@@ -118,6 +118,8 @@ def main():
                 print("configuring the Google Find My Device integration.")
                 print("Choose 'Manual Token Entry' as the authentication method.")
                 print()
+                print("Press Enter to exit...")
+                input()
             else:
                 print("Failed to obtain OAuth token.")
                 sys.exit(1)
