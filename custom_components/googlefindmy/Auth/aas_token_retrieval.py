@@ -11,8 +11,8 @@ from custom_components.googlefindmy.Auth.token_cache import get_cached_value_or_
 from custom_components.googlefindmy.Auth.username_provider import get_username, username_string
 
 
-def _generate_aas_token():
-    username = get_username()
+async def _generate_aas_token():
+    username = await get_username()
     # Use hardcoded android_id instead of FcmReceiver to avoid ChromeDriver
     # Android ID should be a large integer (16 hex digits)
     android_id = 0x38918a453d071993
