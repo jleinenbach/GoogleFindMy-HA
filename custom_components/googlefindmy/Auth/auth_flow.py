@@ -1,56 +1,7 @@
-#
-#  GoogleFindMyTools - A set of tools to interact with the Google Find My API
-#  Copyright © 2024 Leon Böttger. All rights reserved.
-#
+  #
+  #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
+  #  Copyright © 2024 Leon Böttger. All rights reserved.
+  #
 
-from selenium.webdriver.support.ui import WebDriverWait
-from custom_components.googlefindmy.chrome_driver import create_driver
-
-def request_oauth_account_token_flow(headless=False):
-
-    # In Home Assistant context, skip the interactive prompts
-    import sys
-    is_home_assistant = 'homeassistant' in sys.modules
-    
-    if not headless and not is_home_assistant:
-        print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
-> Please make sure that Chrome is installed on your system.
-> For macOS users only: Make that you allow Python (or PyCharm) to control Chrome if prompted. 
-        """)
-
-        # Press enter to continue
-        input("[AuthFlow] Press Enter to continue...")
-
-    # Automatically install and set up the Chrome driver
-    if not is_home_assistant:
-        print("[AuthFlow] Installing ChromeDriver...")
-
-    driver = create_driver(headless=headless)
-
-    try:
-        # Open the browser and navigate to the URL
-        driver.get("https://accounts.google.com/EmbeddedSetup")
-
-        # Wait until the "oauth_token" cookie is set
-        if not is_home_assistant:
-            print("[AuthFlow] Waiting for 'oauth_token' cookie to be set...")
-        WebDriverWait(driver, 300).until(
-            lambda d: d.get_cookie("oauth_token") is not None
-        )
-
-        # Get the value of the "oauth_token" cookie
-        oauth_token_cookie = driver.get_cookie("oauth_token")
-        oauth_token_value = oauth_token_cookie['value']
-
-        # Print the value of the "oauth_token" cookie
-        if not is_home_assistant:
-            print("[AuthFlow] Retrieved Account Token successfully.")
-
-        return oauth_token_value
-
-    finally:
-        # Close the browser
-        driver.quit()
-
-if __name__ == '__main__':
-    request_oauth_account_token_flow()
+  # Chrome driver functionality removed - not needed for Home Assistant integration
+  # that uses pre-generated secrets.json authentication
