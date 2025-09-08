@@ -1,0 +1,6 @@
+{
+  "services": {
+    "locate_device": "mdi:map-marker-radius",
+    "play_sound": "mdi:play"
+  }
+}
