@@ -40,6 +40,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.auth_data = {}
         self.available_devices = []
 
+    def _write_secrets_file(self, file_path: str, data: dict) -> None:
+        """Write secrets data to file (sync operation for executor)."""
+        import json
+        import os
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=2)
+    
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
