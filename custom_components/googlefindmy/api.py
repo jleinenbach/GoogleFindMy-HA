@@ -34,6 +34,13 @@ class GoogleFindMyAPI:
         
         # Extract common values
         self.google_email = secrets_data.get('username', secrets_data.get('Email'))
+
+        # If no username/Email key, extract from adm_token key name
+        if not self.google_email:
+            for key in secrets_data.keys():
+                if key.startswith('adm_token_') and '@' in key:
+                    self.google_email = key.replace('adm_token_', '')
+                    break
         
         # Store username for later use
         if self.google_email:
