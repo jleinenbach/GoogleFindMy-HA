@@ -22,9 +22,6 @@ STEP_USER_DATA_SCHEMA = vol.Schema({
     vol.Required("secrets_json", description="Paste the complete contents of your secrets.json file"): str
 })
 
-
-
-
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Google Find My Device."""
 
