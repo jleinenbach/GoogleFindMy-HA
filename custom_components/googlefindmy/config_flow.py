@@ -131,7 +131,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             vol.Optional("location_poll_interval", default=300): vol.All(
                 vol.Coerce(int),
-                vol.Range(min=120, max=3600)
+                vol.Range(min=30, max=3600)
             ),
             vol.Optional("device_poll_delay", default=5): vol.All(
                 vol.Coerce(int),
@@ -210,7 +210,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             ),
             vol.Optional("location_poll_interval", default=current_interval): vol.All(
                 vol.Coerce(int),
-                vol.Range(min=120, max=3600)
+                vol.Range(min=30, max=3600)
             ),
             vol.Optional("device_poll_delay", default=self.config_entry.data.get("device_poll_delay", 5)): vol.All(
                 vol.Coerce(int),
@@ -230,7 +230,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id="init",
             data_schema=options_schema,
             description_placeholders={
-                "info": "Modify tracking settings:\n• Location poll interval: How often to poll for locations (120-3600 seconds)\n• Device poll delay: Delay between device polls (1-60 seconds)\n• Min accuracy threshold: Ignore locations worse than this (25-500 meters)\n• Movement threshold: Minimum distance to consider real movement (10-200 meters)\n\nThese settings help reduce location bouncing and false away/home triggers."
+                "info": "Modify tracking settings:\n• Location poll interval: How often to poll for locations (30-3600 seconds). Device poll delay: Delay between device polls (1-60 seconds)\n• Min accuracy threshold: Ignore locations worse than this (25-500 meters)\n• Movement threshold: Minimum distance to consider real movement (10-200 meters)\n\nThese settings help reduce location bouncing and false away/home triggers."
             }
         )
 
