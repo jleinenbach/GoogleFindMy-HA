@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from custom_components.googlefindmy.Auth.aas_token_retrieval import get_aas_token
 from custom_components.googlefindmy.Auth.adm_token_retrieval import get_adm_token
 from custom_components.googlefindmy.Auth.username_provider import get_username
+from custom_components.googlefindmy.Auth.username_provider import get_username, async_get_username
 from custom_components.googlefindmy.Auth.token_cache import get_cached_value, async_get_cached_value
 
 def nova_request(api_scope, hex_payload):
@@ -129,7 +130,7 @@ async def async_nova_request(api_scope, hex_payload):
     import logging
     
     _logger = logging.getLogger(__name__)
-    username = await get_username()
+    username = await async_get_username()
     
     # Check if we have a cached ADM token (from secrets.json)
     android_device_manager_oauth_token = await async_get_cached_value(f'adm_token_{username}')
