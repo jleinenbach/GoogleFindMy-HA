@@ -1,0 +1,38 @@
+//
+//  GoogleFindMyTools - A set of tools to interact with the Google Find My API
+//  Copyright © 2024 Leon Böttger. All rights reserved.
+//
+
+syntax = "proto3";
+import "ProtoDecoders/Common.proto";
+
+message LocationReportsUpload {
+    repeated Report reports = 1;
+    ClientMetadata clientMetadata = 2;
+    uint64 random1 = 3;
+    uint64 random2 = 4;
+}
+
+message Report {
+    Advertisement advertisement = 1;
+    Time time = 4;
+    LocationReport location = 6;
+}
+
+message Advertisement {
+    Identifier identifier = 5;
+    uint32 unwantedTrackingModeEnabled = 6;
+}
+
+message Identifier {
+    bytes truncatedEid = 6;
+    bytes canonicDeviceId = 7;
+}
+
+message ClientMetadata {
+    ClientVersionInformation version = 2;
+}
+
+message ClientVersionInformation {
+    string playServicesVersion = 1;
+}

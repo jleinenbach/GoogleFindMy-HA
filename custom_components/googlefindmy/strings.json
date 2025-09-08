@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Google Find My Device Authentication",
+        "description": "Choose your authentication method. Method 1 is recommended if you can run GoogleFindMyTools on a computer with Chrome.",
+        "data": {
+          "auth_method": "Authentication Method"
+        }
+      },
+      "secrets_json": {
+        "title": "Method 1: GoogleFindMyTools secrets.json",
+        "description": "Run GoogleFindMyTools on a machine with Chrome to generate authentication tokens, then paste the complete contents of the Auth/secrets.json file below.",
+        "data": {
+          "secrets_json": "Contents of secrets.json file"
+        }
+      },
+      "individual_tokens": {
+        "title": "Method 2: Individual OAuth Token",
+        "description": "Enter your OAuth token and Google email address obtained from a manual authentication process.",
+        "data": {
+          "oauth_token": "OAuth Token",
+          "google_email": "Google Email Address"
+        }
+      }
+    },
+    "error": {
+      "auth_failed": "Authentication failed. Please try again.",
+      "invalid_token": "Invalid token provided or missing required fields.",
+      "invalid_json": "Invalid JSON format in secrets.json content.",
+      "unknown": "Unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "Google Find My Device is already configured.",
+      "cannot_connect": "Failed to connect to Google Find My Device."
+    }
+  },
+  "services": {
+    "locate_device": {
+      "name": "Locate Device",
+      "description": "Get the current location of a Google Find My device.",
+      "fields": {
+        "device_id": {
+          "name": "Device ID",
+          "description": "The ID of the device to locate."
+        }
+      }
+    },
+    "play_sound": {
+      "name": "Play Sound",
+      "description": "Play a sound on a Google Find My device.",
+      "fields": {
+        "device_id": {
+          "name": "Device ID",
+          "description": "The ID of the device to play sound on."
+        }
+      }
+    }
+  }
+}
