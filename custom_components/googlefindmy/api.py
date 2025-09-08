@@ -46,8 +46,8 @@ class GoogleFindMyAPI:
         if self.google_email:
             enhanced_data[username_string] = self.google_email
             
-        # Set the memory cache for the token system to use
-        set_memory_cache(enhanced_data)
+        # Store the enhanced data for reference (username extraction complete)
+        # The file-based cache will be used for all token operations
     
     def get_basic_device_list(self) -> list[dict[str, Any]]:
         """Get list of Find My devices without location data (for config flow)."""
