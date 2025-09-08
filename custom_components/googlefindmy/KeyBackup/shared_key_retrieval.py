@@ -5,26 +5,19 @@
 from binascii import unhexlify
 
 from custom_components.googlefindmy.Auth.token_cache import get_cached_value_or_set
-from custom_components.googlefindmy.KeyBackup.shared_key_flow import request_shared_key_flow
-
 
 def _retrieve_shared_key():
-    print("""[SharedKeyRetrieval] You need to log in again to access end-to-end encrypted keys to decrypt location reports.
-> This script will now open Google Chrome on your device. 
-> Make that you allow Python (or PyCharm) to control Chrome (macOS only).
-    """)
+    # Instead of using Chrome driver, read the shared_key directly from secrets.json
+    from custom_components.googlefindmy.Auth.token_cache import get_cached_value
 
-    # Press enter to continue
-    input("[SharedKeyRetrieval] Press 'Enter' to continue...")
-
-    shared_key = request_shared_key_flow()
+    shared_key = get_cached_value('shared_key')
+    if shared_key is None:
+        raise Exception("shared_key not found in secrets.json. Please ensure your secrets.json file contains the shared_key field.")
 
     return shared_key
 
-
 def get_shared_key() -> bytes:
     return unhexlify(get_cached_value_or_set('shared_key', _retrieve_shared_key))
-
 
 if __name__ == '__main__':
     print(get_shared_key())
