@@ -6,18 +6,8 @@ A comprehensive Home Assistant custom integration for Google's Find My Device ne
 
 - **Real-time Device Tracking**: Track Google Find My devices with fresh GPS location data
 - **Advanced Location Filtering**: Intelligent staleness detection and location smoothing to prevent GPS bouncing
-- **Device Control**: Locate devices and play sounds remotely
 - **Configurable Polling**: Flexible polling intervals with rate limit compliance
 - **GoogleFindMyTools Integration**: Uses secrets.json from GoogleFindMyTools for authentication
-- **Enhanced Logging**: Comprehensive debugging and monitoring capabilities
-
-## Recent Improvements (v2.0+)
-
-- **Extended FCM Timeout**: Increased from 10s to 60s for better device GPS acquisition
-- **Stricter Staleness Filtering**: Rejects location data older than 30 minutes (configurable)
-- **Automatic Retry Logic**: Automatically retries when stale location data is received
-- **Enhanced FCM Debugging**: Detailed logging for troubleshooting connection issues
-- **Location Stability Detection**: Prevents micro-movement bouncing for stationary devices
 
 ## Installation
 
@@ -35,13 +25,11 @@ A comprehensive Home Assistant custom integration for Google's Find My Device ne
 
 ## Configuration
 
-The integration supports two authentication methods:
-
 ### Authentication Setup
 1. Run [GoogleFindMyTools](https://github.com/GoogleFindMyTools/GoogleFindMyTools) on a machine with Chrome
 2. Complete the authentication process to generate `Auth/secrets.json`
-3. Copy the entire contents of the secrets.json file
-4. In Home Assistant, paste the secrets.json content when prompted
+3. Copy the entire contents of the secrets.json file.  Specifically, open the file in a text editor, select all, and copy.
+4. In Home Assistant, paste the copied text from secrets.json when prompted.
 
 ## Configuration Options
 
@@ -67,7 +55,7 @@ The integration provides several services:
 #### `googlefindmy.locate_device`
 Request fresh location data for a specific device.
 
-#### `googlefindmy.play_sound`
+#### `googlefindmy.play_sound` (currently broken)
 Play a sound on a specific device for location assistance.
 
 #### `googlefindmy.locate_device_external`
@@ -77,38 +65,18 @@ Alternative location method using external process (workaround for FCM issues).
 
 ### No Location Data
 - Check if devices have moved recently (Find My devices may not update GPS when stationary)
-- Verify network connectivity on tracked devices
 - Check battery levels (low battery may disable GPS reporting)
 - Review logs for staleness warnings
 
 ### Stale Location Data
-- The integration now rejects location data older than 30 minutes
+- The integration rejects location data older than 30 minutes
 - Move the device or use it actively to trigger fresh GPS readings
 - Consider adjusting the staleness threshold if needed
-
-### Authentication Issues
-- Ensure Chrome is installed for OAuth token generation
-- Verify Google account has Find My Device enabled
-- Check that devices are properly registered in Google Find My Device
 
 ### FCM Connection Problems
 - Extended timeout allows up to 60 seconds for device response
 - Check firewall settings for Firebase Cloud Messaging
 - Review FCM debug logs for connection details
-
-## Technical Details
-
-### Architecture
-- **Data Coordinator**: Manages sequential device polling with rate limiting
-- **Device Tracker**: Implements location smoothing and Home Assistant device_tracker entity
-- **API Wrapper**: Interfaces with Google's Nova API and Find My Device network
-- **FCM Integration**: Real-time notifications via Firebase Cloud Messaging
-
-### Dependencies
-- `selenium` and `undetected-chromedriver` for authentication
-- `cryptography` and encryption libraries for E2E location decryption
-- `protobuf` for Google API communication
-- Firebase and Google authentication libraries
 
 ### Rate Limiting
 The integration respects Google's rate limits by:
