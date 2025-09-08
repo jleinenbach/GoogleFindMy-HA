@@ -39,15 +39,9 @@ async def async_get_cached_value_or_set(name: str, generator):
     await async_set_cached_value(name, value)
     return value
 
-
 def get_cached_value(name: str):
-    # Check in-memory cache first (for Home Assistant)
-    value = get_from_memory_cache(name)
-    if value is not None:
-        return value
-    
-    # Fall back to synchronous file access (for non-async contexts)
-    # This should only be used during initialization or in non-async contexts
+    # For Home Assistant integration, always read from file
+    # This function should only be called from sync contexts
     secrets_file = _get_secrets_file()
 
     if os.path.exists(secrets_file):
