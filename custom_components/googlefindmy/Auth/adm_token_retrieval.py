@@ -23,8 +23,7 @@ def get_adm_token(username):
             return value
 
     # If no existing token found, raise error instead of generating
-    raise ValueError(f"No ADM token found for {username} in secrets.json. Please ensure your secrets.json contains the required 
-adm_token.")
+    raise ValueError(f"No ADM token found for {username} in secrets.json. Please ensure your secrets.json contains the required adm_token.")
 
 if __name__ == '__main__':
       print(get_adm_token(get_username()))
