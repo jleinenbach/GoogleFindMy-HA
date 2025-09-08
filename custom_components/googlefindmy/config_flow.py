@@ -95,6 +95,28 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             final_data["tracked_devices"] = selected_devices
             final_data["location_poll_interval"] = location_poll_interval
             final_data["device_poll_delay"] = device_poll_delay
+
+            # Write complete secrets.json to disk for file-based cache
+            import os
+            import json
+            secrets_file_path = os.path.join(self.hass.config.config_dir, 'custom_components', 'googlefindmy', 'Auth',
+  'secrets.json')
+
+            # Enhance secrets data with username if needed
+            enhanced_secrets = self.auth_data["secrets_data"].copy()
+            from .Auth.username_provider import username_string
+            google_email = enhanced_secrets.get('username', enhanced_secrets.get('Email'))
+            if not google_email:
+                for key in enhanced_secrets.keys():
+                    if key.startswith('adm_token_') and '@' in key:
+                        google_email = key.replace('adm_token_', '')
+                        break
+            if google_email:
+                enhanced_secrets[username_string] = google_email
+
+            await self.hass.async_add_executor_job(
+                lambda: self._write_secrets_file(secrets_file_path, enhanced_secrets)
+            )
             
             return self.async_create_entry(
                 title="Google Find My Device",
