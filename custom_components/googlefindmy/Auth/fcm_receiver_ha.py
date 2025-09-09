@@ -159,9 +159,20 @@ class FcmReceiverHA:
         try:
             # Check if the payload is present
             if 'data' in obj and 'com.google.android.apps.adm.FCM_PAYLOAD' in obj['data']:
-                # Decode the base64 string
+                # Decode the base64 string with padding fix
                 base64_string = obj['data']['com.google.android.apps.adm.FCM_PAYLOAD']
-                decoded_bytes = base64.b64decode(base64_string)
+                
+                # Add proper Base64 padding if missing
+                missing_padding = len(base64_string) % 4
+                if missing_padding:
+                    base64_string += '=' * (4 - missing_padding)
+                
+                try:
+                    decoded_bytes = base64.b64decode(base64_string)
+                except Exception as decode_error:
+                    _LOGGER.error(f"Failed to decode Base64 FCM payload: {decode_error}")
+                    _LOGGER.debug(f"Problematic Base64 string: {base64_string[:50]}...")
+                    return
                 
                 # Convert to hex string
                 hex_string = binascii.hexlify(decoded_bytes).decode('utf-8')
