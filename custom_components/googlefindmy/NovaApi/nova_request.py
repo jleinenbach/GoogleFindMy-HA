@@ -41,6 +41,17 @@ def nova_request(api_scope, hex_payload):
         _logger.info(f"Generic ADM token: {'Found' if android_device_manager_oauth_token else 'Not found'}")
         
     if not android_device_manager_oauth_token:
+        # Look for ANY adm_token in the cache
+        for key, value in all_cached.items():
+            if key.startswith('adm_token_') and '@' in key:
+                android_device_manager_oauth_token = value
+                extracted_username = key.replace('adm_token_', '')
+                _logger.info(f"Found ADM token for {extracted_username}, using it")
+                # Update the username for future use
+                username = extracted_username
+                break
+        
+    if not android_device_manager_oauth_token:
         # Fall back to generating ADM token
         try:
             _logger.info("Attempting to generate new ADM token...")
@@ -124,21 +135,37 @@ async def async_nova_request(api_scope, hex_payload):
     url = "https://android.googleapis.com/nova/" + api_scope
 
     # Try to get ADM token from cache first, then generate if needed
-    from custom_components.googlefindmy.Auth.token_cache import get_cached_value, get_all_cached_values
-    from custom_components.googlefindmy.Auth.username_provider import get_username
+    from custom_components.googlefindmy.Auth.token_cache import async_get_cached_value, async_get_all_cached_values
+    from custom_components.googlefindmy.Auth.username_provider import username_string
     import logging
     
     _logger = logging.getLogger(__name__)
-    username = get_username()
     
-    # Check if we have a cached ADM token (from secrets.json)
-    android_device_manager_oauth_token = get_cached_value(f'adm_token_{username}')
+    # Use async methods to avoid blocking the event loop
+    username = await async_get_cached_value(username_string)
+    if not username:
+        username = "user@example.com"  # fallback
+    
+    # Check if we have a cached ADM token (from secrets.json) - use async version
+    android_device_manager_oauth_token = await async_get_cached_value(f'adm_token_{username}')
     _logger.info(f"ADM token for {username}: {'Found' if android_device_manager_oauth_token else 'Not found'}")
     
     if not android_device_manager_oauth_token:
         # Try alternative token names that might be in secrets.json
-        android_device_manager_oauth_token = get_cached_value('adm_token')
+        android_device_manager_oauth_token = await async_get_cached_value('adm_token')
         _logger.info(f"Generic ADM token: {'Found' if android_device_manager_oauth_token else 'Not found'}")
+        
+    if not android_device_manager_oauth_token:
+        # Look for ANY adm_token in the cache - use async version
+        all_cached = await async_get_all_cached_values()
+        for key, value in all_cached.items():
+            if key.startswith('adm_token_') and '@' in key:
+                android_device_manager_oauth_token = value
+                extracted_username = key.replace('adm_token_', '')
+                _logger.info(f"Found ADM token for {extracted_username}, using it")
+                # Update the username for future use
+                username = extracted_username
+                break
         
     if not android_device_manager_oauth_token:
         # Fall back to generating ADM token
