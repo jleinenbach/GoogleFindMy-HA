@@ -36,7 +36,17 @@ def _retrieve_shared_key():
             # Use first 32 bytes of the private key as shared key
             import base64
             private_key_b64 = fcm_creds['keys']['private']
-            private_key_der = base64.b64decode(private_key_b64)
+            
+            # Add proper Base64 padding if missing
+            missing_padding = len(private_key_b64) % 4
+            if missing_padding:
+                private_key_b64 += '=' * (4 - missing_padding)
+            
+            try:
+                private_key_der = base64.b64decode(private_key_b64)
+            except Exception as decode_error:
+                print(f"[SharedKeyRetrieval] Failed to decode FCM private key: {decode_error}")
+                raise RuntimeError(f"Failed to decode FCM private key for shared key fallback: {decode_error}")
             # Extract a 32-byte key from the private key
             return private_key_der[-32:].hex()  # Use last 32 bytes
         
