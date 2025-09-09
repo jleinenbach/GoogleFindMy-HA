@@ -120,7 +120,7 @@ async def get_location_data_for_device(canonic_device_id, name):
                 if received_location_data["received"]:
                     logger.debug(f"Location response received for {name} after {i*0.5:.1f}s")
                     break
-                if i % 10 == 0:  # Log every 5 seconds
+                if i % 40 == 0 and i > 0:  # Log every 20 seconds instead of every 5 seconds
                     logger.debug(f"Still waiting for location response for {name} ({i*0.5:.1f}s elapsed)")
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
