@@ -53,6 +53,16 @@ class FcmReceiverHA:
             await async_load_cache_from_file()
             self.credentials = await async_get_cached_value('fcm_credentials')
             
+            # Parse JSON string if credentials were saved as JSON
+            if isinstance(self.credentials, str):
+                import json
+                try:
+                    self.credentials = json.loads(self.credentials)
+                    _LOGGER.debug("Parsed FCM credentials from JSON string")
+                except json.JSONDecodeError as e:
+                    _LOGGER.error(f"Failed to parse FCM credentials JSON: {e}")
+                    return False
+            
             # Import FCM libraries
             from custom_components.googlefindmy.Auth.firebase_messaging import FcmRegisterConfig, FcmPushClient
             
@@ -170,8 +180,8 @@ class FcmReceiverHA:
                 try:
                     decoded_bytes = base64.b64decode(base64_string)
                 except Exception as decode_error:
-                    _LOGGER.error(f"Failed to decode Base64 FCM payload: {decode_error}")
-                    _LOGGER.debug(f"Problematic Base64 string: {base64_string[:50]}...")
+                    _LOGGER.error(f"FCM Base64 decode failed in _on_notification: {decode_error}")
+                    _LOGGER.debug(f"Problematic Base64 string (length={len(base64_string)}): {base64_string[:50]}...")
                     return
                 
                 # Convert to hex string
