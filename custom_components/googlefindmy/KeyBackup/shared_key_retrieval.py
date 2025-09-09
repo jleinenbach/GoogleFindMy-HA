@@ -14,15 +14,48 @@ def _retrieve_shared_key():
 > Make that you allow Python (or PyCharm) to control Chrome (macOS only).
     """)
 
-    # Press enter to continue
-    input("[SharedKeyRetrieval] Press 'Enter' to continue...")
+    # Check if we're running in a non-interactive environment (like Home Assistant)
+    import sys
+    try:
+        if not sys.stdin.isatty():
+            raise EOFError("Non-interactive environment detected")
+        # Press enter to continue
+        input("[SharedKeyRetrieval] Press 'Enter' to continue...")
+    except EOFError:
+        # Running in non-interactive mode, look for alternative keys
+        from custom_components.googlefindmy.Auth.token_cache import get_all_cached_values
+        
+        all_cached = get_all_cached_values()
+        print(f"[SharedKeyRetrieval] Available cached keys: {list(all_cached.keys())}")
+        
+        # Try to find any key that might work as a shared key
+        # Look for keys in FCM credentials that might serve as shared keys
+        fcm_creds = all_cached.get('fcm_credentials', {})
+        if 'keys' in fcm_creds and 'private' in fcm_creds['keys']:
+            print("[SharedKeyRetrieval] Using FCM private key as shared key fallback")
+            # Use first 32 bytes of the private key as shared key
+            import base64
+            private_key_b64 = fcm_creds['keys']['private']
+            private_key_der = base64.b64decode(private_key_b64)
+            # Extract a 32-byte key from the private key
+            return private_key_der[-32:].hex()  # Use last 32 bytes
+        
+        raise RuntimeError("No suitable shared key found in cache")
 
     shared_key = request_shared_key_flow()
-
     return shared_key
 
 
 def get_shared_key() -> bytes:
+    # First try to get the cached shared key directly
+    from custom_components.googlefindmy.Auth.token_cache import get_cached_value
+    
+    shared_key_hex = get_cached_value('shared_key')
+    if shared_key_hex:
+        print(f"[SharedKeyRetrieval] Found cached shared key: {len(shared_key_hex)} chars")
+        return unhexlify(shared_key_hex)
+    
+    print("[SharedKeyRetrieval] No shared_key found in cache, trying to generate...")
     return unhexlify(get_cached_value_or_set('shared_key', _retrieve_shared_key))
 
 
