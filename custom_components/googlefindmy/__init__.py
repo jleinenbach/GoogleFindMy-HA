@@ -24,6 +24,35 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.DEVICE_TRACKER]
 
 
+async def _async_save_secrets_data(secrets_data: dict) -> None:
+    """Save complete secrets data to persistent cache asynchronously."""
+    from .Auth.token_cache import async_set_cached_value
+    from .Auth.username_provider import username_string
+    import json
+    
+    # Create enhanced data similar to API initialization
+    enhanced_data = secrets_data.copy()
+    
+    # Extract and add username
+    google_email = secrets_data.get('username', secrets_data.get('Email'))
+    if google_email:
+        enhanced_data[username_string] = google_email
+    
+    # Save all the secrets data to persistent cache
+    for key, value in enhanced_data.items():
+        try:
+            if isinstance(value, (str, int, float)):
+                await async_set_cached_value(key, str(value))
+            elif key == 'fcm_credentials':
+                # Save FCM credentials as JSON
+                await async_set_cached_value(key, json.dumps(value))
+            else:
+                # Convert other complex values to JSON string for storage
+                await async_set_cached_value(key, json.dumps(value))
+        except Exception as e:
+            _LOGGER.warning(f"Failed to save {key} to persistent cache: {e}")
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Google Find My Device from a config entry."""
     # Preload the cache to avoid blocking I/O later
@@ -78,6 +107,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.error("Failed to initialize Google Find My Device: %s", err)
         raise ConfigEntryNotReady from err
+
+    # Save complete secrets data to persistent cache asynchronously
+    if auth_method == "secrets_json" and secrets_data:
+        try:
+            await _async_save_secrets_data(secrets_data)
+            _LOGGER.debug("Saved complete secrets data to persistent cache")
+        except Exception as e:
+            _LOGGER.warning(f"Failed to save secrets data to persistent cache: {e}")
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     

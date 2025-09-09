@@ -56,6 +56,10 @@ class GoogleFindMyAPI:
             
         # Set the memory cache for the token system to use
         set_memory_cache(enhanced_data)
+        
+        # Note: Persistent cache saving removed from sync init to avoid blocking I/O
+        # The memory cache will be used during this session, and async saving will happen later
+        print(f"Loaded {len(enhanced_data)} items into memory cache")
     
     def get_basic_device_list(self) -> list[dict[str, Any]]:
         """Get list of Find My devices without location data (for config flow)."""
