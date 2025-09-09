@@ -13,19 +13,36 @@ from custom_components.googlefindmy.Auth.username_provider import get_username, 
 
 def _generate_aas_token():
     username = get_username()
-    # Use hardcoded android_id instead of FcmReceiver to avoid ChromeDriver
-    # Android ID should be a large integer (16 hex digits)
-    android_id = 0x38918a453d071993
-    # Use the manually entered OAuth token instead of ChromeDriver auth
-    token = load_oauth_token()
     
-    if not token:
+    # First check if we already have existing ADM tokens we can derive from
+    from custom_components.googlefindmy.Auth.token_cache import get_all_cached_values
+    all_cached = get_all_cached_values()
+    
+    # Look for any existing ADM token that we can use as OAuth token
+    oauth_token = None
+    for key, value in all_cached.items():
+        if key.startswith('adm_token_') and '@' in key:
+            oauth_token = value
+            extracted_username = key.replace('adm_token_', '')
+            print(f"Using existing ADM token for {extracted_username} as OAuth token")
+            username = extracted_username  # Update username to match the token
+            break
+    
+    if not oauth_token:
+        # Fall back to loading OAuth token
+        oauth_token = load_oauth_token()
+    
+    if not oauth_token:
         raise ValueError("No OAuth token found - please configure integration with valid token")
     if not username:
         raise ValueError("No username found - please check configuration")
 
+    # Use hardcoded android_id instead of FcmReceiver to avoid ChromeDriver
+    # Android ID should be a large integer (16 hex digits)
+    android_id = 0x38918a453d071993
+
     try:
-        aas_token_response = gpsoauth.exchange_token(username, token, android_id)
+        aas_token_response = gpsoauth.exchange_token(username, oauth_token, android_id)
         
         if not aas_token_response:
             raise ValueError("No response from gpsoauth.exchange_token")

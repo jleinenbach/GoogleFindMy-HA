@@ -168,17 +168,28 @@ class FcmReceiverHA:
                 
                 _LOGGER.info(f"Received FCM location response: {len(hex_string)} chars")
                 
-                # Call all registered callbacks
+                # Call all registered callbacks asynchronously to avoid blocking
                 for callback in self.location_update_callbacks:
                     try:
-                        callback(hex_string)
+                        # Run callback in executor to avoid blocking the event loop
+                        asyncio.create_task(self._run_callback_async(callback, hex_string))
                     except Exception as e:
-                        _LOGGER.error(f"Error in FCM callback: {e}")
+                        _LOGGER.error(f"Error scheduling FCM callback: {e}")
             else:
                 _LOGGER.debug("FCM notification without location payload")
                 
         except Exception as e:
             _LOGGER.error(f"Error processing FCM notification: {e}")
+    
+    async def _run_callback_async(self, callback, hex_string):
+        """Run callback in executor to avoid blocking the event loop."""
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            # Run the potentially blocking callback in a thread executor
+            await loop.run_in_executor(None, callback, hex_string)
+        except Exception as e:
+            _LOGGER.error(f"Error in async FCM callback: {e}")
     
     def _on_credentials_updated(self, creds):
         """Handle credential updates."""
