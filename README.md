@@ -31,6 +31,7 @@ A comprehensive Home Assistant custom integration for Google's Find My Device ne
 2. Complete the authentication process to generate `Auth/secrets.json`
 3. Copy the entire contents of the secrets.json file.  Specifically, open the file in a text editor, select all, and copy.
 4. In Home Assistant, paste the copied text from secrets.json when prompted.
+5. After completing authentication and adding devices, RESTART Home Assistant!
 
 #### **CRITICAL AUTHENTICATION STEPS:** 
 **When running main.py, there are 2 steps to the authentication process.  BOTH must be followed!**
