@@ -58,14 +58,26 @@ def _retrieve_shared_key():
 
 def get_shared_key() -> bytes:
     # First try to get the cached shared key directly
-    from custom_components.googlefindmy.Auth.token_cache import get_cached_value
+    from custom_components.googlefindmy.Auth.token_cache import get_cached_value, get_all_cached_values
     
     shared_key_hex = get_cached_value('shared_key')
     if shared_key_hex:
         print(f"[SharedKeyRetrieval] Found cached shared key: {len(shared_key_hex)} chars")
         return unhexlify(shared_key_hex)
     
-    print("[SharedKeyRetrieval] No shared_key found in cache, trying to generate...")
+    print("[SharedKeyRetrieval] No shared_key found in cache, debugging...")
+    
+    # Debug: check what keys are actually available
+    all_cached = get_all_cached_values()
+    available_keys = list(all_cached.keys())
+    print(f"[SharedKeyRetrieval] Available keys in cache: {available_keys}")
+    
+    if 'shared_key' in all_cached:
+        shared_key_hex = all_cached['shared_key']
+        print(f"[SharedKeyRetrieval] Found shared_key via get_all_cached_values: {len(shared_key_hex)} chars")
+        return unhexlify(shared_key_hex)
+    
+    print("[SharedKeyRetrieval] shared_key definitely not found, trying to generate...")
     return unhexlify(get_cached_value_or_set('shared_key', _retrieve_shared_key))
 
 
