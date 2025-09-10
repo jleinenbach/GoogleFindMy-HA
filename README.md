@@ -5,9 +5,9 @@ A comprehensive Home Assistant custom integration for Google's Find My Device ne
 ## Features
 
 - **Real-time Device Tracking**: Track Google Find My devices with fresh GPS location data
-- **Advanced Location Filtering**: Intelligent staleness detection and location smoothing to prevent GPS bouncing
 - **Configurable Polling**: Flexible polling intervals with rate limit compliance
 - **GoogleFindMyTools Integration**: Uses secrets.json from GoogleFindMyTools for authentication
+- **Sound Button Entity**: Devices include a button entity that plays a sound on devices that support playing sound
 
 ## Installation
 
@@ -45,17 +45,6 @@ A comprehensive Home Assistant custom integration for Google's Find My Device ne
 - **Location Poll Interval**: How often to request fresh location data (default: 5 minutes, minimum: 2 minutes)
 - **Device Poll Delay**: Delay between individual device polls (default: 5 seconds)
 - **Accuracy Threshold**: Minimum GPS accuracy to accept (default: 100 meters)
-- **Movement Threshold**: Minimum movement to detect as actual movement vs. GPS drift (default: 50 meters)
-- **Staleness Threshold**: Maximum age of location data to accept (default: 30 minutes)
-
-## Device Tracker Features
-
-### Location Smoothing
-The integration includes advanced location smoothing to prevent GPS bouncing:
-- Filters out readings with poor accuracy
-- Detects micro-movements and treats as stationary
-- Locks onto stable locations to prevent constant updates
-- Configurable movement and accuracy thresholds
 
 ### Services
 
@@ -64,23 +53,14 @@ The integration provides several services:
 #### `googlefindmy.locate_device`
 Request fresh location data for a specific device.
 
-#### `googlefindmy.play_sound` (currently broken)
+#### `googlefindmy.play_sound`
 Play a sound on a specific device for location assistance.
-
-#### `googlefindmy.locate_device_external`
-Alternative location method using external process (workaround for FCM issues).
 
 ## Troubleshooting
 
 ### No Location Data
 - Check if devices have moved recently (Find My devices may not update GPS when stationary)
 - Check battery levels (low battery may disable GPS reporting)
-- Review logs for staleness warnings
-
-### Stale Location Data
-- The integration rejects location data older than 30 minutes
-- Move the device or use it actively to trigger fresh GPS readings
-- Consider adjusting the staleness threshold if needed
 
 ### FCM Connection Problems
 - Extended timeout allows up to 60 seconds for device response
@@ -108,10 +88,6 @@ Contributions are welcome! Please:
 2. Create a feature branch
 3. Test thoroughly with your Find My devices
 4. Submit a pull request with detailed description
-
-## License
-
-This project is licensed under the Apache License 2.0 - see the LICENSE file for details.
 
 ## Credits
 
