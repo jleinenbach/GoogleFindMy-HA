@@ -207,16 +207,7 @@ import sys
 import os
 sys.path.append("/config/custom_components/googlefindmy")
 
-from NovaApi.ExecuteAction.LocateTracker.location_request import get_location_data_for_device
-import json
-
-try:
-    result = get_location_data_for_device("{device_id}", "{device_name}")
-    print("LOCATION_RESULT:", json.dumps(result))
-except Exception as e:
-    print("LOCATION_ERROR:", str(e))
-    import traceback
-    traceback.print_exc()
+# Location request test code removed - not needed in production
 '''
             
             # Write script to temp file
