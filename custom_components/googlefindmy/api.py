@@ -181,13 +181,15 @@ class GoogleFindMyAPI:
             
             # Initialize FCM receiver if needed
             if not fcm_receiver.credentials:
-                _LOGGER.error("FCM receiver not initialized for play sound")
+                _LOGGER.error("FCM receiver not initialized for play sound - credentials missing")
                 return False
             
             fcm_token = fcm_receiver.get_fcm_token()
             if not fcm_token:
-                _LOGGER.error("No FCM token available for play sound")
+                _LOGGER.error("No FCM token available for play sound - token is None or empty")
                 return False
+            
+            _LOGGER.debug(f"FCM receiver status: credentials={bool(fcm_receiver.credentials)}, token_length={len(fcm_token) if fcm_token else 0}")
             
             _LOGGER.info(f"Playing sound on device {device_id} with FCM token {fcm_token[:20]}...")
             
@@ -197,12 +199,15 @@ class GoogleFindMyAPI:
             _LOGGER.debug(f"Sound request payload: {hex_payload[:100]}...")
             
             result = nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+            _LOGGER.debug(f"nova_request result for sound: '{result}' (length: {len(result) if result is not None else 'None'})")
             
-            if result:
+            # For sound requests, Google returns empty response on success (HTTP 200 with no body)
+            # nova_request returns empty string for successful 200 responses with no content
+            if result is not None:  # Check if nova_request completed without exception
                 _LOGGER.info(f"Sound request sent successfully for device {device_id}")
                 return True
             else:
-                _LOGGER.warning(f"Sound request failed for device {device_id}")
+                _LOGGER.error(f"Sound request failed for device {device_id} - nova_request returned None (API error)")
                 return False
                 
         except Exception as err:

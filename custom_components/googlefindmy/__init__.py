@@ -21,7 +21,7 @@ from .Auth.token_cache import async_load_cache_from_file
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.DEVICE_TRACKER]
+PLATFORMS: list[Platform] = [Platform.DEVICE_TRACKER, Platform.BUTTON]
 
 
 async def _async_save_secrets_data(secrets_data: dict) -> None:
@@ -152,7 +152,6 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     }
     
     # Reset polling state to apply changes immediately  
-    coordinator._current_device_index = 0
     coordinator._last_location_poll_time = 0
     coordinator._device_location_data = {}
     
