@@ -67,7 +67,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     location_poll_interval = entry.data.get("location_poll_interval", 300)
     device_poll_delay = entry.data.get("device_poll_delay", 5)
     min_accuracy_threshold = entry.data.get("min_accuracy_threshold", 100)
-    movement_threshold = entry.data.get("movement_threshold", 50)
+    staleness_threshold_hours = entry.data.get("staleness_threshold_hours", 2.0)
     
     if auth_method == "secrets_json":
         secrets_data = entry.data.get("secrets_data")
@@ -121,7 +121,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Store config data for device tracker to use
     hass.data[DOMAIN]["config_data"] = {
         "min_accuracy_threshold": min_accuracy_threshold,
-        "movement_threshold": movement_threshold
+        "staleness_threshold_hours": staleness_threshold_hours
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -148,11 +148,10 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     # Update config data for device tracker
     hass.data[DOMAIN]["config_data"] = {
         "min_accuracy_threshold": entry.data.get("min_accuracy_threshold", 100),
-        "movement_threshold": entry.data.get("movement_threshold", 50)
+        "staleness_threshold_hours": entry.data.get("staleness_threshold_hours", 2.0)
     }
     
     # Reset polling state to apply changes immediately  
-    coordinator._current_device_index = 0
     coordinator._last_location_poll_time = 0
     coordinator._device_location_data = {}
     

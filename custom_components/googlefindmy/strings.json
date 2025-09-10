@@ -3,24 +3,16 @@
     "step": {
       "user": {
         "title": "Google Find My Device Authentication",
-        "description": "Choose your authentication method. Method 1 is recommended if you can run GoogleFindMyTools on a computer with Chrome.",
+        "description": "Run GoogleFindMyTools on a computer with Chrome to generate authentication tokens, then provide the secrets.json file contents.",
         "data": {
           "auth_method": "Authentication Method"
         }
       },
       "secrets_json": {
-        "title": "Method 1: GoogleFindMyTools secrets.json",
+        "title": "GoogleFindMyTools secrets.json",
         "description": "Run GoogleFindMyTools on a machine with Chrome to generate authentication tokens, then paste the complete contents of the Auth/secrets.json file below.",
         "data": {
           "secrets_json": "Contents of secrets.json file"
-        }
-      },
-      "individual_tokens": {
-        "title": "Method 2: Individual OAuth Token",
-        "description": "Enter your OAuth token and Google email address obtained from a manual authentication process.",
-        "data": {
-          "oauth_token": "OAuth Token",
-          "google_email": "Google Email Address"
         }
       }
     },
@@ -53,6 +45,21 @@
         "device_id": {
           "name": "Device ID",
           "description": "The ID of the device to play sound on."
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Google Find My Device Options",
+        "description": "Configure tracking and staleness settings for Google Find My Device integration.",
+        "data": {
+          "tracked_devices": "Tracked Devices",
+          "location_poll_interval": "Location Poll Interval (seconds)",
+          "device_poll_delay": "Device Poll Delay (seconds)",
+          "min_accuracy_threshold": "Minimum Accuracy Threshold (meters)",
+          "staleness_threshold_hours": "Staleness Threshold (hours, 0.5-24)"
         }
       }
     }
