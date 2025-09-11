@@ -33,7 +33,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
         
         # Location data cache
         self._device_location_data = {}  # Store latest location data for each device
-        self._last_location_poll_time = time.time()  # Start at current time to avoid immediate poll on first startup
+        self._last_location_poll_time = 0 # Start at 0 to have immediate poll on first startup
         self._device_names = {}  # Map device IDs to names for easier lookup
         self._startup_complete = False  # Flag to track if initial setup is done
         
@@ -67,7 +67,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
             
             # Check if it's time for a location poll
             time_since_last_poll = current_time - self._last_location_poll_time
-            should_poll_location = (time_since_last_poll >= self.location_poll_interval) and self._startup_complete
+            should_poll_location = (time_since_last_poll >= self.location_poll_interval)
             
             if should_poll_location and devices:
                 _LOGGER.debug(f"Polling locations for {len(devices)} devices")
@@ -208,15 +208,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                 
                 device_data.append(device_info)
                 
-            # Remove excessive processing debug log
-            
-            # Mark startup as complete after first successful refresh
-            if not self._startup_complete:
-                self._startup_complete = True
-                _LOGGER.debug(f"GoogleFindMy startup complete - location polling will begin after {self.location_poll_interval}s")
-            
-            # Cleanup disabled - was part of location history system
-            
             return device_data
             
         except Exception as exception:

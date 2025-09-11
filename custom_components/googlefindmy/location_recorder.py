@@ -75,8 +75,12 @@ class LocationRecorder:
             """Calculate location score (lower is better)."""
             try:
                 accuracy = loc.get('accuracy', float('inf'))
+                semantic = loc.get('semantic_name')
                 if accuracy is None:
-                    accuracy = float('inf')
+                    if (semantic):
+                        accuracy = float(0)
+                    else:
+                        accuracy = float("inf")
                 else:
                     accuracy = float(accuracy)
                 
