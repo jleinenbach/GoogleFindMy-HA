@@ -89,13 +89,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                             lat = location_data.get('latitude')
                             lon = location_data.get('longitude')
                             accuracy = location_data.get('accuracy')
+                            semantic = location_data.get('semantic_name')
                             
                             # Get accuracy threshold from config
                             config_data = self.hass.data[DOMAIN].get("config_data", {})
                             min_accuracy_threshold = config_data.get("min_accuracy_threshold", 100)
                             
                             # Validate coordinates and accuracy threshold
-                            if lat is not None and lon is not None:
+                            if lat is not None and lon is not None or semantic:
                                 if accuracy is not None and accuracy > min_accuracy_threshold:
                                     _LOGGER.debug(f"Filtering out location for {device_name}: accuracy {accuracy}m exceeds threshold {min_accuracy_threshold}m")
                                 else:
@@ -125,6 +126,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                                             'latitude': location_data.get('latitude'),
                                             'longitude': location_data.get('longitude'),
                                             'accuracy': location_data.get('accuracy'),
+                                            'semantic_name' : location_data.get('semantic_name'),
                                             'is_own_report': location_data.get('is_own_report', False),
                                             'altitude': location_data.get('altitude')
                                         }
@@ -140,13 +142,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                                                 'longitude': best_location.get('longitude'),
                                                 'accuracy': best_location.get('accuracy'),
                                                 'altitude': best_location.get('altitude'),
+                                                'semantic_name' : best_location.get('semantic_name'),
                                                 'is_own_report': best_location.get('is_own_report')
                                             })
                                     
                                     except Exception as e:
                                         _LOGGER.debug(f"Recorder history lookup failed for {device_name}, using current data: {e}")
                             else:
-                                _LOGGER.warning(f"Invalid coordinates for {device_name}: lat={lat}, lon={lon}")
+                                _LOGGER.warning(f"Invalid coordinates/semantic location for {device_name}: lat={lat}, lon={lon}, semantic_name={semantic}")
                         else:
                             _LOGGER.warning(f"No location data returned for {device_name}")
                             
