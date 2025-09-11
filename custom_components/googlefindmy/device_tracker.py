@@ -77,6 +77,18 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
 
 
     @property
+    def available(self) -> bool:
+        """Return True if entity has valid location data."""
+        # Stay available as long as we have coordinates, even if they're old
+        device_data = self._current_device_data
+        if device_data:
+            lat = device_data.get("latitude")
+            lon = device_data.get("longitude")
+            # Available if we have both coordinates
+            return lat is not None and lon is not None
+        return False
+
+    @property
     def latitude(self) -> float | None:
         """Return latitude value of the device."""
         device_data = self._current_device_data
