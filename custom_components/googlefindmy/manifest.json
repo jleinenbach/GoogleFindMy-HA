@@ -8,7 +8,7 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/BSkando/GoogleFindMy-HA/issues",
   "loggers": ["custom_components.googlefindmy"],
-  "after_dependencies": ["recorder"],
+  "after_dependencies": [],
   "icon": "mdi:google",
   "requirements": [
     "gpsoauth>=1.1.1",

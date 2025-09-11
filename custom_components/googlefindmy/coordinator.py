@@ -11,7 +11,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import DOMAIN, UPDATE_INTERVAL
 from .api import GoogleFindMyAPI
-from .location_recorder import LocationRecorder
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,9 +35,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
         self._last_location_poll_time = time.time()  # Start at current time to avoid immediate poll on first startup
         self._device_names = {}  # Map device IDs to names for easier lookup
         self._startup_complete = False  # Flag to track if initial setup is done
-        
-        # Initialize recorder-based location history
-        self.location_recorder = LocationRecorder(hass)
         
         super().__init__(
             hass,
@@ -69,8 +65,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
             time_since_last_poll = current_time - self._last_location_poll_time
             should_poll_location = (time_since_last_poll >= self.location_poll_interval) and self._startup_complete
             
+            _LOGGER.debug(f"Polling check: time_since_last={time_since_last_poll:.1f}s, interval={self.location_poll_interval}s, should_poll={should_poll_location}, startup_complete={self._startup_complete}, devices={len(devices)}")
+            
             if should_poll_location and devices:
-                _LOGGER.debug(f"Polling locations for {len(devices)} devices")
+                _LOGGER.info(f"Polling locations for {len(devices)} devices")
                 
                 # Poll all devices with delays to avoid rate limiting
                 for i, device in enumerate(devices):
@@ -88,54 +86,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                         if location_data:
                             lat = location_data.get('latitude')
                             lon = location_data.get('longitude')
-                            accuracy = location_data.get('accuracy')
                             
-                            # Get accuracy threshold from config
-                            config_data = self.hass.data[DOMAIN].get("config_data", {})
-                            min_accuracy_threshold = config_data.get("min_accuracy_threshold", 100)
-                            
-                            # Validate coordinates and accuracy threshold
+                            # Simple validation - just check coordinates exist
                             if lat is not None and lon is not None:
-                                if accuracy is not None and accuracy > min_accuracy_threshold:
-                                    _LOGGER.debug(f"Filtering out location for {device_name}: accuracy {accuracy}m exceeds threshold {min_accuracy_threshold}m")
-                                else:
-                                    # Location received successfully
-                                    
-                                    # Store current location and get best from recorder history
-                                    self._device_location_data[device_id] = location_data.copy()
-                                    self._device_location_data[device_id]["last_updated"] = current_time
-                                    
-                                    # Get recorder history and combine with current data for better location selection
-                                    try:
-                                        entity_id = f"device_tracker.{DOMAIN}_{device_id}"
-                                        historical_locations = await self.location_recorder.get_location_history(entity_id, hours=24)
-                                        
-                                        # Add current Google API location to historical data
-                                        current_location_entry = {
-                                            'timestamp': location_data.get('last_seen', current_time),
-                                            'latitude': location_data.get('latitude'),
-                                            'longitude': location_data.get('longitude'),
-                                            'accuracy': location_data.get('accuracy'),
-                                            'is_own_report': location_data.get('is_own_report', False),
-                                            'altitude': location_data.get('altitude')
-                                        }
-                                        historical_locations.insert(0, current_location_entry)
-                                        
-                                        # Select best location from all data (current + 24hrs of history)
-                                        best_location = self.location_recorder.get_best_location(historical_locations)
-                                        
-                                        if best_location:
-                                            # Use the best location from combined dataset
-                                            self._device_location_data[device_id].update({
-                                                'latitude': best_location.get('latitude'),
-                                                'longitude': best_location.get('longitude'),
-                                                'accuracy': best_location.get('accuracy'),
-                                                'altitude': best_location.get('altitude'),
-                                                'is_own_report': best_location.get('is_own_report')
-                                            })
-                                    
-                                    except Exception as e:
-                                        _LOGGER.debug(f"Recorder history lookup failed for {device_name}, using current data: {e}")
+                                _LOGGER.info(f"Got location for {device_name}: lat={lat}, lon={lon}")
+                                self._device_location_data[device_id] = location_data
+                                self._device_location_data[device_id]["last_updated"] = current_time
                             else:
                                 _LOGGER.warning(f"Invalid coordinates for {device_name}: lat={lat}, lon={lon}")
                         else:
@@ -165,11 +121,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                     "battery_level": None
                 }
                 
-                # Apply cached location data if available (COPY to avoid contamination)
+                # Apply cached location data if available
                 if device["id"] in self._device_location_data:
-                    cached_location = self._device_location_data[device["id"]].copy()
-                    device_info.update(cached_location)
-                    # Applied cached location data
+                    location_data = self._device_location_data[device["id"]]
+                    device_info.update(location_data)
+                    _LOGGER.debug(f"Applied cached location for {device_info['name']}: lat={device_info.get('latitude')}, lon={device_info.get('longitude')}, acc={device_info.get('accuracy')}")
                     
                     # Add status based on data age
                     last_updated = location_data.get("last_updated", 0)
@@ -180,18 +136,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                         device_info["status"] = "Location data aging"
                     else:
                         device_info["status"] = "Location data stale"
-                # Remove excessive "no cached data" logging
+                else:
+                    _LOGGER.debug(f"No cached location data for {device_info['name']} (id={device['id']})")
                 
                 device_data.append(device_info)
                 
-            # Remove excessive processing debug log
+            _LOGGER.debug(f"Processed {len(devices)} devices, next poll in {max(0, self.location_poll_interval - time_since_last_poll):.0f}s")
             
             # Mark startup as complete after first successful refresh
             if not self._startup_complete:
                 self._startup_complete = True
-                _LOGGER.debug(f"GoogleFindMy startup complete - location polling will begin after {self.location_poll_interval}s")
-            
-            # Cleanup disabled - was part of location history system
+                _LOGGER.info(f"GoogleFindMy startup complete - location polling will begin after {self.location_poll_interval}s")
             
             return device_data
             
