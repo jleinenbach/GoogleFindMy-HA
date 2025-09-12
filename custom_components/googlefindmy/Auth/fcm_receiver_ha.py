@@ -33,7 +33,8 @@ class FcmReceiverHA:
         self._initialized = True
         
         self.credentials = None
-        self.location_update_callbacks = []
+        self.location_update_callbacks: Dict[str, Callable] = {}
+        self.coordinators = []  # List of coordinators that can receive background updates
         self.pc = None
         self._listening = False
         self._listen_task = None
@@ -89,11 +90,12 @@ class FcmReceiverHA:
             _LOGGER.error(f"Failed to initialize FCM receiver: {e}")
             return False
     
-    async def async_register_for_location_updates(self, callback: Callable) -> Optional[str]:
+    async def async_register_for_location_updates(self, device_id: str, callback: Callable) -> Optional[str]:
         """Register for location updates asynchronously."""
         try:
-            # Add callback to list
-            self.location_update_callbacks.append(callback)
+            # Add callback to dict
+            self.location_update_callbacks[device_id] = callback
+            _LOGGER.debug(f"Registered FCM callback for device: {device_id}")
             
             # If not listening, start listening
             if not self._listening:
@@ -111,6 +113,29 @@ class FcmReceiverHA:
         except Exception as e:
             _LOGGER.error(f"Failed to register for location updates: {e}")
             return None
+    
+    async def async_unregister_for_location_updates(self, device_id: str) -> None:
+        """Unregister a device from location updates."""
+        try:
+            if device_id in self.location_update_callbacks:
+                del self.location_update_callbacks[device_id]
+                _LOGGER.debug(f"Unregistered FCM callback for device: {device_id}")
+            else:
+                _LOGGER.debug(f"No FCM callback found to unregister for device: {device_id}")
+        except Exception as e:
+            _LOGGER.error(f"Failed to unregister location updates for {device_id}: {e}")
+    
+    def register_coordinator(self, coordinator) -> None:
+        """Register a coordinator to receive background location updates."""
+        if coordinator not in self.coordinators:
+            self.coordinators.append(coordinator)
+            _LOGGER.debug(f"Registered coordinator for background FCM updates")
+    
+    def unregister_coordinator(self, coordinator) -> None:
+        """Unregister a coordinator from background location updates."""
+        if coordinator in self.coordinators:
+            self.coordinators.remove(coordinator)
+            _LOGGER.debug(f"Unregistered coordinator from background FCM updates")
     
     async def _start_listening(self):
         """Start listening for FCM messages."""
@@ -189,28 +214,136 @@ class FcmReceiverHA:
                 
                 _LOGGER.info(f"Received FCM location response: {len(hex_string)} chars")
                 
-                # Call all registered callbacks asynchronously to avoid blocking
-                for callback in self.location_update_callbacks:
+                # Extract canonic_id from response to find the right callback
+                canonic_id = None
+                try:
+                    canonic_id = self._extract_canonic_id_from_response(hex_string)
+                except Exception as extract_error:
+                    _LOGGER.error(f"Failed to extract canonic_id from FCM response: {extract_error}")
+                    return
+                
+                if canonic_id and canonic_id in self.location_update_callbacks:
+                    callback = self.location_update_callbacks[canonic_id]
                     try:
                         # Run callback in executor to avoid blocking the event loop
-                        asyncio.create_task(self._run_callback_async(callback, hex_string))
+                        asyncio.create_task(self._run_callback_async(callback, canonic_id, hex_string))
                     except Exception as e:
-                        _LOGGER.error(f"Error scheduling FCM callback: {e}")
+                        _LOGGER.error(f"Error scheduling FCM callback for device {canonic_id}: {e}")
+                elif canonic_id:
+                    # Check if this is a tracked device from any coordinator
+                    handled_by_coordinator = False
+                    for coordinator in self.coordinators:
+                        if hasattr(coordinator, 'tracked_devices') and canonic_id in coordinator.tracked_devices:
+                            _LOGGER.info(f"Processing background FCM update for tracked device {coordinator._device_names.get(canonic_id, canonic_id[:8])}")
+                            # Process background update
+                            asyncio.create_task(self._process_background_update(coordinator, canonic_id, hex_string))
+                            handled_by_coordinator = True
+                            break
+                    
+                    if not handled_by_coordinator:
+                        # Check if we have any active callbacks
+                        registered_count = len(self.location_update_callbacks)
+                        if registered_count > 0:
+                            registered_devices = list(self.location_update_callbacks.keys())
+                            _LOGGER.debug(f"Received FCM response for untracked device {canonic_id[:8]}... "
+                                        f"Currently waiting for: {[d[:8]+'...' for d in registered_devices]}")
+                        else:
+                            _LOGGER.debug(f"Received FCM response for untracked device {canonic_id[:8]}... "
+                                        f"(not in any coordinator's tracked devices)")
+                else:
+                    _LOGGER.debug("Could not extract canonic_id from FCM response")
             else:
                 _LOGGER.debug("FCM notification without location payload")
                 
         except Exception as e:
             _LOGGER.error(f"Error processing FCM notification: {e}")
     
-    async def _run_callback_async(self, callback, hex_string):
+    def _extract_canonic_id_from_response(self, hex_response: str) -> Optional[str]:
+        """Extract canonic_id from FCM response to identify which device sent it."""
+        try:
+            # Import with fallback for different module loading contexts
+            try:
+                from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
+            except ImportError:
+                from .ProtoDecoders.decoder import parse_device_update_protobuf
+            
+            device_update = parse_device_update_protobuf(hex_response)
+            
+            if (device_update.HasField("deviceMetadata") and 
+                device_update.deviceMetadata.identifierInformation.canonicIds.canonicId):
+                return device_update.deviceMetadata.identifierInformation.canonicIds.canonicId[0].id
+        except Exception as e:
+            _LOGGER.debug(f"Failed to extract canonic_id from FCM response: {e}")
+        return None
+
+    async def _run_callback_async(self, callback, canonic_id: str, hex_string: str):
         """Run callback in executor to avoid blocking the event loop."""
         try:
             import asyncio
             loop = asyncio.get_event_loop()
-            # Run the potentially blocking callback in a thread executor
-            await loop.run_in_executor(None, callback, hex_string)
+            # Run the potentially blocking callback in a thread executor with canonic_id
+            await loop.run_in_executor(None, callback, canonic_id, hex_string)
         except Exception as e:
-            _LOGGER.error(f"Error in async FCM callback: {e}")
+            _LOGGER.error(f"Error in async FCM callback for device {canonic_id}: {e}")
+    
+    async def _process_background_update(self, coordinator, canonic_id: str, hex_string: str):
+        """Process background FCM update for a tracked device."""
+        try:
+            import asyncio
+            import time
+            
+            # Run the location processing in executor to avoid blocking
+            location_data = await asyncio.get_event_loop().run_in_executor(
+                None, self._decode_background_location, hex_string
+            )
+            
+            if location_data:
+                # Store in coordinator's location cache
+                coordinator._device_location_data[canonic_id] = location_data.copy()
+                coordinator._device_location_data[canonic_id]["last_updated"] = time.time()
+                
+                device_name = coordinator._device_names.get(canonic_id, canonic_id[:8])
+                _LOGGER.info(f"Stored background location update for {device_name}")
+                
+                # Trigger coordinator update to refresh entities
+                await coordinator.async_request_refresh()
+            else:
+                _LOGGER.debug(f"No location data in background update for device {canonic_id}")
+                
+        except Exception as e:
+            _LOGGER.error(f"Error processing background update for device {canonic_id}: {e}")
+    
+    def _decode_background_location(self, hex_string: str) -> dict:
+        """Decode location data from hex string (runs in executor)."""
+        try:
+            # Import with robust fallback for different module loading contexts
+            try:
+                from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
+                from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
+            except ImportError:
+                try:
+                    # Try relative import from Auth directory
+                    from ..ProtoDecoders.decoder import parse_device_update_protobuf
+                    from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
+                except ImportError:
+                    # Last resort - try from current working directory
+                    import sys
+                    import os
+                    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+                    from ProtoDecoders.decoder import parse_device_update_protobuf
+                    from NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
+            
+            # Parse and decrypt
+            device_update = parse_device_update_protobuf(hex_string)
+            location_data = decrypt_location_response_locations(device_update)
+            
+            if location_data and len(location_data) > 0:
+                return location_data[0]
+            return {}
+            
+        except Exception as e:
+            _LOGGER.error(f"Failed to decode background location data: {e}")
+            return {}
     
     def _on_credentials_updated(self, creds):
         """Handle credential updates."""
@@ -231,9 +364,28 @@ class FcmReceiverHA:
         try:
             if self._listen_task:
                 self._listen_task.cancel()
+                try:
+                    await self._listen_task
+                except asyncio.CancelledError:
+                    pass
                 
             if self.pc:
-                await self.pc.stop()
+                try:
+                    # Check if the push client was properly started before trying to stop
+                    if (hasattr(self.pc, 'stop') and callable(getattr(self.pc, 'stop')) and
+                        hasattr(self.pc, 'stopping_lock') and self.pc.stopping_lock is not None):
+                        await self.pc.stop()
+                    else:
+                        _LOGGER.debug("FCM push client not fully initialized, skipping stop")
+                        # Just set the client to None to clean up
+                        self.pc = None
+                except TypeError as type_error:
+                    if "asynchronous context manager protocol" in str(type_error):
+                        _LOGGER.debug(f"FCM push client stop method has context manager issue, skipping: {type_error}")
+                    else:
+                        _LOGGER.warning(f"Type error stopping FCM push client: {type_error}")
+                except Exception as pc_error:
+                    _LOGGER.debug(f"Error stopping FCM push client: {pc_error}")
                 
             self._listening = False
             _LOGGER.info("FCM receiver stopped")

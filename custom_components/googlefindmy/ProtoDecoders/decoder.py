@@ -82,12 +82,9 @@ def get_canonic_ids(device_list):
 
 def get_devices_with_location(device_list):
     """Extract devices with location data from device list protobuf."""
-    print("[DeviceDecoder] Using NEW location extraction from device list!")
     try:
         from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
-        print("[DeviceDecoder] Successfully imported decrypt_location_response_locations")
-    except Exception as e:
-        print(f"[DeviceDecoder] Import error: {e}")
+    except Exception:
         return []
     
     result = []
@@ -118,69 +115,31 @@ def get_devices_with_location(device_list):
             
             # Try to extract location data if available
             try:
-                print(f"[DeviceDecoder] === Analyzing {device_name} ===")
-                
-                # Check what fields are actually available
-                available_fields = []
-                for field in device.DESCRIPTOR.fields:
-                    if device.HasField(field.name):
-                        available_fields.append(field.name)
-                print(f"[DeviceDecoder] Available fields in device: {available_fields}")
-                
-                if device.HasField("information"):
-                    info_fields = []
-                    for field in device.information.DESCRIPTOR.fields:
-                        if device.information.HasField(field.name):
-                            info_fields.append(field.name)
-                    print(f"[DeviceDecoder] Available fields in information: {info_fields}")
-                    
-                    if device.information.HasField("locationInformation"):
-                        loc_fields = []
-                        for field in device.information.locationInformation.DESCRIPTOR.fields:
-                            if device.information.locationInformation.HasField(field.name):
-                                loc_fields.append(field.name)
-                        print(f"[DeviceDecoder] Available fields in locationInformation: {loc_fields}")
+                if device.HasField("information") and device.information.HasField("locationInformation"):
+                    if hasattr(device.information.locationInformation, 'reports') and device.information.locationInformation.reports:
+                        from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
+                        mock_device_update = DeviceUpdate_pb2.DeviceUpdate()
+                        mock_device_update.deviceMetadata.CopyFrom(device)
                         
-                        if device.information.locationInformation.HasField("reports"):
-                            print(f"[DeviceDecoder] Found location reports for {device_name}, attempting decryption...")
-                            
-                            # Create a fake device update protobuf with just this device's data
-                            fake_device_update = DeviceUpdate_pb2.DeviceUpdate()
-                            fake_device_update.deviceMetadata.CopyFrom(device)
-                            
-                            # Use existing decryption function
-                            location_data = decrypt_location_response_locations(fake_device_update)
+                        try:
+                            location_data = decrypt_location_response_locations(mock_device_update)
                             
                             if location_data and len(location_data) > 0:
-                                print(f"[DeviceDecoder] Successfully decrypted {len(location_data)} locations for {device_name}")
-                                # Use the most recent location (first in list)
-                                latest_location = location_data[0]
-                                device_info.update({
-                                    "latitude": latest_location.get("latitude"),
-                                    "longitude": latest_location.get("longitude"),
-                                    "altitude": latest_location.get("altitude"),
-                                    "accuracy": latest_location.get("accuracy"),
-                                    "last_seen": latest_location.get("last_seen"),
-                                    "status": latest_location.get("status"),
-                                    "is_own_report": latest_location.get("is_own_report"),
-                                    "semantic_name": latest_location.get("semantic_name")
-                                })
-                            else:
-                                print(f"[DeviceDecoder] No location data returned from decryption for {device_name}")
-                        else:
-                            print(f"[DeviceDecoder] No 'reports' field found for {device_name}")
-                    else:
-                        print(f"[DeviceDecoder] No 'locationInformation' field found for {device_name}")
-                else:
-                    print(f"[DeviceDecoder] No 'information' field found for {device_name}")
-                    
-                print(f"[DeviceDecoder] === End analysis for {device_name} ===")
-                print()
-                        
-            except Exception as e:
-                print(f"[DeviceDecoder] Failed to extract location for device {device_name}: {e}")
-                import traceback
-                print(f"[DeviceDecoder] Traceback: {traceback.format_exc()}")
+                                for loc in location_data:
+                                    loc["device_name"] = device_name
+                                    loc["canonic_id"] = canonic_id.id
+                                    loc["device_id"] = canonic_id.id
+                                    
+                                    result.append({
+                                        "name": device_name,
+                                        "id": canonic_id.id,
+                                        "device_id": canonic_id.id,
+                                        **loc
+                                    })
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             
             result.append(device_info)
     

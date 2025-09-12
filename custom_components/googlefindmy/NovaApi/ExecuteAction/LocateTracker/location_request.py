@@ -44,20 +44,34 @@ async def get_location_data_for_device(canonic_device_id, name):
         # Set up FCM receiver with callback (following original pattern)
         received_location_data = {"data": None, "received": False}
 
-        def location_callback(hex_response):
+        def location_callback(response_canonic_id, hex_response):
             try:
                 logger.info(f"FCM callback triggered for {name}, processing response...")
                 logger.debug(f"FCM response length: {len(hex_response)} chars")
-                from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
-
+                
+                # Import functions inside callback for thread safety
+                try:
+                    from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
+                    from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
+                except ImportError as import_error:
+                    logger.error(f"Failed to import decoder functions in callback for {name}: {import_error}")
+                    return
+                
                 # Parse the hex response
                 device_update = parse_device_update_protobuf(hex_response)
+                
+                # Validate canonic_id matches what we requested
+                if response_canonic_id != canonic_device_id:
+                    logger.warning(f"FCM callback received data for device {response_canonic_id}, but we requested {canonic_device_id}. Ignoring.")
+                    return
 
-                # Decrypt the location data using the original method
+                # Decrypt the location data
                 location_data = decrypt_location_response_locations(device_update)
 
                 if location_data:
-                    print(f"Successfully decrypted {len(location_data)} location records for {name}")
+                    logger.info(f"Successfully decrypted {len(location_data)} location records for {name}")
+                    # Add canonic_id for later reference and validation
+                    location_data[0]["canonic_id"] = response_canonic_id
                     received_location_data["data"] = location_data
                     received_location_data["received"] = True
                     logger.info(f"Successfully processed location data for {name}")
@@ -81,8 +95,8 @@ async def get_location_data_for_device(canonic_device_id, name):
                 return []
             
             logger.debug(f"FCM receiver initialized, registering for location updates for {name}...")
-            # Register for location updates
-            fcm_token = await fcm_receiver.async_register_for_location_updates(location_callback)
+            # Register for location updates with device-specific callback
+            fcm_token = await fcm_receiver.async_register_for_location_updates(canonic_device_id, location_callback)
             if not fcm_token:
                 logger.error(f"Failed to get FCM token for {name}")
                 return []
@@ -118,19 +132,39 @@ async def get_location_data_for_device(canonic_device_id, name):
             # Wait for response with timeout
             for i in range(timeout * 2):  # Check every 0.5 seconds
                 if received_location_data["received"]:
-                    logger.debug(f"Location response received for {name} after {i*0.5:.1f}s")
-                    break
+                    # Validate the response is for the correct device
+                    if (received_location_data["data"] and 
+                        len(received_location_data["data"]) > 0 and 
+                        received_location_data["data"][0].get("canonic_id") == canonic_device_id):
+                        logger.debug(f"Location response received for {name} after {i*0.5:.1f}s")
+                        break
+                    else:
+                        logger.debug(f"Location response received for different device. Keep waiting.")
+                        received_location_data = {"data": None, "received": False}  # reset to not trigger message again
                 if i % 40 == 0 and i > 0:  # Log every 20 seconds instead of every 5 seconds
                     logger.debug(f"Still waiting for location response for {name} ({i*0.5:.1f}s elapsed)")
                 await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             logger.info(f"Location request cancelled for {name}")
-            await fcm_receiver.async_stop()
+            try:
+                await fcm_receiver.async_unregister_for_location_updates(canonic_device_id)
+                if len(fcm_receiver.location_update_callbacks) == 0:
+                    await fcm_receiver.async_stop()
+            except Exception as e:
+                logger.warning(f"Error during cancellation cleanup for {name}: {e}")
             raise
 
-        # Clean up
+        # Clean up - unregister callback first, then stop receiver if no more callbacks
         try:
-            await fcm_receiver.async_stop()
+            await fcm_receiver.async_unregister_for_location_updates(canonic_device_id)
+            
+            # Only stop the receiver if no other callbacks are registered
+            if len(fcm_receiver.location_update_callbacks) == 0:
+                await fcm_receiver.async_stop()
+                logger.debug(f"Stopped FCM receiver after unregistering last callback for {name}")
+            else:
+                logger.debug(f"FCM receiver kept running - {len(fcm_receiver.location_update_callbacks)} callbacks still registered")
+                
         except Exception as cleanup_error:
             logger.warning(f"Error during FCM cleanup for {name}: {cleanup_error}")
 

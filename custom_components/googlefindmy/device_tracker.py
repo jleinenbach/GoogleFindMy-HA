@@ -70,9 +70,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
         if self.coordinator.data:
             for device in self.coordinator.data:
                 if device["id"] == self._device["id"]:
-                    _LOGGER.debug(f"Device data for {self._device['name']}: lat={device.get('latitude')}, lon={device.get('longitude')}, acc={device.get('accuracy')}")
                     return device
-        _LOGGER.debug(f"No device data found for {self._device['name']} (id={self._device['id']})")
         return None
 
 

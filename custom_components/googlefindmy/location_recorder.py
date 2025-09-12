@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
-from homeassistant.components.recorder import history
+from homeassistant.components.recorder import history, get_instance
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,8 +23,9 @@ class LocationRecorder:
             end_time = datetime.now()
             start_time = end_time - timedelta(hours=hours)
             
-            # Use the proper recorder history API
-            history_list = await self.hass.async_add_executor_job(
+            # Use the proper recorder database executor API
+            recorder_instance = get_instance(self.hass)
+            history_list = await recorder_instance.async_add_executor_job(
                 history.get_significant_states,
                 self.hass,
                 start_time,

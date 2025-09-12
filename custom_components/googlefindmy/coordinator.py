@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 import time
 
 from homeassistant.core import HomeAssistant
@@ -46,11 +46,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
             name=DOMAIN,
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
+        
+        # Defer FCM receiver registration to avoid blocking startup
+        self._fcm_registered = False
+
+
 
     async def _async_update_data(self):
         """Update data via library."""
         try:
-            # Get basic device list first
+            # Get basic device list - always use async to avoid blocking the event loop
             all_devices = await self.hass.async_add_executor_job(self.api.get_basic_device_list)
             
             # Filter to only tracked devices
@@ -69,8 +74,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
             time_since_last_poll = current_time - self._last_location_poll_time
             should_poll_location = (time_since_last_poll >= self.location_poll_interval)
             
+            # Skip location polling during first refresh to speed up startup
+            if self._last_location_poll_time == 0:
+                should_poll_location = False
+                # Set timestamp so next update cycle will poll normally
+                self._last_location_poll_time = current_time
+            
+            # Register with FCM receiver after first refresh to enable background updates
+            if not self._fcm_registered:
+                try:
+                    from .Auth.fcm_receiver_ha import FcmReceiverHA
+                    fcm_receiver = FcmReceiverHA()
+                    fcm_receiver.register_coordinator(self)
+                    self._fcm_registered = True
+                except Exception as e:
+                    _LOGGER.warning(f"Failed to register with FCM receiver: {e}")
+            
             if should_poll_location and devices:
-                _LOGGER.debug(f"Polling locations for {len(devices)} devices")
                 
                 # Poll all devices with delays to avoid rate limiting
                 for i, device in enumerate(devices):
@@ -92,7 +112,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                             semantic = location_data.get('semantic_name')
                             
                             # Get accuracy threshold from config
-                            config_data = self.hass.data[DOMAIN].get("config_data", {})
+                            config_data = self.hass.data.get(DOMAIN, {}).get("config_data", {})
                             min_accuracy_threshold = config_data.get("min_accuracy_threshold", 100)
                             
                             # Validate coordinates and accuracy threshold
@@ -105,6 +125,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                                     # Store current location and get best from recorder history
                                     self._device_location_data[device_id] = location_data.copy()
                                     self._device_location_data[device_id]["last_updated"] = current_time
+                                    
                                     
                                     # Get recorder history and combine with current data for better location selection
                                     try:
@@ -196,7 +217,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                     # Applied cached location data
                     
                     # Add status based on data age
-                    last_updated = location_data.get("last_updated", 0)
+                    last_updated = cached_location.get("last_updated", 0)
                     data_age = current_time - last_updated
                     if data_age < self.location_poll_interval:
                         device_info["status"] = "Location data current"
