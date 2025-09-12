@@ -6,8 +6,8 @@ A comprehensive Home Assistant custom integration for Google's Find My Device ne
 
 - **Real-time Device Tracking**: Track Google Find My devices with fresh GPS location data
 - **Configurable Polling**: Flexible polling intervals with rate limit compliance
-- **GoogleFindMyTools Integration**: Uses secrets.json from GoogleFindMyTools for authentication
 - **Sound Button Entity**: Devices include a button entity that plays a sound on devices that support playing sound
+- **Attribute grading system**: Location data is selected automatically based on 3 major attributes: 1) Accuracy 2) Recency 3) Comes from your device or the network.
 
 ## Installation
 
@@ -92,9 +92,7 @@ Contributions are welcome! Please:
 ## Credits
 
 - Böttger, L. (2024). GoogleFindMyTools [Computer software]. https://github.com/leonboe1/GoogleFindMyTools
-- Home Assistant integration architecture
-- Firebase Cloud Messaging integration
-- Enhanced polling and location filtering improvements
+- Firebase Cloud Messaging integration. https://github.com/home-assistant/mobile-apps-fcm-push
 
 ## Disclaimer
 
