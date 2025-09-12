@@ -2,6 +2,8 @@
 
 A comprehensive Home Assistant custom integration for Google's Find My Device network, enabling real-time tracking and control of Find My devices directly within Home Assistant.
 
+**This is a true integration! No scripts, docker containers, or external systems required (other than for initial authenticaiton)!**
+
 ## Features
 
 - **Real-time Device Tracking**: Track Google Find My devices with fresh GPS location data
