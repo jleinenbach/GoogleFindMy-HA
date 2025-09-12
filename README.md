@@ -91,7 +91,7 @@ Contributions are welcome! Please:
 
 ## Credits
 
-- Built on top of [GoogleFindMyTools](https://github.com/GoogleFindMyTools/GoogleFindMyTools) by Leon Böttger
+- Böttger, L. (2024). GoogleFindMyTools [Computer software]. https://github.com/leonboe1/GoogleFindMyTools
 - Home Assistant integration architecture
 - Firebase Cloud Messaging integration
 - Enhanced polling and location filtering improvements
