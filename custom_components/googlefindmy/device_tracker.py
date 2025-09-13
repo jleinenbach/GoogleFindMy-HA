@@ -82,8 +82,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
         if device_data:
             lat = device_data.get("latitude")
             lon = device_data.get("longitude")
-            # Available if we have both coordinates
-            return lat is not None and lon is not None
+            semantic_name = device_data.get("semantic_name")
+            # Available if we have both coordinates or a semantic location name
+            return (lat is not None and lon is not None) or (semantic_name is not None)
         return False
 
     @property
