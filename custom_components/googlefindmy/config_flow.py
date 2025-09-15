@@ -13,15 +13,14 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
-from .const import DOMAIN, CONF_OAUTH_TOKEN
+from .const import DOMAIN, CONF_OAUTH_TOKEN, DEFAULT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
 from .api import GoogleFindMyAPI
 
 _LOGGER = logging.getLogger(__name__)
 
 STEP_USER_DATA_SCHEMA = vol.Schema({
     vol.Required("auth_method"): vol.In({
-        "secrets_json": "Method 1: GoogleFindMyTools secrets.json (Recommended)",
-        "individual_tokens": "Method 2: Individual OAuth token + email"
+        "secrets_json": "GoogleFindMyTools secrets.json"
     })
 })
 
@@ -58,14 +57,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             if user_input.get("auth_method") == "secrets_json":
                 return await self.async_step_secrets_json()
-            else:
-                return await self.async_step_individual_tokens()
 
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
             description_placeholders={
-                "info": "Choose your preferred authentication method. Method 1 is recommended if you can run GoogleFindMyTools on a machine with Chrome."
+                "info": "Authenticate using GoogleFindMyTools secrets.json file. Run GoogleFindMyTools on a machine with Chrome to generate this file."
             }
         )
 
@@ -234,7 +231,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 "location_poll_interval": user_input.get("location_poll_interval", 300),
                 "device_poll_delay": user_input.get("device_poll_delay", 5),
                 "min_accuracy_threshold": user_input.get("min_accuracy_threshold", 100),
-                "movement_threshold": user_input.get("movement_threshold", 50)
+                "movement_threshold": user_input.get("movement_threshold", 50),
+                "google_home_filter_enabled": user_input.get("google_home_filter_enabled", DEFAULT_GOOGLE_HOME_FILTER_ENABLED),
+                "google_home_filter_keywords": user_input.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)
             })
             
             self.hass.config_entries.async_update_entry(
@@ -294,14 +293,16 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional("movement_threshold", default=self.config_entry.data.get("movement_threshold", 50)): vol.All(
                 vol.Coerce(int),
                 vol.Range(min=10, max=200)
-            )
+            ),
+            vol.Optional("google_home_filter_enabled", default=self.config_entry.data.get("google_home_filter_enabled", DEFAULT_GOOGLE_HOME_FILTER_ENABLED)): bool,
+            vol.Optional("google_home_filter_keywords", default=self.config_entry.data.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)): str
         })
 
         return self.async_show_form(
             step_id="init",
             data_schema=options_schema,
             description_placeholders={
-                "info": "Modify tracking settings:\n• Location poll interval: How often to poll for locations (60-3600 seconds)\n• Device poll delay: Delay between device polls (1-60 seconds)\n• Min accuracy threshold: Ignore locations worse than this (25-500 meters)\n• Staleness threshold: Mark location as stale after this time (0.5-24 hours)\n\nThese settings help filter poor location data and identify stale information."
+                "info": "Modify tracking settings:\n• Location poll interval: How often to poll for locations (60-3600 seconds)\n• Device poll delay: Delay between device polls (1-60 seconds)\n• Min accuracy threshold: Ignore locations worse than this (25-500 meters)\n• Movement threshold: Minimum movement to trigger location update (10-200 meters)\n\nGoogle Home Filter:\n• Enable to filter Google Home device detections into Home zone\n• Keywords support partial matching (comma-separated)\n• Example: 'nest' matches 'Kitchen Nest Mini'"
             }
         )
 

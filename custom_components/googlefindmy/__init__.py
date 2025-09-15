@@ -75,11 +75,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("Secrets data not found in config entry")
             raise ConfigEntryNotReady("Secrets data not found")
         coordinator = GoogleFindMyCoordinator(
-            hass, 
-            secrets_data=secrets_data, 
+            hass,
+            secrets_data=secrets_data,
             tracked_devices=tracked_devices,
             location_poll_interval=location_poll_interval,
-            device_poll_delay=device_poll_delay
+            device_poll_delay=device_poll_delay,
+            config_data=entry.data
         )
     else:
         oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
@@ -94,12 +95,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise ConfigEntryNotReady("Google email not found")
 
         coordinator = GoogleFindMyCoordinator(
-            hass, 
-            oauth_token=oauth_token, 
-            google_email=google_email, 
+            hass,
+            oauth_token=oauth_token,
+            google_email=google_email,
             tracked_devices=tracked_devices,
             location_poll_interval=location_poll_interval,
-            device_poll_delay=device_poll_delay
+            device_poll_delay=device_poll_delay,
+            config_data=entry.data
         )
     
     try:
@@ -144,7 +146,11 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     coordinator.tracked_devices = entry.data.get("tracked_devices", [])
     coordinator.location_poll_interval = entry.data.get("location_poll_interval", 300)
     coordinator.device_poll_delay = entry.data.get("device_poll_delay", 5)
-    
+
+    # Update Google Home filter configuration
+    if hasattr(coordinator, 'google_home_filter'):
+        coordinator.google_home_filter.update_config(entry.data)
+
     # Update config data for device tracker
     hass.data[DOMAIN]["config_data"] = {
         "min_accuracy_threshold": entry.data.get("min_accuracy_threshold", 100),

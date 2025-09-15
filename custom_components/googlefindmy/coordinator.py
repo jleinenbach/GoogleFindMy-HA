@@ -12,6 +12,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import DOMAIN, UPDATE_INTERVAL
 from .api import GoogleFindMyAPI
 from .location_recorder import LocationRecorder
+from .google_home_filter import GoogleHomeFilter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 class GoogleFindMyCoordinator(DataUpdateCoordinator):
     """Class to manage fetching Google Find My Device data."""
 
-    def __init__(self, hass: HomeAssistant, oauth_token: str = None, google_email: str = None, secrets_data: dict = None, tracked_devices: list = None, location_poll_interval: int = 300, device_poll_delay: int = 5, min_poll_interval: int = 60) -> None:
+    def __init__(self, hass: HomeAssistant, oauth_token: str = None, google_email: str = None, secrets_data: dict = None, tracked_devices: list = None, location_poll_interval: int = 300, device_poll_delay: int = 5, min_poll_interval: int = 60, config_data: dict = None) -> None:
         """Initialize."""
         if secrets_data:
             self.api = GoogleFindMyAPI(secrets_data=secrets_data)
@@ -39,6 +40,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
         
         # Initialize recorder-based location history
         self.location_recorder = LocationRecorder(hass)
+
+        # Initialize Google Home device filter
+        self.google_home_filter = GoogleHomeFilter(hass, config_data or {})
         
         super().__init__(
             hass,
@@ -110,6 +114,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                             lon = location_data.get('longitude')
                             accuracy = location_data.get('accuracy')
                             semantic = location_data.get('semantic_name')
+
+                            # Apply Google Home device filtering
+                            if semantic:
+                                should_filter, replacement_location = self.google_home_filter.should_filter_detection(device_id, semantic)
+                                if should_filter:
+                                    _LOGGER.debug(f"Filtering out Google Home spam detection for {device_name}")
+                                    continue  # Skip this device for this poll cycle
+                                elif replacement_location:
+                                    _LOGGER.info(f"Google Home filter: Device {device_name} detected at '{semantic}', using '{replacement_location}'")
+                                    semantic = replacement_location
+                                    # Update the semantic_name in location_data for consistency
+                                    location_data = location_data.copy()
+                                    location_data['semantic_name'] = replacement_location
                             
                             # Get accuracy threshold from config
                             config_data = self.hass.data.get(DOMAIN, {}).get("config_data", {})
