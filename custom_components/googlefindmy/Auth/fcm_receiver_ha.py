@@ -298,13 +298,26 @@ class FcmReceiverHA:
             )
             
             if location_data:
+                device_name = coordinator._device_names.get(canonic_id, canonic_id[:8])
+
+                # Apply Google Home device filtering
+                semantic_name = location_data.get('semantic_name')
+                if semantic_name and hasattr(coordinator, 'google_home_filter'):
+                    should_filter, replacement_location = coordinator.google_home_filter.should_filter_detection(canonic_id, semantic_name)
+                    if should_filter:
+                        _LOGGER.debug(f"FCM: Filtering out Google Home spam detection for {device_name}")
+                        return  # Skip processing this update
+                    elif replacement_location:
+                        _LOGGER.info(f"FCM: Google Home filter: Device {device_name} detected at '{semantic_name}', using '{replacement_location}'")
+                        location_data = location_data.copy()
+                        location_data['semantic_name'] = replacement_location
+
                 # Store in coordinator's location cache
                 coordinator._device_location_data[canonic_id] = location_data.copy()
                 coordinator._device_location_data[canonic_id]["last_updated"] = time.time()
-                
-                device_name = coordinator._device_names.get(canonic_id, canonic_id[:8])
+
                 _LOGGER.info(f"Stored background location update for {device_name}")
-                
+
                 # Trigger coordinator update to refresh entities
                 await coordinator.async_request_refresh()
             else:
