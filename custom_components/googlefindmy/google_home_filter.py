@@ -140,7 +140,12 @@ class GoogleHomeFilter:
 
     def _update_spam_tracking(self, device_id: str) -> None:
         """Update the spam tracking timestamp for a device."""
-        self._spam_tracking[device_id] = time.time()
+        current_time = time.time()
+        self._spam_tracking[device_id] = current_time
+
+        # Clean up old entries (older than 1 hour)
+        cutoff_time = current_time - 3600
+        self._spam_tracking = {k: v for k, v in self._spam_tracking.items() if v > cutoff_time}
 
     def reset_spam_tracking(self, device_id: str) -> None:
         """Reset spam tracking when device leaves Home zone."""
