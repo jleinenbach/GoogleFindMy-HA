@@ -56,6 +56,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
 
 
 
+
     async def _async_update_data(self):
         """Update data via library."""
         try:
@@ -68,20 +69,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
             else:
                 devices = all_devices
             
-            # Update device names mapping and clean up old device data
-            current_device_ids = set()
+            # Update device names mapping
             for device in devices:
-                device_id = device["id"]
-                self._device_names[device_id] = device["name"]
-                current_device_ids.add(device_id)
-
-            # Clean up location data for removed devices
-            removed_devices = set(self._device_location_data.keys()) - current_device_ids
-            for device_id in removed_devices:
-                del self._device_location_data[device_id]
-                if device_id in self._device_names:
-                    del self._device_names[device_id]
-                _LOGGER.debug(f"Cleaned up data for removed device: {device_id}")
+                self._device_names[device["id"]] = device["name"]
             
             current_time = time.time()
             
@@ -145,18 +135,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                             
                             # Validate coordinates and accuracy threshold
                             if lat is not None and lon is not None or semantic:
-                                # Check accuracy threshold for GPS locations (not semantic-only locations)
-                                if lat is not None and lon is not None and accuracy is not None and accuracy > min_accuracy_threshold:
+                                if accuracy is not None and accuracy > min_accuracy_threshold:
                                     _LOGGER.debug(f"Filtering out location for {device_name}: accuracy {accuracy}m exceeds threshold {min_accuracy_threshold}m")
-                                elif semantic and not (lat is not None and lon is not None):
-                                    # Semantic-only location (no GPS coords) - always accept
-                                    pass  # Will be stored below
                                 else:
                                     # Location received successfully
-                                    
-                                    # Store current location and get best from recorder history
-                                    self._device_location_data[device_id] = location_data.copy()
-                                    self._device_location_data[device_id]["last_updated"] = current_time
+
+                                    # Check if this is actually new location data (avoid duplicates)
+                                    current_last_seen = location_data.get('last_seen')
+                                    existing_data = self._device_location_data.get(device_id, {})
+                                    existing_last_seen = existing_data.get('last_seen')
+
+                                    if current_last_seen != existing_last_seen:
+                                        # Store current location and get best from recorder history
+                                        self._device_location_data[device_id] = location_data.copy()
+                                        self._device_location_data[device_id]["last_updated"] = current_time
+
+                                        _LOGGER.info(f"Stored NEW polling location update for {device_name} (last_seen: {current_last_seen})")
+                                    else:
+                                        _LOGGER.debug(f"Skipping duplicate polling location update for {device_name} (same last_seen: {current_last_seen})")
+                                        continue  # Skip the rest of the processing for this device
                                     
                                     
                                     # Get recorder history and combine with current data for better location selection
@@ -165,13 +162,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                                         entity_id_by_unique = f"device_tracker.{DOMAIN}_{device_id}"
                                         entity_id_by_name = f"device_tracker.{device_name.lower().replace(' ', '_')}"
                                         
-                                        # Try unique ID format first (reduced to 12 hours to save memory)
-                                        historical_locations = await self.location_recorder.get_location_history(entity_id_by_unique, hours=12)
+                                        # Try unique ID format first
+                                        historical_locations = await self.location_recorder.get_location_history(entity_id_by_unique, hours=24)
                                         
                                         # If no history found, try name-based format
                                         if not historical_locations:
                                             _LOGGER.debug(f"No history for {entity_id_by_unique}, trying {entity_id_by_name}")
-                                            historical_locations = await self.location_recorder.get_location_history(entity_id_by_name, hours=12)
+                                            historical_locations = await self.location_recorder.get_location_history(entity_id_by_name, hours=24)
                                         
                                         # Add current Google API location to historical data
                                         current_location_entry = {
