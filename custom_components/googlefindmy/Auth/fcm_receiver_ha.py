@@ -312,14 +312,22 @@ class FcmReceiverHA:
                         location_data = location_data.copy()
                         location_data['semantic_name'] = replacement_location
 
-                # Store in coordinator's location cache
-                coordinator._device_location_data[canonic_id] = location_data.copy()
-                coordinator._device_location_data[canonic_id]["last_updated"] = time.time()
+                # Check if this is actually new location data (avoid duplicates)
+                current_last_seen = location_data.get('last_seen')
+                existing_data = coordinator._device_location_data.get(canonic_id, {})
+                existing_last_seen = existing_data.get('last_seen')
 
-                _LOGGER.info(f"Stored background location update for {device_name}")
+                if current_last_seen != existing_last_seen:
+                    # Store in coordinator's location cache only if last_seen changed
+                    coordinator._device_location_data[canonic_id] = location_data.copy()
+                    coordinator._device_location_data[canonic_id]["last_updated"] = time.time()
 
-                # Trigger coordinator update to refresh entities
-                await coordinator.async_request_refresh()
+                    _LOGGER.info(f"Stored NEW background location update for {device_name} (last_seen: {current_last_seen})")
+
+                    # Trigger coordinator update to refresh entities
+                    await coordinator.async_request_refresh()
+                else:
+                    _LOGGER.debug(f"Skipping duplicate background location update for {device_name} (same last_seen: {current_last_seen})")
             else:
                 _LOGGER.debug(f"No location data in background update for device {canonic_id}")
                 
