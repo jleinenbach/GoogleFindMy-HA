@@ -78,7 +78,7 @@ class GoogleFindMyAPI:
             
             return devices
         except Exception as err:
-            _LOGGER.error("Failed to get basic device list: %s", err)
+            _LOGGER.debug("Failed to get basic device list: %s", err)
             raise
 
     def get_devices(self) -> list[dict[str, Any]]:
@@ -110,9 +110,9 @@ class GoogleFindMyAPI:
             _LOGGER.info(f"API v3.0: Returning {len(devices)} devices with basic info")
             return devices
         except Exception as err:
-            _LOGGER.error("Failed to get devices: %s", err)
+            _LOGGER.debug("Failed to get devices: %s", err)
             import traceback
-            _LOGGER.error("Traceback: %s", traceback.format_exc())
+            _LOGGER.debug("Traceback: %s", traceback.format_exc())
             raise
 
     def get_device_location(self, device_id: str, device_name: str) -> dict[str, Any]:
@@ -134,9 +134,9 @@ class GoogleFindMyAPI:
                 return {}
                 
         except Exception as err:
-            _LOGGER.error("Failed to get location for device %s (%s): %s", device_name, device_id, err)
+            _LOGGER.debug("Failed to get location for device %s (%s): %s", device_name, device_id, err)
             import traceback
-            _LOGGER.error("Traceback: %s", traceback.format_exc())
+            _LOGGER.debug("Traceback: %s", traceback.format_exc())
             return {}
 
     async def async_get_device_location(self, device_id: str, device_name: str) -> dict[str, Any]:
@@ -156,9 +156,9 @@ class GoogleFindMyAPI:
                 return {}
                 
         except Exception as err:
-            _LOGGER.error("Failed to get async location for device %s (%s): %s", device_name, device_id, err)
+            _LOGGER.debug("Failed to get async location for device %s (%s): %s", device_name, device_id, err)
             import traceback
-            _LOGGER.error("Traceback: %s", traceback.format_exc())
+            _LOGGER.debug("Traceback: %s", traceback.format_exc())
             return {}
 
     def locate_device(self, device_id: str) -> dict[str, Any]:
@@ -169,7 +169,7 @@ class GoogleFindMyAPI:
             location_data = get_location_data_for_device(device_id, device_name)
             return location_data
         except Exception as err:
-            _LOGGER.error("Failed to locate device %s: %s", device_id, err)
+            _LOGGER.debug("Failed to locate device %s: %s", device_id, err)
             raise
 
     def play_sound(self, device_id: str) -> bool:
