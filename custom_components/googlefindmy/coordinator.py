@@ -56,6 +56,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
 
 
 
+
     async def _async_update_data(self):
         """Update data via library."""
         try:
@@ -138,10 +139,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                                     _LOGGER.debug(f"Filtering out location for {device_name}: accuracy {accuracy}m exceeds threshold {min_accuracy_threshold}m")
                                 else:
                                     # Location received successfully
-                                    
-                                    # Store current location and get best from recorder history
-                                    self._device_location_data[device_id] = location_data.copy()
-                                    self._device_location_data[device_id]["last_updated"] = current_time
+
+                                    # Check if this is actually new location data (avoid duplicates)
+                                    current_last_seen = location_data.get('last_seen')
+                                    existing_data = self._device_location_data.get(device_id, {})
+                                    existing_last_seen = existing_data.get('last_seen')
+
+                                    if current_last_seen != existing_last_seen:
+                                        # Store current location and get best from recorder history
+                                        self._device_location_data[device_id] = location_data.copy()
+                                        self._device_location_data[device_id]["last_updated"] = current_time
+
+                                        _LOGGER.info(f"Stored NEW polling location update for {device_name} (last_seen: {current_last_seen})")
+                                    else:
+                                        _LOGGER.debug(f"Skipping duplicate polling location update for {device_name} (same last_seen: {current_last_seen})")
+                                        continue  # Skip the rest of the processing for this device
                                     
                                     
                                     # Get recorder history and combine with current data for better location selection

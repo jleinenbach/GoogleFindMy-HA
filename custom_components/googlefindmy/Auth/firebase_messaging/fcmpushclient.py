@@ -259,9 +259,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
             _logger.debug("Reestablishing connection")
             if not await self._connect_with_retry():
-                _logger.error(
+                _logger.debug(
                     "Unable to connect to MCS endpoint "
-                    + "after %s tries, shutting down",
+                    + "after %s tries, shutting down (FCM connectivity issue)",
                     self.config.connection_retry_count,
                 )
                 self._terminate()
@@ -591,10 +591,10 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             and self.sequential_error_counters[error_type]
             >= self.config.abort_on_sequential_error_count
         ):
-            _logger.error(
+            _logger.debug(
                 "Shutting down push receiver due to "
                 + f"{self.sequential_error_counters[error_type]} sequential"
-                + f" errors of type {error_type}"
+                + f" errors of type {error_type} (FCM connectivity issue)"
             )
             self._terminate()
             return False
@@ -735,15 +735,23 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                                 type(osex).__name__,
                             )
                     else:
-                        _logger.exception("Unexpected exception during read\n")
+                        # Silence ConnectionResetError as it's normal FCM behavior
+                        if isinstance(osex, ConnectionResetError):
+                            _logger.debug("FCM connection reset by peer (normal): %s", osex)
+                        else:
+                            _logger.exception("Unexpected exception during read\n")
                         if self._try_increment_error_count(ErrorType.CONNECTION):
                             await self._reset()
         except Exception as ex:
-            _logger.error(
-                "Unknown error: %s, shutting down FcmPushClient.\n%s",
-                ex,
-                traceback.format_exc(),
-            )
+            # Silence known FCM concurrency issues
+            if "readexactly() called while another coroutine is already waiting" in str(ex):
+                _logger.debug("FCM concurrency issue (known): %s", ex)
+            else:
+                _logger.error(
+                    "Unknown error: %s, shutting down FcmPushClient.\n%s",
+                    ex,
+                    traceback.format_exc(),
+                )
             self._terminate()
         finally:
             await self._do_writer_close()

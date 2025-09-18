@@ -101,30 +101,51 @@ class GoogleHomeFilter:
         if not self._enabled:
             return False, None
 
-        # Check if this is a Google Home device detection OR already a Home zone detection
-        is_google_home = self.is_google_home_device(location_name)
-        is_home_zone = location_name.lower() in ["home", self.get_home_zone_name().lower() if self.get_home_zone_name() else ""]
+        # Check if this is already a Home zone detection first (takes priority)
+        is_home_zone = False
+        if location_name:
+            home_zone_name = self.get_home_zone_name()
+            is_home_zone = location_name.lower() in ["home", home_zone_name.lower() if home_zone_name else ""]
+
+        # Only check for Google Home devices if it's NOT already a Home zone
+        is_google_home = False
+        if not is_home_zone:
+            is_google_home = self.is_google_home_device(location_name)
 
         if not is_google_home and not is_home_zone:
             return False, None  # Not a Google Home device or Home zone, don't filter
 
-        # Check if device is already at Home
-        if self.is_device_at_home(device_id):
-            # Device already at Home - check spam prevention
+        # For Home zone detections, apply spam prevention regardless of device location
+        if is_home_zone:
             if self._should_prevent_spam(device_id):
                 _LOGGER.debug("Filtering out spam detection for %s at %s", device_id, location_name)
                 return True, None  # Filter out to prevent spam
             else:
-                # Allow this detection but don't substitute location
+                # Allow this detection
                 self._update_spam_tracking(device_id)
                 return False, None
-        else:
-            # Device NOT at Home - substitute with Home zone
-            home_zone = self.get_home_zone_name()
-            _LOGGER.info("Device %s detected at Google Home device '%s', substituting with '%s'",
-                        device_id, location_name, home_zone)
-            self._update_spam_tracking(device_id)
-            return False, home_zone
+
+        # For Google Home device detections, substitute with Home zone
+        if is_google_home:
+            # Check if device is already at Home
+            if self.is_device_at_home(device_id):
+                # Device already at Home - apply spam prevention
+                if self._should_prevent_spam(device_id):
+                    _LOGGER.debug("Filtering out spam Google Home detection for %s at %s", device_id, location_name)
+                    return True, None  # Filter out to prevent spam
+                else:
+                    # Allow this detection but don't substitute location
+                    self._update_spam_tracking(device_id)
+                    return False, None
+            else:
+                # Device NOT at Home - substitute with Home zone
+                home_zone = self.get_home_zone_name()
+                _LOGGER.info("Device %s detected at Google Home device '%s', substituting with '%s'",
+                            device_id, location_name, home_zone)
+                self._update_spam_tracking(device_id)
+                return False, home_zone
+
+        return False, None
 
     def _should_prevent_spam(self, device_id: str) -> bool:
         """Check if we should prevent spam for this device."""

@@ -157,9 +157,9 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         "movement_threshold": entry.data.get("movement_threshold", 50)
     }
     
-    # Reset polling state to apply changes immediately  
-    coordinator._last_location_poll_time = 0
-    coordinator._device_location_data = {}
+    # Reset polling state to apply changes immediately
+    coordinator._last_location_poll_time = time.time() - coordinator.location_poll_interval
+    # Don't clear device location data - preserve it to avoid devices going unavailable
     
     _LOGGER.info(f"Updated configuration: {len(coordinator.tracked_devices)} tracked devices, {coordinator.location_poll_interval}s poll interval")
     
@@ -240,13 +240,23 @@ sys.path.append("/config/custom_components/googlefindmy")
                                 loc = location_data[0]
                                 if loc.get('latitude') and loc.get('longitude'):
                                     _LOGGER.info(f"External location found for {device_name}: lat={loc['latitude']}, lon={loc['longitude']}")
-                                    
-                                    # Update the coordinator's location cache
-                                    coordinator._device_location_data[device_id] = loc
-                                    coordinator._device_location_data[device_id]["last_updated"] = time.time()
-                                    
-                                    # Trigger a coordinator update to refresh device tracker entities
-                                    await coordinator.async_request_refresh()
+
+                                    # Check if this is actually new location data (avoid duplicates)
+                                    current_last_seen = loc.get('last_seen')
+                                    existing_data = coordinator._device_location_data.get(device_id, {})
+                                    existing_last_seen = existing_data.get('last_seen')
+
+                                    if current_last_seen != existing_last_seen:
+                                        # Update the coordinator's location cache
+                                        coordinator._device_location_data[device_id] = loc
+                                        coordinator._device_location_data[device_id]["last_updated"] = time.time()
+
+                                        _LOGGER.info(f"Stored NEW external location update for {device_name} (last_seen: {current_last_seen})")
+
+                                        # Trigger a coordinator update to refresh device tracker entities
+                                        await coordinator.async_request_refresh()
+                                    else:
+                                        _LOGGER.debug(f"Skipping duplicate external location update for {device_name} (same last_seen: {current_last_seen})")
                                 else:
                                     _LOGGER.warning(f"External location request for {device_name} returned no coordinates")
                             else:
@@ -265,6 +275,7 @@ sys.path.append("/config/custom_components/googlefindmy")
                     
         except Exception as err:
             _LOGGER.error("Failed to get external location for device %s: %s", device_name, err)
+
 
     # Register services
     hass.services.async_register(
@@ -294,3 +305,4 @@ sys.path.append("/config/custom_components/googlefindmy")
             vol.Optional("device_name"): cv.string,
         }),
     )
+
