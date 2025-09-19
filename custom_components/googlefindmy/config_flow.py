@@ -233,7 +233,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 "min_accuracy_threshold": user_input.get("min_accuracy_threshold", 100),
                 "movement_threshold": user_input.get("movement_threshold", 50),
                 "google_home_filter_enabled": user_input.get("google_home_filter_enabled", DEFAULT_GOOGLE_HOME_FILTER_ENABLED),
-                "google_home_filter_keywords": user_input.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)
+                "google_home_filter_keywords": user_input.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS),
+                "enable_stats_entities": user_input.get("enable_stats_entities", True)
             })
             
             self.hass.config_entries.async_update_entry(
@@ -295,7 +296,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Range(min=10, max=200)
             ),
             vol.Optional("google_home_filter_enabled", default=self.config_entry.data.get("google_home_filter_enabled", DEFAULT_GOOGLE_HOME_FILTER_ENABLED)): bool,
-            vol.Optional("google_home_filter_keywords", default=self.config_entry.data.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)): str
+            vol.Optional("google_home_filter_keywords", default=self.config_entry.data.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)): str,
+            vol.Optional("enable_stats_entities", default=self.config_entry.data.get("enable_stats_entities", True)): bool
         })
 
         return self.async_show_form(
