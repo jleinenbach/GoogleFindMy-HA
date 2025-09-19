@@ -15,13 +15,14 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 import voluptuous as vol
 
-from .const import DOMAIN, CONF_OAUTH_TOKEN, SERVICE_LOCATE_DEVICE, SERVICE_PLAY_SOUND, SERVICE_LOCATE_EXTERNAL
+from .const import DOMAIN, SERVICE_LOCATE_DEVICE, SERVICE_PLAY_SOUND, SERVICE_LOCATE_EXTERNAL
 from .coordinator import GoogleFindMyCoordinator
 from .Auth.token_cache import async_load_cache_from_file
+from .map_view import GoogleFindMyMapView
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.DEVICE_TRACKER, Platform.BUTTON]
+PLATFORMS: list[Platform] = [Platform.DEVICE_TRACKER, Platform.BUTTON, Platform.SENSOR, Platform.BINARY_SENSOR]
 
 
 async def _async_save_secrets_data(secrets_data: dict) -> None:
@@ -62,48 +63,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as e:
         _LOGGER.warning(f"Failed to preload cache: {e}")
     
-    auth_method = entry.data.get("auth_method", "individual_tokens")
+    # Extract configuration - only using secrets.json method
     tracked_devices = entry.data.get("tracked_devices", [])
     location_poll_interval = entry.data.get("location_poll_interval", 300)
     device_poll_delay = entry.data.get("device_poll_delay", 5)
+    min_poll_interval = entry.data.get("min_poll_interval", 120)
     min_accuracy_threshold = entry.data.get("min_accuracy_threshold", 100)
     movement_threshold = entry.data.get("movement_threshold", 50)
-    
-    if auth_method == "secrets_json":
-        secrets_data = entry.data.get("secrets_data")
-        if not secrets_data:
-            _LOGGER.error("Secrets data not found in config entry")
-            raise ConfigEntryNotReady("Secrets data not found")
-        coordinator = GoogleFindMyCoordinator(
-            hass,
-            secrets_data=secrets_data,
-            tracked_devices=tracked_devices,
-            location_poll_interval=location_poll_interval,
-            device_poll_delay=device_poll_delay,
-            config_data=entry.data
-        )
-    else:
-        oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
-        google_email = entry.data.get("google_email")
-        
-        if not oauth_token:
-            _LOGGER.error("OAuth token not found in config entry")
-            raise ConfigEntryNotReady("OAuth token not found")
-        
-        if not google_email:
-            _LOGGER.error("Google email not found in config entry")
-            raise ConfigEntryNotReady("Google email not found")
 
-        coordinator = GoogleFindMyCoordinator(
-            hass,
-            oauth_token=oauth_token,
-            google_email=google_email,
-            tracked_devices=tracked_devices,
-            location_poll_interval=location_poll_interval,
-            device_poll_delay=device_poll_delay,
-            config_data=entry.data
-        )
+    # Get secrets data from config entry
+    secrets_data = entry.data.get("secrets_data")
+    if not secrets_data:
+        _LOGGER.error("Secrets data not found in config entry")
+        raise ConfigEntryNotReady("Secrets data not found")
+
+    # Initialize coordinator
+    coordinator = GoogleFindMyCoordinator(
+        hass,
+        secrets_data=secrets_data,
+        tracked_devices=tracked_devices,
+        location_poll_interval=location_poll_interval,
+        device_poll_delay=device_poll_delay,
+        min_poll_interval=min_poll_interval,
+        min_accuracy_threshold=min_accuracy_threshold
+    )
     
+    # Initialize Google Home filter
+    from .google_home_filter import GoogleHomeFilter
+    coordinator.google_home_filter = GoogleHomeFilter(hass, entry.data)
+    _LOGGER.debug("Initialized Google Home filter")
+
     try:
         await coordinator.async_config_entry_first_refresh()
     except Exception as err:
@@ -111,7 +100,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady from err
 
     # Save complete secrets data to persistent cache asynchronously
-    if auth_method == "secrets_json" and secrets_data:
+    if secrets_data:
         try:
             await _async_save_secrets_data(secrets_data)
             _LOGGER.debug("Saved complete secrets data to persistent cache")
@@ -127,6 +116,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Register map view
+    try:
+        map_view = GoogleFindMyMapView(hass)
+        hass.http.register_view(map_view)
+        _LOGGER.debug("Registered map view")
+    except Exception as e:
+        _LOGGER.warning(f"Failed to register map view: {e}")
 
     # Register services
     await _async_register_services(hass, coordinator)
@@ -195,86 +192,14 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             _LOGGER.error("Failed to play sound on device %s: %s", device_id, err)
 
     async def async_locate_external_service(call: ServiceCall) -> None:
-        """Handle external locate device service call using original GoogleFindMyTools."""
+        """Handle external locate device service call - delegates to normal locate service."""
         device_id = call.data.get("device_id")
         device_name = call.data.get("device_name", device_id)
-        
-        try:
-            import subprocess
-            import json
-            import tempfile
-            import os
-            
-            _LOGGER.info(f"External location request for device: {device_name} ({device_id})")
-            
-            # Create a temporary Python script that uses the existing GoogleFindMyTools
-            script_content = f'''
-import sys
-import os
-sys.path.append("/config/custom_components/googlefindmy")
 
-# Location request test code removed - not needed in production
-'''
-            
-            # Write script to temp file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-                f.write(script_content)
-                script_path = f.name
-            
-            try:
-                # Run the script and capture output
-                result = await hass.async_add_executor_job(
-                    subprocess.run,
-                    ["python3", script_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-                
-                # Parse the output for location data
-                if result.returncode == 0:
-                    for line in result.stdout.split('\\n'):
-                        if line.startswith('LOCATION_RESULT:'):
-                            location_data = json.loads(line[16:])  # Remove 'LOCATION_RESULT: '
-                            if location_data and len(location_data) > 0:
-                                loc = location_data[0]
-                                if loc.get('latitude') and loc.get('longitude'):
-                                    _LOGGER.info(f"External location found for {device_name}: lat={loc['latitude']}, lon={loc['longitude']}")
+        _LOGGER.info(f"External location request for device: {device_name} ({device_id}) - delegating to normal locate")
 
-                                    # Check if this is actually new location data (avoid duplicates)
-                                    current_last_seen = loc.get('last_seen')
-                                    existing_data = coordinator._device_location_data.get(device_id, {})
-                                    existing_last_seen = existing_data.get('last_seen')
-
-                                    if current_last_seen != existing_last_seen:
-                                        # Update the coordinator's location cache
-                                        coordinator._device_location_data[device_id] = loc
-                                        coordinator._device_location_data[device_id]["last_updated"] = time.time()
-
-                                        _LOGGER.info(f"Stored NEW external location update for {device_name} (last_seen: {current_last_seen})")
-
-                                        # Trigger a coordinator update to refresh device tracker entities
-                                        await coordinator.async_request_refresh()
-                                    else:
-                                        _LOGGER.debug(f"Skipping duplicate external location update for {device_name} (same last_seen: {current_last_seen})")
-                                else:
-                                    _LOGGER.warning(f"External location request for {device_name} returned no coordinates")
-                            else:
-                                _LOGGER.warning(f"External location request for {device_name} returned empty data")
-                        elif line.startswith('LOCATION_ERROR:'):
-                            error = line[15:]  # Remove 'LOCATION_ERROR: '
-                            _LOGGER.error(f"External location request failed for {device_name}: {error}")
-                else:
-                    _LOGGER.error(f"External location script failed for {device_name}: {result.stderr}")
-            finally:
-                # Clean up temp file
-                try:
-                    os.unlink(script_path)
-                except:
-                    pass
-                    
-        except Exception as err:
-            _LOGGER.error("Failed to get external location for device %s: %s", device_name, err)
+        # Delegate to the normal locate device service
+        await async_locate_device_service(call)
 
 
     # Register services
