@@ -324,10 +324,21 @@ class FcmReceiverHA:
 
                     _LOGGER.info(f"Stored NEW background location update for {device_name} (last_seen: {current_last_seen})")
 
+                    # Increment background update counter
+                    coordinator.increment_stat("background_updates")
+
+                    # Check if it's a crowd-sourced update (not own report)
+                    is_own_report = location_data.get('is_own_report')
+                    _LOGGER.info(f"FCM location saved for {device_name}: is_own_report={is_own_report}")
+                    if is_own_report is False:
+                        coordinator.increment_stat("crowd_sourced_updates")
+                        _LOGGER.info(f"Crowd-sourced update detected for {device_name} via FCM")
+
                     # Trigger coordinator update to refresh entities
                     await coordinator.async_request_refresh()
                 else:
                     _LOGGER.debug(f"Skipping duplicate background location update for {device_name} (same last_seen: {current_last_seen})")
+                    coordinator.increment_stat("skipped_duplicates")
             else:
                 _LOGGER.debug(f"No location data in background update for device {canonic_id}")
                 

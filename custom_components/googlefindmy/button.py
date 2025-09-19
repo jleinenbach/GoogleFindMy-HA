@@ -51,21 +51,44 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     @property
     def device_info(self) -> dict[str, Any]:
         """Return device info."""
+        # Get Home Assistant base URL using proper HA methods
+        from homeassistant.helpers.network import get_url
+
+        try:
+            # Try to get the best available URL, preferring external access
+            base_url = get_url(self.hass, prefer_external=True, allow_cloud=True, allow_external=True, allow_internal=True)
+        except Exception:
+            base_url = "http://homeassistant.local:8123"
+
+        # Generate auth token for map access
+        auth_token = self._get_map_token()
+
         return {
             "identifiers": {(DOMAIN, self._device["id"])},
             "name": self._device["name"],
             "manufacturer": "Google",
             "model": "Find My Device",
-            "configuration_url": f"https://myaccount.google.com/device-activity?device_id={self._device['id']}",
+            "configuration_url": f"{base_url}/api/googlefindmy/map/{self._device['id']}?token={auth_token}",
             "hw_version": self._device["id"],
         }
+
+    def _get_map_token(self) -> str:
+        """Generate a simple token for map authentication."""
+        import hashlib
+        import time
+        # Use HA's UUID and current day to create a simple token
+        day = str(int(time.time() // 86400))  # Current day since epoch
+        ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
+        return hashlib.md5(f"{ha_uuid}:{day}".encode()).hexdigest()[:16]
 
     async def async_press(self) -> None:
         """Handle the button press."""
         device_id = self._device["id"]
         device_name = self._device["name"]
-        
-        _LOGGER.info(f"Play sound button pressed for {device_name} ({device_id})")
+
+        import traceback
+        _LOGGER.warning(f"PLAY SOUND BUTTON PRESSED for {device_name} ({device_id}) - Call stack:")
+        _LOGGER.warning("".join(traceback.format_stack()))
         
         try:
             result = await self.coordinator.async_play_sound(device_id)

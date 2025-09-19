@@ -121,9 +121,9 @@ class GoogleFindMyAPI:
             _LOGGER.info(f"API v3.0: Requesting location for device {device_name} ({device_id})")
             
             # Use the original location request approach
-            _LOGGER.info(f"DEBUG: About to call get_location_data_for_device for {device_name}")
+            _LOGGER.debug(f"About to call get_location_data_for_device for {device_name}")
             location_data = get_location_data_for_device(device_id, device_name)
-            _LOGGER.info(f"DEBUG: get_location_data_for_device returned: {location_data}")
+            _LOGGER.debug(f"get_location_data_for_device returned: {location_data}")
             
             if location_data and len(location_data) > 0:
                 _LOGGER.info(f"API v3.0: Got {len(location_data)} location records for {device_name}")
