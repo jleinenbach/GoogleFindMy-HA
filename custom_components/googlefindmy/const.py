@@ -12,6 +12,7 @@ UPDATE_INTERVAL = 60  # seconds
 SERVICE_LOCATE_DEVICE = "locate_device"
 SERVICE_PLAY_SOUND = "play_sound"
 SERVICE_LOCATE_EXTERNAL = "locate_device_external"
+SERVICE_REFRESH_URLS = "refresh_device_urls"
 
 # Google Home Filter defaults
 DEFAULT_GOOGLE_HOME_FILTER_ENABLED = True

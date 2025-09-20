@@ -15,10 +15,10 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 import voluptuous as vol
 
-from .const import DOMAIN, SERVICE_LOCATE_DEVICE, SERVICE_PLAY_SOUND, SERVICE_LOCATE_EXTERNAL
+from .const import DOMAIN, SERVICE_LOCATE_DEVICE, SERVICE_PLAY_SOUND, SERVICE_LOCATE_EXTERNAL, SERVICE_REFRESH_URLS
 from .coordinator import GoogleFindMyCoordinator
 from .Auth.token_cache import async_load_cache_from_file
-from .map_view import GoogleFindMyMapView
+from .map_view import GoogleFindMyMapView, GoogleFindMyMapRedirectView
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -117,13 +117,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Register map view
+    # Register map views
     try:
         map_view = GoogleFindMyMapView(hass)
         hass.http.register_view(map_view)
         _LOGGER.debug("Registered map view")
+
+        redirect_view = GoogleFindMyMapRedirectView(hass)
+        hass.http.register_view(redirect_view)
+        _LOGGER.debug("Registered map redirect view")
     except Exception as e:
-        _LOGGER.warning(f"Failed to register map view: {e}")
+        _LOGGER.warning(f"Failed to register map views: {e}")
 
     # Register services
     await _async_register_services(hass, coordinator)
@@ -201,6 +205,84 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         # Delegate to the normal locate device service
         await async_locate_device_service(call)
 
+    async def async_refresh_device_urls_service(call: ServiceCall) -> None:
+        """Handle refresh device URLs service call."""
+        try:
+            from homeassistant.helpers import device_registry
+            from homeassistant.helpers.network import get_url
+            import socket
+
+            # Get device registry
+            dev_reg = device_registry.async_get(hass)
+
+            # Get local IP for URL generation
+            base_url = None
+            try:
+                # Use socket connection method to get the actual local network IP
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+
+                # Get HA port and SSL settings from config
+                port = 8123
+                use_ssl = False
+
+                # Try to get actual port from HA configuration
+                if hasattr(hass, 'http') and hasattr(hass.http, 'server_port'):
+                    port = hass.http.server_port or 8123
+                    use_ssl = hasattr(hass.http, 'ssl_context') and hass.http.ssl_context is not None
+
+                protocol = "https" if use_ssl else "http"
+                base_url = f"{protocol}://{local_ip}:{port}"
+                _LOGGER.info(f"Detected local URL for device refresh: {base_url}")
+
+            except Exception as local_err:
+                _LOGGER.debug(f"Local IP detection failed: {local_err}, trying HA network detection")
+                # Fallback to HA's network detection - force internal only
+                base_url = get_url(hass, prefer_external=False, allow_cloud=False, allow_external=False, allow_internal=True)
+                _LOGGER.info(f"Using HA internal URL for device refresh: {base_url}")
+
+            if not base_url:
+                _LOGGER.error("Could not determine base URL for device refresh")
+                return
+
+            # Generate auth token for map access
+            import hashlib
+            import time
+            day = str(int(time.time() // 86400))
+            ha_uuid = str(hass.data.get("core.uuid", "ha"))
+            auth_token = hashlib.md5(f"{ha_uuid}:{day}".encode()).hexdigest()[:16]
+
+            # Update all Google Find My devices
+            updated_count = 0
+            for device in dev_reg.devices.values():
+                # Check if this is a Google Find My device
+                if any(identifier[0] == DOMAIN for identifier in device.identifiers):
+                    # Extract device ID from identifiers
+                    device_id = None
+                    for identifier in device.identifiers:
+                        if identifier[0] == DOMAIN:
+                            device_id = identifier[1]
+                            break
+
+                    if device_id:
+                        # Generate new configuration URL using redirect endpoint
+                        new_config_url = f"{base_url}/api/googlefindmy/redirect_map/{device_id}?token={auth_token}"
+
+                        # Update device info
+                        dev_reg.async_update_device(
+                            device_id=device.id,
+                            configuration_url=new_config_url
+                        )
+                        updated_count += 1
+                        _LOGGER.info(f"Updated URL for device {device.name_by_user or device.name}: {new_config_url}")
+
+            _LOGGER.info(f"Refreshed URLs for {updated_count} Google Find My devices")
+
+        except Exception as err:
+            _LOGGER.error("Failed to refresh device URLs: %s", err)
+
 
     # Register services
     hass.services.async_register(
@@ -229,5 +311,12 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             vol.Required("device_id"): cv.string,
             vol.Optional("device_name"): cv.string,
         }),
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REFRESH_URLS,
+        async_refresh_device_urls_service,
+        schema=vol.Schema({}),
     )
 

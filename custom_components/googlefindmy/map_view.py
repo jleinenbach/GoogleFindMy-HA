@@ -100,6 +100,7 @@ class GoogleFindMyMapView(HomeAssistantView):
             # Parse custom start/end times if provided
             start_param = request.query.get('start')
             end_param = request.query.get('end')
+            accuracy_param = request.query.get('accuracy', '0')
 
             if start_param:
                 try:
@@ -116,6 +117,12 @@ class GoogleFindMyMapView(HomeAssistantView):
                         end_time = end_time.replace(tzinfo=dt_util.UTC)
                 except ValueError:
                     pass  # Use default if invalid
+
+            # Parse accuracy filter
+            try:
+                accuracy_filter = max(0, min(300, int(accuracy_param)))
+            except (ValueError, TypeError):
+                accuracy_filter = 0
 
             # Query state history
             from homeassistant.components.recorder.history import get_significant_states
@@ -148,11 +155,13 @@ class GoogleFindMyMapView(HomeAssistantView):
                             "timestamp": state.last_updated.isoformat(),
                             "last_seen": current_last_seen,
                             "entity_id": entity_id,
-                            "state": state.state
+                            "state": state.state,
+                            "is_own_report": state.attributes.get("is_own_report"),
+                            "semantic_location": state.attributes.get("semantic_location")
                         })
 
             # Generate HTML map
-            html_content = self._generate_map_html(device_name, locations, device_id, start_time, end_time)
+            html_content = self._generate_map_html(device_name, locations, device_id, start_time, end_time, accuracy_filter)
 
             return web.Response(
                 text=html_content,
@@ -167,11 +176,13 @@ class GoogleFindMyMapView(HomeAssistantView):
                 status=500
             )
 
-    def _generate_map_html(self, device_name: str, locations: list[dict[str, Any]], device_id: str, start_time: datetime, end_time: datetime) -> str:
+    def _generate_map_html(self, device_name: str, locations: list[dict[str, Any]], device_id: str, start_time: datetime, end_time: datetime, accuracy_filter: int = 0) -> str:
         """Generate HTML content for the map."""
-        # Format times for display
-        start_local = start_time.strftime('%Y-%m-%dT%H:%M')
-        end_local = end_time.strftime('%Y-%m-%dT%H:%M')
+        # Format times for display - convert to Home Assistant's local timezone
+        start_local_tz = dt_util.as_local(start_time)
+        end_local_tz = dt_util.as_local(end_time)
+        start_local = start_local_tz.strftime('%Y-%m-%dT%H:%M')
+        end_local = end_local_tz.strftime('%Y-%m-%dT%H:%M')
 
         if not locations:
             return f"""
@@ -273,27 +284,49 @@ class GoogleFindMyMapView(HomeAssistantView):
             # Convert to Home Assistant's configured timezone
             timestamp_local = dt_util.as_local(timestamp_utc)
 
+            # Determine report source
+            is_own_report = loc.get('is_own_report')
+            if is_own_report is True:
+                report_source = "📱 Own Device"
+                report_color = "#28a745"  # Green
+            elif is_own_report is False:
+                report_source = "🌐 Network/Crowd-sourced"
+                report_color = "#007cba"  # Blue
+            else:
+                report_source = "❓ Unknown"
+                report_color = "#6c757d"  # Gray
+
+            # Add semantic location if available
+            semantic_info = ""
+            semantic_location = loc.get('semantic_location')
+            if semantic_location:
+                semantic_info = f"<b>Location Name:</b> {semantic_location}<br>"
+
             popup_text = f"""
             <b>Location {i+1}</b><br>
             <b>Coordinates:</b> {loc['lat']:.6f}, {loc['lon']:.6f}<br>
             <b>GPS Accuracy:</b> {accuracy:.1f} meters<br>
             <b>Timestamp:</b> {timestamp_local.strftime('%Y-%m-%d %H:%M:%S %Z')}<br>
-            <b>Entity ID:</b> {loc.get('entity_id', 'Unknown')}<br>
+            <b style="color: {report_color}">Report Source:</b> <span style="color: {report_color}">{report_source}</span><br>
+            {semantic_info}<b>Entity ID:</b> {loc.get('entity_id', 'Unknown')}<br>
             <b>Entity State:</b> {loc.get('state', 'Unknown')}<br>
             """
 
             markers_js.append(f"""
-                L.marker([{loc['lat']}, {loc['lon']}])
-                    .addTo(map)
-                    .bindPopup(`{popup_text}`)
-                    .bindTooltip('Accuracy: {accuracy:.1f}m');
+                var marker_{i} = L.marker([{loc['lat']}, {loc['lon']}]);
+                marker_{i}.accuracy = {accuracy};
+                marker_{i}.bindPopup(`{popup_text}`);
+                marker_{i}.bindTooltip('Accuracy: {accuracy:.1f}m');
+                marker_{i}.addTo(map);
 
-                L.circle([{loc['lat']}, {loc['lon']}], {{
+                var circle_{i} = L.circle([{loc['lat']}, {loc['lon']}], {{
                     radius: {accuracy},
                     color: '{color}',
                     fillColor: '{color}',
                     fillOpacity: 0.1
-                }}).addTo(map);
+                }});
+                circle_{i}.accuracy = {accuracy};
+                circle_{i}.addTo(map);
             """)
 
         markers_code = "\n".join(markers_js)
@@ -309,46 +342,112 @@ class GoogleFindMyMapView(HomeAssistantView):
             <style>
                 body {{ margin: 0; padding: 0; font-family: Arial, sans-serif; }}
                 #map {{ height: 100vh; width: 100%; }}
-                .header {{ position: absolute; top: 10px; left: 10px; z-index: 1000;
-                          background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-                          max-width: 350px; }}
-                .time-control {{ margin: 8px 0; }}
-                .time-control label {{ display: inline-block; width: 60px; font-size: 12px; font-weight: bold; }}
-                .time-control input {{ padding: 4px; border: 1px solid #ccc; border-radius: 3px; width: 140px; font-size: 11px; }}
-                .header button {{ padding: 6px 12px; background: #007cba; color: white; border: none; border-radius: 4px; cursor: pointer; margin: 2px; font-size: 11px; }}
-                .header button:hover {{ background: #005a8b; }}
-                .quick-buttons {{ margin: 8px 0; }}
-                .quick-buttons button {{ background: #6c757d; padding: 4px 8px; }}
-                .quick-buttons button:hover {{ background: #5a6268; }}
-                .toggle-controls {{ background: #28a745; margin-bottom: 10px; }}
-                .controls-panel {{ display: none; }}
-                .controls-panel.show {{ display: block; }}
-                h2 {{ margin: 0 0 10px 0; font-size: 16px; }}
-                p {{ margin: 5px 0; font-size: 12px; color: #666; }}
+
+                /* Filter panel - positioned to not conflict with zoom buttons */
+                .filter-panel {{
+                    position: absolute; top: 10px; right: 10px; z-index: 1000;
+                    background: white; padding: 15px; border-radius: 8px;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+                    max-width: 380px; font-size: 13px;
+                }}
+
+                /* Collapsed state - just show toggle button */
+                .filter-panel.collapsed {{
+                    padding: 8px 12px;
+                    max-width: 120px;
+                }}
+                .filter-panel.collapsed .filter-content {{ display: none; }}
+
+                /* Filter content */
+                .filter-content {{ margin-top: 10px; }}
+                .filter-section {{ margin: 12px 0; padding: 8px 0; border-bottom: 1px solid #eee; }}
+                .filter-section:last-child {{ border-bottom: none; }}
+
+                /* Controls styling */
+                .filter-control {{ margin: 8px 0; display: flex; align-items: center; }}
+                .filter-control label {{
+                    display: inline-block; width: 70px; font-size: 12px;
+                    font-weight: bold; margin-right: 8px;
+                }}
+                .filter-control input {{
+                    padding: 4px; border: 1px solid #ccc; border-radius: 3px;
+                    width: 150px; font-size: 11px;
+                }}
+
+                /* Accuracy slider */
+                .accuracy-control {{ margin: 10px 0; }}
+                .accuracy-control label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+                .slider-container {{ display: flex; align-items: center; gap: 8px; }}
+                .accuracy-slider {{
+                    flex: 1; height: 6px; background: #ddd; border-radius: 3px;
+                    outline: none; cursor: pointer;
+                }}
+                .accuracy-value {{
+                    min-width: 60px; font-size: 11px; font-weight: bold;
+                    color: #007cba;
+                }}
+
+                /* Buttons */
+                .filter-panel button {{
+                    padding: 6px 12px; background: #007cba; color: white;
+                    border: none; border-radius: 4px; cursor: pointer;
+                    margin: 2px; font-size: 11px;
+                }}
+                .filter-panel button:hover {{ background: #005a8b; }}
+                .toggle-btn {{ background: #28a745 !important; }}
+                .toggle-btn:hover {{ background: #218838 !important; }}
+
+
+                .update-btn {{ background: #dc3545 !important; width: 100%; margin-top: 8px; }}
+                .update-btn:hover {{ background: #c82333 !important; }}
+
+                h2 {{ margin: 0 0 8px 0; font-size: 16px; }}
+                .info {{ margin: 5px 0; font-size: 12px; color: #666; }}
+                .current-time {{
+                    margin: 8px 0; font-size: 11px; color: #007cba;
+                    font-weight: bold; padding: 4px 8px;
+                    background: #f8f9fa; border-radius: 4px;
+                    border-left: 3px solid #007cba;
+                }}
+
+                /* Ensure zoom controls don't conflict */
+                .leaflet-control-zoom {{ z-index: 1500 !important; }}
             </style>
         </head>
         <body>
-            <div class="header">
-                <h2>{device_name}</h2>
-                <p>{len(locations)} locations</p>
-                <button class="toggle-controls" onclick="toggleControls()">Time Filter</button>
-                <div class="controls-panel" id="controlsPanel">
-                    <div class="time-control">
-                        <label for="startTime">Start:</label>
-                        <input type="datetime-local" id="startTime" value="{start_local}">
+            <div class="filter-panel collapsed" id="filterPanel">
+                <button class="toggle-btn" onclick="toggleFilters()">📅 Filters</button>
+
+                <div class="filter-content" id="filterContent">
+                    <h2>{device_name}</h2>
+                    <div class="info">{len(locations)} locations shown</div>
+                    <div class="current-time" id="currentTime">🕐 Loading current time...</div>
+
+                    <!-- Time Range Section -->
+                    <div class="filter-section">
+                        <div class="filter-control">
+                            <label for="startTime">Start:</label>
+                            <input type="datetime-local" id="startTime" value="{start_local}">
+                        </div>
+                        <div class="filter-control">
+                            <label for="endTime">End:</label>
+                            <input type="datetime-local" id="endTime" value="{end_local}">
+                        </div>
                     </div>
-                    <div class="time-control">
-                        <label for="endTime">End:</label>
-                        <input type="datetime-local" id="endTime" value="{end_local}">
+
+                    <!-- Accuracy Filter Section -->
+                    <div class="filter-section">
+                        <div class="accuracy-control">
+                            <label for="accuracySlider">Accuracy Filter:</label>
+                            <div class="slider-container">
+                                <input type="range" id="accuracySlider" class="accuracy-slider"
+                                       min="0" max="300" value="{accuracy_filter}" oninput="updateAccuracyFilter()">
+                                <span class="accuracy-value" id="accuracyValue">Disabled</span>
+                            </div>
+                        </div>
                     </div>
-                    <div class="quick-buttons">
-                        <button onclick="setQuickRange(1)">1D</button>
-                        <button onclick="setQuickRange(3)">3D</button>
-                        <button onclick="setQuickRange(7)">7D</button>
-                        <button onclick="setQuickRange(14)">14D</button>
-                        <button onclick="setQuickRange(30)">30D</button>
-                    </div>
-                    <button onclick="updateMap()">Update Map</button>
+
+                    <button class="update-btn" onclick="updateMap()">🔄 Update Map</button>
                 </div>
             </div>
             <div id="map"></div>
@@ -361,23 +460,105 @@ class GoogleFindMyMapView(HomeAssistantView):
                     attribution: '© OpenStreetMap contributors'
                 }}).addTo(map);
 
+                // Store all markers and circles globally for filtering
+                var allMarkers = [];
+                var allCircles = [];
+
                 {markers_code}
+
+                // Collect all markers and circles
+                map.eachLayer(function(layer) {{
+                    if (layer instanceof L.Marker && layer.accuracy !== undefined) {{
+                        allMarkers.push(layer);
+                    }} else if (layer instanceof L.Circle && layer.accuracy !== undefined) {{
+                        allCircles.push(layer);
+                    }}
+                }});
 
                 // Fit map to show all markers
                 var group = new L.featureGroup();
-                map.eachLayer(function(layer) {{
-                    if (layer instanceof L.Marker) {{
-                        group.addLayer(layer);
+                allMarkers.forEach(function(marker) {{
+                    if (map.hasLayer(marker)) {{
+                        group.addLayer(marker);
                     }}
                 }});
                 if (group.getLayers().length > 0) {{
                     map.fitBounds(group.getBounds().pad(0.1));
                 }}
 
-                // Time filter functions
-                function toggleControls() {{
-                    const panel = document.getElementById('controlsPanel');
-                    panel.classList.toggle('show');
+                // Filter panel functions
+                function toggleFilters() {{
+                    const panel = document.getElementById('filterPanel');
+                    panel.classList.toggle('collapsed');
+                }}
+
+                function updateAccuracyFilter() {{
+                    const slider = document.getElementById('accuracySlider');
+                    const valueSpan = document.getElementById('accuracyValue');
+                    const value = parseInt(slider.value);
+
+                    if (value === 0) {{
+                        valueSpan.textContent = 'Disabled';
+                        valueSpan.style.color = '#6c757d';
+                    }} else {{
+                        valueSpan.textContent = value + 'm';
+                        valueSpan.style.color = '#007cba';
+                    }}
+
+                    // Apply real-time accuracy filtering to existing markers
+                    filterMarkersByAccuracy(value);
+                }}
+
+                function filterMarkersByAccuracy(maxAccuracy) {{
+                    console.log('Filtering by accuracy:', maxAccuracy);
+
+                    // Collect all markers and circles on first run
+                    if (allMarkers.length === 0 || allCircles.length === 0) {{
+                        map.eachLayer(function(layer) {{
+                            if (layer instanceof L.Marker && layer.accuracy !== undefined) {{
+                                allMarkers.push(layer);
+                            }} else if (layer instanceof L.Circle && layer.accuracy !== undefined) {{
+                                allCircles.push(layer);
+                            }}
+                        }});
+                        console.log('Found', allMarkers.length, 'markers and', allCircles.length, 'circles');
+                    }}
+
+                    // Show/hide markers based on accuracy
+                    allMarkers.forEach(function(marker) {{
+                        if (maxAccuracy === 0 || marker.accuracy <= maxAccuracy) {{
+                            if (!map.hasLayer(marker)) {{
+                                marker.addTo(map);
+                            }}
+                        }} else {{
+                            if (map.hasLayer(marker)) {{
+                                map.removeLayer(marker);
+                            }}
+                        }}
+                    }});
+
+                    // Show/hide circles based on accuracy
+                    allCircles.forEach(function(circle) {{
+                        if (maxAccuracy === 0 || circle.accuracy <= maxAccuracy) {{
+                            if (!map.hasLayer(circle)) {{
+                                circle.addTo(map);
+                            }}
+                        }} else {{
+                            if (map.hasLayer(circle)) {{
+                                map.removeLayer(circle);
+                            }}
+                        }}
+                    }});
+
+                    // Update location count
+                    var visibleCount = allMarkers.filter(function(m) {{
+                        return map.hasLayer(m);
+                    }}).length;
+
+                    var infoElement = document.querySelector('.info');
+                    if (infoElement) {{
+                        infoElement.textContent = visibleCount + ' locations shown';
+                    }}
                 }}
 
                 function setQuickRange(days) {{
@@ -395,6 +576,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                 function updateMap() {{
                     const startTime = document.getElementById('startTime').value;
                     const endTime = document.getElementById('endTime').value;
+                    const accuracyFilter = document.getElementById('accuracySlider').value;
 
                     if (!startTime || !endTime) {{
                         alert('Please select both start and end times');
@@ -404,8 +586,42 @@ class GoogleFindMyMapView(HomeAssistantView):
                     const url = new URL(window.location.href);
                     url.searchParams.set('start', startTime + ':00Z');
                     url.searchParams.set('end', endTime + ':00Z');
+                    if (accuracyFilter > 0) {{
+                        url.searchParams.set('accuracy', accuracyFilter);
+                    }} else {{
+                        url.searchParams.delete('accuracy');
+                    }}
                     window.location.href = url.toString();
                 }}
+
+                // Update current time display
+                function updateCurrentTime() {{
+                    const now = new Date();
+                    const options = {{
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        timeZoneName: 'short'
+                    }};
+                    const timeString = now.toLocaleString('en-US', options);
+                    document.getElementById('currentTime').textContent = '🕐 ' + timeString;
+                }}
+
+                // Initialize on page load
+                document.addEventListener('DOMContentLoaded', function() {{
+                    updateAccuracyFilter(); // Set initial display value
+                    const initialFilter = {accuracy_filter};
+                    if (initialFilter > 0) {{
+                        filterMarkersByAccuracy(initialFilter); // Apply initial filter
+                    }}
+
+                    // Start current time updates
+                    updateCurrentTime();
+                    setInterval(updateCurrentTime, 1000); // Update every second
+                }});
             </script>
         </body>
         </html>
@@ -419,3 +635,92 @@ class GoogleFindMyMapView(HomeAssistantView):
         day = str(int(time.time() // 86400))  # Current day since epoch
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
         return hashlib.md5(f"{ha_uuid}:{day}".encode()).hexdigest()[:16]
+
+
+class GoogleFindMyMapRedirectView(HomeAssistantView):
+    """View to redirect to appropriate map URL based on request origin."""
+
+    url = "/api/googlefindmy/redirect_map/{device_id}"
+    name = "api:googlefindmy:redirect_map"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Initialize the redirect view."""
+        self.hass = hass
+
+    async def get(self, request: web.Request, device_id: str) -> web.Response:
+        """Redirect to the appropriate map URL based on request origin."""
+        import socket
+        from homeassistant.helpers.network import get_url
+
+        # Get the auth token
+        auth_token = request.query.get('token')
+        if not auth_token:
+            return web.Response(text="Missing authentication token", status=400)
+
+        # Detect the appropriate base URL based on request headers and origin
+        host_header = request.headers.get('Host', '')
+        x_forwarded_host = request.headers.get('X-Forwarded-Host', '')
+        origin = request.headers.get('Origin', '')
+
+        _LOGGER.debug(f"Request headers - Host: {host_header}, X-Forwarded-Host: {x_forwarded_host}, Origin: {origin}")
+
+        # Determine if this is a cloud request or local request
+        is_cloud_request = False
+        base_url = None
+
+        # Check for Nabu Casa cloud indicators
+        if any(cloud_indicator in host_header.lower() for cloud_indicator in ['nabu', 'ui.nabu.casa']):
+            is_cloud_request = True
+        elif x_forwarded_host and any(cloud_indicator in x_forwarded_host.lower() for cloud_indicator in ['nabu', 'ui.nabu.casa']):
+            is_cloud_request = True
+        elif origin and any(cloud_indicator in origin.lower() for cloud_indicator in ['nabu', 'ui.nabu.casa']):
+            is_cloud_request = True
+
+        if is_cloud_request:
+            # Use HA's cloud/external URL detection
+            try:
+                base_url = get_url(self.hass, prefer_external=True, allow_cloud=True)
+                _LOGGER.info(f"Detected cloud request, using external URL: {base_url}")
+            except Exception as e:
+                _LOGGER.warning(f"Cloud URL detection failed: {e}")
+
+        if not base_url:
+            # Use local IP detection for local requests
+            try:
+                # Use socket connection method to get the actual local network IP
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+
+                # Get HA port and SSL settings from config
+                port = 8123
+                use_ssl = False
+
+                # Try to get actual port from HA configuration
+                if hasattr(self.hass, 'http') and hasattr(self.hass.http, 'server_port'):
+                    port = self.hass.http.server_port or 8123
+                    use_ssl = hasattr(self.hass.http, 'ssl_context') and self.hass.http.ssl_context is not None
+
+                protocol = "https" if use_ssl else "http"
+                base_url = f"{protocol}://{local_ip}:{port}"
+                _LOGGER.info(f"Detected local request, using local IP URL: {base_url}")
+
+            except Exception as e:
+                _LOGGER.warning(f"Local IP detection failed: {e}, falling back to HA network detection")
+                # Fallback to HA's network detection
+                try:
+                    base_url = get_url(self.hass, prefer_external=False, allow_cloud=False, allow_external=False, allow_internal=True)
+                    _LOGGER.info(f"Using HA internal URL fallback: {base_url}")
+                except Exception as fallback_e:
+                    _LOGGER.error(f"All URL detection methods failed: {fallback_e}")
+                    base_url = "http://homeassistant.local:8123"
+
+        # Build the redirect URL
+        redirect_url = f"{base_url}/api/googlefindmy/map/{device_id}?token={auth_token}"
+
+        _LOGGER.info(f"Redirecting to: {redirect_url}")
+
+        # Return a 302 redirect response
+        return web.Response(status=302, headers={'Location': redirect_url})

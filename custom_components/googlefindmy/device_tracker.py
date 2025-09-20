@@ -58,40 +58,60 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
     @property
     def device_info(self) -> dict[str, Any]:
         """Return device info."""
-        # Get Home Assistant base URL using proper HA methods
-        from homeassistant.helpers.network import get_url
-
-        try:
-            # Try to get the best available URL, preferring external access
-            # This follows HA's built-in URL priority: cloud -> external -> internal
-            base_url = get_url(self.hass, prefer_external=True, allow_cloud=True, allow_external=True, allow_internal=True)
-            _LOGGER.info(f"Using URL for device {self._device['name']}: {base_url}")
-
-        except Exception as e:
-            _LOGGER.warning(f"Error getting URL for device {self._device['name']}: {e}")
-            base_url = "http://homeassistant.local:8123"
-            _LOGGER.warning(f"Using default URL for device {self._device['name']}: {base_url}")
-
         # Generate auth token for map access
         auth_token = self._get_map_token()
+
+        # Get a base URL for the redirect endpoint - use local IP detection
+        # The redirect endpoint will handle proper routing based on request origin
+        try:
+            import socket
+            from homeassistant.helpers.network import get_url
+
+            # Use socket connection method to get the actual local network IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+
+            # Get HA port and SSL settings from config
+            port = 8123
+            use_ssl = False
+
+            # Try to get actual port from HA configuration
+            if hasattr(self.hass, 'http') and hasattr(self.hass.http, 'server_port'):
+                port = self.hass.http.server_port or 8123
+                use_ssl = hasattr(self.hass.http, 'ssl_context') and self.hass.http.ssl_context is not None
+
+            protocol = "https" if use_ssl else "http"
+            base_url = f"{protocol}://{local_ip}:{port}"
+
+        except Exception as e:
+            _LOGGER.debug(f"Local IP detection failed: {e}, using fallback URL")
+            # Fallback to HA's network detection
+            try:
+                base_url = get_url(self.hass, prefer_external=False, allow_cloud=False, allow_external=False, allow_internal=True)
+            except Exception as fallback_e:
+                _LOGGER.warning(f"All URL detection methods failed: {fallback_e}")
+                base_url = "http://homeassistant.local:8123"
+
+        # Use the redirect endpoint that will automatically detect the request origin
+        # and redirect to the appropriate URL (local IP or cloud URL)
+        redirect_url = f"{base_url}/api/googlefindmy/redirect_map/{self._device['id']}?token={auth_token}"
 
         return {
             "identifiers": {(DOMAIN, self._device["id"])},
             "name": self._device["name"],
             "manufacturer": "Google",
             "model": "Find My Device",
-            "configuration_url": f"{base_url}/api/googlefindmy/map/{self._device['id']}?token={auth_token}",
+            "configuration_url": redirect_url,
             "hw_version": self._device["id"],  # Show device ID as hardware version for easy copying
         }
 
     @property
     def _current_device_data(self) -> dict[str, Any] | None:
-        """Get current device data from coordinator."""
-        if self.coordinator.data:
-            for device in self.coordinator.data:
-                if device["id"] == self._device["id"]:
-                    return device
-        return None
+        """Get current device data from coordinator's location cache."""
+        # Use cached location data which persists even when polling fails
+        return self.coordinator._device_location_data.get(self._device["id"])
 
 
     @property
