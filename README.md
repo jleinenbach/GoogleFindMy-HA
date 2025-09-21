@@ -11,7 +11,7 @@ A comprehensive Home Assistant custom integration for Google's Find My Device ne
 - **Sound Button Entity**: Devices include a button entity that plays a sound on devices that support playing sound
 - **Attribute grading system**: Location data is selected automatically based on 3 major attributes: 1) Accuracy 2) Recency 3) Comes from your device or the network.
 
-[![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge)](https://github.com/BSkando/GoogleFindMy-HA) [![Buy me a coffee](https://img.shields.io/badge/Donate-Buy%20me%20a%20coffee-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando)
+[![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Buy me a coffee](https://img.shields.io/badge/Donate-Buy%20me%20a%20coffee-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando)
 
 ## Installation
 
