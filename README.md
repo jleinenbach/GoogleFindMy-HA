@@ -31,8 +31,11 @@ A comprehensive Home Assistant custom integration for Google's Find My Device ne
 
 ### Authentication Setup
 1. Run [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools) on a machine with Chrome
+
    **NOTE:** Recently, some have had issues with the script from the repository above.  If you follow all the steps in Leon's repository and are unable to get through the main.py sequence due to errors, please try using my modification of the script [BACKUP:GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools)
+
   **MUST PERFORM CRITICAL STEPS BELOW!!!**
+
 3. Complete the authentication process to generate `Auth/secrets.json`
 4. Copy the entire contents of the secrets.json file.  Specifically, open the file in a text editor, select all, and copy.
 5. In Home Assistant, paste the copied text from secrets.json when prompted.
