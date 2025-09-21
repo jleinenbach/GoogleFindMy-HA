@@ -1,6 +1,5 @@
-[<!-- Place this tag where you want the button to render. -->
-<a class="github-button" href="https://github.com/BSkando/GoogleFindMy-HA" data-color-scheme="no-preference: light; light: light; dark: dark;" data-icon="octicon-star" data-size="large" data-show-count="true" aria-label="Star BSkando/GoogleFindMy-HA on GitHub">Star</a>](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&link=https%3A%2F%2Fgithub.com%2FBSkando%2FGoogleFindMy-HA
-)
+![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&link=https%3A%2F%2Fgithub.com%2FBSkando%2FGoogleFindMy-HA)
+
 # Google Find My Device - Home Assistant Integration
 
 A comprehensive Home Assistant custom integration for Google's Find My Device network, enabling real-time tracking and control of Find My devices directly within Home Assistant.
