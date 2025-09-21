@@ -1,4 +1,4 @@
-![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&link=https%3A%2F%2Fgithub.com%2FBSkando%2FGoogleFindMy-HA) [![Buy me a coffee](https://img.shields.io/badge/Donate-Buy%20me%20a%20coffee-yellow?logo=buy-me-a-coffee?style=for-the-badge)](https://www.buymeacoffee.com/bskando)
+![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&link=https%3A%2F%2Fgithub.com%2FBSkando%2FGoogleFindMy-HA) [![Buy me a coffee](https://img.shields.io/badge/Donate-Buy%20me%20a%20coffee-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando)
 
 # Google Find My Device - Home Assistant Integration
 
