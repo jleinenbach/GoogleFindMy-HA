@@ -3,44 +3,75 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
 import time
+from datetime import timedelta
+from math import isfinite
+from typing import Any, Dict, List, Optional
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN, UPDATE_INTERVAL
 from .api import GoogleFindMyAPI
+from .const import DOMAIN, UPDATE_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class GoogleFindMyCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Google Find My Device data."""
+def _valid_coords(lat: Any, lon: Any) -> bool:
+    """Strict validation for coordinates."""
+    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+        return False
+    if not (isfinite(lat) and isfinite(lon)):
+        return False
+    return -90.0 <= float(lat) <= 90.0 and -180.0 <= float(lon) <= 180.0
 
-    def __init__(self, hass: HomeAssistant, secrets_data: dict, tracked_devices: list = None, location_poll_interval: int = 300, device_poll_delay: int = 5, min_poll_interval: int = 120, min_accuracy_threshold: int = 100) -> None:
+
+class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
+    """Manage fetching and normalizing Google Find My Device data."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        secrets_data: dict,
+        tracked_devices: Optional[List[str]] = None,
+        location_poll_interval: int = 300,
+        device_poll_delay: int = 5,
+        min_poll_interval: int = 120,
+        min_accuracy_threshold: int = 100,
+    ) -> None:
         """Initialize."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=timedelta(seconds=UPDATE_INTERVAL),
+        )
+
         self.api = GoogleFindMyAPI(secrets_data=secrets_data)
 
+        # Polling / filtering configuration
         self.tracked_devices = tracked_devices or []
-        self.location_poll_interval = location_poll_interval  # Use configured interval
-        self.device_poll_delay = device_poll_delay
-        self.min_poll_interval = min_poll_interval  # Minimum 2 minutes between polls
-        self._min_accuracy_threshold = min_accuracy_threshold  # Accuracy filtering threshold
-        
+        self.location_poll_interval = max(int(location_poll_interval), 0)
+        self.device_poll_delay = max(int(device_poll_delay), 0)
+        self.min_poll_interval = max(int(min_poll_interval), 0)  # absolute floor (HA option min 120s)
+        self._min_accuracy_threshold = max(int(min_accuracy_threshold), 0)  # meters
+
         # Sequential polling state
-        self._device_location_data = {}  # Store latest location data for each device
-        self._current_device_index = 0   # Which device to poll next
-        self._last_location_poll_time = 0  # When we last did a location poll
-        self._device_names = {}  # Map device IDs to names for easier lookup
+        self._device_location_data: Dict[str, Dict[str, Any]] = {}  # latest accepted location per device
+        self._current_device_index = 0  # reserved for future round-robin
+        self._last_location_poll_time: float = 0.0
+        self._device_names: Dict[str, str] = {}
+
+        # Log rate-limiting (per device)
+        self._invalid_coord_log_ts: Dict[str, float] = {}
 
         # Statistics tracking - load from cache or start with zeros
-        self.stats = {
+        self.stats: Dict[str, int] = {
             "skipped_duplicates": 0,
             "background_updates": 0,
             "crowd_sourced_updates": 0,
         }
-        _LOGGER.debug(f"Initialized stats: {self.stats}")
+        _LOGGER.debug("Initialized stats: %s", self.stats)
 
         # Load persistent statistics from cache
         hass.async_create_task(self._async_load_stats())
@@ -49,141 +80,200 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
         self._is_polling = False
         self._startup_complete = False
 
-        super().__init__(
-            hass,
-            _LOGGER,
-            name=DOMAIN,
-            update_interval=timedelta(seconds=UPDATE_INTERVAL),
-        )
-
-    async def _async_update_data(self):
+    async def _async_update_data(self) -> List[Dict[str, Any]]:
         """Update data via library."""
         try:
             # Get basic device list first
             all_devices = await self.hass.async_add_executor_job(self.api.get_basic_device_list)
-            
+
             # Filter to only tracked devices
             if self.tracked_devices:
-                devices = [dev for dev in all_devices if dev["id"] in self.tracked_devices]
+                devices = [dev for dev in all_devices if dev.get("id") in self.tracked_devices]
             else:
                 devices = all_devices
-            
+
             # Update device names mapping
             for device in devices:
-                self._device_names[device["id"]] = device["name"]
-            
+                did = device.get("id")
+                if did:
+                    self._device_names[did] = device.get("name", did)
+
             current_time = time.time()
-            
-            # Check if it's time for a location poll
+
+            # Effective poll interval honors a minimum, to be kind to upstream
+            effective_poll_interval = max(self.location_poll_interval, self.min_poll_interval)
             time_since_last_poll = current_time - self._last_location_poll_time
 
-            # During startup, just set baseline without polling
+            # During startup, set baseline without polling immediately
             if not self._startup_complete:
                 self._startup_complete = True
                 self._last_location_poll_time = current_time  # Set baseline for future polls
                 _LOGGER.debug("First startup - setting poll baseline, will poll on normal schedule")
                 should_poll_location = False  # Skip first poll
-                time_since_last_poll = 0  # Reset for logging
+                time_since_last_poll = 0.0
             else:
-                should_poll_location = (time_since_last_poll >= self.location_poll_interval)
+                should_poll_location = time_since_last_poll >= effective_poll_interval
 
-            _LOGGER.debug(f"Poll check: time_since_last_poll={time_since_last_poll:.1f}s, interval={self.location_poll_interval}s, should_poll={should_poll_location}, devices={len(devices) if devices else 0}")
+            _LOGGER.debug(
+                "Poll check: elapsed=%.1fs, interval=%ss (effective=%ss), should_poll=%s, devices=%d",
+                time_since_last_poll,
+                self.location_poll_interval,
+                effective_poll_interval,
+                should_poll_location,
+                len(devices) if devices else 0,
+            )
 
             if should_poll_location and devices:
                 # Set polling state
                 self._is_polling = True
                 _LOGGER.debug("Started polling cycle")
-                # Notify listeners about state change
-                self.async_set_updated_data(self.data)
+                # Notify listeners about state change (so UI can reflect 'polling')
+                self.async_set_updated_data(getattr(self, "data", None))
 
                 # Poll ALL devices in this cycle with timeouts
-                _LOGGER.info(f"Starting sequential poll of {len(devices)} devices")
+                _LOGGER.info("Starting sequential poll of %d devices", len(devices))
 
                 for i, device_to_poll in enumerate(devices):
-                    device_id = device_to_poll["id"]
-                    device_name = device_to_poll["name"]
+                    device_id = device_to_poll.get("id")
+                    device_name = device_to_poll.get("name", device_id or "unknown")
 
-                    _LOGGER.info(f"Sequential poll: requesting location for device {device_name} ({i + 1}/{len(devices)})")
+                    if not device_id:
+                        _LOGGER.debug("Skipping device without id: %r", device_to_poll)
+                        continue
+
+                    _LOGGER.info(
+                        "Sequential poll: requesting location for device %s (%d/%d)",
+                        device_name,
+                        i + 1,
+                        len(devices),
+                    )
 
                     try:
                         # Call async location function with timeout to prevent hanging
                         location_data = await asyncio.wait_for(
                             self.api.async_get_device_location(device_id, device_name),
-                            timeout=30.0
+                            timeout=30.0,
                         )
 
                         # Log data age for informational purposes but don't reject or retry
                         if location_data:
-                            last_seen = location_data.get('last_seen', 0)
-                            if last_seen > 0:
-                                location_age_hours = (current_time - last_seen) / 3600
+                            last_seen = location_data.get("last_seen", 0)
+                            if isinstance(last_seen, (int, float)) and last_seen > 0:
+                                location_age_hours = (current_time - float(last_seen)) / 3600.0
                                 if location_age_hours > 24:
-                                    _LOGGER.info(f"Using old location data for {device_name} (age: {location_age_hours:.1f}h)")
+                                    _LOGGER.info(
+                                        "Using old location data for %s (age: %.1fh)", device_name, location_age_hours
+                                    )
                                 elif location_age_hours > 1:
-                                    _LOGGER.debug(f"Using location data for {device_name} (age: {location_age_hours:.1f}h)")
+                                    _LOGGER.debug(
+                                        "Using location data for %s (age: %.1fh)", device_name, location_age_hours
+                                    )
 
                         if location_data:
                             # Validate location data before storing
-                            lat = location_data.get('latitude')
-                            lon = location_data.get('longitude')
-                            acc = location_data.get('accuracy')
-                            last_seen = location_data.get('last_seen', 0)
+                            lat = location_data.get("latitude")
+                            lon = location_data.get("longitude")
+                            acc = location_data.get("accuracy")
+                            last_seen = location_data.get("last_seen", 0)
 
-                            # Validate coordinates first
-                            if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
-                                # Check for duplicates first
+                            coords_ok = _valid_coords(lat, lon)
+                            acc_ok = acc is None or (
+                                isinstance(acc, (int, float)) and isfinite(acc) and acc <= self._min_accuracy_threshold
+                            )
+
+                            if coords_ok and acc_ok:
+                                # Check for duplicates via last_seen
                                 existing_data = self._device_location_data.get(device_id, {})
-                                existing_last_seen = existing_data.get('last_seen')
+                                existing_last_seen = existing_data.get("last_seen")
 
                                 if last_seen != existing_last_seen:
-                                    # New data
-                                    if last_seen > 0:
-                                        location_age_hours = (current_time - last_seen) / 3600
-                                        _LOGGER.info(f"Got valid location for {device_name}: lat={lat}, lon={lon}, accuracy={acc}m, age={location_age_hours:.1f}h")
+                                    # New data accepted
+                                    if isinstance(last_seen, (int, float)) and last_seen > 0:
+                                        location_age_hours = (current_time - float(last_seen)) / 3600.0
+                                        _LOGGER.info(
+                                            "Got valid location for %s: lat=%s, lon=%s, accuracy=%sm, age=%.1fh",
+                                            device_name,
+                                            lat,
+                                            lon,
+                                            acc,
+                                            location_age_hours,
+                                        )
                                     else:
-                                        _LOGGER.info(f"Got valid location for {device_name}: lat={lat}, lon={lon}, accuracy={acc}m")
+                                        _LOGGER.info(
+                                            "Got valid location for %s: lat=%s, lon=%s, accuracy=%sm",
+                                            device_name,
+                                            lat,
+                                            lon,
+                                            acc,
+                                        )
 
-                                    self._device_location_data[device_id] = location_data
+                                    self._device_location_data[device_id] = dict(location_data)
                                     self._device_location_data[device_id]["last_updated"] = current_time
                                     # Increment polling stats
                                     self.increment_stat("background_updates")
                                 else:
                                     # Duplicate detected
-                                    _LOGGER.debug(f"Skipping duplicate location data for {device_name} (same last_seen: {last_seen})")
+                                    _LOGGER.debug(
+                                        "Skipping duplicate location data for %s (same last_seen: %s)",
+                                        device_name,
+                                        last_seen,
+                                    )
                                     self.increment_stat("skipped_duplicates")
+
                             else:
-                                _LOGGER.warning(f"Invalid coordinates for {device_name}: lat={lat}, lon={lon}")
+                                # Do not overwrite last valid data; log at DEBUG with rate limit to avoid spam
+                                now_mono = time.monotonic()
+                                last_log = self._invalid_coord_log_ts.get(device_id, 0.0)
+                                if now_mono - last_log > 1800.0:  # 30 min per device
+                                    if not coords_ok:
+                                        _LOGGER.debug(
+                                            "Ignoring invalid coordinates for %s: lat=%r, lon=%r",
+                                            device_name,
+                                            lat,
+                                            lon,
+                                        )
+                                    elif not acc_ok:
+                                        _LOGGER.debug(
+                                            "Ignoring low-quality fix for %s: accuracy=%r (threshold=%sm)",
+                                            device_name,
+                                            acc,
+                                            self._min_accuracy_threshold,
+                                        )
+                                    self._invalid_coord_log_ts[device_id] = now_mono
                                 # Keep previous valid data if available
                         else:
-                            _LOGGER.warning(f"No location data returned for {device_name}")
+                            _LOGGER.debug("No location data returned for %s", device_name)
 
                     except asyncio.TimeoutError:
-                        _LOGGER.warning(f"Location request timed out for {device_name} after 30 seconds")
+                        _LOGGER.warning("Location request timed out for %s after 30 seconds", device_name)
                     except Exception as e:
-                        _LOGGER.error(f"Failed to get location for {device_name}: {e}")
+                        _LOGGER.error("Failed to get location for %s: %s", device_name, e)
                         # Keep previous data on error
 
                     # Add delay before next device (except for the last device)
-                    if i < len(devices) - 1:
-                        _LOGGER.debug(f"Waiting {self.device_poll_delay}s before next device poll")
+                    if i < len(devices) - 1 and self.device_poll_delay > 0:
+                        _LOGGER.debug("Waiting %ds before next device poll", self.device_poll_delay)
                         await asyncio.sleep(self.device_poll_delay)
 
                 # Clear polling flag after polling ALL devices
                 self._is_polling = False
-                _LOGGER.debug(f"Completed polling cycle for {len(devices)} devices")
+                _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
                 # Notify listeners about state change
-                self.async_set_updated_data(self.data)
+                self.async_set_updated_data(getattr(self, "data", None))
 
                 # Update polling state
                 self._last_location_poll_time = current_time
-            
+
             # Build device data with cached location information
-            device_data = []
+            device_data: List[Dict[str, Any]] = []
             for device in devices:
-                device_info = {
-                    "name": device["name"],
-                    "id": device["id"], 
-                    "device_id": device["id"],
+                device_id = device.get("id")
+                device_name = device.get("name", device_id or "unknown")
+
+                device_info: Dict[str, Any] = {
+                    "name": device_name,
+                    "id": device_id,
+                    "device_id": device_id,
                     "latitude": None,
                     "longitude": None,
                     "altitude": None,
@@ -192,21 +282,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                     "status": "Waiting for location poll",
                     "is_own_report": None,
                     "semantic_name": None,
-                    "battery_level": None
+                    "battery_level": None,
                 }
-                
+
                 # Apply cached location data if available
-                if device["id"] in self._device_location_data:
-                    location_data = self._device_location_data[device["id"]]
+                if device_id in self._device_location_data:
+                    location_data = self._device_location_data[device_id]
                     device_info.update(location_data)
-                    _LOGGER.debug(f"Applied cached location for {device_info['name']}: lat={device_info.get('latitude')}, lon={device_info.get('longitude')}, acc={device_info.get('accuracy')}")
+                    _LOGGER.debug(
+                        "Applied cached location for %s: lat=%s, lon=%s, acc=%s",
+                        device_info["name"],
+                        device_info.get("latitude"),
+                        device_info.get("longitude"),
+                        device_info.get("accuracy"),
+                    )
 
                     # Add status based on data age
-                    last_updated = location_data.get("last_updated", 0)
-                    data_age = current_time - last_updated
-                    if data_age < self.location_poll_interval:
+                    last_updated = location_data.get("last_updated", 0.0)
+                    data_age = current_time - float(last_updated)
+                    if data_age < effective_poll_interval:
                         device_info["status"] = "Location data current"
-                    elif data_age < self.location_poll_interval * 2:
+                    elif data_age < effective_poll_interval * 2:
                         device_info["status"] = "Location data aging"
                     else:
                         device_info["status"] = "Location data stale"
@@ -214,155 +310,115 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator):
                     # Fallback to Home Assistant historical state if no cached data
                     # Need to find the actual entity_id from the entity registry
                     # The unique_id is googlefindmy_{device_id} but the entity_id is different
-                    from homeassistant.helpers import entity_registry as er
-                    ent_reg = er.async_get(self.hass)
-                    unique_id = f"{DOMAIN}_{device['id']}"
-                    entity_entry = ent_reg.async_get_entity_id("device_tracker", DOMAIN, unique_id)
-
-                    if entity_entry:
-                        entity_id = entity_entry
-                        _LOGGER.debug(f"Found entity_id '{entity_id}' for device '{device_info['name']}' from registry")
-                    else:
-                        # Fallback to guessing the entity_id format
-                        entity_id = f"device_tracker.{device_info['name'].lower().replace(' ', '_').replace("'", '')}"
-                        _LOGGER.debug(f"No registry entry found, trying '{entity_id}' for device '{device_info['name']}'")
-
                     try:
+                        from homeassistant.helpers import entity_registry as er
+
+                        ent_reg = er.async_get(self.hass)
+                        unique_id = f"{DOMAIN}_{device_id}"
+                        entity_id = ent_reg.async_get_entity_id("device_tracker", DOMAIN, unique_id)
+
+                        if not entity_id:
+                            # Fallback to guessing the entity_id format
+                            # sanitize name → device_tracker.<name>
+                            guessed = (
+                                (device_name or "").lower().replace(" ", "_").replace("'", "")
+                            )
+                            entity_id = f"device_tracker.{guessed}"
+                            _LOGGER.debug(
+                                "No registry entry found, trying '%s' for device '%s'", entity_id, device_name
+                            )
+
                         state = self.hass.states.get(entity_id)
-                        _LOGGER.debug(f"State for {entity_id}: {state.state if state else 'None'}")
+                        _LOGGER.debug("State for %s: %s", entity_id, state.state if state else "None")
 
                         # If entity not found in current state, query database for historical data
                         if not state:
-                            _LOGGER.debug(f"Entity {entity_id} not found in current state, querying database")
-                            try:
-                                # Query the database for the most recent state with coordinates
-                                import sqlite3
-                                db_path = self.hass.config.path("home-assistant_v2.db")
-
-                                # Try different entity ID patterns
-                                entity_patterns = [
-                                    entity_id,  # Current format
-                                    f"device_tracker.{device_info['name'].lower().replace(' ', '_').replace("'", '')}",  # Name-based
-                                    f"device_tracker.{device_info['name'].lower().replace(' ', '_')}",  # With apostrophe
-                                ]
-
-                                conn = sqlite3.connect(db_path)
-                                cursor = conn.cursor()
-
-                                for pattern in entity_patterns:
-                                    _LOGGER.debug(f"Trying pattern '{pattern}'")
-                                    query = """
-                                    SELECT s.state, sa.shared_attrs
-                                    FROM states s
-                                    JOIN state_attributes sa ON s.attributes_id = sa.attributes_id
-                                    WHERE s.entity_id = ?
-                                    AND sa.shared_attrs LIKE '%latitude%'
-                                    AND sa.shared_attrs LIKE '%longitude%'
-                                    ORDER BY s.last_updated_ts DESC
-                                    LIMIT 1
-                                    """
-                                    cursor.execute(query, (pattern,))
-                                    result = cursor.fetchone()
-
-                                    if result:
-                                        import json
-                                        attrs = json.loads(result[1])
-                                        lat = attrs.get('latitude')
-                                        lon = attrs.get('longitude')
-                                        acc = attrs.get('gps_accuracy')
-
-                                        if lat is not None and lon is not None:
-                                            _LOGGER.debug(f"Found DB data for {pattern}: lat={lat}, lon={lon}")
-                                            # Create a fake state object
-                                            class FakeState:
-                                                def __init__(self, state_val, attrs):
-                                                    self.state = state_val
-                                                    self.attributes = attrs
-
-                                            state = FakeState(result[0], attrs)
-                                            entity_id = pattern
-                                            break
-
-                                conn.close()
-                            except Exception as e:
-                                _LOGGER.error(f"Database query failed for {device_info['name']}: {e}", exc_info=True)
-
-                        if state:
-                            # Get coordinates from state attributes (even if state is 'unavailable' or 'unknown')
-                            lat = state.attributes.get('latitude')
-                            lon = state.attributes.get('longitude')
-                            acc = state.attributes.get('gps_accuracy')
-                            _LOGGER.debug(f"Attributes for {entity_id}: lat={lat}, lon={lon}, acc={acc}")
-
-                            if lat is not None and lon is not None:
-                                device_info.update({
-                                    "latitude": lat,
-                                    "longitude": lon,
-                                    "accuracy": acc,
-                                    "status": "Using historical data"
-                                })
-                                _LOGGER.info(f"Using historical location for {device_info['name']}: lat={lat}, lon={lon}")
-                            else:
-                                _LOGGER.debug(f"No historical location data for {device_info['name']} (id={device['id']})")
+                            _LOGGER.debug("Entity %s not in current state; skipping DB lookup to avoid I/O in loop", entity_id)
                         else:
-                            _LOGGER.debug(f"No state found for {device_info['name']} (id={device['id']})")
+                            # Get coordinates from state attributes (even if state is 'unavailable' or 'unknown')
+                            lat = state.attributes.get("latitude")
+                            lon = state.attributes.get("longitude")
+                            acc = state.attributes.get("gps_accuracy")
+                            _LOGGER.debug("Attributes for %s: lat=%s, lon=%s, acc=%s", entity_id, lat, lon, acc)
+
+                            if _valid_coords(lat, lon):
+                                device_info.update(
+                                    {
+                                        "latitude": lat,
+                                        "longitude": lon,
+                                        "accuracy": acc,
+                                        "status": "Using historical data",
+                                    }
+                                )
+                                _LOGGER.info("Using historical location for %s: lat=%s, lon=%s", device_name, lat, lon)
+                            else:
+                                _LOGGER.debug("No historical coordinates for %s (id=%s)", device_name, device_id)
                     except Exception as e:
-                        _LOGGER.debug(f"Error retrieving historical data for {device_info['name']}: {e}")
-                        _LOGGER.debug(f"No cached location data for {device_info['name']} (id={device['id']})")
-                
+                        _LOGGER.debug("Error retrieving historical data for %s: %s", device_name, e)
+                        _LOGGER.debug("No cached/historical location data for %s (id=%s)", device_name, device_id)
+
                 device_data.append(device_info)
-                
-            _LOGGER.debug(f"Sequential polling: processed {len(devices)} devices, next poll in {max(0, self.location_poll_interval - time_since_last_poll):.0f}s")
+
+            _LOGGER.debug(
+                "Sequential polling: processed %d devices, next poll in %ds",
+                len(devices),
+                max(0, int(effective_poll_interval - time_since_last_poll)),
+            )
 
             # Debug log what we're returning
-            for device in device_data:
-                _LOGGER.debug(f"Returning device {device['name']}: lat={device.get('latitude')}, lon={device.get('longitude')}, semantic={device.get('semantic_name')}")
+            for d in device_data:
+                _LOGGER.debug(
+                    "Returning %s: lat=%s, lon=%s, status=%s, semantic=%s",
+                    d["name"],
+                    d.get("latitude"),
+                    d.get("longitude"),
+                    d.get("status"),
+                    d.get("semantic_name"),
+                )
 
             return device_data
-            
+
         except Exception as exception:
             raise UpdateFailed(exception) from exception
 
-    async def _async_load_stats(self):
+    async def _async_load_stats(self) -> None:
         """Load statistics from cache."""
         try:
             from .Auth.token_cache import async_get_cached_value
+
             cached_stats = await async_get_cached_value("integration_stats")
             if cached_stats and isinstance(cached_stats, dict):
                 for key in self.stats.keys():
                     if key in cached_stats:
-                        self.stats[key] = cached_stats[key]
-                _LOGGER.debug(f"Loaded statistics from cache: {self.stats}")
+                        self.stats[key] = int(cached_stats[key])
+                _LOGGER.debug("Loaded statistics from cache: %s", self.stats)
         except Exception as e:
-            _LOGGER.debug(f"Failed to load statistics from cache: {e}")
+            _LOGGER.debug("Failed to load statistics from cache: %s", e)
 
-    async def _async_save_stats(self):
+    async def _async_save_stats(self) -> None:
         """Save statistics to cache."""
         try:
             from .Auth.token_cache import async_set_cached_value
+
             await async_set_cached_value("integration_stats", self.stats.copy())
         except Exception as e:
-            _LOGGER.debug(f"Failed to save statistics to cache: {e}")
+            _LOGGER.debug("Failed to save statistics to cache: %s", e)
 
-    def increment_stat(self, stat_name: str):
-        """Increment a statistic counter and save to cache."""
+    def increment_stat(self, stat_name: str) -> None:
+        """Increment a statistic counter and schedule persistence."""
         if stat_name in self.stats:
             old_value = self.stats[stat_name]
-            self.stats[stat_name] += 1
-            _LOGGER.debug(f"Incremented {stat_name} from {old_value} to {self.stats[stat_name]}")
+            self.stats[stat_name] = int(old_value) + 1
+            _LOGGER.debug("Incremented %s from %s to %s", stat_name, old_value, self.stats[stat_name])
             # Schedule async save to avoid blocking
             self.hass.async_create_task(self._async_save_stats())
         else:
-            _LOGGER.warning(f"Tried to increment unknown stat {stat_name}, available: {list(self.stats.keys())}")
+            _LOGGER.debug("Tried to increment unknown stat %s (available: %s)", stat_name, list(self.stats.keys()))
 
     async def async_locate_device(self, device_id: str) -> dict:
         """Locate a device."""
-        return await self.hass.async_add_executor_job(
-            self.api.locate_device, device_id
-        )
+        return await self.hass.async_add_executor_job(self.api.locate_device, device_id)
 
     async def async_play_sound(self, device_id: str) -> bool:
         """Play sound on a device."""
-        return await self.hass.async_add_executor_job(
-            self.api.play_sound, device_id
-        )
+        return await self.hass.async_add_executor_job(self.api.play_sound, device_id)
