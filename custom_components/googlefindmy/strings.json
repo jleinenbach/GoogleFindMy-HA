@@ -28,11 +28,25 @@
       "auth_failed": "Authentication failed. Please try again.",
       "invalid_token": "Invalid token provided or missing required fields.",
       "invalid_json": "Invalid JSON format in secrets.json content.",
+      "no_devices": "No devices found. Please ensure you have Find My Device enabled on your Google account.",
+      "cannot_connect": "Failed to connect to Google API. This may be a temporary issue - please try again.",
       "unknown": "Unexpected error occurred."
     },
     "abort": {
       "already_configured": "Google Find My Device is already configured.",
       "cannot_connect": "Failed to connect to Google Find My Device."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "map_view_token_expiration": "Enable map view token expiration"
+        },
+        "data_description": {
+          "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire."
+        }
+      }
     }
   },
   "services": {
