@@ -110,7 +110,9 @@ The integration respects Google's rate limits by:
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome and encouraged! 
+
+To contrubuted, please:
 1. Fork the repository
 2. Create a feature branch
 3. Test thoroughly with your Find My devices
