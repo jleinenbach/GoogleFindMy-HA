@@ -21,6 +21,9 @@ class GoogleFindMyAPI:
 
     def __init__(self, oauth_token: str = None, google_email: str = None, secrets_data: dict = None) -> None:
         """Initialize the API wrapper."""
+        # Store secrets_data as instance variable for later use
+        self.secrets_data = secrets_data
+
         if secrets_data:
             # Use secrets.json data from original GoogleFindMyTools
             self._initialize_from_secrets(secrets_data)
@@ -31,7 +34,7 @@ class GoogleFindMyAPI:
             # Cache the token and email in memory to avoid file I/O
             from custom_components.googlefindmy.Auth.token_cache import set_memory_cache
             from custom_components.googlefindmy.Auth.username_provider import username_string
-            
+
             # Create memory cache with individual tokens
             cache_data = {
                 "oauth_token": oauth_token,
