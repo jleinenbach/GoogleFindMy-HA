@@ -68,7 +68,8 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 | movement_threshold | 50 | meters | Distance a device must travel to show an update in device location |
 | google_home_filter_enabled | true | toggle | Enables/disables Google Home device location update filtering |
 | google_home_filter_keywords | various | text input | Keywords, separated by commas, that are used in filtering out location data from Google Home devices |
-| enable_stats_entities | true | toggle | Enables "Google Find My Integration" statistics entity, which displays various useful statistics, including when polling is active |
+| enable_stats_entities | true | toggle | Enables/disables "Google Find My Integration" statistics entity, which displays various useful statistics, including when polling is active |
+| map_vew_token_expiration | false | toggle | Enables/disables expiration of generated API token for accessing recorder history, used in Map View location data queries |
 
 ### Services (Actions)
 
