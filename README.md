@@ -59,7 +59,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ## Configuration Options
 
-Accessible via the ⚙️ cogwheel button in the main Google Find My Device Integration page.
+Accessible via the ⚙️ cogwheel button on the main Google Find My Device Integration page.
 
 | **Option** | **Default** | **Units** | **Description** |
 | :---: | :---: | :---: | --- |
