@@ -130,7 +130,7 @@ def nova_request(api_scope, hex_payload):
         raise RuntimeError(f"Nova API request failed with status {response.status_code}: {error_message}")
 
 
-async def async_nova_request(api_scope, hex_payload):
+async def async_nova_request(api_scope, hex_payload, username=None):
     """Async version of nova_request for Home Assistant compatibility."""
     url = "https://android.googleapis.com/nova/" + api_scope
 
@@ -141,10 +141,11 @@ async def async_nova_request(api_scope, hex_payload):
 
     _logger = logging.getLogger(__name__)
 
-    # Use async methods to avoid blocking the event loop
-    username = await async_get_cached_value(username_string)
+    # Use provided username or get from cache
     if not username:
-        username = "user@example.com"  # fallback
+        username = await async_get_cached_value(username_string)
+        if not username:
+            username = "user@example.com"  # fallback
 
     # Check if we have a cached ADM token (from secrets.json) - use async version
     android_device_manager_oauth_token = await async_get_cached_value(f'adm_token_{username}')
