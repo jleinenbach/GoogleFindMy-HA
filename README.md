@@ -59,6 +59,8 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ## Configuration Options
 
+Accessible via the ⚙️ cogwheel button in the main Google Find My Device Integration page.
+
 | **Option** | **Default** | **Units** | **Description** |
 | :---: | :---: | :---: | --- |
 | tracked_devices | - | - | Select which devices from your account are tracked with the integration. |
@@ -71,7 +73,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 | enable_stats_entities | true | toggle | Enables/disables "Google Find My Integration" statistics entity, which displays various useful statistics, including when polling is active |
 | map_vew_token_expiration | false | toggle | Enables/disables expiration of generated API token for accessing recorder history, used in Map View location data queries |
 
-### Services (Actions)
+## Services (Actions)
 
 The integration provides a couple of Home Assistant Actions for use with automations.  Note that Device ID is different than Entity ID.  Device ID is a long, alpha-numeric value that can be obtained from the Device info pages.
 
