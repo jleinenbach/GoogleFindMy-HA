@@ -59,7 +59,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ## Configuration Options
 
-| Option | Default | Units | Description |
+| **Option** | **Default** | **Units** | **Description** |
 | :---: | :---: | :---: | --- |
 | tracked_devices | - | - | Select which devices from your account are tracked with the integration. |
 | location_poll_interval | 300 | seconds | How often the integration runs a poll cycle for all devices |
@@ -73,13 +73,13 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ### Services (Actions)
 
-The integration provides a couple of Home Assistant Actions for use with automations:
+The integration provides a couple of Home Assistant Actions for use with automations.  Note that Device ID is different than Entity ID.  Device ID is a long, alpha-numeric value that can be obtained from the Device info pages.
 
-#### `googlefindmy.locate_device`
-Request fresh location data for a specific device.  Device ID is required for this action (can be obtained from Device info pages).
-
-#### `googlefindmy.play_sound`
-Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible.
+| Action | Attribute | Description |
+| :---: | :---: | --- |
+| googlefindmy.locate_device | Device ID | Request fresh location data for a specific device. |
+| googlefindmy.play_sound | Device ID | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. |
+| googlefindmy.refresh_device_urls | - | Refreshes all device Map View URLs.  Useful if you are having problems with accessing Map View pages. |
 
 ## Troubleshooting
 
