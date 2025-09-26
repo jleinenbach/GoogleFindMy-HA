@@ -28,6 +28,8 @@
       "auth_failed": "Authentication failed. Please try again.",
       "invalid_token": "Invalid token provided or missing required fields.",
       "invalid_json": "Invalid JSON format in secrets.json content.",
+      "no_devices": "No devices found. Please ensure you have Find My Device enabled on your Google account.",
+      "cannot_connect": "Failed to connect to Google API. This may be a temporary issue - please try again.",
       "unknown": "Unexpected error occurred."
     },
     "abort": {

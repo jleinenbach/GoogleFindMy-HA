@@ -161,16 +161,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 if self.auth_data.get("auth_method") == "secrets_json":
                     api = GoogleFindMyAPI(secrets_data=self.auth_data.get("secrets_data"))
+                    # Extract username from secrets for async call
+                    username = self.auth_data.get("secrets_data", {}).get("googleHomeUsername",
+                                                                         self.auth_data.get("secrets_data", {}).get("google_email"))
                 else:
                     api = GoogleFindMyAPI(
                         oauth_token=self.auth_data.get(CONF_OAUTH_TOKEN),
                         google_email=self.auth_data.get("google_email")
                     )
-                
-                # Get device list (just names, no location data yet)
-                devices = await self.hass.async_add_executor_job(api.get_basic_device_list)
-                self.available_devices = [(dev["name"], dev["id"]) for dev in devices]
-                
+                    username = self.auth_data.get("google_email")
+
+                # Use async version directly - no executor needed
+                devices = await api.async_get_basic_device_list(username)
+
+                if not devices:
+                    _LOGGER.warning("No devices found or API returned empty list")
+                    errors["base"] = "no_devices"
+                else:
+                    self.available_devices = [(dev["name"], dev["id"]) for dev in devices]
+
             except Exception as e:
                 _LOGGER.error("Failed to get device list: %s", e)
                 errors["base"] = "cannot_connect"
