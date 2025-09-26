@@ -13,7 +13,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
-from .const import DOMAIN, CONF_OAUTH_TOKEN, DEFAULT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
+from .const import DOMAIN, CONF_OAUTH_TOKEN, DEFAULT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 from .api import GoogleFindMyAPI
 
 _LOGGER = logging.getLogger(__name__)
@@ -161,16 +161,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 if self.auth_data.get("auth_method") == "secrets_json":
                     api = GoogleFindMyAPI(secrets_data=self.auth_data.get("secrets_data"))
+                    # Extract username from secrets for async call
+                    username = self.auth_data.get("secrets_data", {}).get("googleHomeUsername",
+                                                                         self.auth_data.get("secrets_data", {}).get("google_email"))
                 else:
                     api = GoogleFindMyAPI(
                         oauth_token=self.auth_data.get(CONF_OAUTH_TOKEN),
                         google_email=self.auth_data.get("google_email")
                     )
-                
-                # Get device list (just names, no location data yet)
-                devices = await self.hass.async_add_executor_job(api.get_basic_device_list)
-                self.available_devices = [(dev["name"], dev["id"]) for dev in devices]
-                
+                    username = self.auth_data.get("google_email")
+
+                # Use async version directly - no executor needed
+                devices = await api.async_get_basic_device_list(username)
+
+                if not devices:
+                    _LOGGER.warning("No devices found or API returned empty list")
+                    errors["base"] = "no_devices"
+                else:
+                    self.available_devices = [(dev["name"], dev["id"]) for dev in devices]
+
             except Exception as e:
                 _LOGGER.error("Failed to get device list: %s", e)
                 errors["base"] = "cannot_connect"
@@ -234,7 +243,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 "movement_threshold": user_input.get("movement_threshold", 50),
                 "google_home_filter_enabled": user_input.get("google_home_filter_enabled", DEFAULT_GOOGLE_HOME_FILTER_ENABLED),
                 "google_home_filter_keywords": user_input.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS),
-                "enable_stats_entities": user_input.get("enable_stats_entities", True)
+                "enable_stats_entities": user_input.get("enable_stats_entities", True),
+                "map_view_token_expiration": user_input.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
             })
             
             self.hass.config_entries.async_update_entry(
@@ -297,7 +307,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             ),
             vol.Optional("google_home_filter_enabled", default=self.config_entry.data.get("google_home_filter_enabled", DEFAULT_GOOGLE_HOME_FILTER_ENABLED)): bool,
             vol.Optional("google_home_filter_keywords", default=self.config_entry.data.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)): str,
-            vol.Optional("enable_stats_entities", default=self.config_entry.data.get("enable_stats_entities", True)): bool
+            vol.Optional("enable_stats_entities", default=self.config_entry.data.get("enable_stats_entities", True)): bool,
+            vol.Optional("map_view_token_expiration", default=self.config_entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)): bool
         })
 
         return self.async_show_form(
