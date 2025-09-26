@@ -1,17 +1,20 @@
-# Google Find My Device - Home Assistant Integration
+# Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> 
 
-A comprehensive Home Assistant custom integration for Google's Find My Device network, enabling real-time tracking and control of Find My devices directly within Home Assistant.
+A comprehensive Home Assistant custom integration for Google's FindMy Device network, enabling real-time(ish) tracking and control of FindMy devices directly within Home Assistant!
 
 **This is a true integration! No scripts, docker containers, or external systems required (other than for initial authentication)!**
 
-## Features
+## Features 
 
-- **Real-time Device Tracking**: Track Google Find My devices with fresh GPS location data
-- **Configurable Polling**: Flexible polling intervals with rate limit compliance
-- **Sound Button Entity**: Devices include a button entity that plays a sound on devices that support playing sound
-- **Attribute grading system**: Location data is selected automatically based on 3 major attributes: 1) Accuracy 2) Recency 3) Comes from your device or the network.
+- 🗺️ **Real-time Device Tracking**: Track Google FindMy devices with location data, sourced from the FindMy network
+- ⏱️ **Configurable Polling**: Flexible polling intervals with rate limit protection
+- 🔔 **Sound Button Entity**: Devices include button entity that plays a sound on supported devices
+- ✅ **Attribute grading system**: Best location data is selected automatically based on recency, accuracy, and source of data
+- 📍 **Historical Map-View**: Each tracker has a filterable Map-View that shows tracker movement with location data
+- 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
+- ❣️ **More to come!**
 
-[![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando)
+<img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
 ## Installation
 
@@ -27,42 +30,55 @@ A comprehensive Home Assistant custom integration for Google's Find My Device ne
 3. Restart Home Assistant
 4. Add the integration through the UI
 
-## Configuration
+## First-Time Setup
 
-### Authentication Setup
-1. Run [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools) on a machine with Chrome
+**NOTE: Authentication and setup is a 2-part process.  One part requires use of a python script to obtain a secrets.json file, which will contain all necessary keys for authentication!  This is currently the *ONLY* way to authenticate to the FindMy network.**
 
-   **NOTE:** Recently, some have had issues with the script from the repository above.  If you follow all the steps in Leon's repository and are unable to get through the main.py sequence due to errors, please try using my modification of the script [BACKUP:GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools)
+### Authentication (External Steps)
+1. Navigate to [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools?tab=readme-ov-file#how-to-use) repository and follow the directions on "How to use" the main.py script.  For convenience, I have included a summary of the required steps.
 
-  **MUST PERFORM CRITICAL STEPS BELOW!!!**
+```
+- Open Terminal and change to desired download directory
+- Clone the GoogleFindMyTools repository: git clone https://github.com/leonboe1/GoogleFindMyTools or download the ZIP file and extract
+- Change into the directory: cd GoogleFindMyTools
+- Optional: Create venv: python -m venv venv
+- Optional: Activate venv: venv\Scripts\activate (Windows) or source venv/bin/activate (Linux & macOS)
+- Install all required packages: pip install -r requirements.txt
+- Install the latest version of Google Chrome: https://www.google.com/chrome/
+- Start the program by running main.py: python main.py or python3 main.py
+```
+
+***NOTE:** Recently, some have had issues with the script from the repository above.  If you follow all the steps in Leon's repository and are unable to get through the main.py sequence due to errors, please try using my modification of the script [BACKUP:GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools)*
 
 3. Complete the authentication process to generate `Auth/secrets.json`
 4. Copy the entire contents of the secrets.json file.  Specifically, open the file in a text editor, select all, and copy.
-5. In Home Assistant, paste the copied text from secrets.json when prompted.
-6. After completing authentication and adding devices, RESTART Home Assistant!
-
-#### **CRITICAL AUTHENTICATION STEPS:** 
-**When running main.py, there are 2 steps to the authentication process.  BOTH must be followed!**
-1. Run main.py per the instructions in the repo above.  You will get your first authentication step and open a Chrome window.
-![mainpy1](https://github.com/user-attachments/assets/dad8b94b-c9c7-4499-a516-f3c8e3498388)
-2. After you authenticate the first time, you should see a list of your devices, type in a number of one of your devices and type 'Enter'.  Once you see the location info and error message, you can close the terminal and continue to step 2. above.
-![mainpy2](https://github.com/user-attachments/assets/e36e602c-081f-495e-a2b5-8627fa04420c)
+### Authentication (Home Assistant Steps)  
+5. Add the integration to your Home Assistant install.
+6. In Home Assistant, paste the copied text from secrets.json when prompted.
+7. After completing authentication and adding devices, RESTART Home Assistant!
 
 ## Configuration Options
 
-- **Location Poll Interval**: How often to request fresh location data (default: 5 minutes, minimum: 2 minutes)
-- **Device Poll Delay**: Delay between individual device polls (default: 5 seconds)
-- **Accuracy Threshold**: Minimum GPS accuracy to accept (default: 100 meters)
+| Option | Default | Units | Description |
+| :---: | :---: | :---: | --- |
+| tracked_devices | - | - | Select which devices from your account are tracked with the integration. |
+| location_poll_interval | 300 | seconds | How often the integration runs a poll cycle for all devices |
+| device_poll_delay | 5 | seconds | How much time to wait between polling devices during a poll cycle |
+| min_accuract_threshold | 100 | meters | Distance beyond which location data will be rejected from writing to logbook/recorder |
+| movement_threshold | 50 | meters | Distance a device must travel to show an update in device location |
+| google_home_filter_enabled | true | toggle | Enables/disables Google Home device location update filtering |
+| google_home_filter_keywords | various | text input | Keywords, separated by commas, that are used in filtering out location data from Google Home devices |
+| enable_stats_entities | true | toggle | Enables "Google Find My Integration" statistics entity, which displays various useful statistics, including when polling is active |
 
-### Services
+### Services (Actions)
 
-The integration provides several services:
+The integration provides a couple of Home Assistant Actions for use with automations:
 
 #### `googlefindmy.locate_device`
-Request fresh location data for a specific device.
+Request fresh location data for a specific device.  Device ID is required for this action (can be obtained from Device info pages).
 
 #### `googlefindmy.play_sound`
-Play a sound on a specific device for location assistance.
+Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible.
 
 ## Troubleshooting
 
