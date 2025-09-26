@@ -2,7 +2,8 @@
 
 A comprehensive Home Assistant custom integration for Google's FindMy Device network, enabling real-time(ish) tracking and control of FindMy devices directly within Home Assistant!
 
-**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**
+>[!NOTE]
+>**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**
 
 ## Features 
 
@@ -32,27 +33,19 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ## First-Time Setup
 
-[! **NOTE: Authentication and setup is a 2-part process.  One part requires use of a python script to obtain a secrets.json file, which will contain all necessary keys for authentication!  This is currently the *ONLY* way to authenticate to the FindMy network.**]
+>[!IMPORTANT]
+>**Authentication is a 2-part process.  One part requires use of a python script to obtain a secrets.json file, which will contain all necessary keys for authentication!  This is currently the *ONLY* way to authenticate to the FindMy network.**
 
-### Authentication (External Steps)
-1. Navigate to [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools?tab=readme-ov-file#how-to-use) repository and follow the directions on "How to use" the main.py script.  For convenience, I have included a summary of the required steps.
+### Authentication Part 1 (External Steps)
+1. Navigate to [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools?tab=readme-ov-file#how-to-use) repository and follow the directions on "How to use" the main.py script.
 
-```
-- Open Terminal and change to desired download directory
-- Clone the GoogleFindMyTools repository: git clone https://github.com/leonboe1/GoogleFindMyTools or download the ZIP file and extract
-- Change into the directory: cd GoogleFindMyTools
-- Optional: Create venv: python -m venv venv
-- Optional: Activate venv: venv\Scripts\activate (Windows) or source venv/bin/activate (Linux & macOS)
-- Install all required packages: pip install -r requirements.txt
-- Install the latest version of Google Chrome: https://www.google.com/chrome/
-- Start the program by running main.py: python main.py or python3 main.py
-```
-
-***NOTE:** Recently, some have had issues with the script from the repository above.  If you follow all the steps in Leon's repository and are unable to get through the main.py sequence due to errors, please try using my modification of the script [BACKUP:GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools)*
+>[!NOTE]
+>Recently, some have had issues with the script from the repository above.  If you follow all the steps in Leon's repository and are unable to get through the main.py sequence due to errors, please try using my modification of the script [BACKUP:GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools)
 
 3. Complete the authentication process to generate `Auth/secrets.json`
 4. Copy the entire contents of the secrets.json file.  Specifically, open the file in a text editor, select all, and copy.
-### Authentication (Home Assistant Steps)  
+
+### Authentication Part 2 (Home Assistant Steps)  
 5. Add the integration to your Home Assistant install.
 6. In Home Assistant, paste the copied text from secrets.json when prompted.
 7. After completing authentication and adding devices, RESTART Home Assistant!
