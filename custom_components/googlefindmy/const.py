@@ -18,3 +18,6 @@ SERVICE_REFRESH_URLS = "refresh_device_urls"
 DEFAULT_GOOGLE_HOME_FILTER_ENABLED = True
 DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS = "nest,google,home,mini,hub,display,chromecast,speaker"
 GOOGLE_HOME_SPAM_THRESHOLD_MINUTES = 15
+
+# Map View Token defaults
+DEFAULT_MAP_VIEW_TOKEN_EXPIRATION = False  # Default to no expiration (disabled)

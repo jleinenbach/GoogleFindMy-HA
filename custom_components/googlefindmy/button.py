@@ -86,9 +86,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         device_id = self._device["id"]
         device_name = self._device["name"]
 
-        import traceback
-        _LOGGER.warning(f"PLAY SOUND BUTTON PRESSED for {device_name} ({device_id}) - Call stack:")
-        _LOGGER.warning("".join(traceback.format_stack()))
+        _LOGGER.debug(f"Play sound button pressed for {device_name} ({device_id})")
         
         try:
             result = await self.coordinator.async_play_sound(device_id)

@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from custom_components.googlefindmy.Auth.token_cache import save_oauth_token, load_oauth_token
-from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import request_device_list
+from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import request_device_list, async_request_device_list
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import get_location_data_for_device
 from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound.start_sound_request import start_sound_request
 from custom_components.googlefindmy.NovaApi.nova_request import nova_request
@@ -21,6 +21,9 @@ class GoogleFindMyAPI:
 
     def __init__(self, oauth_token: str = None, google_email: str = None, secrets_data: dict = None) -> None:
         """Initialize the API wrapper."""
+        # Store secrets_data as instance variable for later use
+        self.secrets_data = secrets_data
+
         if secrets_data:
             # Use secrets.json data from original GoogleFindMyTools
             self._initialize_from_secrets(secrets_data)
@@ -31,7 +34,7 @@ class GoogleFindMyAPI:
             # Cache the token and email in memory to avoid file I/O
             from custom_components.googlefindmy.Auth.token_cache import set_memory_cache
             from custom_components.googlefindmy.Auth.username_provider import username_string
-            
+
             # Create memory cache with individual tokens
             cache_data = {
                 "oauth_token": oauth_token,
@@ -67,7 +70,7 @@ class GoogleFindMyAPI:
             result_hex = request_device_list()
             device_list = parse_device_list_protobuf(result_hex)
             canonic_ids = get_canonic_ids(device_list)
-            
+
             devices = []
             for device_name, canonic_id in canonic_ids:
                 devices.append({
@@ -75,11 +78,36 @@ class GoogleFindMyAPI:
                     "id": canonic_id,
                     "device_id": canonic_id,
                 })
-            
+
             return devices
         except Exception as err:
             _LOGGER.debug("Failed to get basic device list: %s", err)
             raise
+
+    async def async_get_basic_device_list(self, username=None) -> list[dict[str, Any]]:
+        """Async version: Get list of Find My devices without location data (for config flow)."""
+        try:
+            # Use provided username or try to extract from secrets
+            if not username and self.secrets_data:
+                username = self.secrets_data.get("googleHomeUsername", self.secrets_data.get("google_email"))
+
+            result_hex = await async_request_device_list(username)
+            device_list = parse_device_list_protobuf(result_hex)
+            canonic_ids = get_canonic_ids(device_list)
+
+            devices = []
+            for device_name, canonic_id in canonic_ids:
+                devices.append({
+                    "name": device_name,
+                    "id": canonic_id,
+                    "device_id": canonic_id,
+                })
+
+            return devices
+        except Exception as err:
+            _LOGGER.error("Failed to get basic device list: %s", err)
+            # Return empty list on error to allow graceful degradation
+            return []
 
     def get_devices(self) -> list[dict[str, Any]]:
         """Get list of Find My devices with basic info (no location data for now)."""

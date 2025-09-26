@@ -5,7 +5,7 @@
 
 import binascii
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import get_location_data_for_device
-from custom_components.googlefindmy.NovaApi.nova_request import nova_request
+from custom_components.googlefindmy.NovaApi.nova_request import nova_request, async_nova_request
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_LIST_DEVICS_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
@@ -19,6 +19,13 @@ def request_device_list():
     hex_payload = create_device_list_request()
     result = nova_request(NOVA_LIST_DEVICS_API_SCOPE, hex_payload)
 
+    return result
+
+
+async def async_request_device_list(username=None):
+    """Async version of request_device_list for Home Assistant integration."""
+    hex_payload = create_device_list_request()
+    result = await async_nova_request(NOVA_LIST_DEVICS_API_SCOPE, hex_payload, username)
     return result
 
 
