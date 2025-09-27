@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import GoogleFindMyAPI
 from .const import DOMAIN, UPDATE_INTERVAL
+from .storage import LastKnownStore  # persist last known locations across restarts
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,10 +58,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._min_accuracy_threshold = max(int(min_accuracy_threshold), 0)  # meters
 
         # Sequential polling state
-        self._device_location_data: Dict[str, Dict[str, Any]] = {}  # latest accepted location per device
+        self._device_location_data: Dict[str, Dict[str, Any]] = {}  # latest accepted location per device (live)
         self._current_device_index = 0  # reserved for future round-robin
         self._last_location_poll_time: float = 0.0
         self._device_names: Dict[str, str] = {}
+
+        # Persisted "last known" locations across restarts (loaded in __init__.py)
+        self.last_known_locations: Dict[str, Dict[str, Any]] = {}
+        self._store: Optional[LastKnownStore] = None
+        self._pending_store_save: bool = False
 
         # Log rate-limiting (per device)
         self._invalid_coord_log_ts: Dict[str, float] = {}
@@ -207,8 +213,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                             acc,
                                         )
 
+                                    # Update in-memory live cache
                                     self._device_location_data[device_id] = dict(location_data)
                                     self._device_location_data[device_id]["last_updated"] = current_time
+                                    # Persist as last known for next startup
+                                    self.set_last_known(
+                                        device_id,
+                                        {
+                                            "latitude": lat,
+                                            "longitude": lon,
+                                            "accuracy": acc,
+                                            "last_seen": last_seen,
+                                            "last_updated": current_time,
+                                        },
+                                        source="poll",
+                                    )
                                     # Increment polling stats
                                     self.increment_stat("background_updates")
                                 else:
@@ -285,7 +304,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     "battery_level": None,
                 }
 
-                # Apply cached location data if available
+                # Apply cached live location data if available (current session)
                 if device_id in self._device_location_data:
                     location_data = self._device_location_data[device_id]
                     device_info.update(location_data)
@@ -307,55 +326,69 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     else:
                         device_info["status"] = "Location data stale"
                 else:
-                    # Fallback to Home Assistant historical state if no cached data
-                    # Need to find the actual entity_id from the entity registry
-                    # The unique_id is googlefindmy_{device_id} but the entity_id is different
-                    try:
-                        from homeassistant.helpers import entity_registry as er
+                    # Fallback 1: Persisted last known location (from .storage/)
+                    lkl = self.last_known_locations.get(device_id)
+                    if lkl and _valid_coords(lkl.get("latitude"), lkl.get("longitude")):
+                        device_info.update(
+                            {
+                                "latitude": lkl.get("latitude"),
+                                "longitude": lkl.get("longitude"),
+                                "accuracy": lkl.get("accuracy"),
+                                "last_seen": lkl.get("last_seen"),
+                                "last_updated": lkl.get("last_updated"),
+                                "status": "Last known (cached)",
+                            }
+                        )
+                        _LOGGER.debug(
+                            "Using last known (stored) for %s: lat=%s, lon=%s",
+                            device_name,
+                            device_info["latitude"],
+                            device_info["longitude"],
+                        )
+                    else:
+                        # Fallback 2: Home Assistant current state (no DB queries)
+                        try:
+                            from homeassistant.helpers import entity_registry as er
 
-                        ent_reg = er.async_get(self.hass)
-                        unique_id = f"{DOMAIN}_{device_id}"
-                        entity_id = ent_reg.async_get_entity_id("device_tracker", DOMAIN, unique_id)
+                            ent_reg = er.async_get(self.hass)
+                            unique_id = f"{DOMAIN}_{device_id}"
+                            entity_id = ent_reg.async_get_entity_id("device_tracker", DOMAIN, unique_id)
 
-                        if not entity_id:
-                            # Fallback to guessing the entity_id format
-                            # sanitize name → device_tracker.<name>
-                            guessed = (
-                                (device_name or "").lower().replace(" ", "_").replace("'", "")
-                            )
-                            entity_id = f"device_tracker.{guessed}"
-                            _LOGGER.debug(
-                                "No registry entry found, trying '%s' for device '%s'", entity_id, device_name
-                            )
-
-                        state = self.hass.states.get(entity_id)
-                        _LOGGER.debug("State for %s: %s", entity_id, state.state if state else "None")
-
-                        # If entity not found in current state, query database for historical data
-                        if not state:
-                            _LOGGER.debug("Entity %s not in current state; skipping DB lookup to avoid I/O in loop", entity_id)
-                        else:
-                            # Get coordinates from state attributes (even if state is 'unavailable' or 'unknown')
-                            lat = state.attributes.get("latitude")
-                            lon = state.attributes.get("longitude")
-                            acc = state.attributes.get("gps_accuracy")
-                            _LOGGER.debug("Attributes for %s: lat=%s, lon=%s, acc=%s", entity_id, lat, lon, acc)
-
-                            if _valid_coords(lat, lon):
-                                device_info.update(
-                                    {
-                                        "latitude": lat,
-                                        "longitude": lon,
-                                        "accuracy": acc,
-                                        "status": "Using historical data",
-                                    }
+                            if not entity_id:
+                                guessed = (device_name or "").lower().replace(" ", "_").replace("'", "")
+                                entity_id = f"device_tracker.{guessed}"
+                                _LOGGER.debug(
+                                    "No registry entry found, trying '%s' for device '%s'", entity_id, device_name
                                 )
-                                _LOGGER.info("Using historical location for %s: lat=%s, lon=%s", device_name, lat, lon)
+
+                            state = self.hass.states.get(entity_id)
+                            _LOGGER.debug("State for %s: %s", entity_id, state.state if state else "None")
+
+                            if state:
+                                lat = state.attributes.get("latitude")
+                                lon = state.attributes.get("longitude")
+                                acc = state.attributes.get("gps_accuracy")
+                                _LOGGER.debug("Attributes for %s: lat=%s, lon=%s, acc=%s", entity_id, lat, lon, acc)
+
+                                if _valid_coords(lat, lon):
+                                    device_info.update(
+                                        {
+                                            "latitude": lat,
+                                            "longitude": lon,
+                                            "accuracy": acc,
+                                            "status": "Using historical data",
+                                        }
+                                    )
+                                    _LOGGER.info(
+                                        "Using historical location for %s: lat=%s, lon=%s", device_name, lat, lon
+                                    )
+                                else:
+                                    _LOGGER.debug("No historical coordinates for %s (id=%s)", device_name, device_id)
                             else:
-                                _LOGGER.debug("No historical coordinates for %s (id=%s)", device_name, device_id)
-                    except Exception as e:
-                        _LOGGER.debug("Error retrieving historical data for %s: %s", device_name, e)
-                        _LOGGER.debug("No cached/historical location data for %s (id=%s)", device_name, device_id)
+                                _LOGGER.debug("Entity %s not in current state; no fallback coordinates", entity_id)
+                        except Exception as e:
+                            _LOGGER.debug("Error retrieving historical data for %s: %s", device_name, e)
+                            _LOGGER.debug("No cached/historical location data for %s (id=%s)", device_name, device_id)
 
                 device_data.append(device_info)
 
@@ -380,6 +413,39 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         except Exception as exception:
             raise UpdateFailed(exception) from exception
+
+    def set_last_known(self, device_id: str, data: Dict[str, Any], *, source: str = "poll") -> None:
+        """Update last known cache and schedule debounced persistence."""
+        # Normalize keys we persist
+        entry = {
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "accuracy": data.get("accuracy"),
+            "last_seen": data.get("last_seen"),
+            "last_updated": data.get("last_updated", time.time()),
+            "source": source,
+        }
+        if _valid_coords(entry["latitude"], entry["longitude"]):
+            self.last_known_locations[device_id] = entry
+            if self._store and not self._pending_store_save:
+                self._pending_store_save = True
+                # Debounce persistence (5s), non-blocking
+                self.hass.loop.call_later(
+                    5, lambda: self.hass.async_create_task(self._async_flush_last_known_store())
+                )
+
+    def get_last_known(self, device_id: str) -> Optional[Dict[str, Any]]:
+        """Get last known entry for device."""
+        return self.last_known_locations.get(device_id)
+
+    async def _async_flush_last_known_store(self) -> None:
+        """Persist last known cache to storage."""
+        self._pending_store_save = False
+        if self._store:
+            try:
+                await self._store.async_save(self.last_known_locations)
+            except Exception as err:
+                _LOGGER.debug("Failed to persist last known locations: %s", err)
 
     async def _async_load_stats(self) -> None:
         """Load statistics from cache."""
