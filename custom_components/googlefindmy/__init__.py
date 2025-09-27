@@ -20,6 +20,7 @@ from .coordinator import GoogleFindMyCoordinator
 from .Auth.token_cache import async_load_cache_from_file
 from .map_view import GoogleFindMyMapView, GoogleFindMyMapRedirectView
 from .google_home_filter import GoogleHomeFilter
+from .storage import LastKnownStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,11 +84,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.google_home_filter = GoogleHomeFilter(hass, entry.data)
     _LOGGER.debug("Initialized Google Home filter")
 
+    # Load persisted last known locations (no network calls at setup)
+    coordinator._store = LastKnownStore(hass)
     try:
-        await coordinator.async_config_entry_first_refresh()
+        coordinator.last_known_locations = await coordinator._store.async_load()
+        _LOGGER.debug("Loaded last known locations for %d device(s)", len(coordinator.last_known_locations))
     except Exception as err:
-        _LOGGER.error("Failed to initialize Google Find My Device: %s", err)
-        raise ConfigEntryNotReady from err
+        _LOGGER.debug("Failed to load last known locations: %s", err)
 
     if secrets_data:
         try:
@@ -172,6 +175,7 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             _LOGGER.error("Failed to play sound on device %s: %s", device_id, err)
 
     async def async_locate_external_service(call: ServiceCall) -> None:
+        """Handle external locate device service call - delegates to normal locate service."""
         device_id = call.data.get("device_id")
         device_name = call.data.get("device_name", device_id)
 
@@ -180,6 +184,7 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         await async_locate_device_service(call)
 
     async def async_refresh_device_urls_service(call: ServiceCall) -> None:
+        """Handle refresh device URLs service call."""
         try:
             from homeassistant.helpers import device_registry
             from homeassistant.helpers.network import get_url
@@ -244,6 +249,7 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         except Exception as err:
             _LOGGER.error("Failed to refresh device URLs: %s", err)
 
+    # Register services
     hass.services.async_register(
         DOMAIN,
         SERVICE_LOCATE_DEVICE,
