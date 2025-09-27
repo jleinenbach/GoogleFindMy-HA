@@ -11,6 +11,8 @@ from bs4 import BeautifulSoup
 from custom_components.googlefindmy.Auth.aas_token_retrieval import get_aas_token
 from custom_components.googlefindmy.Auth.adm_token_retrieval import get_adm_token
 from custom_components.googlefindmy.Auth.username_provider import get_username
+# New: non-blocking for async context
+from custom_components.googlefindmy.Auth.adm_token_retrieval import async_get_adm_token
 
 
 def nova_request(api_scope, hex_payload):
@@ -169,14 +171,10 @@ async def async_nova_request(api_scope, hex_payload, username=None):
                 break
 
     if not android_device_manager_oauth_token:
-        # Fall back to generating ADM token - run in executor to avoid blocking
+        # Fall back to generating ADM token - now non-blocking
         try:
             _logger.info("Attempting to generate new ADM token...")
-            import asyncio
-            loop = asyncio.get_event_loop()
-            android_device_manager_oauth_token = await loop.run_in_executor(
-                None, get_adm_token, username
-            )
+            android_device_manager_oauth_token = await async_get_adm_token(username)
             _logger.info(f"Generated ADM token: {'Success' if android_device_manager_oauth_token else 'Failed'}")
         except Exception as e:
             _logger.error(f"ADM token generation failed: {e}")
@@ -220,14 +218,10 @@ async def async_nova_request(api_scope, hex_payload, username=None):
                 # Clear the expired ADM token
                 set_cached_value(f'adm_token_{username}', None)
                 
-                # Generate new ADM token - run in executor to avoid blocking
+                # Generate new ADM token - non-blocking
                 try:
                     _logger.info("Generating fresh ADM token...")
-                    import asyncio
-                    loop = asyncio.get_event_loop()
-                    android_device_manager_oauth_token = await loop.run_in_executor(
-                        None, get_adm_token, username
-                    )
+                    android_device_manager_oauth_token = await async_get_adm_token(username)
 
                     if android_device_manager_oauth_token:
                         # Retry request with new token
