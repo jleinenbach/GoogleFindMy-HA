@@ -19,6 +19,7 @@ from .const import DOMAIN, SERVICE_LOCATE_DEVICE, SERVICE_PLAY_SOUND, SERVICE_LO
 from .coordinator import GoogleFindMyCoordinator
 from .Auth.token_cache import async_load_cache_from_file
 from .map_view import GoogleFindMyMapView, GoogleFindMyMapRedirectView
+from .google_home_filter import GoogleHomeFilter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,24 +32,19 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
     from .Auth.username_provider import username_string
     import json
     
-    # Create enhanced data similar to API initialization
     enhanced_data = secrets_data.copy()
     
-    # Extract and add username
     google_email = secrets_data.get('username', secrets_data.get('Email'))
     if google_email:
         enhanced_data[username_string] = google_email
     
-    # Save all the secrets data to persistent cache
     for key, value in enhanced_data.items():
         try:
             if isinstance(value, (str, int, float)):
                 await async_set_cached_value(key, str(value))
             elif key == 'fcm_credentials':
-                # Save FCM credentials as JSON
                 await async_set_cached_value(key, json.dumps(value))
             else:
-                # Convert other complex values to JSON string for storage
                 await async_set_cached_value(key, json.dumps(value))
         except Exception as e:
             _LOGGER.warning(f"Failed to save {key} to persistent cache: {e}")
@@ -56,14 +52,12 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Google Find My Device from a config entry."""
-    # Preload the cache to avoid blocking I/O later
     try:
         await async_load_cache_from_file()
         _LOGGER.debug("Cache preloaded successfully")
     except Exception as e:
         _LOGGER.warning(f"Failed to preload cache: {e}")
     
-    # Extract configuration - only using secrets.json method
     tracked_devices = entry.data.get("tracked_devices", [])
     location_poll_interval = entry.data.get("location_poll_interval", 300)
     device_poll_delay = entry.data.get("device_poll_delay", 5)
@@ -71,13 +65,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     min_accuracy_threshold = entry.data.get("min_accuracy_threshold", 100)
     movement_threshold = entry.data.get("movement_threshold", 50)
 
-    # Get secrets data from config entry
     secrets_data = entry.data.get("secrets_data")
     if not secrets_data:
         _LOGGER.error("Secrets data not found in config entry")
         raise ConfigEntryNotReady("Secrets data not found")
 
-    # Initialize coordinator
     coordinator = GoogleFindMyCoordinator(
         hass,
         secrets_data=secrets_data,
@@ -88,8 +80,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         min_accuracy_threshold=min_accuracy_threshold
     )
     
-    # Initialize Google Home filter
-    from .google_home_filter import GoogleHomeFilter
     coordinator.google_home_filter = GoogleHomeFilter(hass, entry.data)
     _LOGGER.debug("Initialized Google Home filter")
 
@@ -99,7 +89,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("Failed to initialize Google Find My Device: %s", err)
         raise ConfigEntryNotReady from err
 
-    # Save complete secrets data to persistent cache asynchronously
     if secrets_data:
         try:
             await _async_save_secrets_data(secrets_data)
@@ -109,7 +98,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     
-    # Store config data for device tracker to use
     hass.data[DOMAIN]["config_data"] = {
         "min_accuracy_threshold": min_accuracy_threshold,
         "movement_threshold": movement_threshold
@@ -117,7 +105,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Register map views
     try:
         map_view = GoogleFindMyMapView(hass)
         hass.http.register_view(map_view)
@@ -129,10 +116,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as e:
         _LOGGER.warning(f"Failed to register map views: {e}")
 
-    # Register services
     await _async_register_services(hass, coordinator)
 
-    # Listen for config entry updates to reload settings
     entry.async_on_unload(entry.add_update_listener(async_update_entry))
 
     return True
@@ -140,31 +125,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Update a config entry."""
-    # Get the coordinator
     coordinator = hass.data[DOMAIN][entry.entry_id]
     
-    # Update coordinator settings from new config entry data
     coordinator.tracked_devices = entry.data.get("tracked_devices", [])
     coordinator.location_poll_interval = entry.data.get("location_poll_interval", 300)
     coordinator.device_poll_delay = entry.data.get("device_poll_delay", 5)
 
-    # Update Google Home filter configuration
     if hasattr(coordinator, 'google_home_filter'):
         coordinator.google_home_filter.update_config(entry.data)
 
-    # Update config data for device tracker
     hass.data[DOMAIN]["config_data"] = {
         "min_accuracy_threshold": entry.data.get("min_accuracy_threshold", 100),
         "movement_threshold": entry.data.get("movement_threshold", 50)
     }
     
-    # Reset polling state to apply changes immediately
     coordinator._last_location_poll_time = time.time() - coordinator.location_poll_interval
-    # Don't clear device location data - preserve it to avoid devices going unavailable
     
     _LOGGER.info(f"Updated configuration: {len(coordinator.tracked_devices)} tracked devices, {coordinator.location_poll_interval}s poll interval")
     
-    # Trigger immediate refresh
     await coordinator.async_refresh()
 
 
@@ -180,7 +158,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
     """Register services for the integration."""
     
     async def async_locate_device_service(call: ServiceCall) -> None:
-        """Handle locate device service call."""
         device_id = call.data["device_id"]
         try:
             await coordinator.async_locate_device(device_id)
@@ -188,7 +165,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             _LOGGER.error("Failed to locate device %s: %s", device_id, err)
 
     async def async_play_sound_service(call: ServiceCall) -> None:
-        """Handle play sound service call."""
         device_id = call.data["device_id"]
         try:
             await coordinator.async_play_sound(device_id)
@@ -196,39 +172,31 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             _LOGGER.error("Failed to play sound on device %s: %s", device_id, err)
 
     async def async_locate_external_service(call: ServiceCall) -> None:
-        """Handle external locate device service call - delegates to normal locate service."""
         device_id = call.data.get("device_id")
         device_name = call.data.get("device_name", device_id)
 
         _LOGGER.info(f"External location request for device: {device_name} ({device_id}) - delegating to normal locate")
 
-        # Delegate to the normal locate device service
         await async_locate_device_service(call)
 
     async def async_refresh_device_urls_service(call: ServiceCall) -> None:
-        """Handle refresh device URLs service call."""
         try:
             from homeassistant.helpers import device_registry
             from homeassistant.helpers.network import get_url
             import socket
 
-            # Get device registry
             dev_reg = device_registry.async_get(hass)
 
-            # Get local IP for URL generation
             base_url = None
             try:
-                # Use socket connection method to get the actual local network IP
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s.connect(("8.8.8.8", 80))
                 local_ip = s.getsockname()[0]
                 s.close()
 
-                # Get HA port and SSL settings from config
                 port = 8123
                 use_ssl = False
 
-                # Try to get actual port from HA configuration
                 if hasattr(hass, 'http') and hasattr(hass.http, 'server_port'):
                     port = hass.http.server_port or 8123
                     use_ssl = hasattr(hass.http, 'ssl_context') and hass.http.ssl_context is not None
@@ -239,7 +207,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
 
             except Exception as local_err:
                 _LOGGER.debug(f"Local IP detection failed: {local_err}, trying HA network detection")
-                # Fallback to HA's network detection - force internal only
                 base_url = get_url(hass, prefer_external=False, allow_cloud=False, allow_external=False, allow_internal=True)
                 _LOGGER.info(f"Using HA internal URL for device refresh: {base_url}")
 
@@ -247,19 +214,15 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 _LOGGER.error("Could not determine base URL for device refresh")
                 return
 
-            # Generate auth token for map access
             import hashlib
             import time
             day = str(int(time.time() // 86400))
             ha_uuid = str(hass.data.get("core.uuid", "ha"))
             auth_token = hashlib.md5(f"{ha_uuid}:{day}".encode()).hexdigest()[:16]
 
-            # Update all Google Find My devices
             updated_count = 0
             for device in dev_reg.devices.values():
-                # Check if this is a Google Find My device
                 if any(identifier[0] == DOMAIN for identifier in device.identifiers):
-                    # Extract device ID from identifiers
                     device_id = None
                     for identifier in device.identifiers:
                         if identifier[0] == DOMAIN:
@@ -267,10 +230,8 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                             break
 
                     if device_id:
-                        # Generate new configuration URL using redirect endpoint
                         new_config_url = f"{base_url}/api/googlefindmy/redirect_map/{device_id}?token={auth_token}"
 
-                        # Update device info
                         dev_reg.async_update_device(
                             device_id=device.id,
                             configuration_url=new_config_url
@@ -283,8 +244,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         except Exception as err:
             _LOGGER.error("Failed to refresh device URLs: %s", err)
 
-
-    # Register services
     hass.services.async_register(
         DOMAIN,
         SERVICE_LOCATE_DEVICE,
@@ -319,4 +278,3 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         async_refresh_device_urls_service,
         schema=vol.Schema({}),
     )
-
