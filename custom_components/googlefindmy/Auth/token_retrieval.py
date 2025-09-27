@@ -32,7 +32,7 @@ def request_token(username: str, scope: str, play_services: bool = False) -> str
         if not auth_response or "Auth" not in auth_response:
             raise RuntimeError(f"OAuth response missing 'Auth': {auth_response}")
         return auth_response["Auth"]
-    except Exception as e) as e:  # noqa: E722 kept generic to preserve upstream behavior
+    except Exception as e:  # noqa: E722 kept generic to preserve upstream behavior
         raise RuntimeError(f"Failed to get auth token for scope '{scope}': {e}") from e
 
 
