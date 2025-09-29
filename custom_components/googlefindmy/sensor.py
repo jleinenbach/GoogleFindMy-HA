@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,15 +24,17 @@ async def async_setup_entry(
     """Set up Google Find My Device sensor entities."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities = []
+    entities: list[SensorEntity] = []
 
     # Add global statistics sensors (for the integration itself) if enabled
     if entry.data.get("enable_stats_entities", True):
-        entities.extend([
-            GoogleFindMyStatsSensor(coordinator, "skipped_duplicates", "Skipped Duplicates"),
-            GoogleFindMyStatsSensor(coordinator, "background_updates", "Background Updates"),
-            GoogleFindMyStatsSensor(coordinator, "crowd_sourced_updates", "Crowd-sourced Updates"),
-        ])
+        entities.extend(
+            [
+                GoogleFindMyStatsSensor(coordinator, "skipped_duplicates", "Skipped Duplicates"),
+                GoogleFindMyStatsSensor(coordinator, "background_updates", "Background Updates"),
+                GoogleFindMyStatsSensor(coordinator, "crowd_sourced_updates", "Crowd-sourced Updates"),
+            ]
+        )
 
     # Add per-device last_seen sensors if we have device data
     if coordinator.data:
@@ -67,9 +69,9 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         """Return the icon for the sensor."""
         if "duplicate" in self._stat_key:
             return "mdi:cancel"
-        elif "background" in self._stat_key:
+        if "background" in self._stat_key:
             return "mdi:cloud-download"
-        elif "crowd" in self._stat_key:
+        if "crowd" in self._stat_key:
             return "mdi:account-group"
         return "mdi:counter"
 
@@ -83,7 +85,6 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
             "model": "Find My Device Integration",
             "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
         }
-
 
 
 class GoogleFindMyLastSeenSensor(CoordinatorEntity, SensorEntity):
@@ -103,10 +104,11 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, SensorEntity):
     @property
     def state(self):
         """Return the last_seen timestamp."""
-        device_data = self.coordinator._device_location_data.get(self._device_id, {})
-        last_seen = device_data.get('last_seen')
+        device_data = self.coordinator._device_location_data.get(self._device_id, {})  # noqa: SLF001
+        last_seen = device_data.get("last_seen")
         if last_seen:
             import datetime
+
             return datetime.datetime.fromtimestamp(last_seen).isoformat()
         return None
 
@@ -123,7 +125,13 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, SensorEntity):
 
         try:
             # Try to get the best available URL, preferring external access
-            base_url = get_url(self.hass, prefer_external=True, allow_cloud=True, allow_external=True, allow_internal=True)
+            base_url = get_url(
+                self.hass,
+                prefer_external=True,
+                allow_cloud=True,
+                allow_external=True,
+                allow_internal=True,
+            )
         except Exception:
             base_url = "http://homeassistant.local:8123"
 
@@ -140,10 +148,28 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, SensorEntity):
         }
 
     def _get_map_token(self) -> str:
-        """Generate a simple token for map authentication."""
+        """Generate a token for map authentication.
+
+        Weekly-rotating token when enabled; otherwise a static token.
+        """
         import hashlib
         import time
-        # Use HA's UUID and current day to create a simple token
-        day = str(int(time.time() // 86400))  # Current day since epoch
+
+        # Read option from Config Entry (falls back to default)
+        config_entries = self.hass.config_entries.async_entries(DOMAIN)
+        token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+        if config_entries:
+            token_expiration_enabled = config_entries[0].data.get(
+                "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            )
+
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
-        return hashlib.md5(f"{ha_uuid}:{day}".encode()).hexdigest()[:16]
+        if token_expiration_enabled:
+            # Weekly-rolling token (7-day bucket)
+            week = str(int(time.time() // 604800))
+            token_src = f"{ha_uuid}:{week}"
+        else:
+            # Static token (no rotation)
+            token_src = f"{ha_uuid}:static"
+
+        return hashlib.md5(token_src.encode()).hexdigest()[:16]
