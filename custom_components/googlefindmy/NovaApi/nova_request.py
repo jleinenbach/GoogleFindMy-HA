@@ -295,10 +295,10 @@ async def async_nova_request(api_scope, hex_payload, username=None):
         if response and status == 401:
             # Token expired - clear cached ADM token and retry once
             _logger.warning(f"Got 401 Unauthorized - ADM token likely expired, refreshing...")
-            from custom_components.googlefindmy.Auth.token_cache import set_cached_value
+            from custom_components.googlefindmy.Auth.token_cache import async_set_cached_value
 
             # Clear the expired ADM token
-            set_cached_value(f'adm_token_{username}', None)
+            await async_set_cached_value(f'adm_token_{username}', None)
 
             # Generate new ADM token - run in executor to avoid blocking
             try:
