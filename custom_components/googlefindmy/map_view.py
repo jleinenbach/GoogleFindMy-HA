@@ -682,13 +682,30 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         is_cloud_request = False
         base_url = None
 
-        # Check for Nabu Casa cloud indicators
-        if any(cloud_indicator in host_header.lower() for cloud_indicator in ['nabu', 'ui.nabu.casa']):
+        # Check for Nabu Casa cloud indicators - more comprehensive detection
+        cloud_indicators = ['nabu', 'ui.nabu.casa', 'www.nabucasa.com', 'nabucasa.com', 'duckdns.org', 'remote.nabucasa.com']
+        if any(cloud_indicator in host_header.lower() for cloud_indicator in cloud_indicators):
             is_cloud_request = True
-        elif x_forwarded_host and any(cloud_indicator in x_forwarded_host.lower() for cloud_indicator in ['nabu', 'ui.nabu.casa']):
+        elif x_forwarded_host and any(cloud_indicator in x_forwarded_host.lower() for cloud_indicator in cloud_indicators):
             is_cloud_request = True
-        elif origin and any(cloud_indicator in origin.lower() for cloud_indicator in ['nabu', 'ui.nabu.casa']):
+        elif origin and any(cloud_indicator in origin.lower() for cloud_indicator in cloud_indicators):
             is_cloud_request = True
+
+        # Additional checks for cloud requests
+        # Check for non-local IP addresses in Host header (could indicate external/cloud access)
+        if not is_cloud_request and host_header:
+            host_ip = host_header.split(':')[0]  # Remove port if present
+            # Check if host is not a local/private IP address
+            if not (
+                host_ip.startswith('192.168.') or
+                host_ip.startswith('10.') or
+                host_ip.startswith('172.') and host_ip.split('.')[1].isdigit() and 16 <= int(host_ip.split('.')[1]) <= 31 or
+                host_ip in ['localhost', '127.0.0.1', 'homeassistant.local'] or
+                host_ip.startswith('127.') or
+                host_ip.startswith('169.254.')  # Link-local
+            ):
+                is_cloud_request = True
+                _LOGGER.debug(f"Detected external IP in host header: {host_ip}, treating as cloud request")
 
         if is_cloud_request:
             # Use HA's cloud/external URL detection

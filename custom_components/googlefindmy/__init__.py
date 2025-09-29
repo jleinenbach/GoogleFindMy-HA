@@ -250,9 +250,23 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             # Generate auth token for map access
             import hashlib
             import time
-            day = str(int(time.time() // 86400))
+            from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+
+            # Check if token expiration is enabled in config
+            config_entries = hass.config_entries.async_entries(DOMAIN)
+            token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            if config_entries:
+                token_expiration_enabled = config_entries[0].data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+
             ha_uuid = str(hass.data.get("core.uuid", "ha"))
-            auth_token = hashlib.md5(f"{ha_uuid}:{day}".encode()).hexdigest()[:16]
+
+            if token_expiration_enabled:
+                # Use weekly expiration when enabled
+                week = str(int(time.time() // 604800))  # Current week since epoch (7 days)
+                auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
+            else:
+                # No expiration - use static token based on HA UUID only
+                auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
 
             # Update all Google Find My devices
             updated_count = 0
