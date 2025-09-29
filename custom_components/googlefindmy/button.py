@@ -86,12 +86,13 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         import hashlib
         import time
 
-        # Read option from Config Entry (falls back to default)
-        config_entries = self.hass.config_entries.async_entries(DOMAIN)
+        # Read option from the current config entry (options preferred; fallback to data)
+        config_entry = getattr(self.coordinator, "config_entry", None)
         token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-        if config_entries:
-            token_expiration_enabled = config_entries[0].data.get(
-                "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+        if config_entry:
+            token_expiration_enabled = config_entry.options.get(
+                "map_view_token_expiration",
+                config_entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
             )
 
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
