@@ -10,6 +10,7 @@ import ipaddress  # IPv4/IPv6 checks for private/link-local/loopback
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 from homeassistant.util import dt as dt_util
 
@@ -255,7 +256,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                 function updateMap() {{
                     const startTime = document.getElementById('startTime').value;
                     const endTime = document.getElementById('endTime').value;
-                    const accuracyFilter = document.getElementById('accuracySlider').value;
 
                     if (!startTime || !endTime) {{
                         alert('Please select both start and end times');
@@ -265,11 +265,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                     const url = new URL(window.location.href);
                     url.searchParams.set('start', startTime + ':00Z');
                     url.searchParams.set('end', endTime + ':00Z');
-                    if (accuracyFilter > 0) {
-                        url.searchParams.set('accuracy', accuracyFilter);
-                    } else {
-                        url.searchParams.delete('accuracy');
-                    }
                     window.location.href = url.toString();
                 }}
                 </script>
@@ -591,6 +586,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                 function updateMap() {{
                     const startTime = document.getElementById('startTime').value;
                     const endTime = document.getElementById('endTime').value;
+                    const accuracyFilter = document.getElementById('accuracySlider').value;
 
                     if (!startTime || !endTime) {{
                         alert('Please select both start and end times');
@@ -600,6 +596,11 @@ class GoogleFindMyMapView(HomeAssistantView):
                     const url = new URL(window.location.href);
                     url.searchParams.set('start', startTime + ':00Z');
                     url.searchParams.set('end', endTime + ':00Z');
+                    if (accuracyFilter > 0) {{
+                        url.searchParams.set('accuracy', accuracyFilter);
+                    }} else {{
+                        url.searchParams.delete('accuracy');
+                    }}
                     window.location.href = url.toString();
                 }}
 
@@ -704,6 +705,7 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         # Check for non-local IP addresses in Host header (could indicate external/cloud access)
         if not is_cloud_request and host_header:
             host_ip = host_header.split(':')[0]  # Remove port if present
+            # Check if host is not a local/private IP address
             if not _is_private_host(host_ip):
                 is_cloud_request = True
                 _LOGGER.debug(f"Detected external IP in host header: {host_ip}, treating as cloud request")
@@ -711,12 +713,14 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         # Prefer HA's URL helper first (best practice)
         try:
             if is_cloud_request:
+                # Use HA's cloud/external URL detection
                 base_url = get_url(self.hass, prefer_external=True, allow_cloud=True)
                 _LOGGER.info(f"Detected cloud request, using external URL: {base_url}")
             else:
+                # Use HA's internal URL for local requests
                 base_url = get_url(self.hass, prefer_external=False, allow_cloud=False, allow_external=False, allow_internal=True)
                 _LOGGER.info(f"Detected local request, using internal URL: {base_url}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _LOGGER.warning(f"URL detection with get_url failed: {e}")
 
         if not base_url:
