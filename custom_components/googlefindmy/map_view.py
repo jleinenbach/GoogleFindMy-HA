@@ -255,6 +255,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                 function updateMap() {{
                     const startTime = document.getElementById('startTime').value;
                     const endTime = document.getElementById('endTime').value;
+                    const accuracyFilter = document.getElementById('accuracySlider').value;
 
                     if (!startTime || !endTime) {{
                         alert('Please select both start and end times');
@@ -264,6 +265,11 @@ class GoogleFindMyMapView(HomeAssistantView):
                     const url = new URL(window.location.href);
                     url.searchParams.set('start', startTime + ':00Z');
                     url.searchParams.set('end', endTime + ':00Z');
+                    if (accuracyFilter > 0) {
+                        url.searchParams.set('accuracy', accuracyFilter);
+                    } else {
+                        url.searchParams.delete('accuracy');
+                    }
                     window.location.href = url.toString();
                 }}
                 </script>
