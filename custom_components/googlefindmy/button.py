@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ async def async_setup_entry(
     """Set up Google Find My Device button entities."""
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][config_entry.entry_id]
 
-    entities = []
+    entities: list[GoogleFindMyPlaySoundButton] = []
     if coordinator.data:
         for device in coordinator.data:
             entities.append(GoogleFindMyPlaySoundButton(coordinator, device))
@@ -56,7 +56,13 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
 
         try:
             # Try to get the best available URL, preferring external access
-            base_url = get_url(self.hass, prefer_external=True, allow_cloud=True, allow_external=True, allow_internal=True)
+            base_url = get_url(
+                self.hass,
+                prefer_external=True,
+                allow_cloud=True,
+                allow_external=True,
+                allow_internal=True,
+            )
         except Exception:
             base_url = "http://homeassistant.local:8123"
 
@@ -73,13 +79,31 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         }
 
     def _get_map_token(self) -> str:
-        """Generate a simple token for map authentication."""
+        """Generate a token for map authentication.
+
+        Weekly-rotating token when enabled; otherwise a static token.
+        """
         import hashlib
         import time
-        # Use HA's UUID and current day to create a simple token
-        day = str(int(time.time() // 86400))  # Current day since epoch
+
+        # Read option from Config Entry (falls back to default)
+        config_entries = self.hass.config_entries.async_entries(DOMAIN)
+        token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+        if config_entries:
+            token_expiration_enabled = config_entries[0].data.get(
+                "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            )
+
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
-        return hashlib.md5(f"{ha_uuid}:{day}".encode()).hexdigest()[:16]
+        if token_expiration_enabled:
+            # Weekly-rolling token (7-day bucket)
+            week = str(int(time.time() // 604800))
+            token_src = f"{ha_uuid}:{week}"
+        else:
+            # Static token (no rotation)
+            token_src = f"{ha_uuid}:static"
+
+        return hashlib.md5(token_src.encode()).hexdigest()[:16]
 
     async def async_press(self) -> None:
         """Handle the button press."""
@@ -87,12 +111,12 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         device_name = self._device["name"]
 
         _LOGGER.debug(f"Play sound button pressed for {device_name} ({device_id})")
-        
+
         try:
             result = await self.coordinator.async_play_sound(device_id)
             if result:
                 _LOGGER.info(f"Successfully played sound on {device_name}")
             else:
                 _LOGGER.warning(f"Failed to play sound on {device_name}")
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.error(f"Error playing sound on {device_name}: {err}")
