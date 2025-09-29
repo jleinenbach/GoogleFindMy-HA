@@ -11,6 +11,8 @@ from bs4 import BeautifulSoup
 from custom_components.googlefindmy.Auth.aas_token_retrieval import get_aas_token
 from custom_components.googlefindmy.Auth.adm_token_retrieval import get_adm_token
 from custom_components.googlefindmy.Auth.username_provider import get_username
+# New: non-blocking for async context
+from custom_components.googlefindmy.Auth.adm_token_retrieval import async_get_adm_token
 
 
 def nova_request(api_scope, hex_payload):
@@ -81,55 +83,16 @@ def nova_request(api_scope, hex_payload):
     _logger.debug(f"Request headers: {headers}")
     _logger.debug(f"Payload length: {len(payload)} bytes")
     
-    # Add retry logic for transient failures
-    max_retries = 3
-    retry_delay = 1
-
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(url, headers=headers, data=payload, timeout=30)
-
-            _logger.debug(f"Nova API response status: {response.status_code} (attempt {attempt + 1}/{max_retries})")
-            _logger.debug(f"Response content length: {len(response.content)} bytes")
-
-            if response.status_code == 200:
-                result_hex = response.content.hex()
-                _logger.debug(f"Nova API success - returning {len(result_hex)} characters of hex data")
-                return result_hex
-            elif response.status_code == 401:
-                break  # Don't retry on auth errors
-            elif response.status_code in [500, 502, 503, 504]:
-                # Server errors - retry with exponential backoff
-                if attempt < max_retries - 1:
-                    import time
-                    wait_time = retry_delay * (2 ** attempt)
-                    _logger.warning(f"Got {response.status_code} error, retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    _logger.error(f"Nova API failed with {response.status_code} after {max_retries} attempts")
-            else:
-                break  # Don't retry on client errors
-        except requests.Timeout:
-            if attempt < max_retries - 1:
-                import time
-                wait_time = retry_delay * (2 ** attempt)
-                _logger.warning(f"Request timeout, retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-                continue
-            else:
-                raise RuntimeError(f"Nova API request timed out after {max_retries} attempts")
-        except requests.ConnectionError as e:
-            if attempt < max_retries - 1:
-                import time
-                wait_time = retry_delay * (2 ** attempt)
-                _logger.warning(f"Connection error: {e}, retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-                continue
-            else:
-                raise RuntimeError(f"Connection error after {max_retries} attempts: {e}")
-
-    if response.status_code == 401:
+    response = requests.post(url, headers=headers, data=payload)
+    
+    _logger.debug(f"Nova API response status: {response.status_code}")
+    _logger.debug(f"Response content length: {len(response.content)} bytes")
+    
+    if response.status_code == 200:
+        result_hex = response.content.hex()
+        _logger.debug(f"Nova API success - returning {len(result_hex)} characters of hex data")
+        return result_hex
+    elif response.status_code == 401:
         # Token expired - clear cached ADM token and retry once
         _logger.warning(f"Got 401 Unauthorized - ADM token likely expired, refreshing...")
         from custom_components.googlefindmy.Auth.token_cache import set_cached_value
@@ -208,14 +171,10 @@ async def async_nova_request(api_scope, hex_payload, username=None):
                 break
 
     if not android_device_manager_oauth_token:
-        # Fall back to generating ADM token - run in executor to avoid blocking
+        # Fall back to generating ADM token - now non-blocking
         try:
             _logger.info("Attempting to generate new ADM token...")
-            import asyncio
-            loop = asyncio.get_event_loop()
-            android_device_manager_oauth_token = await loop.run_in_executor(
-                None, get_adm_token, username
-            )
+            android_device_manager_oauth_token = await async_get_adm_token(username)
             _logger.info(f"Generated ADM token: {'Success' if android_device_manager_oauth_token else 'Failed'}")
         except Exception as e:
             _logger.error(f"ADM token generation failed: {e}")
@@ -240,107 +199,58 @@ async def async_nova_request(api_scope, hex_payload, username=None):
     _logger.debug(f"Making async Nova API request to: {url}")
     _logger.debug(f"Payload length: {len(payload)} bytes")
     
-    # Add retry logic for transient failures
-    max_retries = 3
-    retry_delay = 1
-    response = None
-    content = None
-    status = None
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, data=payload) as response:
+            content = await response.read()
+            
+            _logger.debug(f"Nova API response status: {response.status}")
+            _logger.debug(f"Response content length: {len(content)} bytes")
+            
+            if response.status == 200:
+                result_hex = content.hex()
+                _logger.debug(f"Nova API success - returning {len(result_hex)} characters of hex data")
+                return result_hex
+            elif response.status == 401:
+                # Token expired - clear cached ADM token and retry once
+                _logger.warning(f"Got 401 Unauthorized - ADM token likely expired, refreshing...")
+                from custom_components.googlefindmy.Auth.token_cache import set_cached_value
+                
+                # Clear the expired ADM token
+                set_cached_value(f'adm_token_{username}', None)
+                
+                # Generate new ADM token - non-blocking
+                try:
+                    _logger.info("Generating fresh ADM token...")
+                    android_device_manager_oauth_token = await async_get_adm_token(username)
 
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        for attempt in range(max_retries):
-            try:
-                async with session.post(url, headers=headers, data=payload) as response:
-                    content = await response.read()
-                    status = response.status
-
-                    _logger.debug(f"Nova API response status: {status} (attempt {attempt + 1}/{max_retries})")
-                    _logger.debug(f"Response content length: {len(content)} bytes")
-
-                    if status == 200:
-                        result_hex = content.hex()
-                        _logger.debug(f"Nova API success - returning {len(result_hex)} characters of hex data")
-                        return result_hex
-                    elif status == 401:
-                        break  # Don't retry on auth errors, handle below
-                    elif status in [500, 502, 503, 504]:
-                        # Server errors - retry with exponential backoff
-                        if attempt < max_retries - 1:
-                            wait_time = retry_delay * (2 ** attempt)
-                            _logger.warning(f"Got {status} error, retrying in {wait_time} seconds...")
-                            await asyncio.sleep(wait_time)
-                            continue
-                        else:
-                            _logger.error(f"Nova API failed with {status} after {max_retries} attempts")
+                    if android_device_manager_oauth_token:
+                        # Retry request with new token
+                        headers["Authorization"] = "Bearer " + android_device_manager_oauth_token
+                        _logger.debug("Retrying Nova API request with fresh token...")
+                        
+                        async with session.post(url, headers=headers, data=payload) as retry_response:
+                            retry_content = await retry_response.read()
+                            
+                            if retry_response.status == 200:
+                                result_hex = retry_content.hex()
+                                _logger.debug(f"Nova API success after token refresh - returning {len(result_hex)} characters")
+                                return result_hex
+                            else:
+                                _logger.error(f"Nova API still failed after token refresh: status={retry_response.status}")
+                                raise RuntimeError(f"Nova API request failed after token refresh with status {retry_response.status}")
                     else:
-                        break  # Don't retry on client errors
-
-            except asyncio.TimeoutError:
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (2 ** attempt)
-                    _logger.warning(f"Request timeout, retrying in {wait_time} seconds...")
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    raise RuntimeError(f"Nova API request timed out after {max_retries} attempts")
-            except aiohttp.ClientError as e:
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (2 ** attempt)
-                    _logger.warning(f"Client error: {e}, retrying in {wait_time} seconds...")
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    raise RuntimeError(f"Client error after {max_retries} attempts: {e}")
-
-        if response and status == 401:
-            # Token expired - clear cached ADM token and retry once
-            _logger.warning(f"Got 401 Unauthorized - ADM token likely expired, refreshing...")
-            from custom_components.googlefindmy.Auth.token_cache import async_set_cached_value
-
-            # Clear the expired ADM token
-            await async_set_cached_value(f'adm_token_{username}', None)
-
-            # Generate new ADM token - run in executor to avoid blocking
-            try:
-                _logger.info("Generating fresh ADM token...")
-                import asyncio
-                loop = asyncio.get_event_loop()
-                android_device_manager_oauth_token = await loop.run_in_executor(
-                    None, get_adm_token, username
-                )
-
-                if android_device_manager_oauth_token:
-                    # Retry request with new token
-                    headers["Authorization"] = "Bearer " + android_device_manager_oauth_token
-                    _logger.debug("Retrying Nova API request with fresh token...")
-
-                    async with session.post(url, headers=headers, data=payload) as retry_response:
-                        retry_content = await retry_response.read()
-
-                        if retry_response.status == 200:
-                            result_hex = retry_content.hex()
-                            _logger.debug(f"Nova API success after token refresh - returning {len(result_hex)} characters")
-                            return result_hex
-                        else:
-                            _logger.error(f"Nova API still failed after token refresh: status={retry_response.status}")
-                            raise RuntimeError(f"Nova API request failed after token refresh with status {retry_response.status}")
-                else:
-                    _logger.error("Failed to generate new ADM token")
-                    raise RuntimeError("Failed to refresh ADM token after 401 error")
-
-            except Exception as e:
-                _logger.error(f"Token refresh failed: {e}")
-                raise RuntimeError(f"Failed to refresh ADM token: {e}")
-        elif response:
-            # Handle other non-200 responses
-            error_text = content.decode('utf-8', errors='ignore') if content else ""
-            soup = BeautifulSoup(error_text, 'html.parser')
-            error_message = soup.get_text() if soup else error_text
-            _logger.debug(f"Nova API failed: status={status}, error='{error_message[:200]}...'")
-            raise RuntimeError(f"Nova API request failed with status {status}: {error_message}")
-        else:
-            # No response at all
-            raise RuntimeError("Nova API request failed: no response received")
+                        _logger.error("Failed to generate new ADM token")
+                        raise RuntimeError("Failed to refresh ADM token after 401 error")
+                        
+                except Exception as e:
+                    _logger.error(f"Token refresh failed: {e}")
+                    raise RuntimeError(f"Failed to refresh ADM token: {e}")
+            else:
+                error_text = await response.text()
+                soup = BeautifulSoup(error_text, 'html.parser')
+                error_message = soup.get_text() if soup else error_text
+                _logger.debug(f"Nova API failed: status={response.status}, error='{error_message[:200]}...'")
+                raise RuntimeError(f"Nova API request failed with status {response.status}: {error_message}")
 
 
 if __name__ == '__main__':
