@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from aiohttp import web
+import ipaddress  # IPv4/IPv6 checks for private/link-local/loopback
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
@@ -15,6 +16,16 @@ from homeassistant.util import dt as dt_util
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _is_private_host(host: str) -> bool:
+    """Return True if host is private/loopback/link-local (IPv4/IPv6) or a known local hostname."""
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        # Not an IP literal; treat common local names as private
+        return host in ("localhost", "homeassistant.local")
 
 
 class GoogleFindMyMapView(HomeAssistantView):
@@ -80,12 +91,7 @@ class GoogleFindMyMapView(HomeAssistantView):
 
             found_entity = False
             for entity in entity_registry.entities.values():
-                if (
-                    entity.unique_id
-                    and device_id in entity.unique_id
-                    and entity.platform == "googlefindmy"
-                    and entity.entity_id.startswith("device_tracker.")
-                ):
+                if entity.unique_id and device_id in entity.unique_id and entity.platform == "googlefindmy" and entity.entity_id.startswith("device_tracker."):
                     _LOGGER.debug(f"Found matching entity: {entity.entity_id} with unique_id: {entity.unique_id}")
                     entity_id = entity.entity_id
                     found_entity = True
@@ -142,10 +148,8 @@ class GoogleFindMyMapView(HomeAssistantView):
             if entity_id in history:
                 last_seen = None
                 for state in history[entity_id]:
-                    if (
-                        state.attributes.get("latitude") is not None
-                        and state.attributes.get("longitude") is not None
-                    ):
+                    if (state.attributes.get("latitude") is not None and
+                        state.attributes.get("longitude") is not None):
 
                         # Skip duplicates based on last_seen attribute
                         current_last_seen = state.attributes.get("last_seen")
@@ -166,9 +170,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                         })
 
             # Generate HTML map
-            html_content = self._generate_map_html(
-                device_name, locations, device_id, start_time, end_time, accuracy_filter
-            )
+            html_content = self._generate_map_html(device_name, locations, device_id, start_time, end_time, accuracy_filter)
 
             return web.Response(
                 text=html_content,
@@ -176,22 +178,14 @@ class GoogleFindMyMapView(HomeAssistantView):
                 charset="utf-8"
             )
 
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _LOGGER.error(f"Error generating map for device {device_id}: {e}")
             return web.Response(
                 text=f"Error generating map: {e}",
                 status=500
             )
 
-    def _generate_map_html(
-        self,
-        device_name: str,
-        locations: list[dict[str, Any]],
-        device_id: str,
-        start_time: datetime,
-        end_time: datetime,
-        accuracy_filter: int = 0
-    ) -> str:
+    def _generate_map_html(self, device_name: str, locations: list[dict[str, Any]], device_id: str, start_time: datetime, end_time: datetime, accuracy_filter: int = 0) -> str:
         """Generate HTML content for the map."""
         # Format times for display - convert to Home Assistant's local timezone
         start_local_tz = dt_util.as_local(start_time)
@@ -591,7 +585,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                 function updateMap() {{
                     const startTime = document.getElementById('startTime').value;
                     const endTime = document.getElementById('endTime').value;
-                    const accuracyFilter = document.getElementById('accuracySlider').value;
 
                     if (!startTime || !endTime) {{
                         alert('Please select both start and end times');
@@ -601,11 +594,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                     const url = new URL(window.location.href);
                     url.searchParams.set('start', startTime + ':00Z');
                     url.searchParams.set('end', endTime + ':00Z');
-                    if (accuracyFilter > 0) {{
-                        url.searchParams.set('accuracy', accuracyFilter);
-                    }} else {{
-                        url.searchParams.delete('accuracy');
-                    }}
                     window.location.href = url.toString();
                 }}
 
@@ -697,65 +685,38 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         is_cloud_request = False
         base_url: str | None = None
 
-        # Broader cloud indicator detection
-        cloud_indicators = (
-            'nabu', 'ui.nabu.casa', 'www.nabucasa.com', 'nabucasa.com',
-            'duckdns.org', 'remote.nabucasa.com'
-        )
-        lh = (host_header or "").lower()
-        xfh = (x_forwarded_host or "").lower()
-        og = (origin or "").lower()
-        if any(ci in lh for ci in cloud_indicators):
+        # Check for Nabu Casa cloud indicators - more comprehensive detection
+        cloud_indicators = ['nabu', 'ui.nabu.casa', 'www.nabucasa.com', 'nabucasa.com', 'duckdns.org', 'remote.nabucasa.com']
+        if any(cloud_indicator in host_header.lower() for cloud_indicator in cloud_indicators):
             is_cloud_request = True
-        elif any(ci in xfh for ci in cloud_indicators):
+        elif x_forwarded_host and any(cloud_indicator in x_forwarded_host.lower() for cloud_indicator in cloud_indicators):
             is_cloud_request = True
-        elif any(ci in og for ci in cloud_indicators):
+        elif origin and any(cloud_indicator in origin.lower() for cloud_indicator in cloud_indicators):
             is_cloud_request = True
 
-        # Additional heuristic: public Host IP ⇒ external/cloud
+        # Additional checks for cloud requests
+        # Check for non-local IP addresses in Host header (could indicate external/cloud access)
         if not is_cloud_request and host_header:
-            host_ip = host_header.split(':')[0]  # strip port
-            def _is_private(ip: str) -> bool:
-                return (
-                    ip.startswith('192.168.')
-                    or ip.startswith('10.')
-                    or (ip.startswith('172.') and ip.split('.')[1].isdigit()
-                        and 16 <= int(ip.split('.')[1]) <= 31)  # RFC1918 172.16/12
-                    or ip in ('localhost', '127.0.0.1', 'homeassistant.local')
-                    or ip.startswith('127.')                # loopback
-                    or ip.startswith('169.254.')            # link-local (RFC3927)
-                )
-            if not _is_private(host_ip):
+            host_ip = host_header.split(':')[0]  # Remove port if present
+            if not _is_private_host(host_ip):
                 is_cloud_request = True
-                _LOGGER.debug("Detected external IP in Host header (%s) → treat as cloud request", host_ip)
+                _LOGGER.debug(f"Detected external IP in host header: {host_ip}, treating as cloud request")
 
         # Prefer HA's URL helper first (best practice)
         try:
             if is_cloud_request:
-                base_url = get_url(
-                    self.hass,
-                    prefer_external=True,
-                    allow_cloud=True,
-                    allow_external=True,
-                    allow_internal=True,
-                )
-                _LOGGER.info("Detected cloud request, using external URL: %s", base_url)
+                base_url = get_url(self.hass, prefer_external=True, allow_cloud=True)
+                _LOGGER.info(f"Detected cloud request, using external URL: {base_url}")
             else:
-                base_url = get_url(
-                    self.hass,
-                    prefer_external=False,
-                    allow_cloud=False,
-                    allow_external=False,
-                    allow_internal=True,
-                )
-                _LOGGER.info("Detected local request, using internal URL: %s", base_url)
+                base_url = get_url(self.hass, prefer_external=False, allow_cloud=False, allow_external=False, allow_internal=True)
+                _LOGGER.info(f"Detected local request, using internal URL: {base_url}")
         except Exception as e:  # noqa: BLE001
-            _LOGGER.warning("URL detection with get_url failed: %s", e)
+            _LOGGER.warning(f"URL detection with get_url failed: {e}")
 
-        # Fallbacks only if get_url was not available
         if not base_url:
+            # Use local IP detection for local requests
             try:
-                # Last-resort local IP detection (may fail offline)
+                # Use socket connection method to get the actual local network IP
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s.connect(("8.8.8.8", 80))
                 local_ip = s.getsockname()[0]
@@ -764,20 +725,30 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
                 # Get HA port and SSL settings from config
                 port = 8123
                 use_ssl = False
+
+                # Try to get actual port from HA configuration
                 if hasattr(self.hass, 'http') and hasattr(self.hass.http, 'server_port'):
                     port = self.hass.http.server_port or 8123
-                    use_ssl = getattr(self.hass.http, 'ssl_context', None) is not None
+                    use_ssl = hasattr(self.hass.http, 'ssl_context') and self.hass.http.ssl_context is not None
 
                 protocol = "https" if use_ssl else "http"
                 base_url = f"{protocol}://{local_ip}:{port}"
-                _LOGGER.info("Using socket-derived local URL fallback: %s", base_url)
-            except Exception as e:  # noqa: BLE001
-                _LOGGER.error("All URL detection methods failed (%s) – falling back to default hostname", e)
-                base_url = "http://homeassistant.local:8123"
+                _LOGGER.info(f"Detected local request, using local IP URL: {base_url}")
+
+            except Exception as e:
+                _LOGGER.warning(f"Local IP detection failed: {e}, falling back to HA network detection")
+                # Fallback to HA's network detection
+                try:
+                    base_url = get_url(self.hass, prefer_external=False, allow_cloud=False, allow_external=False, allow_internal=True)
+                    _LOGGER.info(f"Using HA internal URL fallback: {base_url}")
+                except Exception as fallback_e:
+                    _LOGGER.error(f"All URL detection methods failed: {fallback_e}")
+                    base_url = "http://homeassistant.local:8123"
 
         # Build the redirect URL
         redirect_url = f"{base_url}/api/googlefindmy/map/{device_id}?token={auth_token}"
-        _LOGGER.info("Redirecting to: %s", redirect_url)
+
+        _LOGGER.debug(f"Redirecting to: {redirect_url}")
 
         # Return a 302 redirect response
         return web.Response(status=302, headers={'Location': redirect_url})
