@@ -148,7 +148,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, SensorEntity):
         }
 
     def _get_map_token(self) -> str:
-        """Generate a token for map authentication.
+        """Generate a simple token for map authentication.
 
         Weekly-rotating token when enabled; otherwise a static token.
         """
