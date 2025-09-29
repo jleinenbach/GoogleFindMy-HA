@@ -117,7 +117,7 @@ To contrubuted, please:
 - Böttger, L. (2024). GoogleFindMyTools [Computer software]. https://github.com/leonboe1/GoogleFindMyTools
 - Firebase Cloud Messaging integration. https://github.com/home-assistant/mobile-apps-fcm-push
 
-## Special thanks to contributors!
+## Special thanks to some amazing contributors!
 
 - @DominicWindisch
 - @suka97
