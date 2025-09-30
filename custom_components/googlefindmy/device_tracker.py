@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
+from homeassistant.const import ATTR_GPS_ACCURACY
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE, PERCENTAGE
 from homeassistant.config_entries import ConfigEntry
@@ -14,14 +15,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import GoogleFindMyCoordinator
-
-# Back-compat: try to import the accuracy attribute constant; fallback to plain key
-try:
-    from homeassistant.const import ATTR_GPS_ACCURACY (  # type: ignore[attr-defined]
-        ATTR_GPS_ACCURACY as _ATTR_GPS_ACCURACY,
-    )
-except Exception:  # noqa: BLE001
-    _ATTR_GPS_ACCURACY = "gps_accuracy"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,7 +72,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         # Read standard device_tracker attributes (with fallbacks)
         lat = last_state.attributes.get(ATTR_LATITUDE, last_state.attributes.get("latitude"))
         lon = last_state.attributes.get(ATTR_LONGITUDE, last_state.attributes.get("longitude"))
-        acc = last_state.attributes.get(_ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy"))
+        acc = last_state.attributes.get(ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy"))
         batt = last_state.attributes.get("battery_level")
 
         restored: dict[str, Any] = {}
@@ -350,8 +343,8 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
                     _LOGGER.info(
                         "Keeping previous good data for %s: current accuracy=%sm > threshold=%sm",
                         self._device["name"],
-                        ,
-                        min__threshold,
+                        float(accuracy),
+                        float(min_accuracy_threshold),
                     )
         elif device_data:
             # No filtering or no accuracy data - use current data
