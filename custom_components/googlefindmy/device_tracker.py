@@ -5,7 +5,6 @@ import logging
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
-from homeassistant.const import PERCENTAGE # why?
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.const import (
     ATTR_GPS_ACCURACY,  # correct import location
