@@ -104,7 +104,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
     @property
     def state(self):
         """Return the last_seen timestamp."""
-        device_data = self.coordinator._device_location_data.get(self._device_id, {})  # noqa: SLF001
+        device_data = self.coordinator._device_location_data.get(self._device_id, {})
         last_seen = device_data.get('last_seen')
         if last_seen:
             import datetime
