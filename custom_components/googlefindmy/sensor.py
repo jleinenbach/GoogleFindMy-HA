@@ -5,7 +5,7 @@ from typing import Any
 from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
-    RestoreSensor,  # Use HA-managed restore for sensors
+    RestoreSensor,  # use HA's built-in restore for sensors
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -25,7 +25,8 @@ async def async_setup_entry(
     """Set up Google Find My Device sensor entities."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities = []
+    # Explicit typing preferred
+    entities: list[SensorEntity] = []
 
     # Add global statistics sensors (for the integration itself) if enabled
     if entry.data.get("enable_stats_entities", True):
@@ -103,7 +104,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
     @property
     def state(self):
         """Return the last_seen timestamp."""
-        device_data = self.coordinator._device_location_data.get(self._device_id, {})
+        device_data = self.coordinator._device_location_data.get(self._device_id, {})  # noqa: SLF001
         last_seen = device_data.get('last_seen')
         if last_seen:
             import datetime
@@ -111,25 +112,24 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         return None
 
     async def async_added_to_hass(self) -> None:
-        """Restore last_seen on restart via RestoreSensor and seed coordinator cache.
+        """Restore last_seen from HA's persistent store and seed coordinator cache.
 
-        Best practice:
-        - read last native value from HA-managed restore store
-        - convert to epoch seconds and write into coordinator cache (non-invasive)
+        Best effort only: if restore fails or no value is present, do nothing.
         """
         await super().async_added_to_hass()
-        value = None
+
+        # Use RestoreSensor API to get the last native value
         try:
             data = await self.async_get_last_sensor_data()
             value = getattr(data, "native_value", None) if data else None
-        except Exception:  # noqa: BLE001
+        except Exception:
             value = None
 
         if value in (None, "unknown", "unavailable"):
             return
 
-        # Parse into epoch seconds (accept ISO string or numeric)
-        ts = None
+        # Parse restored value -> epoch seconds for coordinator cache
+        ts: float | None = None
         try:
             from datetime import datetime, timezone
             if isinstance(value, (int, float)):
@@ -152,10 +152,10 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
             return
 
         # Seed coordinator cache so state() has data immediately after restart
-        try:
-            mapping = self.coordinator._device_location_data.get(self._device_id, {})
+        try:  # noqa: SIM105
+            mapping = self.coordinator._device_location_data.get(self._device_id, {})  # noqa: SLF001
             mapping.setdefault("last_seen", ts)
-            self.coordinator._device_location_data[self._device_id] = mapping
+            self.coordinator._device_location_data[self._device_id] = mapping  # noqa: SLF001
         except Exception:
             pass
 
@@ -192,7 +192,6 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     def _get_map_token(self) -> str:
         """Generate a simple token for map authentication.
-
         Weekly-rotating token when enabled; otherwise a static token.
         """
         import hashlib
