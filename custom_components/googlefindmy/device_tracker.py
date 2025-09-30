@@ -5,7 +5,9 @@ import logging
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
-from homeassistant.const import PERCENTAGE
+from homeassistant.components.device_tracker.const import ATTR_GPS_ACCURACY
+from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE, PERCENTAGE
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -25,7 +27,7 @@ async def async_setup_entry(
     """Set up Google Find My Device tracker entities."""
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][config_entry.entry_id]
 
-    entities = []
+    entities: list[GoogleFindMyDeviceTracker] = []
     if coordinator.data:
         for device in coordinator.data:
             entities.append(GoogleFindMyDeviceTracker(coordinator, device))
@@ -33,7 +35,7 @@ async def async_setup_entry(
     async_add_entities(entities, True)
 
 
-class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
+class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity):
     """Representation of a Google Find My Device tracker."""
 
     def __init__(
@@ -50,10 +52,56 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
         self._attr_has_entity_name = False
         self._attr_entity_category = None  # Ensure device trackers are not diagnostic
         # Set battery attributes for proper display
-        self._attr_battery_level = None
+        self._attr_battery_level: int | None = None
         self._attr_battery_unit = PERCENTAGE
         # Track last good accuracy location for database writes
-        self._last_good_accuracy_data = None
+        self._last_good_accuracy_data: dict[str, Any] | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last known coordinates/battery after restart via RestoreEntity."""
+        await super().async_added_to_hass()
+
+        try:
+            last_state = await self.async_get_last_state()
+        except Exception:  # noqa: BLE001
+            last_state = None
+
+        if not last_state:
+            return
+
+        # Read standard device_tracker attributes (with fallbacks)
+        lat = last_state.attributes.get(ATTR_LATITUDE, last_state.attributes.get("latitude"))
+        lon = last_state.attributes.get(ATTR_LONGITUDE, last_state.attributes.get("longitude"))
+        acc = last_state.attributes.get(ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy"))
+        batt = last_state.attributes.get("battery_level")
+
+        restored: dict[str, Any] = {}
+        try:
+            if lat is not None and lon is not None:
+                restored["latitude"] = float(lat)
+                restored["longitude"] = float(lon)
+            if acc is not None:
+                restored["accuracy"] = int(acc)
+            if batt is not None:
+                restored["battery_level"] = int(batt)
+        except (TypeError, ValueError):
+            # Ignore malformed persisted attributes
+            restored = {}
+
+        # Seed our own cache and the coordinator cache so properties return data immediately
+        if restored:
+            self._last_good_accuracy_data = {**restored}
+            self._attr_battery_level = restored.get("battery_level")
+
+            try:  # Prime coordinator cache used by other entities (e.g., map/last_seen)
+                dev_id = self._device["id"]
+                mapping = self.coordinator._device_location_data.get(dev_id, {})  # noqa: SLF001
+                mapping.update(restored)
+                self.coordinator._device_location_data[dev_id] = mapping  # noqa: SLF001
+            except Exception:
+                pass
+
+            self.async_write_ha_state()
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -78,9 +126,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
             use_ssl = False
 
             # Try to get actual port from HA configuration
-            if hasattr(self.hass, 'http') and hasattr(self.hass.http, 'server_port'):
+            if hasattr(self.hass, "http") and hasattr(self.hass.http, "server_port"):
                 port = self.hass.http.server_port or 8123
-                use_ssl = hasattr(self.hass.http, 'ssl_context') and self.hass.http.ssl_context is not None
+                use_ssl = hasattr(self.hass.http, "ssl_context") and self.hass.http.ssl_context is not None
 
             protocol = "https" if use_ssl else "http"
             base_url = f"{protocol}://{local_ip}:{port}"
@@ -89,7 +137,13 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
             _LOGGER.debug(f"Local IP detection failed: {e}, using fallback URL")
             # Fallback to HA's network detection
             try:
-                base_url = get_url(self.hass, prefer_external=False, allow_cloud=False, allow_external=False, allow_internal=True)
+                base_url = get_url(
+                    self.hass,
+                    prefer_external=False,
+                    allow_cloud=False,
+                    allow_external=False,
+                    allow_internal=True,
+                )
             except Exception as fallback_e:
                 _LOGGER.warning(f"All URL detection methods failed: {fallback_e}")
                 base_url = "http://homeassistant.local:8123"
@@ -111,8 +165,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
     def _current_device_data(self) -> dict[str, Any] | None:
         """Get current device data from coordinator's location cache."""
         # Use cached location data which persists even when polling fails
-        return self.coordinator._device_location_data.get(self._device["id"])
-
+        return self.coordinator._device_location_data.get(self._device["id"])  # noqa: SLF001
 
     @property
     def available(self) -> bool:
@@ -123,12 +176,18 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
             lat = device_data.get("latitude")
             lon = device_data.get("longitude")
             semantic_name = device_data.get("semantic_name")
-            _LOGGER.debug(f"Device {self._device['name']} availability check: lat={lat}, lon={lon}, semantic_name={semantic_name}")
+            _LOGGER.debug(
+                "Device %s availability check: lat=%s, lon=%s, semantic_name=%s",
+                self._device["name"],
+                lat,
+                lon,
+                semantic_name,
+            )
             # Available if we have both coordinates or a semantic location name
             is_available = (lat is not None and lon is not None) or (semantic_name is not None)
-            _LOGGER.debug(f"Device {self._device['name']} available={is_available}")
+            _LOGGER.debug("Device %s available=%s", self._device["name"], is_available)
             return is_available
-        _LOGGER.debug(f"Device {self._device['name']} has no device_data - unavailable")
+        _LOGGER.debug("Device %s has no device_data - unavailable", self._device["name"])
         return False
 
     @property
@@ -169,55 +228,56 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
         # Update the attr for consistency
         self._attr_battery_level = battery
         return battery
-    
+
     @property
     def location_name(self) -> str | None:
         """Return the location name (zone or semantic location)."""
         device_data = self._current_device_data
         if not device_data:
             return None
-        
+
         # If we have a semantic location, use it
         semantic_name = device_data.get("semantic_name")
         if semantic_name:
             return semantic_name
-        
+
         # Otherwise return None to let HA determine zone/home/away
         return None
-    
+
     # Let Home Assistant handle state logic - it will determine home/away/zone based on coordinates
     # We can override this later for semantic locations if needed
-    
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        attributes = {}
+        attributes: dict[str, Any] = {}
         device_data = self._current_device_data
-        
+
         if device_data:
             # Add all available location attributes
             if "last_seen" in device_data and device_data["last_seen"] is not None:
                 import datetime
+
                 attributes["last_seen"] = datetime.datetime.fromtimestamp(device_data["last_seen"]).isoformat()
-            
+
             # Don't duplicate battery_level since it's a primary attribute
             # It will be shown in the UI automatically
-            
+
             if "altitude" in device_data and device_data["altitude"] is not None:
                 attributes["altitude"] = device_data["altitude"]
-            
+
             if "status" in device_data and device_data["status"] is not None:
                 attributes["device_status"] = device_data["status"]
-            
+
             if "is_own_report" in device_data and device_data["is_own_report"] is not None:
                 attributes["is_own_report"] = device_data["is_own_report"]
-            
+
             if "semantic_name" in device_data and device_data["semantic_name"] is not None:
                 attributes["semantic_location"] = device_data["semantic_name"]
-            
+
             # Add polling status info
             attributes["polling_status"] = device_data.get("status", "Unknown")
-        
+
         return attributes
 
     def _get_map_token(self) -> str:
@@ -230,7 +290,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
         config_entries = self.hass.config_entries.async_entries(DOMAIN)
         token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
         if config_entries:
-            token_expiration_enabled = config_entries[0].data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+            token_expiration_enabled = config_entries[0].data.get(
+                "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            )
 
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
 
@@ -270,11 +332,20 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity):
                         "battery_level": device_data.get("battery_level"),
                         "status": device_data.get("status"),
                         "is_own_report": device_data.get("is_own_report"),
-                        "semantic_name": device_data.get("semantic_name")
+                        "semantic_name": device_data.get("semantic_name"),
                     }
-                    _LOGGER.debug(f"Updated last good accuracy data for {self._device['name']}: accuracy={accuracy}m")
+                    _LOGGER.debug(
+                        "Updated last good accuracy data for %s: accuracy=%sm",
+                        self._device["name"],
+                        accuracy,
+                    )
                 else:
-                    _LOGGER.info(f"Keeping previous good data for {self._device['name']}: current accuracy={accuracy}m > threshold={min_accuracy_threshold}m")
+                    _LOGGER.info(
+                        "Keeping previous good data for %s: current accuracy=%sm > threshold=%sm",
+                        self._device["name"],
+                        accuracy,
+                        min_accuracy_threshold,
+                    )
         elif device_data:
             # No filtering or no accuracy data - use current data
             self._last_good_accuracy_data = device_data
