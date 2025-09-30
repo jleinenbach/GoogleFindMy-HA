@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
+from homeassistant.const import PERCENTAGE # why?
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.const import (
     ATTR_GPS_ACCURACY,  # correct import location
@@ -164,7 +165,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     def _current_device_data(self) -> dict[str, Any] | None:
         """Get current device data from coordinator's location cache."""
         # Use cached location data which persists even when polling fails
-        return self.coordinator._device_location_data.get(self._device["id"])  # noqa: SLF001
+        return self.coordinator._device_location_data.get(self._device["id"])
 
     @property
     def available(self) -> bool:
