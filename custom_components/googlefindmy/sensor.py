@@ -1,4 +1,6 @@
 """Sensor entities for Google Find My Device integration."""
+from __future__ import annotations
+
 import logging
 from typing import Any
 
@@ -6,6 +8,14 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
+# Prefer RestoreSensor when available (HA 2025+); fallback to RestoreEntity for compatibility
+try:
+    from homeassistant.components.sensor import RestoreSensor as _RestoreBase  # type: ignore[attr-defined]
+    _HAS_RESTORE_SENSOR = True
+except Exception:  # noqa: BLE001
+    from homeassistant.helpers.restore_state import RestoreEntity as _RestoreBase
+    _HAS_RESTORE_SENSOR = False
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -24,15 +34,17 @@ async def async_setup_entry(
     """Set up Google Find My Device sensor entities."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities = []
+    entities: list[SensorEntity] = []
 
     # Add global statistics sensors (for the integration itself) if enabled
     if entry.data.get("enable_stats_entities", True):
-        entities.extend([
-            GoogleFindMyStatsSensor(coordinator, "skipped_duplicates", "Skipped Duplicates"),
-            GoogleFindMyStatsSensor(coordinator, "background_updates", "Background Updates"),
-            GoogleFindMyStatsSensor(coordinator, "crowd_sourced_updates", "Crowd-sourced Updates"),
-        ])
+        entities.extend(
+            [
+                GoogleFindMyStatsSensor(coordinator, "skipped_duplicates", "Skipped Duplicates"),
+                GoogleFindMyStatsSensor(coordinator, "background_updates", "Background Updates"),
+                GoogleFindMyStatsSensor(coordinator, "crowd_sourced_updates", "Crowd-sourced Updates"),
+            ]
+        )
 
     # Add per-device last_seen sensors if we have device data
     if coordinator.data:
@@ -59,7 +71,7 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
     def state(self):
         """Return the state of the sensor."""
         value = self.coordinator.stats.get(self._stat_key, 0)
-        _LOGGER.debug(f"Sensor {self._stat_name} returning value {value}")
+        _LOGGER.debug("Sensor %s returning value %s", self._stat_name, value)
         return value
 
     @property
@@ -85,8 +97,7 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         }
 
 
-
-class GoogleFindMyLastSeenSensor(CoordinatorEntity, SensorEntity):
+class GoogleFindMyLastSeenSensor(CoordinatorEntity, SensorEntity, _RestoreBase):
     """Sensor showing last_seen timestamp for each device."""
 
     def __init__(self, coordinator, device: dict[str, Any]):
@@ -102,13 +113,68 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def state(self):
-        """Return the last_seen timestamp."""
-        device_data = self.coordinator._device_location_data.get(self._device_id, {})
-        last_seen = device_data.get('last_seen')
+        """Return the last_seen timestamp (ISO 8601) from coordinator cache."""
+        device_data = self.coordinator._device_location_data.get(self._device_id, {})  # noqa: SLF001
+        last_seen = device_data.get("last_seen")
         if last_seen:
             import datetime
+
             return datetime.datetime.fromtimestamp(last_seen).isoformat()
         return None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last_seen on restart by seeding coordinator cache."""
+        await super().async_added_to_hass()
+        value: Any | None = None
+
+        try:
+            if _HAS_RESTORE_SENSOR and hasattr(self, "async_get_last_sensor_data"):
+                data = await self.async_get_last_sensor_data()  # type: ignore[func-returns-value]
+                value = getattr(data, "native_value", None) if data else None
+            else:
+                last_state = await self.async_get_last_state()
+                value = last_state.state if last_state else None
+        except Exception:  # noqa: BLE001
+            value = None
+
+        if value in (None, "unknown", "unavailable"):
+            return
+
+        # Parse into epoch seconds
+        ts: float | None = None
+        try:
+            from datetime import datetime, timezone
+
+            if isinstance(value, (int, float)):
+                ts = float(value)
+            elif isinstance(value, str):
+                v = value.strip()
+                # Support ISO strings incl. trailing 'Z'
+                if v.endswith("Z"):
+                    v = v.replace("Z", "+00:00")
+                try:
+                    dt = datetime.fromisoformat(v)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    ts = dt.timestamp()
+                except Exception:
+                    # Try numeric string
+                    ts = float(v)
+        except Exception:
+            ts = None
+
+        if ts is None:
+            return
+
+        # Seed coordinator cache so state() has data immediately after restart
+        try:
+            mapping = self.coordinator._device_location_data.get(self._device_id, {})  # noqa: SLF001
+            mapping.setdefault("last_seen", ts)
+            self.coordinator._device_location_data[self._device_id] = mapping  # noqa: SLF001
+        except Exception:
+            pass
+
+        self.async_write_ha_state()
 
     @property
     def icon(self):
@@ -153,7 +219,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, SensorEntity):
         if config_entry:
             token_expiration_enabled = config_entry.options.get(
                 "map_view_token_expiration",
-                config_entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+                config_entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
             )
         else:
             token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
