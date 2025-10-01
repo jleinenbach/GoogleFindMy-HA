@@ -1,23 +1,27 @@
 """Device tracker platform for Google Find My Device."""
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    ATTR_GPS_ACCURACY,  # correct import location
+    ATTR_GPS_ACCURACY,  # use HA core constant
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
-    PERCENTAGE,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.network import get_url
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION, DOMAIN
 from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,17 +35,25 @@ async def async_setup_entry(
     """Set up Google Find My Device tracker entities."""
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][config_entry.entry_id]
 
-    # Prefer explicit typing for readability and IDE support
+    # Explicit typing for readability and IDE support
     entities: list[GoogleFindMyDeviceTracker] = []
     if coordinator.data:
         for device in coordinator.data:
-            entities.append(GoogleFindMyDeviceTracker(coordinator, device))
+            # Guard against malformed device dicts
+            if device.get("id") and device.get("name"):
+                entities.append(GoogleFindMyDeviceTracker(coordinator, device))
+            else:
+                _LOGGER.warning("Skipping device due to missing 'id' or 'name': %s", device)
 
     async_add_entities(entities, True)
 
 
 class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity):
     """Representation of a Google Find My Device tracker."""
+
+    _attr_has_entity_name = False
+    _attr_source_type = SourceType.GPS
+    _attr_entity_category = None  # Ensure device trackers are not diagnostic
 
     def __init__(
         self,
@@ -53,24 +65,23 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         self._device = device
         self._attr_unique_id = f"{DOMAIN}_{device['id']}"
         self._attr_name = device["name"]
-        self._attr_source_type = SourceType.GPS
-        self._attr_has_entity_name = False
-        self._attr_entity_category = None  # Ensure device trackers are not diagnostic
-        # Set battery attributes for proper display
-        self._attr_battery_level: int | None = None  # prefer typed attribute
-        self._attr_battery_unit = PERCENTAGE
         # Track last good accuracy location for database writes
         self._last_good_accuracy_data: dict[str, Any] | None = None
 
     async def async_added_to_hass(self) -> None:
-        """Restore last known location/battery via HA's persistent state store.
+        """Restore last known location via HA's persistent state store.
 
-        We seed our internal cache (and the coordinator cache) so the entity
-        has coordinates immediately after a restart, until fresh data arrives.
+        Seed our internal/coordinator cache so the entity has coordinates
+        immediately after a restart, until fresh data arrives.
         """
         await super().async_added_to_hass()
 
-        last_state = await self.async_get_last_state()
+        try:
+            last_state = await self.async_get_last_state()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Failed to get last state for %s: %s", self.entity_id, err)
+            return
+
         if not last_state:
             return
 
@@ -78,7 +89,6 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         lat = last_state.attributes.get(ATTR_LATITUDE, last_state.attributes.get("latitude"))
         lon = last_state.attributes.get(ATTR_LONGITUDE, last_state.attributes.get("longitude"))
         acc = last_state.attributes.get(ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy"))
-        batt = last_state.attributes.get("battery_level")
 
         restored: dict[str, Any] = {}
         try:
@@ -87,248 +97,215 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
                 restored["longitude"] = float(lon)
             if acc is not None:
                 restored["accuracy"] = int(acc)
-            if batt is not None:
-                restored["battery_level"] = int(batt)
-        except (TypeError, ValueError):
-            # Ignore malformed persisted attributes
+        except (TypeError, ValueError) as ex:
+            _LOGGER.debug("Invalid restored coordinates for %s: %s", self.entity_id, ex)
             restored = {}
 
         if restored:
             self._last_good_accuracy_data = {**restored}
-            self._attr_battery_level = restored.get("battery_level")
 
-            # Prime coordinator cache used elsewhere (e.g. map/last_seen)
-            try:  # noqa: SIM105
-                dev_id = self._device["id"]
-                mapping = self.coordinator._device_location_data.get(dev_id, {})  # noqa: SLF001
-                mapping.update(restored)
-                self.coordinator._device_location_data[dev_id] = mapping  # noqa: SLF001
-            except Exception:  # best-effort only
-                pass
+            # Prime coordinator cache used elsewhere (best-effort).
+            dev_id = self._device["id"]
+            try:
+                # Prefer future public API if present (forward-compatible)
+                if hasattr(self.coordinator, "prime_device_location_cache"):
+                    # Expected: prime_device_location_cache(device_id: str, data: dict[str, Any]) -> None
+                    self.coordinator.prime_device_location_cache(dev_id, restored)  # type: ignore[attr-defined]
+                else:
+                    # Legacy fallback: direct cache access for current coordinator
+                    mapping = getattr(self.coordinator, "_device_location_data", None)  # noqa: SLF001
+                    if isinstance(mapping, dict):
+                        slot = mapping.get(dev_id, {})
+                        slot.update(restored)
+                        mapping[dev_id] = slot
+                    else:
+                        # Extremely defensive: create cache if missing (unlikely)
+                        setattr(self.coordinator, "_device_location_data", {dev_id: restored})  # noqa: SLF001
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Failed to seed coordinator cache for %s: %s", self.entity_id, err)
 
             self.async_write_ha_state()
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        """Return device info."""
-        # Generate auth token for map access
+    def device_info(self) -> DeviceInfo:
+        """Return device info.
+
+        NOTE (prep for later path refactor):
+        Build the *path* separately so we can switch to returning a relative
+        configuration_url in a later step without touching other code.
+        """
+        # Generate auth token and build path first
         auth_token = self._get_map_token()
+        path = self._build_map_path(self._device["id"], auth_token, redirect=True)
 
-        # Get a base URL for the redirect endpoint - use local IP detection
-        # The redirect endpoint will handle proper routing based on request origin
+        # Today: still return absolute URL; redirect endpoint handles origin correctly
         try:
-            import socket
-            from homeassistant.helpers.network import get_url
+            base_url = get_url(
+                self.hass,
+                prefer_external=True,   # prefer URL that also works from remote/cloud
+                allow_cloud=True,
+                allow_external=True,
+                allow_internal=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.warning("Could not determine Home Assistant URL, using fallback: %s", e)
+            base_url = "http://homeassistant.local:8123"
 
-            # Use socket connection method to get the actual local network IP
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._device["id"])},
+            name=self._device["name"],
+            manufacturer="Google",
+            model="Find My Device",
+            configuration_url=f"{base_url}{path}",  # later: just `path`
+            hw_version=self._device["id"],  # Show device ID as hardware version for easy copying
+        )
 
-            # Get HA port and SSL settings from config
-            port = 8123
-            use_ssl = False
-
-            # Try to get actual port from HA configuration
-            if hasattr(self.hass, 'http') and hasattr(self.hass.http, 'server_port'):
-                port = self.hass.http.server_port or 8123
-                use_ssl = hasattr(self.hass.http, 'ssl_context') and self.hass.http.ssl_context is not None
-
-            protocol = "https" if use_ssl else "http"
-            base_url = f"{protocol}://{local_ip}:{port}"
-
-        except Exception as e:
-            _LOGGER.debug(f"Local IP detection failed: {e}, using fallback URL")
-            # Fallback to HA's network detection
-            try:
-                base_url = get_url(self.hass, prefer_external=False, allow_cloud=False, allow_external=False, allow_internal=True)
-            except Exception as fallback_e:
-                _LOGGER.warning(f"All URL detection methods failed: {fallback_e}")
-                base_url = "http://homeassistant.local:8123"
-
-        # Use the redirect endpoint that will automatically detect the request origin
-        # and redirect to the appropriate URL (local IP or cloud URL)
-        redirect_url = f"{base_url}/api/googlefindmy/redirect_map/{self._device['id']}?token={auth_token}"
-
-        return {
-            "identifiers": {(DOMAIN, self._device["id"])},
-            "name": self._device["name"],
-            "manufacturer": "Google",
-            "model": "Find My Device",
-            "configuration_url": redirect_url,
-            "hw_version": self._device["id"],  # Show device ID as hardware version for easy copying
-        }
+    def _build_map_path(self, device_id: str, token: str, *, redirect: bool = True) -> str:
+        """Return the map URL *path* (no scheme/host)."""
+        if redirect:
+            return f"/api/googlefindmy/redirect_map/{device_id}?token={token}"
+        return f"/api/googlefindmy/map/{device_id}?token={token}"
 
     @property
     def _current_device_data(self) -> dict[str, Any] | None:
         """Get current device data from coordinator's location cache."""
-        # Use cached location data which persists even when polling fails
-        return self.coordinator._device_location_data.get(self._device["id"])
+        dev_id = self._device["id"]
+        # Prefer future public API if present; otherwise legacy fallback
+        if hasattr(self.coordinator, "get_device_location_data"):
+            # Expected: get_device_location_data(device_id: str) -> dict[str, Any] | None
+            try:
+                return self.coordinator.get_device_location_data(dev_id)  # type: ignore[attr-defined]
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Coordinator public API failed for %s: %s", dev_id, err)
+        return getattr(self.coordinator, "_device_location_data", {}).get(dev_id)  # noqa: SLF001
+
+    @property
+    def _data_to_persist(self) -> dict[str, Any] | None:
+        """Return data used for persistent state (lat/lon/accuracy)."""
+        return self._last_good_accuracy_data or self._current_device_data
 
     @property
     def available(self) -> bool:
         """Return True if entity has valid location data."""
-        # Stay available as long as we have coordinates, even if they're old
-        device_data = self._current_device_data
-        if device_data:
-            lat = device_data.get("latitude")
-            lon = device_data.get("longitude")
-            semantic_name = device_data.get("semantic_name")
-            _LOGGER.debug(f"Device {self._device['name']} availability check: lat={lat}, lon={lon}, semantic_name={semantic_name}")
-            # Available if we have both coordinates or a semantic location name
-            is_available = (lat is not None and lon is not None) or (semantic_name is not None)
-            _LOGGER.debug(f"Device {self._device['name']} available={is_available}")
-            return is_available
-        _LOGGER.debug(f"Device {self._device['name']} has no device_data - unavailable")
+        if device_data := self._current_device_data:
+            return (
+                device_data.get("latitude") is not None and device_data.get("longitude") is not None
+            ) or device_data.get("semantic_name") is not None
         return False
 
     @property
     def latitude(self) -> float | None:
         """Return latitude value of the device."""
-        # Return filtered data for database writes
-        data_to_use = self._last_good_accuracy_data if self._last_good_accuracy_data else self._current_device_data
-        if not data_to_use:
-            return None
-        lat = data_to_use.get("latitude")
-        return lat if lat is not None else None
+        if data := self._data_to_persist:
+            return data.get("latitude")
+        return None
 
     @property
     def longitude(self) -> float | None:
         """Return longitude value of the device."""
-        # Return filtered data for database writes
-        data_to_use = self._last_good_accuracy_data if self._last_good_accuracy_data else self._current_device_data
-        if not data_to_use:
-            return None
-        lon = data_to_use.get("longitude")
-        return lon if lon is not None else None
+        if data := self._data_to_persist:
+            return data.get("longitude")
+        return None
 
     @property
     def location_accuracy(self) -> int | None:
         """Return accuracy of location."""
-        # Return filtered data for database writes
-        data_to_use = self._last_good_accuracy_data if self._last_good_accuracy_data else self._current_device_data
-        if not data_to_use:
-            return None
-        acc = data_to_use.get("accuracy")
-        return acc if acc is not None else None
-
-    @property
-    def battery_level(self) -> int | None:
-        """Return battery level of the device."""
-        device_data = self._current_device_data
-        battery = device_data.get("battery_level") if device_data else None
-        # Update the attr for consistency
-        self._attr_battery_level = battery
-        return battery
+        if data := self._data_to_persist:
+            return data.get("accuracy")
+        return None
 
     @property
     def location_name(self) -> str | None:
         """Return the location name (zone or semantic location)."""
-        device_data = self._current_device_data
-        if not device_data:
-            return None
-
-        # If we have a semantic location, use it
-        semantic_name = device_data.get("semantic_name")
-        if semantic_name:
-            return semantic_name
-
-        # Otherwise return None to let HA determine zone/home/away
+        if device_data := self._current_device_data:
+            return device_data.get("semantic_name")
         return None
-
-    # Let Home Assistant handle state logic - it will determine home/away/zone based on coordinates
-    # We can override this later for semantic locations if needed
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
         attributes: dict[str, Any] = {}
-        device_data = self._current_device_data
-
-        if device_data:
-            # Add all available location attributes
-            if "last_seen" in device_data and device_data["last_seen"] is not None:
-                import datetime
-                attributes["last_seen"] = datetime.datetime.fromtimestamp(device_data["last_seen"]).isoformat()
-
-            # Don't duplicate battery_level since it's a primary attribute
-            # It will be shown in the UI automatically
-
-            if "altitude" in device_data and device_data["altitude"] is not None:
-                attributes["altitude"] = device_data["altitude"]
-
-            if "status" in device_data and device_data["status"] is not None:
-                attributes["device_status"] = device_data["status"]
-
-            if "is_own_report" in device_data and device_data["is_own_report"] is not None:
-                attributes["is_own_report"] = device_data["is_own_report"]
-
-            if "semantic_name" in device_data and device_data["semantic_name"] is not None:
-                attributes["semantic_location"] = device_data["semantic_name"]
-
-            # Add polling status info
-            attributes["polling_status"] = device_data.get("status", "Unknown")
-
+        if device_data := self._current_device_data:
+            if last_seen_ts := device_data.get("last_seen"):
+                attributes["last_seen"] = datetime.fromtimestamp(last_seen_ts).isoformat()
+            if altitude := device_data.get("altitude"):
+                attributes["altitude"] = altitude
+            if status := device_data.get("status"):
+                attributes["device_status"] = status
+            if (is_own := device_data.get("is_own_report")) is not None:
+                attributes["is_own_report"] = is_own
+            if semantic_name := device_data.get("semantic_name"):
+                attributes["semantic_location"] = semantic_name
+            # removed 'polling_status' to avoid duplicating status fields
         return attributes
 
     def _get_map_token(self) -> str:
-        """Generate a simple token for map authentication."""
-        import hashlib
-        import time
-        from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+        """Generate a simple token for map authentication.
 
-        # Check if token expiration is enabled in config
-        config_entries = self.hass.config_entries.async_entries(DOMAIN)
-        token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-        if config_entries:
-            token_expiration_enabled = config_entries[0].data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+        Options-first: prefer config_entry.options over data; fallback to default.
+        """
+        config_entry = getattr(self.coordinator, "config_entry", None)
+        if config_entry:
+            token_expiration_enabled = config_entry.options.get(
+                "map_view_token_expiration",
+                config_entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
+            )
+        else:
+            token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
 
         if token_expiration_enabled:
-            # Use weekly expiration when enabled
-            week = str(int(time.time() // 604800))  # Current week since epoch (7 days)
-            return hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
+            # Weekly-rolling token (7-day bucket)
+            week = str(int(time.time() // 604800))
+            secret = f"{ha_uuid}:{week}"
         else:
-            # No expiration - use static token based on HA UUID only
-            return hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
+            # Static token (no rotation)
+            secret = f"{ha_uuid}:static"
+
+        return hashlib.md5(secret.encode()).hexdigest()[:16]
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        # Get accuracy threshold from config
-        config_data = self.hass.data[DOMAIN].get("config_data", {})
-        min_accuracy_threshold = config_data.get("min_accuracy_threshold", 0)
+        # Options-first, with safe fallback to previous mechanism
+        config_entry = getattr(self.coordinator, "config_entry", None)
+        if config_entry:
+            min_accuracy_threshold = config_entry.options.get("min_accuracy_threshold", 0)
+        else:
+            # Legacy fallback (kept for backward compatibility)
+            cfg = self.hass.data.get(DOMAIN, {}).get("config_data", {})
+            min_accuracy_threshold = cfg.get("min_accuracy_threshold", 0)
 
-        # Get current device data
-        device_data = self._current_device_data
+        if not (device_data := self._current_device_data):
+            self.async_write_ha_state()
+            return
 
-        if device_data and min_accuracy_threshold > 0:
-            accuracy = device_data.get("accuracy")
-            lat = device_data.get("latitude")
-            lon = device_data.get("longitude")
+        accuracy = device_data.get("accuracy")
+        lat = device_data.get("latitude")
+        lon = device_data.get("longitude")
 
-            # Check if this is good accuracy data
-            if accuracy is not None and lat is not None and lon is not None:
-                if accuracy <= min_accuracy_threshold:
-                    # Good accuracy - save as last good data
-                    self._last_good_accuracy_data = {
-                        "latitude": lat,
-                        "longitude": lon,
-                        "accuracy": accuracy,
-                        "last_seen": device_data.get("last_seen"),
-                        "altitude": device_data.get("altitude"),
-                        "battery_level": device_data.get("battery_level"),
-                        "status": device_data.get("status"),
-                        "is_own_report": device_data.get("is_own_report"),
-                        "semantic_name": device_data.get("semantic_name")
-                    }
-                    _LOGGER.debug(f"Updated last good accuracy data for {self._device['name']}: accuracy={accuracy}m")
-                else:
-                    _LOGGER.info(f"Keeping previous good data for {self._device['name']}: current accuracy={accuracy}m > threshold={min_accuracy_threshold}m")
-        elif device_data:
-            # No filtering or no accuracy data - use current data
-            self._last_good_accuracy_data = device_data
+        # Update last good data if accuracy filtering is off or the new data is good enough
+        is_good = (
+            min_accuracy_threshold <= 0
+            or (accuracy is not None and lat is not None and lon is not None and accuracy <= min_accuracy_threshold)
+        )
+
+        if is_good:
+            self._last_good_accuracy_data = device_data.copy()
+            if min_accuracy_threshold > 0 and accuracy is not None:
+                _LOGGER.debug(
+                    "Updated last good accuracy data for %s: accuracy=%sm (threshold=%sm)",
+                    self.name,
+                    accuracy,
+                    min_accuracy_threshold,
+                )
+        elif accuracy is not None:
+            _LOGGER.info(
+                "Keeping previous good data for %s: current accuracy=%sm > threshold=%sm",
+                self.name,
+                accuracy,
+                min_accuracy_threshold,
+            )
 
         self.async_write_ha_state()
