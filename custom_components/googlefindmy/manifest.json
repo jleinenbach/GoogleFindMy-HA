@@ -28,5 +28,7 @@
     "undetected_chromedriver>=3.5.5",
     "selenium>=4.27.1"
   ],
+  "dependencies": ["http"],
+  "after_dependencies": ["recorder"],
   "version": "1.5.5-3"
 }
