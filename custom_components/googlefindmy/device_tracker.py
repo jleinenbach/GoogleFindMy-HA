@@ -160,7 +160,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             hw_version=self._device["id"],  # Show device ID as hardware version for easy copying
         )
 
-    def _build_map_path(self, device_id: str, token: str, *, redirect: bool = True) -> str:
+    def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
         """Return the map URL *path* (no scheme/host)."""
         if redirect:
             return f"/api/googlefindmy/redirect_map/{device_id}?token={token}"
