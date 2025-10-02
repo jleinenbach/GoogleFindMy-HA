@@ -73,7 +73,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         # Generate auth token for map access
         auth_token = self._get_map_token()
         # Build relative map path (consistent with sensor.py)
-        path = self._build_map_path(self._device["id"], auth_token, redirect=True)
+        path = self._build_map_path(self._device["id"], auth_token, redirect=False)
 
         return {
             "identifiers": {(DOMAIN, self._device["id"])},
