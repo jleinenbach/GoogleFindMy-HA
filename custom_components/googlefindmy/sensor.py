@@ -210,17 +210,17 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
     @property
     def device_info(self) -> dict[str, Any]:
         """Return device info.
-
-        NOTE (prep for later path refactor):
-        Build the *path* separately so we can switch to returning a relative
-        configuration_url in a later step without touching other code.
         """
         path = self._build_map_path(self._device["id"], self._get_map_token(), redirect=False)
 
-        # Today we still return an absolute URL to avoid changing behavior now.
         from homeassistant.helpers.network import get_url
 
         try:
+            # Resolve a single absolute base URL for the device registry entry.
+            # Runs outside an HTTP request, so we intentionally do NOT use require_current_request.
+            # Home Assistant selects between internal/external/cloud based on configured URLs
+            # and the 'prefer_external' hint; the stored value remains until the device/integration
+            # is reloaded or HA restarts.
             base_url = get_url(
                 self.hass,
                 prefer_external=True,
@@ -229,7 +229,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                 allow_internal=True,
             )
         except Exception:
-            base_url = "http://homeassistant.local:8123"
+            base_url = "http://homeassistant.local:8123"  # noqa: F841
 
         return {
             "identifiers": {(DOMAIN, self._device["id"])},
@@ -242,8 +242,6 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
         """Return the map URL *path* (no scheme/host).
-
-        Using a dedicated builder avoids later code churn when switching to relative URLs.
         """
         if redirect:
             return f"/api/googlefindmy/redirect_map/{device_id}?token={token}"
