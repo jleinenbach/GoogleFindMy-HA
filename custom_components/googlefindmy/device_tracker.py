@@ -136,7 +136,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         """
         # Generate auth token and build path first
         auth_token = self._get_map_token()
-        path = self._build_map_path(self._device["id"], auth_token, redirect=True)
+        path = self._build_map_path(self._device["id"], auth_token, redirect=False)
 
         # Today: still return absolute URL; redirect endpoint handles origin correctly
         try:
