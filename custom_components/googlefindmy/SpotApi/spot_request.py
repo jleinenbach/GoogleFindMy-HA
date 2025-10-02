@@ -102,17 +102,20 @@ def spot_request(api_scope: str, payload: bytes) -> bytes:
         grpc_msg = resp.headers.get("grpc-message")
         if status == 200:
             if grpc_status and grpc_status != "0":
-                _LOGGER.debug("SPOT %s trailers-only error: grpc-status=%s, msg=%s",
-                              api_scope, grpc_status, grpc_msg)
+                _LOGGER.debug(
+                    "SPOT %s trailers-only error: grpc-status=%s, msg=%s",
+                    api_scope, grpc_status, grpc_msg
+                )
                 # UNAUTHENTICATED=16 or PERMISSION_DENIED=7 → refresh token once
                 if grpc_status in ("16", "7") and attempts == 0:
                     _invalidate_token(kind, username)
                     attempts += 1
                     continue
-                raise RuntimeError(f"Spot gRPC error (trailers-only): status={grpc_status}, message={grpc_msg}")
+                return b""
             # 200 but no grpc-status → invalid body
             snippet = (resp.content or b"")[:128]
-            raise ValueError(f"Invalid GRPC payload (200 without valid frame). Snippet={snippet!r}")
+            _LOGGER.debug("SPOT %s invalid 200 body (no frame). Snippet=%r", api_scope, snippet)
+            return b""
 
         # Non-200: auth retry once
         if status in (401, 403) and attempts == 0:
