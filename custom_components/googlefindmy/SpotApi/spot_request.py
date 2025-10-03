@@ -72,7 +72,9 @@ def _invalidate_token(kind: str, username: str):
     if kind == "adm":
         set_cached_value(f"adm_token_{username}", None)
     elif kind == "spot":
-        # Drop AAS to force SPOT token refresh on next call (implementation-dependent)
+        # IMPORTANT: also drop the cached SPOT access token itself
+        set_cached_value(f"spot_token_{username}", None)
+        # Drop AAS so that the SPOT flow regenerates from its root credentials if needed
         set_cached_value("aas_token", None)
 
 
