@@ -166,30 +166,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register services (available regardless of initial data availability)
     await _async_register_services(hass, coordinator)
 
-    # Defer the first refresh until HA is fully started to reduce startup pressure.
-    # IMPORTANT: Do NOT call async_config_entry_first_refresh() when the entry is LOADED.
-    # Use async_refresh() instead and check last_update_success. Then forward platforms.
-    async def _do_first_refresh(_: Any) -> None:
-        """Perform the initial coordinator refresh and then set up platforms.
+    # IMPORTANT FOR STATE RESTORE:
+    # Forward platforms *now*, so Entities exist early and RestoreEntity can
+    # rehydrate last known states immediately after reboot/reload.
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-        We try to fetch initial data once HA is started to avoid slowing down bootstrap.
-        Even if the first refresh fails, we still forward platforms so entities can load
-        and recover on subsequent polls.
+    # Defer the first refresh until HA is fully started to reduce startup pressure.
+    # We do NOT use async_config_entry_first_refresh() when the entry is LOADED.
+    async def _do_first_refresh(_: Any) -> None:
+        """Perform the initial coordinator refresh after HA has started.
+
+        Entities are already created (state restore is possible). This refresh will
+        populate live data shortly after startup without blocking bootstrap.
         """
         try:
             await coordinator.async_refresh()
             if not coordinator.last_update_success:
                 _LOGGER.warning(
-                    "Initial refresh did not succeed; platforms will still be set up. "
-                    "Entities may start without data and recover on subsequent polls."
+                    "Initial refresh did not succeed; entities will recover on subsequent polls."
                 )
         except Exception as err:
-            _LOGGER.error(
-                "Initial refresh raised an unexpected error; setting up platforms anyway: %s",
-                err,
-            )
-        # Forward platform setups after attempting the first refresh
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+            _LOGGER.error("Initial refresh raised an unexpected error: %s", err)
 
     if hass.state == CoreState.running:
         # HA already running (reload / late setup) -> refresh now via async_refresh()
