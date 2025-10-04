@@ -306,8 +306,10 @@ async def _async_register_services(
     async def async_refresh_device_urls_service(call: ServiceCall) -> None:
         """Handle refresh of configuration URLs for all integration devices.
 
-        The service prefers a local base URL (derived from the host's primary IP and HA port)
-        and falls back to Home Assistant's internal URL if local IP discovery fails.
+        The device registry requires a valid **absolute HTTP(S) URL**. We therefore build a
+        base URL once via `get_url(... prefer_external=True, allow_cloud=True, allow_external=True,
+        allow_internal=True)` and **avoid** relative paths here. Browser navigation remains
+        origin-agnostic thanks to the Redirect View (which issues a relative `Location`).
         Token is rotated weekly by default (configurable). All logs redact the token.
         """
         try:
@@ -315,35 +317,21 @@ async def _async_register_services(
             from homeassistant.helpers.network import get_url
             import hashlib
 
-            # Try to infer local IP in an executor (avoid blocking the event loop)
-            local_ip = await hass.async_add_executor_job(_get_local_ip_sync)
-            if local_ip:
-                port = 8123
-                use_ssl = False
-                if hasattr(hass, "http") and hasattr(hass.http, "server_port"):
-                    port = hass.http.server_port or 8123
-                    use_ssl = hasattr(hass.http, "ssl_context") and (
-                        hass.http.ssl_context is not None
-                    )
-                protocol = "https" if use_ssl else "http"
-                base_url = f"{protocol}://{local_ip}:{port}"
-                _LOGGER.info("Detected local URL for device refresh: %s", base_url)
-            else:
-                # Fallback to HA internal URL discovery
-                base_url = get_url(
-                    hass,
-                    prefer_external=False,
-                    allow_cloud=False,
-                    allow_external=False,
-                    allow_internal=True,
-                )
-                _LOGGER.info("Using HA internal URL for device refresh: %s", base_url)
+            # Resolve a single absolute base URL suitable for registry storage.
+            # Prefer external/Cloud to keep "Visit" working when UI is opened via Cloud URL.
+            base_url = get_url(
+                hass,
+                prefer_external=True,
+                allow_cloud=True,
+                allow_external=True,
+                allow_internal=True,
+            )
 
             if not base_url:
                 _LOGGER.error("Could not determine base URL for device refresh")
                 return
 
-            # Build an auth token with optional weekly rotation — options-first to match views/entities
+            # Build an auth token with optional weekly rotation — options-first for consistency
             ha_uuid = str(hass.data.get("core.uuid", "ha"))
             config_entries = hass.config_entries.async_entries(DOMAIN)
             token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
@@ -360,7 +348,7 @@ async def _async_register_services(
             else:
                 auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
 
-            # Update device configuration URLs in the device registry
+            # Update device configuration URLs in the device registry with an **absolute** URL to the map path
             dev_reg = device_registry.async_get(hass)
             updated_count = 0
             for device in dev_reg.devices.values():
@@ -373,7 +361,7 @@ async def _async_register_services(
                             break
                     if dev_id:
                         new_config_url = (
-                            f"{base_url}/api/googlefindmy/redirect_map/{dev_id}"
+                            f"{base_url}/api/googlefindmy/map/{dev_id}"
                             f"?token={auth_token}"
                         )
                         dev_reg.async_update_device(
