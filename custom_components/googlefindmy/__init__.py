@@ -343,13 +343,15 @@ async def _async_register_services(
                 _LOGGER.error("Could not determine base URL for device refresh")
                 return
 
-            # Build an auth token with optional weekly rotation
+            # Build an auth token with optional weekly rotation — options-first to match views/entities
             ha_uuid = str(hass.data.get("core.uuid", "ha"))
             config_entries = hass.config_entries.async_entries(DOMAIN)
             token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             if config_entries:
-                token_expiration_enabled = config_entries[0].data.get(
-                    "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+                entry = config_entries[0]
+                token_expiration_enabled = entry.options.get(
+                    "map_view_token_expiration",
+                    entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
                 )
 
             if token_expiration_enabled:
