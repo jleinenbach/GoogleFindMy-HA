@@ -42,8 +42,9 @@ async def async_setup_entry(
             ]
         )
 
-    # Add per-device last_seen sensors if we have device data
+    # Add per-device last_seen sensors
     if coordinator.data:
+        # Normal path: we already have live device list
         for device in coordinator.data:
             # Guard against malformed device dicts
             dev_id = device.get("id")
@@ -52,6 +53,19 @@ async def async_setup_entry(
                 entities.append(GoogleFindMyLastSeenSensor(coordinator, device))
             else:
                 _LOGGER.warning("Skipping device due to missing 'id' or 'name': %s", device)
+    else:
+        # --- FIX: Ensure sensors exist at startup even without live data (enables Restore) ---
+        tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
+        name_map: dict[str, str] = getattr(coordinator, "_device_names", {})  # noqa: SLF001
+        for dev_id in tracked_ids:
+            name = name_map.get(dev_id) or f"Find My - {dev_id}"
+            entities.append(GoogleFindMyLastSeenSensor(coordinator, {"id": dev_id, "name": name}))
+        if tracked_ids:
+            _LOGGER.debug(
+                "Created %d skeleton last_seen sensors for restore (no live data yet)",
+                len(tracked_ids),
+            )
+        # --- end FIX ---
 
     async_add_entities(entities)
 
