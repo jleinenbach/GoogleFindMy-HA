@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 import time
 from typing import Any, Dict, List, Optional
 
@@ -90,6 +90,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_location_data: Dict[str, Dict[str, Any]] = {}
         self._device_names: Dict[str, str] = {}  # device_id -> human name
 
+        # PATCH C: track capabilities from the latest device list (e.g., can ring)
+        self._device_caps: Dict[str, Dict[str, Any]] = {}  # device_id -> caps (e.g., {"can_ring": True})
+
         # Polling state (decoupled background task)
         self._poll_lock = asyncio.Lock()
         self._is_polling = False
@@ -139,9 +142,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             else:
                 devices = all_devices
 
-            # 3) Update device name map (for logging/UX)
+            # 3) Update device name map (for logging/UX) and capture capabilities
             for dev in devices:
-                self._device_names[dev["id"]] = dev.get("name", dev["id"])
+                dev_id = dev["id"]
+                self._device_names[dev_id] = dev.get("name", dev_id)
+
+                # PATCH C: extract "can ring" capability when present
+                can_ring = None
+                if "can_ring" in dev:
+                    can_ring = bool(dev.get("can_ring"))
+                elif isinstance(dev.get("capabilities"), (list, set, tuple)):
+                    caps = {str(x).lower() for x in dev["capabilities"]}
+                    can_ring = ("ring" in caps) or ("play_sound" in caps)
+                elif isinstance(dev.get("capabilities"), dict):
+                    caps = {k.lower(): v for k, v in dev["capabilities"].items()}
+                    can_ring = bool(caps.get("ring")) or bool(caps.get("play_sound"))
+                # store normalized flag when we could infer it
+                if can_ring is not None:
+                    slot = self._device_caps.get(dev_id, {})
+                    slot["can_ring"] = bool(can_ring)
+                    self._device_caps[dev_id] = slot
 
             # 4) Scheduling: decide whether to trigger a poll cycle (monotonic clock)
             now_mono = time.monotonic()
@@ -528,6 +548,92 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             )
 
     # -------------------------------------------------------------------------
+    # PATCH A: Public helpers consumed by platforms (tracker/sensor)
+    # -------------------------------------------------------------------------
+    def get_device_location_data(self, device_id: str) -> Optional[Dict[str, Any]]:
+        """Return current cached location dict for a device (or None)."""
+        return self._device_location_data.get(device_id)
+
+    def prime_device_location_cache(self, device_id: str, data: Dict[str, Any]) -> None:
+        """Seed/update the location cache for a device with (lat/lon/accuracy)."""
+        slot = self._device_location_data.get(device_id, {})
+        slot.update({k: v for k, v in data.items() if k in ("latitude", "longitude", "accuracy")})
+        # Do not set last_updated/last_seen here; this is only priming.
+        self._device_location_data[device_id] = slot
+
+    # -------------------------------------------------------------------------
+    # PATCH B: Last-seen accessors for Sensor restore path
+    # -------------------------------------------------------------------------
+    def seed_device_last_seen(self, device_id: str, ts_epoch: float) -> None:
+        """Seed last_seen (epoch seconds) without overriding fresh data."""
+        slot = self._device_location_data.setdefault(device_id, {})
+        slot.setdefault("last_seen", float(ts_epoch))
+
+    def get_device_last_seen(self, device_id: str) -> Optional[datetime]:
+        """Return last_seen as timezone-aware datetime (UTC) if cached."""
+        ts = self._device_location_data.get(device_id, {}).get("last_seen")
+        if ts is None:
+            return None
+        try:
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        except Exception:
+            return None
+
+    # -------------------------------------------------------------------------
+    # PATCH C: Expose Play Sound availability to buttons
+    # -------------------------------------------------------------------------
+    def _api_push_ready(self) -> bool:
+        """Best-effort check whether push/FCM is initialized in the API (backward compatible)."""
+        try:
+            # Preferred explicit function
+            fn = getattr(self.api, "is_push_ready", None)
+            if callable(fn):
+                return bool(fn())
+            # Common attr variants in older API builds
+            for attr in ("push_ready", "fcm_ready", "receiver_ready"):
+                val = getattr(self.api, attr, None)
+                if isinstance(val, bool):
+                    return val
+            # Some implementations expose a nested FCM object
+            fcm = getattr(self.api, "fcm", None)
+            if fcm is not None:
+                for attr in ("is_ready", "ready"):
+                    val = getattr(fcm, attr, None)
+                    if isinstance(val, bool):
+                        return val
+        except Exception as err:
+            _LOGGER.debug("Push readiness check failed: %s", err)
+        return False
+
+    def can_play_sound(self, device_id: str) -> bool:
+        """Return True if 'Play Sound' is available for the device.
+
+        Order of truth sources (most specific first):
+        1) API method can_play_sound(device_id) if present.
+        2) API push readiness AND device capability from last device list (can_ring).
+        3) Fallback: API push readiness AND device known to coordinator.
+        """
+        # 1) Delegate to API if available
+        api_can = getattr(self.api, "can_play_sound", None)
+        if callable(api_can):
+            try:
+                return bool(api_can(device_id))  # type: ignore[misc]
+            except Exception as err:
+                _LOGGER.debug("API.can_play_sound failed for %s: %s", device_id, err)
+
+        # 2) Use push readiness + cached capability if we have it
+        if not self._api_push_ready():
+            return False
+
+        caps = self._device_caps.get(device_id)
+        if caps and isinstance(caps.get("can_ring"), bool):
+            return bool(caps["can_ring"])
+
+        # 3) Fallback: if the device is known at all, allow press; otherwise deny
+        is_known = device_id in self._device_names or device_id in self._device_location_data
+        return bool(is_known)
+
+    # -------------------------------------------------------------------------
     # Passthrough API helpers (unchanged)
     # -------------------------------------------------------------------------
     async def async_locate_device(self, device_id: str) -> Dict[str, Any]:
@@ -536,4 +642,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     async def async_play_sound(self, device_id: str) -> bool:
         """Play sound on a device (executes blocking client code in executor)."""
+        # PATCH D: small guard to avoid spurious API calls when not ready
+        if not self.can_play_sound(device_id):
+            _LOGGER.debug(
+                "Suppressing play_sound call for %s: capability/push not ready", device_id
+            )
+            return False
         return await self.hass.async_add_executor_job(self.api.play_sound, device_id)
