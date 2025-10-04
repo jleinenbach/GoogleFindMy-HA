@@ -166,7 +166,26 @@ async def get_location_data_for_device(canonic_device_id, name):
 
         # Send location request to Google API
         logger.info(f"Sending location request to Google API for {name}...")
-        nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+
+        # NEW: transient-error retry for Nova nbe_execute_action:
+        # - Wrap async_nova_request(...) in try/except.
+        # - On HTTP 500/502/503/504, wait 3s and retry once.
+        # - If the second call fails, continue best-effort by waiting for FCM; non-5xx errors still abort.
+        try:
+            nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+        except RuntimeError as e:
+            msg = str(e)
+            if ("500" in msg) or ("502" in msg) or ("503" in msg) or ("504" in msg):
+                logger.warning("Nova transient error (%s) for %s. Retrying once after 3s...", e, name)
+                await asyncio.sleep(3)
+                try:
+                    nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+                except RuntimeError as e2:
+                    logger.warning("Nova still failing (%s). Proceeding to wait for FCM best-effort.", e2)
+                    nova_result = None
+            else:
+                logger.error("Nova API request failed for %s: %s", name, e)
+                return []
 
         # NOTE: For this RPC the server often returns HTTP 200 with empty body (FCM delivers the data).
         # Treat None as "accepted" and proceed to wait for FCM; do not bail out early.
