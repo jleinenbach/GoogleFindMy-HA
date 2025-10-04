@@ -37,6 +37,8 @@ async def async_setup_entry(
 
     # Explicit typing for readability and IDE support
     entities: list[GoogleFindMyDeviceTracker] = []
+
+    # --- FIX 1: Ensure entities exist at startup even when no live data is loaded yet ---
     if coordinator.data:
         for device in coordinator.data:
             # Guard against malformed device dicts
@@ -44,6 +46,19 @@ async def async_setup_entry(
                 entities.append(GoogleFindMyDeviceTracker(coordinator, device))
             else:
                 _LOGGER.warning("Skipping device due to missing 'id' or 'name': %s", device)
+    else:
+        # No live data yet (early startup). Create skeleton entities from configured tracked IDs
+        tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
+        name_map: dict[str, str] = getattr(coordinator, "_device_names", {})  # noqa: SLF001
+        for dev_id in tracked_ids:
+            name = name_map.get(dev_id) or f"Find My - {dev_id}"
+            entities.append(GoogleFindMyDeviceTracker(coordinator, {"id": dev_id, "name": name}))
+        if tracked_ids:
+            _LOGGER.debug(
+                "Created %d skeleton device_tracker entities for restore (no live data yet)",
+                len(tracked_ids),
+            )
+    # --- end FIX 1 ---
 
     async_add_entities(entities, True)
 
@@ -186,12 +201,20 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
     @property
     def available(self) -> bool:
-        """Return True if entity has valid location data."""
-        if device_data := self._current_device_data:
-            return (
-                device_data.get("latitude") is not None and device_data.get("longitude") is not None
-            ) or device_data.get("semantic_name") is not None
-        return False
+        """Return True if entity has valid location data.
+
+        FIX 2: If coordinator has no data yet, but we restored a valid location,
+        expose the entity as available to avoid 'unavailable' after reboot.
+        """
+        device_data = self._current_device_data
+        if device_data:
+            if (
+                device_data.get("latitude") is not None
+                and device_data.get("longitude") is not None
+            ) or device_data.get("semantic_name") is not None:
+                return True
+        # Fallback to restored data (seeded in async_added_to_hass)
+        return self._last_good_accuracy_data is not None
 
     @property
     def latitude(self) -> float | None:
