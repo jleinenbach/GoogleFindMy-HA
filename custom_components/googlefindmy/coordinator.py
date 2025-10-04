@@ -99,6 +99,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._startup_complete = False
         self._last_poll_mono: float = 0.0  # monotonic timestamp for scheduling
 
+        # NEW: push readiness memoization and transport cooldown
+        self._push_ready_memo: Optional[bool] = None  # last known readiness (for change-only logging)
+        self._push_cooldown_until: float = 0.0        # monotonic timestamp; if in future, treat push as not-ready
+
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
             "skipped_duplicates": 0,
@@ -583,55 +587,95 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     # PATCH C: Expose Play Sound availability to buttons
     # -------------------------------------------------------------------------
     def _api_push_ready(self) -> bool:
-        """Best-effort check whether push/FCM is initialized in the API (backward compatible)."""
+        """Best-effort check whether push/FCM is initialized (backward compatible).
+
+        Optimistic default: if we cannot determine readiness explicitly,
+        return True so the UI stays usable; the API call will enforce reality.
+        """
+        # Short-circuit via cooldown window after a transport failure.
+        now = time.monotonic()
+        if now < self._push_cooldown_until:
+            if self._push_ready_memo is not False:
+                _LOGGER.debug("Push readiness: cooldown active -> treating as not ready")
+            self._push_ready_memo = False
+            return False
+
+        ready: Optional[bool] = None
         try:
-            # Preferred explicit function
             fn = getattr(self.api, "is_push_ready", None)
             if callable(fn):
-                return bool(fn())
-            # Common attr variants in older API builds
-            for attr in ("push_ready", "fcm_ready", "receiver_ready"):
-                val = getattr(self.api, attr, None)
-                if isinstance(val, bool):
-                    return val
-            # Some implementations expose a nested FCM object
-            fcm = getattr(self.api, "fcm", None)
-            if fcm is not None:
-                for attr in ("is_ready", "ready"):
-                    val = getattr(fcm, attr, None)
+                ready = bool(fn())
+            else:
+                for attr in ("push_ready", "fcm_ready", "receiver_ready"):
+                    val = getattr(self.api, attr, None)
                     if isinstance(val, bool):
-                        return val
+                        ready = val
+                        break
+                if ready is None:
+                    fcm = getattr(self.api, "fcm", None)
+                    if fcm is not None:
+                        for attr in ("is_ready", "ready"):
+                            val = getattr(fcm, attr, None)
+                            if isinstance(val, bool):
+                                ready = val
+                                break
         except Exception as err:
-            _LOGGER.debug("Push readiness check failed: %s", err)
-        return False
+            _LOGGER.debug("Push readiness check exception: %s (defaulting optimistic True)", err)
+            ready = True
+
+        if ready is None:
+            ready = True  # optimistic default
+
+        # Change-only logging to keep logs quiet.
+        if ready != self._push_ready_memo:
+            _LOGGER.debug("Push readiness changed: %s", ready)
+            self._push_ready_memo = ready
+
+        return ready
+
+    def _note_push_transport_problem(self, cooldown_s: int = 90) -> None:
+        """Enter a temporary cooldown after a push transport failure to avoid spamming."""
+        self._push_cooldown_until = time.monotonic() + cooldown_s
+        self._push_ready_memo = False
+        _LOGGER.debug("Entering push cooldown for %ss after transport failure", cooldown_s)
 
     def can_play_sound(self, device_id: str) -> bool:
-        """Return True if 'Play Sound' is available for the device.
+        """Return True if 'Play Sound' should be enabled for the device.
 
-        Order of truth sources (most specific first):
-        1) API method can_play_sound(device_id) if present.
-        2) API push readiness AND device capability from last device list (can_ring).
-        3) Fallback: API push readiness AND device known to coordinator.
+        Optimistic strategy:
+        - If API gives an explicit verdict -> use it.
+        - If push readiness is explicitly False -> disable.
+        - If capability is known -> use it.
+        - Otherwise -> enable (optimistic), API call will guard and start cooldown on failure.
         """
-        # 1) Delegate to API if available
         api_can = getattr(self.api, "can_play_sound", None)
         if callable(api_can):
             try:
-                return bool(api_can(device_id))  # type: ignore[misc]
+                verdict = api_can(device_id)  # may be True/False/None
+                _LOGGER.debug("can_play_sound(api) for %s -> %r", device_id, verdict)
+                if verdict is not None:
+                    return bool(verdict)
             except Exception as err:
-                _LOGGER.debug("API.can_play_sound failed for %s: %s", device_id, err)
+                _LOGGER.debug("can_play_sound(api) failed for %s: %s; falling back", device_id, err)
 
-        # 2) Use push readiness + cached capability if we have it
-        if not self._api_push_ready():
+        ready = self._api_push_ready()
+        if ready is False:
+            _LOGGER.debug("can_play_sound(%s) -> False (push not ready)", device_id)
             return False
 
         caps = self._device_caps.get(device_id)
         if caps and isinstance(caps.get("can_ring"), bool):
-            return bool(caps["can_ring"])
+            res = bool(caps["can_ring"])
+            _LOGGER.debug("can_play_sound(%s) -> %s (from capability can_ring)", device_id, res)
+            return res
 
-        # 3) Fallback: if the device is known at all, allow press; otherwise deny
         is_known = device_id in self._device_names or device_id in self._device_location_data
-        return bool(is_known)
+        if is_known:
+            _LOGGER.debug("can_play_sound(%s) -> True (optimistic fallback; known device, push_ready=%s)", device_id, ready)
+            return True
+
+        _LOGGER.debug("can_play_sound(%s) -> True (optimistic final fallback)", device_id)
+        return True
 
     # -------------------------------------------------------------------------
     # Passthrough API helpers (unchanged)
@@ -641,11 +685,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         return await self.hass.async_add_executor_job(self.api.locate_device, device_id)
 
     async def async_play_sound(self, device_id: str) -> bool:
-        """Play sound on a device (executes blocking client code in executor)."""
-        # PATCH D: small guard to avoid spurious API calls when not ready
+        """Play sound on a device (executes blocking client code in executor).
+
+        Guard with can_play_sound(); on failure, start a short cooldown to avoid repeated errors.
+        """
         if not self.can_play_sound(device_id):
             _LOGGER.debug(
                 "Suppressing play_sound call for %s: capability/push not ready", device_id
             )
             return False
-        return await self.hass.async_add_executor_job(self.api.play_sound, device_id)
+        try:
+            ok = await self.hass.async_add_executor_job(self.api.play_sound, device_id)
+            if not ok:
+                self._note_push_transport_problem()
+            return bool(ok)
+        except Exception as err:
+            _LOGGER.debug("play_sound raised for %s: %s; entering cooldown", device_id, err)
+            self._note_push_transport_problem()
+            return False
