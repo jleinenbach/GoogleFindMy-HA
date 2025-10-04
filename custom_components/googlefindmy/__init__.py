@@ -4,17 +4,15 @@ Version: 2.0 - Location extraction from device list
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import HomeAssistant, ServiceCall, CoreState
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.start import async_when_started
 import voluptuous as vol
 
 from .const import (
@@ -31,6 +29,7 @@ from .map_view import GoogleFindMyMapView, GoogleFindMyMapRedirectView
 
 _LOGGER = logging.getLogger(__name__)
 
+# Platforms provided by this integration
 PLATFORMS: list[Platform] = [
     Platform.DEVICE_TRACKER,
     Platform.BUTTON,
@@ -39,45 +38,46 @@ PLATFORMS: list[Platform] = [
 ]
 
 
-def _get_local_ip_sync() -> str:
-    """Best-effort local IP detection (blocking, run in executor)."""
-    import socket
-
-    try:
-        # UDP connect does not send packets; it just sets routing and local address
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except OSError:
-        return ""
-
-
 def _redact_url_token(url: str) -> str:
-    """Redact 'token' query param for logging."""
+    """Return URL with any 'token' query parameter value redacted for safe logging.
+
+    We never want to leak authentication/authorization tokens into logs or bug reports.
+    This helper keeps the URL readable while masking the secret.
+    """
     try:
         from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
         parts = urlsplit(url)
-        query = dict(parse_qsl(parts.query))
-        if "token" in query:
-            query["token"] = "****"
-            redacted = urlunsplit(
-                (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
-            )
-            return redacted
+        q = parse_qsl(parts.query, keep_blank_values=True)
+        redacted = []
+        for k, v in q:
+            if k.lower() == "token" and v:
+                # Keep a tiny hint of length without exposing the secret
+                red_v = (v[:2] + "…" + v[-2:]) if len(v) > 4 else "****"
+                redacted.append((k, red_v))
+            else:
+                redacted.append((k, v))
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(redacted, doseq=True), parts.fragment)
+        )
     except Exception:
-        pass
-    return url
+        # In worst case, fall back to original to avoid breaking logs (still try not to log raw tokens)
+        return url
 
 
 async def _async_save_secrets_data(secrets_data: dict) -> None:
-    """Persist complete secrets data to the integration cache (async, non-blocking)."""
+    """Persist complete secrets data to the integration cache (async, non-blocking).
+
+    All storage happens using the integration's async token_cache helpers. Complex values
+    are serialized to JSON strings to avoid blocking I/O in the event loop.
+    """
     from .Auth.token_cache import async_set_cached_value
     from .Auth.username_provider import username_string
+    import json
 
     enhanced_data = secrets_data.copy()
 
-    # Derive and persist the username in a normalized way
+    # Derive and persist the username in a normalized way (works for both old/new keys)
     google_email = secrets_data.get("username", secrets_data.get("Email"))
     if google_email:
         enhanced_data[username_string] = google_email
@@ -111,13 +111,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     movement_threshold = entry.data.get("movement_threshold", 50)
     allow_history_fallback = entry.data.get("allow_history_fallback", False)
 
-    # Obtain secrets bundle
+    # Obtain secrets bundle (required)
     secrets_data = entry.data.get("secrets_data")
     if not secrets_data:
         _LOGGER.error("Secrets data not found in config entry")
         raise ConfigEntryNotReady("Secrets data not found")
 
-    # Initialize coordinator (non-blocking; first refresh will be deferred)
+    # Initialize coordinator (non-blocking; first refresh is deferred until HA is started)
     coordinator = GoogleFindMyCoordinator(
         hass,
         secrets_data=secrets_data,
@@ -167,10 +167,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _async_register_services(hass, coordinator)
 
     # Defer the first refresh until HA is fully started to reduce startup pressure.
-    # IMPORTANT: Do NOT call async_config_entry_first_refresh() when the entry is already LOADED.
+    # IMPORTANT: Do NOT call async_config_entry_first_refresh() when the entry is LOADED.
     # Use async_refresh() instead and check last_update_success. Then forward platforms.
-    async def _do_first_refresh() -> None:
-        """Perform the initial coordinator refresh and then set up platforms."""
+    async def _do_first_refresh(_: Any) -> None:
+        """Perform the initial coordinator refresh and then set up platforms.
+
+        We try to fetch initial data once HA is started to avoid slowing down bootstrap.
+        Even if the first refresh fails, we still forward platforms so entities can load
+        and recover on subsequent polls.
+        """
         try:
             await coordinator.async_refresh()
             if not coordinator.last_update_success:
@@ -186,9 +191,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Forward platform setups after attempting the first refresh
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Use HA helper to schedule the task when HA is started, or immediately if already running.
-    # This avoids manual subscribe/unsubscribe race conditions with one-time listeners.
-    async_when_started(hass, _do_first_refresh)
+    if hass.state == CoreState.running:
+        # HA already running (reload / late setup) -> refresh now via async_refresh()
+        hass.async_create_task(_do_first_refresh(None))
+    else:
+        # Normal startup -> refresh after HA signals 'started'
+        unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_first_refresh)
+        entry.async_on_unload(unsub)
 
     # React to entry updates (options) and apply changes
     entry.async_on_unload(entry.add_update_listener(async_update_entry))
@@ -197,7 +206,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle config entry updates."""
+    """Handle config entry updates.
+
+    We push new options into the coordinator and trigger a refresh without blocking the loop.
+    """
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     # Update coordinator knobs
@@ -225,6 +237,7 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         )
     except Exception:
         effective_interval = coordinator.location_poll_interval
+    # Coordinator uses a monotonic timestamp for scheduling; subtract interval to force due
     coordinator._last_poll_mono = time.monotonic() - float(effective_interval)
 
     _LOGGER.info(
@@ -242,6 +255,23 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok
+
+
+def _get_local_ip_sync() -> str:
+    """Synchronous helper: best-effort local IP discovery via UDP connect.
+
+    This can block on some systems (e.g. DNS/route issues), so it must be called
+    from an executor thread. The service will use hass.async_add_executor_job().
+    """
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            # We don't actually send anything; this just forces the OS to pick an outbound IP.
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return ""
 
 
 async def _async_register_services(
@@ -277,13 +307,18 @@ async def _async_register_services(
         await async_locate_device_service(call)
 
     async def async_refresh_device_urls_service(call: ServiceCall) -> None:
-        """Handle refresh device URLs service call."""
+        """Handle refresh of configuration URLs for all integration devices.
+
+        The service prefers a local base URL (derived from the host's primary IP and HA port)
+        and falls back to Home Assistant's internal URL if local IP discovery fails.
+        Token is rotated weekly by default (configurable). All logs redact the token.
+        """
         try:
             from homeassistant.helpers import device_registry
             from homeassistant.helpers.network import get_url
             import hashlib
 
-            # Determine a base URL (prefer local) – local IP detection runs in executor
+            # Try to infer local IP in an executor (avoid blocking the event loop)
             local_ip = await hass.async_add_executor_job(_get_local_ip_sync)
             if local_ip:
                 port = 8123
@@ -297,7 +332,7 @@ async def _async_register_services(
                 base_url = f"{protocol}://{local_ip}:{port}"
                 _LOGGER.info("Detected local URL for device refresh: %s", base_url)
             else:
-                # Fallback to HA's internal URL resolution
+                # Fallback to HA internal URL discovery
                 base_url = get_url(
                     hass,
                     prefer_external=False,
@@ -311,7 +346,7 @@ async def _async_register_services(
                 _LOGGER.error("Could not determine base URL for device refresh")
                 return
 
-            # Auth token (with optional weekly rotation)
+            # Build an auth token with optional weekly rotation
             ha_uuid = str(hass.data.get("core.uuid", "ha"))
             config_entries = hass.config_entries.async_entries(DOMAIN)
             token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
@@ -321,7 +356,7 @@ async def _async_register_services(
                 )
 
             if token_expiration_enabled:
-                week = str(int(time.time() // 604800))  # week-bucket
+                week = str(int(time.time() // 604800))  # current week bucket
                 auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
             else:
                 auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
@@ -330,22 +365,22 @@ async def _async_register_services(
             dev_reg = device_registry.async_get(hass)
             updated_count = 0
             for device in dev_reg.devices.values():
+                # Only touch devices that belong to this integration
                 if any(identifier[0] == DOMAIN for identifier in device.identifiers):
-                    device_id = None
+                    dev_id = None
                     for identifier in device.identifiers:
                         if identifier[0] == DOMAIN:
-                            device_id = identifier[1]
+                            dev_id = identifier[1]
                             break
-                    if device_id:
+                    if dev_id:
                         new_config_url = (
-                            f"{base_url}/api/googlefindmy/redirect_map/{device_id}"
+                            f"{base_url}/api/googlefindmy/redirect_map/{dev_id}"
                             f"?token={auth_token}"
                         )
                         dev_reg.async_update_device(
                             device_id=device.id, configuration_url=new_config_url
                         )
                         updated_count += 1
-                        # Log redacted URL (do not leak token)
                         _LOGGER.info(
                             "Updated URL for device %s: %s",
                             device.name_by_user or device.name,
