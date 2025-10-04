@@ -117,7 +117,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("Secrets data not found in config entry")
         raise ConfigEntryNotReady("Secrets data not found")
 
-    # Initialize coordinator (non-blocking; first refresh is deferred until HA is started)
+    # Initialize coordinator (non-blocking; first refresh timing is handled below)
     coordinator = GoogleFindMyCoordinator(
         hass,
         secrets_data=secrets_data,
@@ -166,35 +166,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register services (available regardless of initial data availability)
     await _async_register_services(hass, coordinator)
 
-    # IMPORTANT FOR STATE RESTORE:
-    # Forward platforms *now*, so Entities exist early and RestoreEntity can
-    # rehydrate last known states immediately after reboot/reload.
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    # Defer the first refresh until HA is fully started to reduce startup pressure.
-    # We do NOT use async_config_entry_first_refresh() when the entry is LOADED.
-    async def _do_first_refresh(_: Any) -> None:
-        """Perform the initial coordinator refresh after HA has started.
-
-        Entities are already created (state restore is possible). This refresh will
-        populate live data shortly after startup without blocking bootstrap.
-        """
+    # --- Bootstrap order: ensure data exists BEFORE forwarding platforms ---
+    async def _bootstrap_after_start(_: Any) -> None:
+        """Perform first refresh after HA started, then forward platforms."""
         try:
-            await coordinator.async_refresh()
-            if not coordinator.last_update_success:
-                _LOGGER.warning(
-                    "Initial refresh did not succeed; entities will recover on subsequent polls."
-                )
+            await coordinator.async_config_entry_first_refresh()
         except Exception as err:
             _LOGGER.error("Initial refresh raised an unexpected error: %s", err)
+        try:
+            await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        except Exception as err:
+            _LOGGER.error("Forwarding platforms failed: %s", err)
 
     if hass.state == CoreState.running:
-        # HA already running (reload / late setup) -> refresh now via async_refresh()
-        hass.async_create_task(_do_first_refresh(None))
+        # HA already running (reload / late setup): refresh now, then forward
+        await coordinator.async_config_entry_first_refresh()
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     else:
-        # Normal startup -> refresh after HA signals 'started'
-        unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_first_refresh)
-        entry.async_on_unload(unsub)
+        # Normal startup: wait for HA to start, then refresh and forward
+        unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _bootstrap_after_start)
+
+        # Guard against "remove unknown job listener" when the one-time listener already fired
+        def _safe_unsub() -> None:
+            try:
+                unsub()
+            except Exception:
+                # Listener may already be gone; ignore
+                pass
+
+        entry.async_on_unload(_safe_unsub)
 
     # React to entry updates (options) and apply changes
     entry.async_on_unload(entry.add_update_listener(async_update_entry))
@@ -243,7 +243,7 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         coordinator.location_poll_interval,
     )
 
-    # Request an immediate refresh (non-blocking); do not call async_config_entry_first_refresh() here
+    # Request an immediate refresh (non-blocking)
     await coordinator.async_request_refresh()
 
 
@@ -252,23 +252,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok
-
-
-def _get_local_ip_sync() -> str:
-    """Synchronous helper: best-effort local IP discovery via UDP connect.
-
-    This can block on some systems (e.g. DNS/route issues), so it must be called
-    from an executor thread. The service will use hass.async_add_executor_job().
-    """
-    import socket
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            # We don't actually send anything; this just forces the OS to pick an outbound IP.
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except OSError:
-        return ""
 
 
 async def _async_register_services(
