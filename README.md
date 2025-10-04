@@ -42,7 +42,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 >[!IMPORTANT]
 >**Authentication is a 2-part process.  One part requires use of a python script to obtain a secrets.json file, which will contain all necessary keys for authentication!  This is currently the *ONLY* way to authenticate to the FindMy network.**
 
-### Authentication Part 1 (External Steps)
+### <ins>Authentication Part 1 (External Steps)</ins>
 1. Navigate to [GoogleFindMyTools](https://github.com/leonboe1/GoogleFindMyTools?tab=readme-ov-file#how-to-use) repository and follow the directions on "How to use" the main.py script.
 2. **CRITICAL STEP!**  Complete the **ENTIRE** authentication process to generate `Auth/secrets.json`
 > [!WARNING]
@@ -50,7 +50,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 3. Copy the entire contents of the secrets.json file.
     - Specifically, open the file in a text editor, select all, and copy.
 
-### Authentication Part 2 (Home Assistant Steps)  
+### <ins>Authentication Part 2 (Home Assistant Steps)</ins> 
 4. Add the integration to your Home Assistant install.
 5. In Home Assistant, paste the copied text from secrets.json when prompted.
 6. After completing authentication and adding devices, RESTART Home Assistant!
