@@ -4,15 +4,17 @@ Version: 2.0 - Location extraction from device list
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STARTED
-from homeassistant.core import HomeAssistant, ServiceCall, CoreState
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.start import async_when_started
 import voluptuous as vol
 
 from .const import (
@@ -37,11 +39,41 @@ PLATFORMS: list[Platform] = [
 ]
 
 
+def _get_local_ip_sync() -> str:
+    """Best-effort local IP detection (blocking, run in executor)."""
+    import socket
+
+    try:
+        # UDP connect does not send packets; it just sets routing and local address
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return ""
+
+
+def _redact_url_token(url: str) -> str:
+    """Redact 'token' query param for logging."""
+    try:
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+        parts = urlsplit(url)
+        query = dict(parse_qsl(parts.query))
+        if "token" in query:
+            query["token"] = "****"
+            redacted = urlunsplit(
+                (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+            )
+            return redacted
+    except Exception:
+        pass
+    return url
+
+
 async def _async_save_secrets_data(secrets_data: dict) -> None:
     """Persist complete secrets data to the integration cache (async, non-blocking)."""
     from .Auth.token_cache import async_set_cached_value
     from .Auth.username_provider import username_string
-    import json
 
     enhanced_data = secrets_data.copy()
 
@@ -56,7 +88,6 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
             if isinstance(value, (str, int, float)):
                 await async_set_cached_value(key, str(value))
             else:
-                # Convert other complex values to JSON string for storage
                 await async_set_cached_value(key, json.dumps(value))
         except Exception as err:
             _LOGGER.warning("Failed to save %s to persistent cache: %s", key, err)
@@ -136,9 +167,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _async_register_services(hass, coordinator)
 
     # Defer the first refresh until HA is fully started to reduce startup pressure.
-    # IMPORTANT: Do NOT call async_config_entry_first_refresh() when the entry is LOADED.
+    # IMPORTANT: Do NOT call async_config_entry_first_refresh() when the entry is already LOADED.
     # Use async_refresh() instead and check last_update_success. Then forward platforms.
-    async def _do_first_refresh(_: Any) -> None:
+    async def _do_first_refresh() -> None:
         """Perform the initial coordinator refresh and then set up platforms."""
         try:
             await coordinator.async_refresh()
@@ -155,13 +186,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Forward platform setups after attempting the first refresh
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    if hass.state == CoreState.running:
-        # HA already running (reload / late setup) -> refresh now via async_refresh()
-        hass.async_create_task(_do_first_refresh(None))
-    else:
-        # Normal startup -> refresh after HA signals 'started'
-        unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_first_refresh)
-        entry.async_on_unload(unsub)
+    # Use HA helper to schedule the task when HA is started, or immediately if already running.
+    # This avoids manual subscribe/unsubscribe race conditions with one-time listeners.
+    async_when_started(hass, _do_first_refresh)
 
     # React to entry updates (options) and apply changes
     entry.async_on_unload(entry.add_update_listener(async_update_entry))
@@ -254,17 +281,11 @@ async def _async_register_services(
         try:
             from homeassistant.helpers import device_registry
             from homeassistant.helpers.network import get_url
-            import socket
             import hashlib
 
-            # Determine a base URL (prefer local)
-            try:
-                # Try to infer local IP to construct an internal URL
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                s.close()
-
+            # Determine a base URL (prefer local) – local IP detection runs in executor
+            local_ip = await hass.async_add_executor_job(_get_local_ip_sync)
+            if local_ip:
                 port = 8123
                 use_ssl = False
                 if hasattr(hass, "http") and hasattr(hass.http, "server_port"):
@@ -275,10 +296,8 @@ async def _async_register_services(
                 protocol = "https" if use_ssl else "http"
                 base_url = f"{protocol}://{local_ip}:{port}"
                 _LOGGER.info("Detected local URL for device refresh: %s", base_url)
-            except Exception as local_err:
-                _LOGGER.debug(
-                    "Local IP detection failed: %s, trying HA network detection", local_err
-                )
+            else:
+                # Fallback to HA's internal URL resolution
                 base_url = get_url(
                     hass,
                     prefer_external=False,
@@ -326,10 +345,11 @@ async def _async_register_services(
                             device_id=device.id, configuration_url=new_config_url
                         )
                         updated_count += 1
+                        # Log redacted URL (do not leak token)
                         _LOGGER.info(
                             "Updated URL for device %s: %s",
                             device.name_by_user or device.name,
-                            new_config_url,
+                            _redact_url_token(new_config_url),
                         )
 
             _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
