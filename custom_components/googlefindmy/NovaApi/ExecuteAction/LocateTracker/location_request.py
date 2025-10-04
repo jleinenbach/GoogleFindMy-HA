@@ -8,17 +8,21 @@ import time
 import logging
 import traceback
 
-# Import FcmReceiver lazily to avoid protobuf conflicts
-from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
+# Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import create_action_request, serialize_action_request
 from custom_components.googlefindmy.NovaApi.nova_request import async_nova_request
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
-from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
-from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
+
 def create_location_request(canonic_device_id, fcm_registration_id, request_uuid):
+    """Build and serialize a LocateTracker action request.
+
+    DeviceUpdate_pb2 is imported lazily here to avoid protobuf side effects
+    at module import time (important inside Home Assistant).
+    """
+    from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2  # lazy import
 
     action_request = create_action_request(canonic_device_id, fcm_registration_id, request_uuid=request_uuid)
 
@@ -214,4 +218,7 @@ async def get_location_data_for_device(canonic_device_id, name):
             logger.warning(f"Error during FCM cleanup for {name}: {cleanup_error}")
 
 if __name__ == '__main__':
-    get_location_data_for_device(get_example_data("sample_canonic_device_id"), "Test")
+    # FIX: run the async function when executed as a script (outside HA)
+    asyncio.run(
+        get_location_data_for_device(get_example_data("sample_canonic_device_id"), "Test")
+    )
