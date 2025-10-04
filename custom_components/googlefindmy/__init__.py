@@ -1,6 +1,6 @@
 """Google Find My Device integration for Home Assistant.
 
-Version: 2.0 - Location extraction from device list
+Version: 2.1 - Entities-first bootstrap with deferred initial refresh
 """
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def _redact_url_token(url: str) -> str:
 
 
 async def _async_save_secrets_data(secrets_data: dict) -> None:
-    """Persist complete secrets data to the integration cache (async, non-blocking).
+    """Persist secrets data to the integration cache (async, non-blocking).
 
     All storage happens using the integration's async token_cache helpers. Complex values
     are serialized to JSON strings to avoid blocking I/O in the event loop.
@@ -94,15 +94,15 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Google Find My Device from a config entry."""
-    # Preload cache early to reduce I/O during first refresh
+    """Set up Google Find My Device from a config entry (entities-first)."""
+    # Preload cache early
     try:
         await async_load_cache_from_file()
         _LOGGER.debug("Cache preloaded successfully")
     except Exception as err:
         _LOGGER.warning("Failed to preload cache: %s", err)
 
-    # Extract configuration (secrets.json is the source)
+    # Extract configuration (from entry.data)
     tracked_devices = entry.data.get("tracked_devices", [])
     location_poll_interval = entry.data.get("location_poll_interval", 300)
     device_poll_delay = entry.data.get("device_poll_delay", 5)
@@ -117,7 +117,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("Secrets data not found in config entry")
         raise ConfigEntryNotReady("Secrets data not found")
 
-    # Initialize coordinator (non-blocking; first refresh timing is handled below)
+    # Initialize coordinator (first refresh is deferred until HA is started)
     coordinator = GoogleFindMyCoordinator(
         hass,
         secrets_data=secrets_data,
@@ -128,73 +128,74 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         min_accuracy_threshold=min_accuracy_threshold,
         allow_history_fallback=allow_history_fallback,
     )
+    coordinator.config_entry = entry  # convenience for platforms
 
-    # Optional: attach Google Home filter (kept as-is)
+    # Optional: attach Google Home filter
     from .google_home_filter import GoogleHomeFilter
 
     coordinator.google_home_filter = GoogleHomeFilter(hass, entry.data)
     _LOGGER.debug("Initialized Google Home filter")
 
-    # Persist secrets asynchronously (non-blocking)
-    if secrets_data:
-        try:
-            await _async_save_secrets_data(secrets_data)
-            _LOGGER.debug("Saved complete secrets data to persistent cache")
-        except Exception as err:
-            _LOGGER.warning("Failed to save secrets data to persistent cache: %s", err)
+    # Persist secrets asynchronously (fire-and-forget)
+    try:
+        await _async_save_secrets_data(secrets_data)
+        _LOGGER.debug("Saved complete secrets data to persistent cache")
+    except Exception as err:
+        _LOGGER.warning("Failed to save secrets data to persistent cache: %s", err)
 
-    # Make coordinator available in hass.data immediately
+    # Share coordinator & config in hass.data immediately (so platforms can restore)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    # Also share config data for device tracker
     hass.data[DOMAIN]["config_data"] = {
         "min_accuracy_threshold": min_accuracy_threshold,
         "movement_threshold": movement_threshold,
     }
 
-    # Register map views early; safe to do before first refresh
+    # Register map views early
     try:
-        map_view = GoogleFindMyMapView(hass)
-        hass.http.register_view(map_view)
-        _LOGGER.debug("Registered map view")
-
-        redirect_view = GoogleFindMyMapRedirectView(hass)
-        hass.http.register_view(redirect_view)
-        _LOGGER.debug("Registered map redirect view")
+        hass.http.register_view(GoogleFindMyMapView(hass))
+        hass.http.register_view(GoogleFindMyMapRedirectView(hass))
+        _LOGGER.debug("Registered map views")
     except Exception as err:
         _LOGGER.warning("Failed to register map views: %s", err)
 
-    # Register services (available regardless of initial data availability)
+    # Register services (available regardless of data freshness)
     await _async_register_services(hass, coordinator)
 
-    # --- Bootstrap order: ensure data exists BEFORE forwarding platforms ---
-    async def _bootstrap_after_start(_: Any) -> None:
-        """Perform first refresh after HA started, then forward platforms."""
+    # --- ENTITIES-FIRST: forward platforms now so RestoreEntity can populate immediately ---
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Defer the first refresh until HA is fully started
+    async def _do_first_refresh(_: Any) -> None:
+        """Perform the initial coordinator refresh after HA has started."""
         try:
-            await coordinator.async_config_entry_first_refresh()
+            await coordinator.async_refresh()
+            if not coordinator.last_update_success:
+                _LOGGER.warning(
+                    "Initial refresh did not succeed; entities will recover on subsequent polls."
+                )
         except Exception as err:
             _LOGGER.error("Initial refresh raised an unexpected error: %s", err)
-        try:
-            await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-        except Exception as err:
-            _LOGGER.error("Forwarding platforms failed: %s", err)
 
+    # ----- MINI-HARDENING START: wrap scheduling and listener registration -----
     if hass.state == CoreState.running:
-        # HA already running (reload / late setup): refresh now, then forward
-        await coordinator.async_config_entry_first_refresh()
-        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        try:
+            hass.async_create_task(_do_first_refresh(None))
+        except Exception as err:
+            _LOGGER.error("Failed to schedule initial refresh task: %s", err)
     else:
-        # Normal startup: wait for HA to start, then refresh and forward
-        unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _bootstrap_after_start)
-
-        # Guard against "remove unknown job listener" when the one-time listener already fired
-        def _safe_unsub() -> None:
-            try:
-                unsub()
-            except Exception:
-                # Listener may already be gone; ignore
-                pass
-
-        entry.async_on_unload(_safe_unsub)
+        try:
+            unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_first_refresh)
+        except Exception as err:
+            _LOGGER.error("Failed to register initial refresh listener: %s", err)
+        else:
+            def _safe_unsub() -> None:
+                try:
+                    unsub()
+                except Exception:
+                    # Listener already removed or never registered; ignore
+                    pass
+            entry.async_on_unload(_safe_unsub)
+    # ----- MINI-HARDENING END -----
 
     # React to entry updates (options) and apply changes
     entry.async_on_unload(entry.add_update_listener(async_update_entry))
@@ -214,28 +215,26 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     coordinator.location_poll_interval = entry.data.get("location_poll_interval", 300)
     coordinator.device_poll_delay = entry.data.get("device_poll_delay", 5)
     coordinator.min_poll_interval = entry.data.get("min_poll_interval", 120)
-    coordinator._min_accuracy_threshold = entry.data.get("min_accuracy_threshold", 100)
+    coordinator._min_accuracy_threshold = entry.data.get("min_accuracy_threshold", 100)  # noqa: SLF001
     coordinator.allow_history_fallback = entry.data.get("allow_history_fallback", False)
 
     # Update Google Home filter configuration
     if hasattr(coordinator, "google_home_filter"):
         coordinator.google_home_filter.update_config(entry.data)
 
-    # Share updated config for device tracker
+    # Share updated config for platforms
     hass.data[DOMAIN]["config_data"] = {
         "min_accuracy_threshold": entry.data.get("min_accuracy_threshold", 100),
         "movement_threshold": entry.data.get("movement_threshold", 50),
     }
 
-    # Reset monotonic baseline so the next cycle is due immediately
+    # Reset scheduling baseline so the next cycle is due immediately
     try:
-        effective_interval = max(
-            coordinator.location_poll_interval, coordinator.min_poll_interval
-        )
+        effective_interval = max(coordinator.location_poll_interval, coordinator.min_poll_interval)
     except Exception:
         effective_interval = coordinator.location_poll_interval
     # Coordinator uses a monotonic timestamp for scheduling; subtract interval to force due
-    coordinator._last_poll_mono = time.monotonic() - float(effective_interval)
+    coordinator._last_poll_mono = time.monotonic() - float(effective_interval)  # noqa: SLF001
 
     _LOGGER.info(
         "Updated configuration: %d tracked devices, %ss poll interval",
@@ -243,7 +242,7 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         coordinator.location_poll_interval,
     )
 
-    # Request an immediate refresh (non-blocking)
+    # Trigger an immediate refresh (non-blocking)
     await coordinator.async_request_refresh()
 
 
@@ -254,13 +253,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
+def _get_local_ip_sync() -> str:
+    """Best-effort local IP discovery via UDP connect (executor-only)."""
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return ""
+
+
 async def _async_register_services(
     hass: HomeAssistant, coordinator: GoogleFindMyCoordinator
 ) -> None:
     """Register services for the integration."""
 
     async def async_locate_device_service(call: ServiceCall) -> None:
-        """Handle locate device service call."""
         device_id = call.data["device_id"]
         try:
             await coordinator.async_locate_device(device_id)
@@ -268,15 +278,15 @@ async def _async_register_services(
             _LOGGER.error("Failed to locate device %s: %s", device_id, err)
 
     async def async_play_sound_service(call: ServiceCall) -> None:
-        """Handle play sound service call."""
         device_id = call.data["device_id"]
+        """Handle play sound service call."""
         try:
             await coordinator.async_play_sound(device_id)
         except Exception as err:
             _LOGGER.error("Failed to play sound on device %s: %s", device_id, err)
 
     async def async_locate_external_service(call: ServiceCall) -> None:
-        """Handle external locate device service call (delegates to locate)."""
+        """External locate device service (delegates to locate)."""
         device_id = call.data.get("device_id")
         device_name = call.data.get("device_name", device_id)
         _LOGGER.info(
@@ -287,7 +297,7 @@ async def _async_register_services(
         await async_locate_device_service(call)
 
     async def async_refresh_device_urls_service(call: ServiceCall) -> None:
-        """Handle refresh of configuration URLs for all integration devices.
+        """Refresh configuration URLs for integration devices (absolute URL).
 
         The device registry requires a valid **absolute HTTP(S) URL**. We therefore build a
         base URL once via `get_url(... prefer_external=True, allow_cloud=True, allow_external=True,
@@ -300,8 +310,6 @@ async def _async_register_services(
             from homeassistant.helpers.network import get_url
             import hashlib
 
-            # Resolve a single absolute base URL suitable for registry storage.
-            # Prefer external/Cloud to keep "Visit" working when UI is opened via Cloud URL.
             base_url = get_url(
                 hass,
                 prefer_external=True,
@@ -309,20 +317,19 @@ async def _async_register_services(
                 allow_external=True,
                 allow_internal=True,
             )
-
             if not base_url:
                 _LOGGER.error("Could not determine base URL for device refresh")
                 return
 
-            # Build an auth token with optional weekly rotation — options-first for consistency
+            # Token mode: options-first (consistent with platforms / map_view)
             ha_uuid = str(hass.data.get("core.uuid", "ha"))
             config_entries = hass.config_entries.async_entries(DOMAIN)
             token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             if config_entries:
-                entry = config_entries[0]
-                token_expiration_enabled = entry.options.get(
+                e0 = config_entries[0]
+                token_expiration_enabled = e0.options.get(
                     "map_view_token_expiration",
-                    entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
+                    e0.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
                 )
 
             if token_expiration_enabled:
@@ -331,11 +338,9 @@ async def _async_register_services(
             else:
                 auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
 
-            # Update device configuration URLs in the device registry with an **absolute** URL to the map path
             dev_reg = device_registry.async_get(hass)
             updated_count = 0
             for device in dev_reg.devices.values():
-                # Only touch devices that belong to this integration
                 if any(identifier[0] == DOMAIN for identifier in device.identifiers):
                     dev_id = None
                     for identifier in device.identifiers:
@@ -343,10 +348,7 @@ async def _async_register_services(
                             dev_id = identifier[1]
                             break
                     if dev_id:
-                        new_config_url = (
-                            f"{base_url}/api/googlefindmy/map/{dev_id}"
-                            f"?token={auth_token}"
-                        )
+                        new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
                         dev_reg.async_update_device(
                             device_id=device.id, configuration_url=new_config_url
                         )
