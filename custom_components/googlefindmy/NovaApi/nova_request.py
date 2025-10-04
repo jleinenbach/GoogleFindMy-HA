@@ -7,6 +7,7 @@ import binascii
 import requests
 import aiohttp
 from bs4 import BeautifulSoup
+import asyncio
 
 from custom_components.googlefindmy.Auth.aas_token_retrieval import get_aas_token
 from custom_components.googlefindmy.Auth.adm_token_retrieval import get_adm_token
@@ -211,10 +212,8 @@ async def async_nova_request(api_scope, hex_payload, username=None):
         # Fall back to generating ADM token - run in executor to avoid blocking
         try:
             _logger.info("Attempting to generate new ADM token...")
-            import asyncio
-            loop = asyncio.get_event_loop()
-            android_device_manager_oauth_token = await loop.run_in_executor(
-                None, get_adm_token, username
+            android_device_manager_oauth_token = await asyncio.to_thread(
+                get_adm_token, username
             )
             _logger.info(f"Generated ADM token: {'Success' if android_device_manager_oauth_token else 'Failed'}")
         except Exception as e:
@@ -303,10 +302,8 @@ async def async_nova_request(api_scope, hex_payload, username=None):
             # Generate new ADM token - run in executor to avoid blocking
             try:
                 _logger.info("Generating fresh ADM token...")
-                import asyncio
-                loop = asyncio.get_event_loop()
-                android_device_manager_oauth_token = await loop.run_in_executor(
-                    None, get_adm_token, username
+                android_device_manager_oauth_token = await asyncio.to_thread(
+                    get_adm_token, username
                 )
 
                 if android_device_manager_oauth_token:

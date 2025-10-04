@@ -2,11 +2,14 @@
 
 A comprehensive Home Assistant custom integration for Google's FindMy Device network, enabling real-time(ish) tracking and control of FindMy devices directly within Home Assistant!
 
->[!NOTE]
->**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**
-
+>[!TIP]
+>**Check out my companion Lovelace card, designed to work perfectly with this integration!**
+>
+>**[Google FindMy Card!](https://github.com/BSkando/GoogleFindMy-Card)**
+---
 <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
+---
 ## Features 
 
 - 🗺️ **Real-time Device Tracking**: Track Google FindMy devices with location data, sourced from the FindMy network
@@ -16,7 +19,10 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 - 📍 **Historical Map-View**: Each tracker has a filterable Map-View that shows tracker movement with location data
 - 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
 - ❣️ **More to come!**
-
+  
+>[!NOTE]
+>**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**
+>
 ## Installation
 
 ### HACS (Recommended)
