@@ -8,17 +8,21 @@ import time
 import logging
 import traceback
 
-# Import FcmReceiver lazily to avoid protobuf conflicts
-from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
+# Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import create_action_request, serialize_action_request
 from custom_components.googlefindmy.NovaApi.nova_request import async_nova_request
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
-from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
-from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
+
 def create_location_request(canonic_device_id, fcm_registration_id, request_uuid):
+    """Build and serialize a LocateTracker action request.
+
+    DeviceUpdate_pb2 is imported lazily here to avoid protobuf side effects
+    at module import time (important inside Home Assistant).
+    """
+    from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2  # lazy import
 
     action_request = create_action_request(canonic_device_id, fcm_registration_id, request_uuid=request_uuid)
 
@@ -162,7 +166,26 @@ async def get_location_data_for_device(canonic_device_id, name):
 
         # Send location request to Google API
         logger.info(f"Sending location request to Google API for {name}...")
-        nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+
+        # NEW: transient-error retry for Nova nbe_execute_action:
+        # - Wrap async_nova_request(...) in try/except.
+        # - On HTTP 500/502/503/504, wait 3s and retry once.
+        # - If the second call fails, continue best-effort by waiting for FCM; non-5xx errors still abort.
+        try:
+            nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+        except RuntimeError as e:
+            msg = str(e)
+            if ("500" in msg) or ("502" in msg) or ("503" in msg) or ("504" in msg):
+                logger.warning("Nova transient error (%s) for %s. Retrying once after 3s...", e, name)
+                await asyncio.sleep(3)
+                try:
+                    nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+                except RuntimeError as e2:
+                    logger.warning("Nova still failing (%s). Proceeding to wait for FCM best-effort.", e2)
+                    nova_result = None
+            else:
+                logger.error("Nova API request failed for %s: %s", name, e)
+                return []
 
         # NOTE: For this RPC the server often returns HTTP 200 with empty body (FCM delivers the data).
         # Treat None as "accepted" and proceed to wait for FCM; do not bail out early.
@@ -214,4 +237,7 @@ async def get_location_data_for_device(canonic_device_id, name):
             logger.warning(f"Error during FCM cleanup for {name}: {cleanup_error}")
 
 if __name__ == '__main__':
-    get_location_data_for_device(get_example_data("sample_canonic_device_id"), "Test")
+    # FIX: run the async function when executed as a script (outside HA)
+    asyncio.run(
+        get_location_data_for_device(get_example_data("sample_canonic_device_id"), "Test")
+    )
