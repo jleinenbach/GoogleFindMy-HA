@@ -97,7 +97,7 @@ async def async_setup_entry(
 class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity):
     """Representation of a Google Find My Device tracker."""
 
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
     _attr_source_type = SourceType.GPS
     _attr_entity_category = None  # Ensure device trackers are not diagnostic
 
@@ -110,7 +110,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         super().__init__(coordinator)
         self._device = device
         self._attr_unique_id = f"{DOMAIN}_{device['id']}"
-        self._attr_name = device["name"]
+        self._attr_name = "Find My"
         # Track last good accuracy location for database writes
         self._last_good_accuracy_data: dict[str, Any] | None = None
 
