@@ -32,6 +32,10 @@
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)"
         }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate",
+        "description": "Your credentials appear to be invalid or expired. Please provide new credentials below.\n\nTip: You can either paste the full contents of a fresh secrets.json **or** supply a new OAuth token and email."
       }
     },
     "error": {
@@ -40,16 +44,41 @@
       "invalid_json": "Invalid JSON format in secrets.json content.",
       "no_devices": "No devices found. Please ensure that Find My Device is enabled on your Google account.",
       "cannot_connect": "Failed to connect to the Google API. This may be temporary — please try again later.",
+      "choose_one": "Please provide exactly one credential method.",
+      "required": "This field is required.",
       "unknown": "Unexpected error occurred."
     },
     "abort": {
       "already_configured": "Google Find My Device is already configured.",
-      "cannot_connect": "Failed to connect to Google Find My Device."
+      "cannot_connect": "Failed to connect to Google Find My Device.",
+      "reauth_successful": "Reauthentication successful.",
+      "reconfigure_successful": "Reconfiguration successful."
     }
   },
   "options": {
     "step": {
       "init": {
+        "title": "Configuration",
+        "description": "What would you like to configure?",
+        "menu_options": {
+          "credentials": "Update credentials",
+          "settings": "Modify settings"
+        }
+      },
+      "credentials": {
+        "title": "Update credentials (optional)",
+        "description": "Update credentials without exposing existing values. Provide exactly one method:\n\n• Paste full contents of a new **secrets.json**\n**or**\n• Enter a new **OAuth token** and (optionally) **Google email**.\n\nIf provided, credentials will be validated and stored; the integration will reload without changing your entity names.",
+        "data": {
+          "new_secrets_json": "New secrets.json (full contents)",
+          "new_oauth_token": "New OAuth token",
+          "new_google_email": "Google email (optional)"
+        }
+      },
+      "finish": {
+        "title": "Action started",
+        "description": "The “{mode}” operation was started. Check the logs for details."
+      },
+      "settings": {
         "title": "Options",
         "description": "Modify tracking settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Min accuracy threshold: Ignore locations worse than this (25–500 meters)\n• Movement threshold: Minimum movement to trigger a location update (10–200 meters)\n\nGoogle Home Filter:\n• Enable to group Google Home detections into the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: 'nest' matches 'Kitchen Nest Mini'",
         "data": {
@@ -67,6 +96,13 @@
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire."
         }
       }
+    },
+    "error": {
+      "invalid_json": "Invalid JSON format in secrets.json content.",
+      "invalid": "Validation failed. Please check your input.",
+      "cannot_connect": "Failed to connect to the Google API.",
+      "choose_one": "Please provide exactly one credential method.",
+      "required": "This field is required."
     }
   },
   "services": {
