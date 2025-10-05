@@ -1,7 +1,9 @@
 """Sensor entities for Google Find My Device integration."""
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,8 +15,10 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
@@ -56,9 +60,9 @@ async def async_setup_entry(
     else:
         # Startup restore path: create skeletons from tracked_devices so Restore works immediately
         tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
-        name_map: dict[str, str] = getattr(coordinator, "_device_names", {})  # noqa: SLF001
         for dev_id in tracked_ids:
-            name = name_map.get(dev_id) or f"Find My - {dev_id}"
+            # Neutral default; do NOT leak technical device_id into the visible name.
+            name = "Google Find My Device"
             entities.append(GoogleFindMyLastSeenSensor(coordinator, {"id": dev_id, "name": name}))
             known_ids.add(dev_id)
         if tracked_ids:
@@ -89,7 +93,7 @@ async def async_setup_entry(
             if new_entities:
                 _LOGGER.info("Discovered %d new devices; adding last_seen sensors", len(new_entities))
                 async_add_entities(new_entities, True)
-        except Exception as err:  # noqa: BLE001
+        except (AttributeError, TypeError) as err:
             _LOGGER.debug("Dynamic sensor add failed: %s", err)
 
     coordinator.async_add_listener(_add_new_sensors_on_update)
@@ -158,27 +162,39 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
     @callback
     def _handle_coordinator_update(self) -> None:
         """Update native timestamp and handle device name drift."""
-        # Best-effort: update display name from coordinator's name map (if changed)
+        # Update display name from coordinator snapshot (no private maps).
         try:
-            name_map: dict[str, str] = getattr(self.coordinator, "_device_names", {})  # noqa: SLF001
-            new_name = name_map.get(self._device_id or "")
-            if new_name and new_name != self._device.get("name"):
-                self._device["name"] = new_name
-        except Exception as e:  # noqa: BLE001
+            my_id = self._device_id or ""
+            for dev in (getattr(self.coordinator, "data", None) or []):
+                if dev.get("id") == my_id:
+                    new_name = dev.get("name")
+                    if new_name and new_name != self._device.get("name"):
+                        self._device["name"] = new_name
+                    break
+        except (AttributeError, TypeError) as e:
             _LOGGER.debug("Name refresh failed for %s: %s", self._device_id, e)
 
-        # Source last_seen from public API (if present) -> fallback to internal cache
+        # Source last_seen strictly via public API; robust type handling.
         try:
-            if hasattr(self.coordinator, "get_device_last_seen") and self._device_id:
-                value = self.coordinator.get_device_last_seen(self._device_id)  # type: ignore[attr-defined]
+            value = self.coordinator.get_device_last_seen(self._device_id) if self._device_id else None
+            if isinstance(value, datetime):
                 self._attr_native_value = value
+            elif isinstance(value, (int, float)):
+                self._attr_native_value = datetime.fromtimestamp(float(value), tz=timezone.utc)
+            elif isinstance(value, str):
+                v = value.strip()
+                if v.endswith("Z"):
+                    v = v.replace("Z", "+00:00")
+                try:
+                    dt = datetime.fromisoformat(v)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    self._attr_native_value = dt
+                except ValueError:
+                    self._attr_native_value = None
             else:
-                mapping = getattr(self.coordinator, "_device_location_data", {})
-                ts = mapping.get(self._device_id, {}).get("last_seen") if self._device_id else None
-                self._attr_native_value = (
-                    datetime.fromtimestamp(float(ts), tz=timezone.utc) if ts is not None else None
-                )
-        except (ValueError, TypeError) as e:
+                self._attr_native_value = None
+        except (AttributeError, TypeError, ValueError) as e:
             _LOGGER.debug("Invalid last_seen for %s: %s", self._device_name, e)
             self._attr_native_value = None
 
@@ -192,7 +208,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         try:
             data = await self.async_get_last_sensor_data()
             value = getattr(data, "native_value", None) if data else None
-        except Exception as e:  # noqa: BLE001
+        except (RuntimeError, AttributeError) as e:
             _LOGGER.warning("Failed to restore sensor state for %s: %s", self.entity_id, e)
             value = None
 
@@ -213,8 +229,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     ts = dt.timestamp()
-                except ValueError as ex:
-                    _LOGGER.debug("Could not parse restored ISO value '%s' for %s: %s", value, self.entity_id, ex)
+                except ValueError:
                     ts = float(v)  # try numeric string
             elif isinstance(value, datetime):
                 ts = value.timestamp()
@@ -225,18 +240,12 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         if ts is None or not self._device_id:
             return
 
-        # Seed coordinator cache so native_value is available immediately after restart.
+        # Seed coordinator cache using its public API (no private access).
         try:
-            if hasattr(self.coordinator, "seed_device_last_seen"):
-                # Expected: seed_device_last_seen(device_id, timestamp: float) -> None
-                self.coordinator.seed_device_last_seen(self._device_id, ts)  # type: ignore[attr-defined]
-            else:
-                mapping = getattr(self.coordinator, "_device_location_data", {})
-                slot = mapping.setdefault(self._device_id, {})
-                slot.setdefault("last_seen", ts)  # don't overwrite fresh data
-                setattr(self.coordinator, "_device_location_data", mapping)
-        except Exception as e:  # noqa: BLE001
+            self.coordinator.seed_device_last_seen(self._device_id, ts)
+        except (AttributeError, TypeError) as e:
             _LOGGER.debug("Failed to seed coordinator cache for %s: %s", self._device_name, e)
+            return
 
         # Set our native value now (no need to wait for next coordinator tick)
         self._attr_native_value = datetime.fromtimestamp(ts, tz=timezone.utc)
@@ -252,8 +261,6 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         """Return device info."""
         path = self._build_map_path(self._device["id"], self._get_map_token(), redirect=False)
 
-        from homeassistant.helpers.network import get_url
-
         try:
             # Absolute base URL so the "Visit" link in device registry works from anywhere.
             base_url = get_url(
@@ -263,8 +270,9 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                 allow_external=True,
                 allow_internal=True,
             )
-        except Exception:
-            base_url = "http://homeassistant.local:8123"  # noqa: F841
+        except (HomeAssistantError, RuntimeError) as e:
+            _LOGGER.debug("Could not determine Home Assistant URL, using fallback: %s", e)
+            base_url = "http://homeassistant.local:8123"
 
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
@@ -272,7 +280,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
-            hw_version=self._device["id"],
+            serial_number=self._device["id"],  # semantically correct tech identifier
         )
 
     def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
@@ -283,9 +291,6 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     def _get_map_token(self) -> str:
         """Generate a simple token for map authentication (options-first)."""
-        import hashlib
-        import time
-
         config_entry = getattr(self.coordinator, "config_entry", None)
         if config_entry:
             token_expiration_enabled = config_entry.options.get(
