@@ -125,6 +125,41 @@
           "description": "The ID of the device on which the sound will be played."
         }
       }
+    },
+    "refresh_device_urls": {
+      "name": "Refresh Device URLs",
+      "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view.",
+      "fields": {}
+    },
+    "locate_external": {
+      "name": "Locate Device (External)",
+      "description": "Locate a device using the external service (delegates to the normal locate).",
+      "fields": {
+        "device_id": {
+          "name": "Device ID",
+          "description": "The ID of the device to locate."
+        },
+        "device_name": {
+          "name": "Device name (optional)",
+          "description": "An optional human-readable name for logging."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_seen": {
+        "name": "Last Seen"
+      },
+      "stat_skipped_duplicates": {
+        "name": "Skipped duplicates"
+      },
+      "stat_background_updates": {
+        "name": "Background updates"
+      },
+      "stat_crowd_sourced_updates": {
+        "name": "Crowd-sourced updates"
+      }
     }
   }
 }
