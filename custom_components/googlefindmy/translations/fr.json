@@ -32,6 +32,10 @@
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d’appareil (s)"
         }
+      },
+      "reauth_confirm": {
+        "title": "Se réauthentifier",
+        "description": "Vos identifiants semblent invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nAstuce : vous pouvez soit coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail."
       }
     },
     "error": {
@@ -40,18 +44,43 @@
       "invalid_json": "Format JSON invalide dans le contenu de secrets.json.",
       "no_devices": "Aucun appareil trouvé. Assurez-vous que « Localiser mon appareil » est activé sur votre compte Google.",
       "cannot_connect": "Échec de la connexion à l’API Google. Il peut s’agir d’un problème temporaire — réessayez plus tard.",
+      "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
+      "required": "Ce champ est obligatoire.",
       "unknown": "Erreur inattendue."
     },
     "abort": {
       "already_configured": "Google Find My Device est déjà configuré.",
-      "cannot_connect": "Échec de la connexion à Google Find My Device."
+      "cannot_connect": "Échec de la connexion à Google Find My Device.",
+      "reauth_successful": "Réauthentification réussie.",
+      "reconfigure_successful": "Reconfiguration réussie."
     }
   },
   "options": {
     "step": {
       "init": {
+        "title": "Configuration",
+        "description": "Que souhaitez-vous configurer ?",
+        "menu_options": {
+          "credentials": "Mettre à jour les identifiants",
+          "settings": "Modifier les paramètres"
+        }
+      },
+      "credentials": {
+        "title": "Mettre à jour les identifiants (optionnel)",
+        "description": "Mettez à jour les identifiants sans exposer les valeurs existantes. Fournissez exactement une méthode :\n\n• Coller le contenu complet d’un **secrets.json** neuf\n**ou**\n• Saisir un **jeton OAuth** neuf et (facultatif) une **adresse e-mail Google**.\n\nLe cas échéant, les identifiants seront validés et enregistrés ; l’intégration sera rechargée sans modifier les noms de vos entités.",
+        "data": {
+          "new_secrets_json": "Nouveau secrets.json (contenu complet)",
+          "new_oauth_token": "Nouveau jeton OAuth",
+          "new_google_email": "Adresse e-mail Google (facultatif)"
+        }
+      },
+      "finish": {
+        "title": "Action démarrée",
+        "description": "L’opération « {mode} » a été démarrée. Consultez les journaux pour plus de détails."
+      },
+      "settings": {
         "title": "Options",
-        "description": "Modifier les paramètres de suivi :\n• Intervalle d’interrogation de position : fréquence des requêtes de position (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes par appareil (1–60 secondes)\n• Précision minimale : ignorer les positions moins précises que cette valeur (25–500 mètres)\n• Seuil de mouvement : mouvement minimal déclenchant une mise à jour de la position (10–200 mètres)\n\nFiltre Google Home :\n• Activez pour regrouper les détections Google Home dans la zone « Domicile »\n• Les mots-clés acceptent les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
+        "description": "Modifier les paramètres de suivi :\n• Intervalle d’interrogation de position : fréquence des requêtes de position (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes par appareil (1–60 secondes)\n• Précision minimale : ignorer les positions moins précises que cette valeur (25–500 mètres)\n• Seuil de mouvement : mouvement minimal déclenchant une mise à jour de la position (10–200 mètres)\n\nFiltre Google Home :\n• Activer pour regrouper les détections Google Home dans la zone « Domicile »\n• Les mots-clés acceptent les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
         "data": {
           "tracked_devices": "Appareils suivis",
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
@@ -67,6 +96,13 @@
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas."
         }
       }
+    },
+    "error": {
+      "invalid_json": "Format JSON invalide dans le contenu de secrets.json.",
+      "invalid": "Échec de la validation. Veuillez vérifier vos saisies.",
+      "cannot_connect": "Échec de la connexion à l’API Google.",
+      "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
+      "required": "Ce champ est obligatoire."
     }
   },
   "services": {
@@ -88,6 +124,41 @@
           "name": "ID de l’appareil",
           "description": "L’ID de l’appareil sur lequel le son sera joué."
         }
+      }
+    },
+    "refresh_device_urls": {
+      "name": "Actualiser les URL des appareils",
+      "description": "Actualise les URL de configuration des appareils Google Find My pour qu’elles pointent vers la vue carte intégrée.",
+      "fields": {}
+    },
+    "locate_external": {
+      "name": "Localiser l’appareil (externe)",
+      "description": "Localiser un appareil à l’aide du service externe (délègue à la localisation normale).",
+      "fields": {
+        "device_id": {
+          "name": "ID de l’appareil",
+          "description": "L’ID de l’appareil à localiser."
+        },
+        "device_name": {
+          "name": "Nom de l’appareil (optionnel)",
+          "description": "Nom lisible facultatif pour les journaux."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_seen": {
+        "name": "Vu pour la dernière fois"
+      },
+      "stat_skipped_duplicates": {
+        "name": "Doublons ignorés"
+      },
+      "stat_background_updates": {
+        "name": "Mises à jour en arrière-plan"
+      },
+      "stat_crowd_sourced_updates": {
+        "name": "Mises à jour participatives"
       }
     }
   }

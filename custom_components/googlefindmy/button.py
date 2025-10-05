@@ -1,19 +1,30 @@
 """Button platform for Google Find My Device."""
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
 from typing import Any
 
-from homeassistant.components.button import ButtonEntity
+from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.network import get_url
 
-from .const import DOMAIN
+from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION, DOMAIN
 from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# Single, reusable entity description with translations
+PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
+    key="play_sound",
+    translation_key="play_sound",
+    icon="mdi:volume-high",
+)
 
 
 async def async_setup_entry(
@@ -71,51 +82,40 @@ async def async_setup_entry(
 class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     """Button to trigger 'Play Sound' on a Google Find My Device."""
 
-    _attr_has_entity_name = True
-    _attr_icon = "mdi:volume-high"
+    _attr_has_entity_name = True  # Let HA compose "<Device Name> <Entity Name>"
+    entity_description = PLAY_SOUND_DESCRIPTION
+    _attr_name = "Play Sound"  # translated via translation_key
 
-    def __init__(
-        self,
-        coordinator: GoogleFindMyCoordinator,
-        device: dict[str, Any],
-    ) -> None:
+    def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:
         """Initialize the button."""
         super().__init__(coordinator)
         self._device = device
         dev_id = device["id"]
-        name = device["name"]
         self._attr_unique_id = f"{DOMAIN}_{dev_id}_play_sound"
-        self._attr_name = f"{name} Play Sound"
 
     # ---------------- Availability ----------------
     @property
     def available(self) -> bool:
-        """Button is available only if the coordinator allows Play Sound.
+        """Expose availability based on coordinator.can_play_sound().
 
-        Primary source of truth:
-        - coordinator.can_play_sound(device_id) -> bool | None
-          (None = unknown yet)
-
-        Backward compatibility:
-        - If the coordinator doesn't have this method yet (older versions),
-          default to True (optimistic), so the button is not incorrectly greyed out.
+        Optimistic UX: if the capability is unknown or the coordinator is older
+        and does not provide can_play_sound(), return True so the UI remains usable.
+        The API call itself enforces reality and applies a cooldown on failure.
         """
         dev_id = self._device["id"]
         can_play = getattr(self.coordinator, "can_play_sound", None)
 
         if callable(can_play):
             try:
-                verdict = can_play(dev_id)  # may be True/False/None
+                verdict = can_play(dev_id)  # may be True/False
                 _LOGGER.debug(
                     "PlaySound availability for %s (%s): can_play_sound -> %r",
                     self._device.get("name", dev_id),
                     dev_id,
                     verdict,
                 )
-                if verdict is None:
-                    return True  # optimistic while capability is unknown
                 return bool(verdict)
-            except Exception as err:
+            except Exception as err:  # keep optimistic behavior on transient errors
                 _LOGGER.debug(
                     "PlaySound availability check for %s (%s) raised %s; defaulting to True",
                     self._device.get("name", dev_id),
@@ -139,24 +139,12 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
 
     # ---------------- Device Info + Map Link ----------------
     @property
-    def device_info(self) -> dict[str, Any]:
-        """Return device info with a configuration_url to the map view.
-
-        The base URL is resolved via get_url(...) with prefer_external=True so
-        the link also works when the UI is opened through Nabu Casa Cloud or
-        an external URL. We then append the relative path built by
-        _build_map_path(...).
-
-        Runs outside an HTTP request; we intentionally do NOT require the
-        current request context. Home Assistant will choose a stable base URL
-        according to the configured internal/external/cloud URLs.
-        """
-        from homeassistant.helpers.network import get_url
-
+    def device_info(self) -> DeviceInfo:
+        """Return DeviceInfo with a stable configuration_url and proper metadata."""
         try:
             base_url = get_url(
                 self.hass,
-                prefer_external=True,
+                prefer_external=True,  # also works from remote/cloud
                 allow_cloud=True,
                 allow_external=True,
                 allow_internal=True,
@@ -167,35 +155,24 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         auth_token = self._get_map_token()
         path = self._build_map_path(self._device["id"], auth_token, redirect=False)
 
-        return {
-            "identifiers": {(DOMAIN, self._device["id"])},
-            "name": self._device["name"],
-            "manufacturer": "Google",
-            "model": "Find My Device",
-            "configuration_url": f"{base_url}{path}",
-            "serial_number": self._device["id"],
-        }
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._device["id"])},
+            name=self._device["name"],
+            manufacturer="Google",
+            model="Find My Device",
+            configuration_url=f"{base_url}{path}",
+            serial_number=self._device["id"],  # semantic: device ID is the serial number
+        )
 
-    def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
-        """Return the map URL *path* (no scheme/host).
-
-        Keep the path construction here so we can switch to redirect endpoints
-        without touching base URL resolution elsewhere.
-        """
+    @staticmethod
+    def _build_map_path(device_id: str, token: str, *, redirect: bool = False) -> str:
+        """Return the map URL *path* (no scheme/host)."""
         if redirect:
             return f"/api/googlefindmy/redirect_map/{device_id}?token={token}"
         return f"/api/googlefindmy/map/{device_id}?token={token}"
 
     def _get_map_token(self) -> str:
-        """Generate a simple map token (options-first; weekly/static).
-
-        - Prefer config_entry.options over entry.data to reflect recent option changes.
-        - Weekly-rotating token when enabled; otherwise static token.
-        """
-        import hashlib
-        import time
-        from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-
+        """Generate a simple map token (options-first; weekly/static)."""
         config_entry = getattr(self.coordinator, "config_entry", None)
         if config_entry:
             token_expiration_enabled = config_entry.options.get(
@@ -222,7 +199,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         when Push/FCM is not ready or the device isn't ring-capable.
         """
         device_id = self._device["id"]
-        device_name = self._device["name"]
+        device_name = self._device.get("name", device_id)
 
         if not self.available:
             _LOGGER.warning(

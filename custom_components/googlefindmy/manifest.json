@@ -1,15 +1,21 @@
 {
   "domain": "googlefindmy",
   "name": "Google Find My Device",
-  "codeowners": ["@BSkando"],
+  "version": "1.5.6-0",
   "config_flow": true,
-  "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
   "integration_type": "device",
   "iot_class": "cloud_polling",
+
+  "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
   "issue_tracker": "https://github.com/BSkando/GoogleFindMy-HA/issues",
+  "codeowners": ["@BSkando"],
   "loggers": ["custom_components.googlefindmy"],
-  "after_dependencies": [],
+
   "icon": "mdi:google",
+
+  "dependencies": ["http"],
+  "after_dependencies": ["recorder"],
+
   "requirements": [
     "gpsoauth>=1.1.1",
     "beautifulsoup4>=4.12.3",
@@ -27,8 +33,5 @@
     "requests>=2.25.1",
     "undetected_chromedriver>=3.5.5",
     "selenium>=4.27.1"
-  ],
-  "dependencies": ["http"],
-  "after_dependencies": ["recorder"],
-  "version": "1.5.5-4"
+  ]
 }
