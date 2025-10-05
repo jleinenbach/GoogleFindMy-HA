@@ -1,38 +1,46 @@
 locate_device:
   name: Locate Device
-  description: Get the current location of a Google Find My device
+  description: Get the current location of a Google Find My device.
   fields:
     device_id:
-      name: Device ID
-      description: The ID of the device to locate
+      name: Device
+      description: Select the device to locate.
       required: true
       selector:
-        text:
+        device:
+          integration: googlefindmy
 
 play_sound:
   name: Play Sound
-  description: Play a sound on a Google Find My device
+  description: Play a sound on a Google Find My device.
   fields:
     device_id:
-      name: Device ID
-      description: The ID of the device to play sound on
+      name: Device
+      description: Select the device on which the sound will be played.
       required: true
       selector:
-        text:
+        device:
+          integration: googlefindmy
 
-locate_device_external:
+locate_external:
   name: Locate Device (External)
-  description: Get current location using external GoogleFindMyTools process (workaround for FCM issues)
+  description: Locate a device using the external GoogleFindMyTools process (workaround for FCM issues).
   fields:
     device_id:
-      name: Device ID
-      description: The canonical device ID to locate
+      name: Device
+      description: Select the device to locate.
       required: true
       selector:
-        text:
+        device:
+          integration: googlefindmy
     device_name:
-      name: Device Name
-      description: The friendly name of the device (optional)
+      name: Device name (optional)
+      description: Optional human-friendly name to include in logs.
       required: false
       selector:
         text:
+
+refresh_device_urls:
+  name: Refresh Device URLs
+  description: Refresh configuration URLs for all Google Find My devices to point to the integrated map view.
+  fields: {}
