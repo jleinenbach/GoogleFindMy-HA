@@ -50,9 +50,9 @@ async def async_setup_entry(
     else:
         # No live data yet (early startup). Create skeleton entities from configured tracked IDs.
         tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
-        name_map: dict[str, str] = getattr(coordinator, "_device_names", {})  # noqa: SLF001
         for dev_id in tracked_ids:
-            name = name_map.get(dev_id) or f"Find My - {dev_id}"
+            # Neutral default: do NOT leak device_id into visible name.
+            name = "Google Find My Device"
             known_ids.add(dev_id)
             entities.append(GoogleFindMyDeviceTracker(coordinator, {"id": dev_id, "name": name}))
         if tracked_ids:
@@ -150,20 +150,10 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         if restored:
             self._last_good_accuracy_data = {**restored}
 
-            # Prime coordinator cache used elsewhere (best-effort).
+            # Prime coordinator cache using its public API (no private access).
             dev_id = self._device["id"]
             try:
-                if hasattr(self.coordinator, "prime_device_location_cache"):
-                    # Expected: prime_device_location_cache(device_id: str, data: dict[str, Any]) -> None
-                    self.coordinator.prime_device_location_cache(dev_id, restored)  # type: ignore[attr-defined]
-                else:
-                    mapping = getattr(self.coordinator, "_device_location_data", None)  # noqa: SLF001
-                    if isinstance(mapping, dict):
-                        slot = mapping.get(dev_id, {})
-                        slot.update(restored)
-                        mapping[dev_id] = slot
-                    else:
-                        setattr(self.coordinator, "_device_location_data", {dev_id: restored})  # noqa: SLF001
+                self.coordinator.prime_device_location_cache(dev_id, restored)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Failed to seed coordinator cache for %s: %s", self.entity_id, err)
 
@@ -200,7 +190,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",  # later: just `path`
-            hw_version=self._device["id"],  # Show device ID as hardware version for easy copying
+            serial_number=self._device["id"],  # expose tech ID semantically correct
         )
 
     def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
@@ -211,15 +201,13 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
     @property
     def _current_device_data(self) -> dict[str, Any] | None:
-        """Get current device data from coordinator's location cache."""
+        """Get current device data from coordinator's public cache API."""
         dev_id = self._device["id"]
-        if hasattr(self.coordinator, "get_device_location_data"):
-            # Expected: get_device_location_data(device_id: str) -> dict[str, Any] | None
-            try:
-                return self.coordinator.get_device_location_data(dev_id)  # type: ignore[attr-defined]
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Coordinator public API failed for %s: %s", dev_id, err)
-        return getattr(self.coordinator, "_device_location_data", {}).get(dev_id)  # noqa: SLF001
+        try:
+            return self.coordinator.get_device_location_data(dev_id)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Coordinator.get_device_location_data failed for %s: %s", dev_id, err)
+            return None
 
     @property
     def _data_to_persist(self) -> dict[str, Any] | None:
@@ -317,12 +305,17 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        # Update display name if the coordinator learned a better one
+        # Update display name based on coordinator snapshot (no private maps).
         try:
-            name_map: dict[str, str] = getattr(self.coordinator, "_device_names", {})  # noqa: SLF001
-            new_name = name_map.get(self._device["id"])
-            if new_name and new_name != self._attr_name:
-                self._attr_name = new_name
+            data = getattr(self.coordinator, "data", None) or []
+            my_id = self._device["id"]
+            # Find our device entry in the latest snapshot and adopt its name
+            for dev in data:
+                if dev.get("id") == my_id:
+                    new_name = dev.get("name")
+                    if new_name and new_name != self._attr_name:
+                        self._attr_name = new_name
+                    break
         except Exception:  # noqa: BLE001
             pass
 
