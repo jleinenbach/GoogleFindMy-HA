@@ -1,25 +1,61 @@
 """Sensor entities for Google Find My Device integration."""
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.sensor import (
-    RestoreSensor,  # built-in restore for sensors
+    RestoreSensor,  # built-in restore for sensors (HA >= 2023.6)
     SensorDeviceClass,
     SensorEntity,
+    SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.network import get_url
+
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
 _LOGGER = logging.getLogger(__name__)
+
+# ----------------------------- Entity Descriptions -----------------------------
+
+LAST_SEEN_DESCRIPTION = SensorEntityDescription(
+    key="last_seen",
+    translation_key="last_seen",
+    icon="mdi:clock-outline",
+    device_class=SensorDeviceClass.TIMESTAMP,
+)
+
+STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
+    "skipped_duplicates": SensorEntityDescription(
+        key="skipped_duplicates",
+        translation_key="stat_skipped_duplicates",
+        icon="mdi:cancel",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    "background_updates": SensorEntityDescription(
+        key="background_updates",
+        translation_key="stat_background_updates",
+        icon="mdi:cloud-download",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    "crowd_sourced_updates": SensorEntityDescription(
+        key="crowd_sourced_updates",
+        translation_key="stat_crowd_sourced_updates",
+        icon="mdi:account-group",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+}
 
 
 async def async_setup_entry(
@@ -33,15 +69,14 @@ async def async_setup_entry(
     entities: list[SensorEntity] = []
     known_ids: set[str] = set()
 
-    # Global statistics sensors (diagnostic)
-    if entry.data.get("enable_stats_entities", True):
-        entities.extend(
-            [
-                GoogleFindMyStatsSensor(coordinator, "skipped_duplicates", "Skipped Duplicates"),
-                GoogleFindMyStatsSensor(coordinator, "background_updates", "Background Updates"),
-                GoogleFindMyStatsSensor(coordinator, "crowd_sourced_updates", "Crowd-sourced Updates"),
-            ]
-        )
+    # Options-first toggle for diagnostic counters
+    enable_stats = entry.options.get(
+        "enable_stats_entities",
+        entry.data.get("enable_stats_entities", True),
+    )
+    if enable_stats:
+        for stat_key, desc in STATS_DESCRIPTIONS.items():
+            entities.append(GoogleFindMyStatsSensor(coordinator, stat_key, desc))
 
     # Per-device last_seen sensors
     if coordinator.data:
@@ -52,13 +87,13 @@ async def async_setup_entry(
                 entities.append(GoogleFindMyLastSeenSensor(coordinator, device))
                 known_ids.add(dev_id)
             else:
-                _LOGGER.warning("Skipping device due to missing 'id' or 'name': %s", device)
+                _LOGGER.debug("Skipping device without id/name: %s", device)
     else:
         # Startup restore path: create skeletons from tracked_devices so Restore works immediately
         tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
-        name_map: dict[str, str] = getattr(coordinator, "_device_names", {})  # noqa: SLF001
         for dev_id in tracked_ids:
-            name = name_map.get(dev_id) or f"Find My - {dev_id}"
+            # Neutral default; do NOT leak the technical id into the visible name
+            name = "Google Find My Device"
             entities.append(GoogleFindMyLastSeenSensor(coordinator, {"id": dev_id, "name": name}))
             known_ids.add(dev_id)
         if tracked_ids:
@@ -67,7 +102,6 @@ async def async_setup_entry(
                 len(tracked_ids),
             )
 
-    # Immediate state push so restored/native values are written right away
     if entities:
         async_add_entities(entities, True)
 
@@ -76,12 +110,10 @@ async def async_setup_entry(
     def _add_new_sensors_on_update() -> None:
         try:
             new_entities: list[SensorEntity] = []
-            for device in getattr(coordinator, "data", []) or []:
+            for device in (getattr(coordinator, "data", None) or []):
                 dev_id = device.get("id")
                 dev_name = device.get("name")
-                if not dev_id or not dev_name:
-                    continue
-                if dev_id in known_ids:
+                if not dev_id or not dev_name or dev_id in known_ids:
                     continue
                 new_entities.append(GoogleFindMyLastSeenSensor(coordinator, device))
                 known_ids.add(dev_id)
@@ -89,47 +121,49 @@ async def async_setup_entry(
             if new_entities:
                 _LOGGER.info("Discovered %d new devices; adding last_seen sensors", len(new_entities))
                 async_add_entities(new_entities, True)
-        except Exception as err:  # noqa: BLE001
+        except (AttributeError, TypeError) as err:
             _LOGGER.debug("Dynamic sensor add failed: %s", err)
 
-    coordinator.async_add_listener(_add_new_sensors_on_update)
+    unsub = coordinator.async_add_listener(_add_new_sensors_on_update)
+    entry.async_on_unload(unsub)
 
+
+# ------------------------------- Stats Sensor ---------------------------------
 
 class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
-    """Sensor for Google Find My Device statistics."""
+    """Diagnostic counters for the integration."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_has_entity_name = False  # standalone (not per-device)
 
-    def __init__(self, coordinator, stat_key: str, stat_name: str) -> None:
-        """Initialize the sensor."""
+    def __init__(self, coordinator, stat_key: str, description: SensorEntityDescription) -> None:
+        """Initialize the stats sensor."""
         super().__init__(coordinator)
         self._stat_key = stat_key
-        self._attr_name = f"Google Find My {stat_name}"
+        self.entity_description = description
         self._attr_unique_id = f"{DOMAIN}_{stat_key}"
-        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
-        self._attr_native_unit_of_measurement = "updates"
-
-        # Variante A: icon einmalig setzen (stabil, performant)
-        icon_map = {
-            "skipped_duplicates": "mdi:cancel",
-            "background_updates": "mdi:cloud-download",
-            "crowd_sourced_updates": "mdi:account-group",
+        # Fallback name in case translations are missing
+        fallback_names = {
+            "skipped_duplicates": "Skipped Duplicates",
+            "background_updates": "Background Updates",
+            "crowd_sourced_updates": "Crowd-sourced Updates",
         }
-        self._attr_icon = icon_map.get(stat_key, "mdi:counter")
+        self._attr_name = f"Google Find My {fallback_names.get(stat_key, stat_key.replace('_', ' ').title())}"
+        # Units are counts of updates
+        self._attr_native_unit_of_measurement = "updates"
+        # state_class provided by description
 
     @property
     def state(self) -> int | None:
-        """Return the state of the sensor."""
+        """Return the current counter value."""
         stats = getattr(self.coordinator, "stats", None)
         if stats is None:
             return None
-        value = stats.get(self._stat_key, 0)
-        _LOGGER.debug("Sensor %s returning value %s", self._attr_name, value)
-        return value
+        return stats.get(self._stat_key, 0)
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return device info for the integration device."""
+        """Expose a single integration device for diagnostic sensors."""
         return DeviceInfo(
             identifiers={(DOMAIN, "integration")},
             name="Google Find My Integration",
@@ -139,8 +173,13 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         )
 
 
+# ----------------------------- Per-Device Last Seen ---------------------------
+
 class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
-    """Sensor showing last_seen timestamp for each device."""
+    """Per-device sensor exposing the last_seen timestamp."""
+
+    _attr_has_entity_name = True  # name becomes "<device> Last Seen"
+    # device_class via description (TIMESTAMP)
 
     def __init__(self, coordinator, device: dict[str, Any]) -> None:
         """Initialize the sensor."""
@@ -148,52 +187,67 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         self._device = device
         self._device_id: str | None = device.get("id")
         safe_id = self._device_id if self._device_id is not None else "unknown"
-        self._device_name: str = device.get("name", f"Unknown Device {safe_id}")
-        self._attr_name = "Last Seen"
+        self.entity_description = LAST_SEEN_DESCRIPTION
         self._attr_unique_id = f"{DOMAIN}_{safe_id}_last_seen"
-        self._attr_device_class = SensorDeviceClass.TIMESTAMP  # native timestamp semantics
-        self._attr_has_entity_name = True
+        # No _attr_name here; translation_key supplies the readable part.
         self._attr_native_value: datetime | None = None
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Update native timestamp and handle device name drift."""
-        # Best-effort: update display name from coordinator's name map (if changed)
+        """Update native timestamp and keep the device label in sync."""
+        # Keep device name aligned with the coordinator snapshot (best effort).
         try:
-            name_map: dict[str, str] = getattr(self.coordinator, "_device_names", {})  # noqa: SLF001
-            new_name = name_map.get(self._device_id or "")
-            if new_name and new_name != self._device.get("name"):
-                self._device["name"] = new_name
-        except Exception as e:  # noqa: BLE001
+            my_id = self._device_id or ""
+            for dev in (getattr(self.coordinator, "data", None) or []):
+                if dev.get("id") == my_id:
+                    new_name = dev.get("name")
+                    if new_name and new_name != self._device.get("name"):
+                        self._device["name"] = new_name
+                    break
+        except (AttributeError, TypeError) as e:
             _LOGGER.debug("Name refresh failed for %s: %s", self._device_id, e)
 
-        # Source last_seen from public API (if present) -> fallback to internal cache
+        # Source last_seen strictly via public API; robust type handling.
         try:
-            if hasattr(self.coordinator, "get_device_last_seen") and self._device_id:
-                value = self.coordinator.get_device_last_seen(self._device_id)  # type: ignore[attr-defined]
+            value = self.coordinator.get_device_last_seen(self._device_id) if self._device_id else None
+            if isinstance(value, datetime):
                 self._attr_native_value = value
+            elif isinstance(value, (int, float)):
+                self._attr_native_value = datetime.fromtimestamp(float(value), tz=timezone.utc)
+            elif isinstance(value, str):
+                v = value.strip()
+                if v.endswith("Z"):
+                    v = v.replace("Z", "+00:00")
+                try:
+                    dt = datetime.fromisoformat(v)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    self._attr_native_value = dt
+                except ValueError:
+                    self._attr_native_value = None
             else:
-                mapping = getattr(self.coordinator, "_device_location_data", {})
-                ts = mapping.get(self._device_id, {}).get("last_seen") if self._device_id else None
-                self._attr_native_value = (
-                    datetime.fromtimestamp(float(ts), tz=timezone.utc) if ts is not None else None
-                )
-        except (ValueError, TypeError) as e:
-            _LOGGER.debug("Invalid last_seen for %s: %s", self._device_name, e)
+                self._attr_native_value = None
+        except (AttributeError, TypeError, ValueError) as e:
+            _LOGGER.debug("Invalid last_seen for %s: %s", self._device.get("name", self._device_id), e)
             self._attr_native_value = None
 
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
-        """Restore last_seen from HA's persistent store and seed coordinator cache."""
+        """Restore last_seen from HA's persistent store and seed coordinator cache.
+
+        Why:
+        - Enables immediate usefulness after restart before the first poll.
+        - Uses the coordinator's public API to avoid private attribute access.
+        """
         await super().async_added_to_hass()
 
         # Use RestoreSensor API to get the last native value (may be datetime/str/number)
         try:
             data = await self.async_get_last_sensor_data()
             value = getattr(data, "native_value", None) if data else None
-        except Exception as e:  # noqa: BLE001
-            _LOGGER.warning("Failed to restore sensor state for %s: %s", self.entity_id, e)
+        except (RuntimeError, AttributeError) as e:
+            _LOGGER.debug("Failed to restore sensor state for %s: %s", self.entity_id, e)
             value = None
 
         if value in (None, "unknown", "unavailable"):
@@ -213,9 +267,8 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     ts = dt.timestamp()
-                except ValueError as ex:
-                    _LOGGER.debug("Could not parse restored ISO value '%s' for %s: %s", value, self.entity_id, ex)
-                    ts = float(v)  # try numeric string
+                except ValueError:
+                    ts = float(v)  # numeric string fallback
             elif isinstance(value, datetime):
                 ts = value.timestamp()
         except (ValueError, TypeError) as ex:
@@ -225,34 +278,21 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         if ts is None or not self._device_id:
             return
 
-        # Seed coordinator cache so native_value is available immediately after restart.
+        # Seed coordinator cache using its public API (no private access).
         try:
-            if hasattr(self.coordinator, "seed_device_last_seen"):
-                # Expected: seed_device_last_seen(device_id, timestamp: float) -> None
-                self.coordinator.seed_device_last_seen(self._device_id, ts)  # type: ignore[attr-defined]
-            else:
-                mapping = getattr(self.coordinator, "_device_location_data", {})
-                slot = mapping.setdefault(self._device_id, {})
-                slot.setdefault("last_seen", ts)  # don't overwrite fresh data
-                setattr(self.coordinator, "_device_location_data", mapping)
-        except Exception as e:  # noqa: BLE001
-            _LOGGER.debug("Failed to seed coordinator cache for %s: %s", self._device_name, e)
+            self.coordinator.seed_device_last_seen(self._device_id, ts)
+        except (AttributeError, TypeError) as e:
+            _LOGGER.debug("Failed to seed coordinator cache for %s: %s", self.entity_id, e)
+            return
 
         # Set our native value now (no need to wait for next coordinator tick)
         self._attr_native_value = datetime.fromtimestamp(ts, tz=timezone.utc)
         self.async_write_ha_state()
 
     @property
-    def icon(self) -> str:
-        """Return the icon for the sensor."""
-        return "mdi:clock-outline"
-
-    @property
     def device_info(self) -> DeviceInfo:
-        """Return device info."""
+        """Return per-device info (shared across all entities of that device)."""
         path = self._build_map_path(self._device["id"], self._get_map_token(), redirect=False)
-
-        from homeassistant.helpers.network import get_url
 
         try:
             # Absolute base URL so the "Visit" link in device registry works from anywhere.
@@ -263,16 +303,17 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                 allow_external=True,
                 allow_internal=True,
             )
-        except Exception:
-            base_url = "http://homeassistant.local:8123"  # noqa: F841
+        except (HomeAssistantError, RuntimeError) as e:
+            _LOGGER.debug("Could not determine Home Assistant URL, using fallback: %s", e)
+            base_url = "http://homeassistant.local:8123"
 
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
-            name=self._device["name"],
+            name=self._device.get("name"),
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
-            hw_version=self._device["id"],
+            serial_number=self._device["id"],
         )
 
     def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
@@ -283,9 +324,6 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     def _get_map_token(self) -> str:
         """Generate a simple token for map authentication (options-first)."""
-        import hashlib
-        import time
-
         config_entry = getattr(self.coordinator, "config_entry", None)
         if config_entry:
             token_expiration_enabled = config_entry.options.get(
