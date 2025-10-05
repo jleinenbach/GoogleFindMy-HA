@@ -1,46 +1,42 @@
 locate_device:
   name: Locate Device
-  description: Get the current location of a Google Find My device.
+  description: Get the current location of a Google Find My device
   fields:
     device_id:
-      name: Device
-      description: Select the device to locate.
+      name: Device ID
+      description: The ID of the device to locate
       required: true
       selector:
-        device:
-          integration: googlefindmy
+        text:
 
 play_sound:
   name: Play Sound
-  description: Play a sound on a Google Find My device.
+  description: Play a sound on a Google Find My device
   fields:
     device_id:
-      name: Device
-      description: Select the device on which the sound will be played.
+      name: Device ID
+      description: The ID of the device to play sound on
       required: true
       selector:
-        device:
-          integration: googlefindmy
+        text:
 
-locate_external:
+locate_device_external:
   name: Locate Device (External)
-  description: Locate a device using the external GoogleFindMyTools process (workaround for FCM issues).
+  description: Get current location using external GoogleFindMyTools process (workaround for FCM issues)
   fields:
     device_id:
-      name: Device
-      description: Select the device to locate.
+      name: Device ID
+      description: The canonical device ID to locate
       required: true
       selector:
-        device:
-          integration: googlefindmy
+        text:
     device_name:
-      name: Device name (optional)
-      description: Optional human-friendly name to include in logs.
+      name: Device Name
+      description: The friendly name of the device (optional)
       required: false
       selector:
         text:
 
 refresh_device_urls:
   name: Refresh Device URLs
-  description: Refresh configuration URLs for all Google Find My devices to point to the integrated map view.
-  fields: {}
+  description: Recompute and update each device's configuration_url to point to the map view (use after base-URL or token policy changes)
