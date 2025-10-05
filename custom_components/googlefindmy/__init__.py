@@ -1,5 +1,4 @@
 """Google Find My Device integration for Home Assistant.
-
 Version: 2.1 - Entities-first bootstrap with deferred initial refresh
 """
 from __future__ import annotations
@@ -40,7 +39,6 @@ PLATFORMS: list[Platform] = [
 
 def _redact_url_token(url: str) -> str:
     """Return URL with any 'token' query parameter value redacted for safe logging.
-
     We never want to leak authentication/authorization tokens into logs or bug reports.
     This helper keeps the URL readable while masking the secret.
     """
@@ -67,9 +65,8 @@ def _redact_url_token(url: str) -> str:
 
 async def _async_save_secrets_data(secrets_data: dict) -> None:
     """Persist secrets data to the integration cache (async, non-blocking).
-
-    All storage happens using the integration's async token_cache helpers. Complex values
-    are serialized to JSON strings to avoid blocking I/O in the event loop.
+    All storage happens using the integration's async token_cache helpers.
+    Complex values are serialized to JSON strings to avoid blocking I/O in the event loop.
     """
     from .Auth.token_cache import async_set_cached_value
     from .Auth.username_provider import username_string
@@ -95,6 +92,7 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Google Find My Device from a config entry (entities-first)."""
+
     # Preload cache early
     try:
         await async_load_cache_from_file()
@@ -165,8 +163,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Defer the first refresh until HA is fully started
+    # ---------------- FIX: make one-time listener idempotent ----------------
+    listener_active = False  # becomes True only if we actually register the one-time listener
+
     async def _do_first_refresh(_: Any) -> None:
         """Perform the initial coordinator refresh after HA has started."""
+        nonlocal listener_active
+        # Mark as consumed: prevents later unsub() on already-removed one-time listener
+        listener_active = False
         try:
             await coordinator.async_refresh()
             if not coordinator.last_update_success:
@@ -175,6 +179,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
         except Exception as err:
             _LOGGER.error("Initial refresh raised an unexpected error: %s", err)
+    # -----------------------------------------------------------------------
 
     # ----- MINI-HARDENING START: wrap scheduling and listener registration -----
     if hass.state == CoreState.running:
@@ -185,27 +190,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         try:
             unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_first_refresh)
+            listener_active = True  # listener successfully registered and pending
         except Exception as err:
             _LOGGER.error("Failed to register initial refresh listener: %s", err)
         else:
             def _safe_unsub() -> None:
-                try:
-                    unsub()
-                except Exception:
-                    # Listener already removed or never registered; ignore
-                    pass
+                # Only call unsub() if the one-time listener is still pending.
+                if listener_active:
+                    try:
+                        unsub()
+                    except Exception:
+                        # Listener already removed or never registered; ignore
+                        pass
+
             entry.async_on_unload(_safe_unsub)
     # ----- MINI-HARDENING END -----
 
     # React to entry updates (options) and apply changes
     entry.async_on_unload(entry.add_update_listener(async_update_entry))
-
     return True
 
 
 async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle config entry updates.
-
     We push new options into the coordinator and trigger a refresh without blocking the loop.
     """
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][entry.entry_id]
@@ -233,6 +240,7 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         effective_interval = max(coordinator.location_poll_interval, coordinator.min_poll_interval)
     except Exception:
         effective_interval = coordinator.location_poll_interval
+
     # Coordinator uses a monotonic timestamp for scheduling; subtract interval to force due
     coordinator._last_poll_mono = time.monotonic() - float(effective_interval)  # noqa: SLF001
 
@@ -278,8 +286,8 @@ async def _async_register_services(
             _LOGGER.error("Failed to locate device %s: %s", device_id, err)
 
     async def async_play_sound_service(call: ServiceCall) -> None:
-        device_id = call.data["device_id"]
         """Handle play sound service call."""
+        device_id = call.data["device_id"]
         try:
             await coordinator.async_play_sound(device_id)
         except Exception as err:
@@ -298,12 +306,10 @@ async def _async_register_services(
 
     async def async_refresh_device_urls_service(call: ServiceCall) -> None:
         """Refresh configuration URLs for integration devices (absolute URL).
-
-        The device registry requires a valid **absolute HTTP(S) URL**. We therefore build a
-        base URL once via `get_url(... prefer_external=True, allow_cloud=True, allow_external=True,
-        allow_internal=True)` and **avoid** relative paths here. Browser navigation remains
-        origin-agnostic thanks to the Redirect View (which issues a relative `Location`).
-        Token is rotated weekly by default (configurable). All logs redact the token.
+        The device registry requires a valid **absolute HTTP(S) URL**. We therefore build a base URL once
+        via `get_url(... prefer_external=True, allow_cloud=True, allow_external=True, allow_internal=True)`
+        and **avoid** relative paths here. Browser navigation remains origin-agnostic thanks to the Redirect View
+        (which issues a relative `Location`). Token is rotated weekly by default (configurable). All logs redact the token.
         """
         try:
             from homeassistant.helpers import device_registry
@@ -329,7 +335,10 @@ async def _async_register_services(
                 e0 = config_entries[0]
                 token_expiration_enabled = e0.options.get(
                     "map_view_token_expiration",
-                    e0.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
+                    e0.data.get(
+                        "map_view_token_expiration",
+                        DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+                    ),
                 )
 
             if token_expiration_enabled:
@@ -350,7 +359,8 @@ async def _async_register_services(
                     if dev_id:
                         new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
                         dev_reg.async_update_device(
-                            device_id=device.id, configuration_url=new_config_url
+                            device_id=device.id,
+                            configuration_url=new_config_url,
                         )
                         updated_count += 1
                         _LOGGER.info(
@@ -360,7 +370,6 @@ async def _async_register_services(
                         )
 
             _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
-
         except Exception as err:
             _LOGGER.error("Failed to refresh device URLs: %s", err)
 
@@ -371,14 +380,12 @@ async def _async_register_services(
         async_locate_device_service,
         schema=vol.Schema({vol.Required("device_id"): cv.string}),
     )
-
     hass.services.async_register(
         DOMAIN,
         SERVICE_PLAY_SOUND,
         async_play_sound_service,
         schema=vol.Schema({vol.Required("device_id"): cv.string}),
     )
-
     hass.services.async_register(
         DOMAIN,
         SERVICE_LOCATE_EXTERNAL,
@@ -387,7 +394,6 @@ async def _async_register_services(
             {vol.Required("device_id"): cv.string, vol.Optional("device_name"): cv.string}
         ),
     )
-
     hass.services.async_register(
         DOMAIN,
         SERVICE_REFRESH_URLS,
