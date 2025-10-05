@@ -173,7 +173,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
             "manufacturer": "Google",
             "model": "Find My Device",
             "configuration_url": f"{base_url}{path}",
-            "hw_version": self._device["id"],
+            "serial_number": self._device["id"],
         }
 
     def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
