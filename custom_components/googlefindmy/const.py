@@ -1,4 +1,4 @@
-"""Constants for Google Find My Device integration (v2.2)."""
+"""Constants for Google Find My Device integration."""
 
 from __future__ import annotations
 
@@ -6,16 +6,16 @@ from __future__ import annotations
 # Core identifiers
 # ---------------------------------------------------------------------------
 DOMAIN = "googlefindmy"
-INTEGRATION_VERSION = "2.2"
+INTEGRATION_VERSION = "1.5.6-0"
 
 # ---------------------------------------------------------------------------
 # Configuration keys (data vs. options separation)
 # ---------------------------------------------------------------------------
 # Data (immutable / credentials): stored in config_entry.data
-CONF_OAUTH_TOKEN = "oauth_token"          # kept for backward compatibility
-CONF_GOOGLE_EMAIL = "google_email"        # helper key when individual tokens are used
-DATA_SECRET_BUNDLE = "secrets_data"       # full GoogleFindMyTools secrets.json content
-DATA_AUTH_METHOD = "auth_method"          # "secrets_json" | "individual_tokens"
+CONF_OAUTH_TOKEN = "oauth_token"        # kept for backward compatibility
+CONF_GOOGLE_EMAIL = "google_email"      # helper key when individual tokens are used
+DATA_SECRET_BUNDLE = "secrets_data"     # full GoogleFindMyTools secrets.json content
+DATA_AUTH_METHOD = "auth_method"        # "secrets_json" | "individual_tokens"
 
 # Options (user-changeable): stored in config_entry.options
 OPT_TRACKED_DEVICES = "tracked_devices"
@@ -95,8 +95,21 @@ DEFAULT_OPTIONS: dict[str, object] = {
 # ---------------------------------------------------------------------------
 SERVICE_LOCATE_DEVICE = "locate_device"
 SERVICE_PLAY_SOUND = "play_sound"
-SERVICE_LOCATE_EXTERNAL = "locate_device_external"
-SERVICE_REFRESH_URLS = "refresh_device_urls"
+SERVICE_LOCATE_EXTERNAL = "locate_external"
+
+# Be consistent with service name used in translations and __init__.py
+SERVICE_REFRESH_DEVICE_URLS = "refresh_device_urls"
+# Optional compatibility alias (remove once all imports use SERVICE_REFRESH_DEVICE_URLS)
+SERVICE_REFRESH_URLS = SERVICE_REFRESH_DEVICE_URLS
+
+SERVICE_REBUILD_REGISTRY = "rebuild_registry"
+
+# Optional attrs/modes for rebuild service (add if imported/used in __init__.py)
+ATTR_MODE = "mode"
+ATTR_DEVICE_IDS = "device_ids"
+MODE_REBUILD = "rebuild"
+MODE_MIGRATE = "migrate"
+REBUILD_REGISTRY_MODES: tuple[str, str] = (MODE_REBUILD, MODE_MIGRATE)
 
 # ---------------------------------------------------------------------------
 # Optional request timeouts (consumers may adopt gradually)
