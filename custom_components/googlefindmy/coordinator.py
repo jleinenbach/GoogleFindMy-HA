@@ -128,6 +128,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
 
+    # Public read-only state for diagnostics/UI
+    @property
+    def is_polling(self) -> bool:
+        """Expose current polling state (public read-only API)."""
+        return self._is_polling
+
     # ---------------------------- HA Coordinator ----------------------------
     async def _async_update_data(self) -> List[Dict[str, Any]]:
         """Provide cached device data; trigger background poll if due.
@@ -161,7 +167,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     caps = {str(x).lower() for x in dev["capabilities"]}
                     can_ring = ("ring" in caps) or ("play_sound" in caps)
                 elif isinstance(dev.get("capabilities"), dict):
-                    caps = {str(k).lower(): v for k, v in dev["capabilities"].items()}
+                    caps = {str(k).lower(): v for k, v in dev["capibilities"].items()}  # type: ignore[attr-defined]
                     can_ring = bool(caps.get("ring")) or bool(caps.get("play_sound"))
                 if can_ring is not None:
                     slot = self._device_caps.get(dev_id, {})
@@ -445,7 +451,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             unique_id = f"{DOMAIN}_{dev_id}"
             entity_id = ent_reg.async_get_entity_id("device_tracker", DOMAIN, unique_id)
             if not entity_id:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "No entity registry entry for device '%s' (unique_id=%s); skipping any fallback.",
                     dev_name,
                     unique_id,
