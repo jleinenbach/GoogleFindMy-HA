@@ -4,15 +4,15 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from typing import Any
+from typing import Any, Optional, Tuple
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.network import get_url
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION, DOMAIN
 from .coordinator import GoogleFindMyCoordinator
@@ -86,55 +86,72 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     entity_description = PLAY_SOUND_DESCRIPTION
     _attr_name = "Play Sound"  # translated via translation_key
 
+    # Cache: (verdict, monotonic_timestamp)
+    _cap_cache: Tuple[Optional[bool], float]
+    _cap_cache_ttl_sec = 15 * 60  # 15 minutes
+
     def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:
         """Initialize the button."""
         super().__init__(coordinator)
         self._device = device
         dev_id = device["id"]
         self._attr_unique_id = f"{DOMAIN}_{dev_id}_play_sound"
+        self._cap_cache = (None, 0.0)
 
     # ---------------- Availability ----------------
     @property
     def available(self) -> bool:
         """Expose availability based on coordinator.can_play_sound().
 
-        Optimistic UX: if the capability is unknown or the coordinator is older
-        and does not provide can_play_sound(), return True so the UI remains usable.
-        The API call itself enforces reality and applies a cooldown on failure.
+        Optimistic UX: if the capability is unknown (None) or the coordinator
+        lacks can_play_sound(), return True so the UI remains usable.
+        A small cache avoids expensive capability probes on every update.
         """
         dev_id = self._device["id"]
         can_play = getattr(self.coordinator, "can_play_sound", None)
 
-        if callable(can_play):
-            try:
-                verdict = can_play(dev_id)  # may be True/False
-                _LOGGER.debug(
-                    "PlaySound availability for %s (%s): can_play_sound -> %r",
-                    self._device.get("name", dev_id),
-                    dev_id,
-                    verdict,
-                )
-                return bool(verdict)
-            except Exception as err:  # keep optimistic behavior on transient errors
-                _LOGGER.debug(
-                    "PlaySound availability check for %s (%s) raised %s; defaulting to True",
-                    self._device.get("name", dev_id),
-                    dev_id,
-                    err,
-                )
-                return True
+        # If there is no capability API, stay optimistic.
+        if not callable(can_play):
+            _LOGGER.debug(
+                "PlaySound availability for %s (%s): legacy coordinator (no can_play_sound) -> default True",
+                self._device.get("name", dev_id),
+                dev_id,
+            )
+            return True
 
-        _LOGGER.debug(
-            "PlaySound availability for %s (%s): legacy coordinator (no can_play_sound) -> default True",
-            self._device.get("name", dev_id),
-            dev_id,
-        )
-        return True
+        # Respect cache to avoid frequent network-bound checks.
+        verdict_cached, ts_cached = self._cap_cache
+        now = time.monotonic()
+        if now - ts_cached < self._cap_cache_ttl_sec:
+            # Unknown -> optimistic True; bool(None) would be False which is not desired
+            return True if verdict_cached is None else bool(verdict_cached)
+
+        # Refresh capability (may be network-bound in older API versions)
+        try:
+            verdict = can_play(dev_id)  # True / False / None
+            self._cap_cache = (verdict, now)
+            _LOGGER.debug(
+                "PlaySound availability for %s (%s): refreshed verdict -> %r",
+                self._device.get("name", dev_id),
+                dev_id,
+                verdict,
+            )
+            # Unknown -> optimistic True
+            return True if verdict is None else bool(verdict)
+        except Exception as err:
+            # Keep UI usable on transient issues; update cache time to avoid hammering
+            self._cap_cache = (None, now)
+            _LOGGER.debug(
+                "PlaySound availability check for %s (%s) raised %s; defaulting to True",
+                self._device.get("name", dev_id),
+                dev_id,
+                err,
+            )
+            return True
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """React to coordinator updates (availability may change)."""
-        _LOGGER.debug("Coordinator update received for %s", self._attr_unique_id)
         self.async_write_ha_state()
 
     # ---------------- Device Info + Map Link ----------------
