@@ -51,7 +51,8 @@ rebuild_registry:
     mode:
       name: Mode
       description: Choose 'Rebuild' to remove entities/devices and reload; 'Migrate' only re-applies the soft data→options migration.
-      required: true
+      # Field is optional as the backend provides a safe default ('rebuild').
+      required: false
       default: rebuild
       selector:
         select:
