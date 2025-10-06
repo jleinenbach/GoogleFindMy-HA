@@ -3,15 +3,25 @@
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
+from __future__ import annotations
+
 import logging
-from custom_components.googlefindmy.Auth.token_cache import get_cached_value
+from custom_components.googlefindmy.Auth.token_cache import get_cached_value, set_cached_value
 
 _LOGGER = logging.getLogger(__name__)
 
+# Single well-known cache key for the Google account e-mail
 username_string = 'username'
 
 
-def get_username():
+def get_username() -> str:
+    """
+    Return the configured Google account e-mail from cache.
+
+    IMPORTANT:
+    - Callers that already *know* the username should avoid relying on this and
+      pass the username explicitly (DI). This function is a legacy convenience.
+    """
     username = get_cached_value(username_string)
     if username is not None:
         return username
@@ -26,5 +36,20 @@ def get_username():
     )
 
 
+def set_username(username: str) -> None:
+    """
+    Explicitly seed/update the username cache.
+
+    Rationale:
+    During cold starts, higher layers may know the username before the UI/options
+    flow persists it. Exposing a setter allows early seeding and avoids races.
+    """
+    if not isinstance(username, str) or not username:
+        raise ValueError("Username must be a non-empty string.")
+    set_cached_value(username_string, username)
+
+
 if __name__ == '__main__':
-    get_username()
+    # Simple self-check: seed from env or leave as-is, then read.
+    # (Kept minimal; real flows seed via API init or token retrieval paths.)
+    print(get_username())
