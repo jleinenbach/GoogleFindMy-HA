@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from typing import Any, Optional, Tuple
+from typing import Any
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -86,61 +86,26 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     entity_description = PLAY_SOUND_DESCRIPTION
     _attr_name = "Play Sound"  # translated via translation_key
 
-    # Cache: (verdict, monotonic_timestamp)
-    _cap_cache: Tuple[Optional[bool], float]
-    _cap_cache_ttl_sec = 15 * 60  # 15 minutes
-
     def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:
         """Initialize the button."""
         super().__init__(coordinator)
         self._device = device
         dev_id = device["id"]
         self._attr_unique_id = f"{DOMAIN}_{dev_id}_play_sound"
-        self._cap_cache = (None, 0.0)
 
     # ---------------- Availability ----------------
     @property
     def available(self) -> bool:
-        """Expose availability based on coordinator.can_play_sound().
+        """Availability derived from coordinator.can_play_sound().
 
-        Optimistic UX: if the capability is unknown (None) or the coordinator
-        lacks can_play_sound(), return True so the UI remains usable.
-        A small cache avoids expensive capability probes on every update.
+        Optimistic UX: if capability is unknown internally, the coordinator returns True,
+        so the button remains usable while the API enforces reality.
         """
         dev_id = self._device["id"]
-        can_play = getattr(self.coordinator, "can_play_sound", None)
-
-        # If there is no capability API, stay optimistic.
-        if not callable(can_play):
-            _LOGGER.debug(
-                "PlaySound availability for %s (%s): legacy coordinator (no can_play_sound) -> default True",
-                self._device.get("name", dev_id),
-                dev_id,
-            )
-            return True
-
-        # Respect cache to avoid frequent network-bound checks.
-        verdict_cached, ts_cached = self._cap_cache
-        now = time.monotonic()
-        if now - ts_cached < self._cap_cache_ttl_sec:
-            # Unknown -> optimistic True; bool(None) would be False which is not desired
-            return True if verdict_cached is None else bool(verdict_cached)
-
-        # Refresh capability (may be network-bound in older API versions)
         try:
-            verdict = can_play(dev_id)  # True / False / None
-            self._cap_cache = (verdict, now)
-            _LOGGER.debug(
-                "PlaySound availability for %s (%s): refreshed verdict -> %r",
-                self._device.get("name", dev_id),
-                dev_id,
-                verdict,
-            )
-            # Unknown -> optimistic True
-            return True if verdict is None else bool(verdict)
+            verdict = self.coordinator.can_play_sound(dev_id)
+            return bool(verdict)
         except Exception as err:
-            # Keep UI usable on transient issues; update cache time to avoid hammering
-            self._cap_cache = (None, now)
             _LOGGER.debug(
                 "PlaySound availability check for %s (%s) raised %s; defaulting to True",
                 self._device.get("name", dev_id),
@@ -212,8 +177,8 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Handle the button press.
 
-        We perform a pre-check using availability to avoid hitting the API
-        when Push/FCM is not ready or the device isn't ring-capable.
+        Pre-check via availability avoids hitting the API when push/FCM is not ready
+        or the device isn't ring-capable.
         """
         device_id = self._device["id"]
         device_name = self._device.get("name", device_id)
