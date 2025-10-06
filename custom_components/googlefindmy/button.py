@@ -14,6 +14,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION, DOMAIN
 from .coordinator import GoogleFindMyCoordinator
@@ -29,6 +30,27 @@ PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
 
 # Placeholder used during early boot; never prefix this into a final display name.
 _PLACEHOLDER_NAME = "Google Find My Device"
+
+
+# See device_tracker.py for rationale.
+def _maybe_update_device_registry_name(hass, entity_id: str, new_name: str) -> None:
+    try:
+        ent_reg = er.async_get(hass)
+        ent = ent_reg.async_get(entity_id)
+        if not ent or not ent.device_id:
+            return
+        dev_reg = dr.async_get(hass)
+        dev = dev_reg.async_get(ent.device_id)
+        if not dev or dev.name_by_user:
+            return
+        if new_name and dev.name != new_name:
+            dev_reg.async_update_device(device_id=ent.device_id, name=new_name)
+            _LOGGER.debug(
+                "Device registry name updated for %s: '%s' -> '%s'",
+                entity_id, dev.name, new_name
+            )
+    except Exception as e:
+        _LOGGER.debug("Device registry name update failed for %s: %s", entity_id, e)
 
 
 def _display_name(raw: Optional[str]) -> Optional[str]:
@@ -152,6 +174,8 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
                     old_label = self._device.get("name")
                     if new_label and new_label != old_label:
                         self._device["name"] = new_label
+                        # Sync device registry name (if not user-overridden)
+                        _maybe_update_device_registry_name(self.hass, self.entity_id, new_label)
                         # Recompute display name with guard against the placeholder.
                         dn = _display_name(new_label)
                         if dn and self._attr_name != dn:
