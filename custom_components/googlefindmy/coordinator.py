@@ -630,54 +630,33 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def can_play_sound(self, device_id: str) -> bool:
         """Return True if 'Play Sound' should be enabled for the device.
 
-        Optimistic strategy:
-        - If capability is known from the lightweight device list -> use it (no I/O).
+        **No network in availability path.**
+        Strategy:
+        - If capability is known from the lightweight device list -> use it (fast, cached).
         - If push readiness is explicitly False -> disable.
-        - Otherwise, try API probe as a last resort.
-        - If still unknown -> enable (optimistic); API call will guard and start cooldown on failure.
+        - Otherwise -> optimistic True (known devices) to keep the UI usable.
+          The actual action enforces reality and will start a cooldown on failure.
         """
-        api_can = getattr(self.api, "can_play_sound", None)
-        if callable(api_can):
-            try:
-                verdict = api_can(device_id)  # may be True/False/None
-                _LOGGER.debug("can_play_sound(api) for %s -> %r", device_id, verdict)
-                if verdict is not None:
-                    return bool(verdict)
-            except Exception as err:
-                _LOGGER.debug(
-                    "can_play_sound(api) failed for %s: %s; falling back", device_id, err
-                )
-
         # 1) Use cached capability when available (fast path, no network).
         caps = self._device_caps.get(device_id)
         if caps and isinstance(caps.get("can_ring"), bool):
             res = bool(caps["can_ring"])
             _LOGGER.debug("can_play_sound(%s) -> %s (from capability can_ring)", device_id, res)
             return res
- 
+
         # 2) Short-circuit if push transport is not ready.
         ready = self._api_push_ready()
         if ready is False:
             _LOGGER.debug("can_play_sound(%s) -> False (push not ready)", device_id)
             return False
 
-        # 3) As a last resort, ask the API (may probe the device list).
-        api_can = getattr(self.api, "can_play_sound", None)
-        if callable(api_can):
-            try:
-                verdict = api_can(device_id)  # may be True/False/None
-                _LOGGER.debug("can_play_sound(api) for %s -> %r", device_id, verdict)
-                if verdict is not None:
-                    return bool(verdict)
-            except Exception as err:
-                _LOGGER.debug("can_play_sound(api) failed for %s: %s; falling back", device_id, err)
-
+        # 3) Optimistic final decision based on whether we know the device.
         is_known = (
             device_id in self._device_names or device_id in self._device_location_data
         )
         if is_known:
             _LOGGER.debug(
-                "can_play_sound(%s) -> True (optimistic fallback; known device, push_ready=%s)",
+                "can_play_sound(%s) -> True (optimistic; known device, push_ready=%s)",
                 device_id,
                 ready,
             )
@@ -686,7 +665,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         _LOGGER.debug("can_play_sound(%s) -> True (optimistic final fallback)", device_id)
         return True
 
-    # ---------------------------- Public control API ------------------------
+    # ---------------------------- Public control API -----------------------
     def update_settings(
         self,
         *,
