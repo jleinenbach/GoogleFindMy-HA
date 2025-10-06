@@ -177,6 +177,35 @@ async def _async_soft_migrate_data_to_options(hass: HomeAssistant, entry: Config
         hass.config_entries.async_update_entry(entry, options=new_options)
 
 
+async def _async_normalize_device_names(hass: HomeAssistant) -> None:
+    """One-time normalization: strip legacy 'Find My - ' prefix from device names.
+
+    Rationale (HA best practice):
+    - Device names must not include integration prefixes; entities will carry context.
+    Safety:
+    - Only touch devices belonging to this integration.
+    - Never overwrite user-provided names (`name_by_user` remains authoritative).
+    """
+    try:
+        dev_reg = dr.async_get(hass)
+        updated = 0
+        for device in list(dev_reg.devices.values()):
+            if not any(domain == DOMAIN for domain, _ in device.identifiers):
+                continue
+            if device.name_by_user:
+                continue  # user-chosen names stay untouched
+            name = device.name or ""
+            if name.startswith("Find My - "):
+                new_name = name[len("Find My - ") :].strip()
+                if new_name and new_name != name:
+                    dev_reg.async_update_device(device_id=device.id, name=new_name)
+                    updated += 1
+        if updated:
+            _LOGGER.info('Normalized %d device name(s) by removing legacy "Find My - " prefix', updated)
+    except Exception as err:
+        _LOGGER.debug("Device name normalization skipped due to: %s", err)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration from a config entry (entities-first, options-first)."""
 
@@ -249,6 +278,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await coordinator.async_refresh()
             if not coordinator.last_update_success:
                 _LOGGER.warning("Initial refresh failed; entities will recover on subsequent polls.")
+            # Run a one-time normalization after entities/devices exist.
+            await _async_normalize_device_names(hass)
         except Exception as err:
             _LOGGER.error("Initial refresh raised an unexpected error: %s", err, exc_info=True)
 
@@ -326,11 +357,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
 
     def _resolve_canonical_from_any(arg: str) -> tuple[str, str]:
         """Resolve any device identifier to (canonical_id, friendly_name).
-
-        Tries to resolve, in order:
-        1. A Home Assistant device_id.
-        2. A Home Assistant entity_id.
-        3. A raw canonical ID from this integration.
 
         Args:
             arg: The identifier to resolve.
