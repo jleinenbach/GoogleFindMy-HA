@@ -154,7 +154,7 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         # state_class provided by description
 
     @property
-    def state(self) -> int | None:
+    def native_value(self) -> int | None:
         """Return the current counter value."""
         stats = getattr(self.coordinator, "stats", None)
         if stats is None:
