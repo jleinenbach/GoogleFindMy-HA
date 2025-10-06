@@ -7,6 +7,9 @@ import asyncio
 import time
 import logging
 import traceback
+from typing import Optional
+
+import aiohttp
 
 # Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import create_action_request, serialize_action_request
@@ -36,9 +39,17 @@ def create_location_request(canonic_device_id, fcm_registration_id, request_uuid
     return hex_payload
 
 
-async def get_location_data_for_device(canonic_device_id, name):
-    """Get location data for device - HA-compatible async version."""
-    
+async def get_location_data_for_device(
+    canonic_device_id: str,
+    name: str,
+    session: Optional[aiohttp.ClientSession] = None,
+):
+    """Get location data for device - HA-compatible async version.
+
+    Note:
+    - If a Home Assistant aiohttp.ClientSession is provided, it will be reused for the Nova call.
+      This avoids creating ephemeral sessions and suppresses 'suboptimal' warnings.
+    """
     logger = logging.getLogger(__name__)
     logger.info(f"GoogleFindMyTools: Requesting location data for {name}...")
 
@@ -172,14 +183,14 @@ async def get_location_data_for_device(canonic_device_id, name):
         # - On HTTP 500/502/503/504, wait 3s and retry once.
         # - If the second call fails, continue best-effort by waiting for FCM; non-5xx errors still abort.
         try:
-            nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+            nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload, session=session)
         except RuntimeError as e:
             msg = str(e)
             if ("500" in msg) or ("502" in msg) or ("503" in msg) or ("504" in msg):
                 logger.warning("Nova transient error (%s) for %s. Retrying once after 3s...", e, name)
                 await asyncio.sleep(3)
                 try:
-                    nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+                    nova_result = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload, session=session)
                 except RuntimeError as e2:
                     logger.warning("Nova still failing (%s). Proceeding to wait for FCM best-effort.", e2)
                     nova_result = None
