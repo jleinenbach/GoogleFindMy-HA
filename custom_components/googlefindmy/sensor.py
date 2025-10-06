@@ -21,6 +21,7 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .const import DOMAIN, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
@@ -57,6 +58,27 @@ STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
 }
 
 
+# See device_tracker.py for rationale.
+def _maybe_update_device_registry_name(hass, entity_id: str, new_name: str) -> None:
+    try:
+        ent_reg = er.async_get(hass)
+        ent = ent_reg.async_get(entity_id)
+        if not ent or not ent.device_id:
+            return
+        dev_reg = dr.async_get(hass)
+        dev = dev_reg.async_get(ent.device_id)
+        if not dev or dev.name_by_user:
+            return
+        if new_name and dev.name != new_name:
+            dev_reg.async_update_device(device_id=ent.device_id, name=new_name)
+            _LOGGER.debug(
+                "Device registry name updated for %s: '%s' -> '%s'",
+                entity_id, dev.name, new_name
+            )
+    except Exception as e:
+        _LOGGER.debug("Device registry name update failed for %s: %s", entity_id, e)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -91,7 +113,6 @@ async def async_setup_entry(
         # Startup restore path: create skeletons from tracked_devices so Restore works immediately
         tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
         for dev_id in tracked_ids:
-            # Neutral default; do NOT leak the technical id into the visible name
             name = "Google Find My Device"
             entities.append(GoogleFindMyLastSeenSensor(coordinator, {"id": dev_id, "name": name}))
             known_ids.add(dev_id)
@@ -148,9 +169,7 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
             "crowd_sourced_updates": "Crowd-sourced Updates",
         }
         self._attr_name = f"Google Find My {fallback_names.get(stat_key, stat_key.replace('_', ' ').title())}"
-        # Units are counts of updates
         self._attr_native_unit_of_measurement = "updates"
-        # state_class provided by description
 
     @property
     def native_value(self) -> int | None:
@@ -202,6 +221,8 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                     new_name = dev.get("name")
                     if new_name and new_name != self._device.get("name"):
                         self._device["name"] = new_name
+                        # Keep device registry in sync (no-op if user renamed device)
+                        _maybe_update_device_registry_name(self.hass, self.entity_id, new_name)
                     break
         except (AttributeError, TypeError) as e:
             _LOGGER.debug("Name refresh failed for %s: %s", self._device_id, e)
@@ -242,12 +263,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
-        """Restore last_seen from HA's persistent store and seed coordinator cache.
-
-        Why:
-        - Enables immediate usefulness after restart before the first poll.
-        - Uses the coordinator's public API to avoid private attribute access.
-        """
+        """Restore last_seen from HA's persistent store and seed coordinator cache."""
         await super().async_added_to_hass()
 
         # Use RestoreSensor API to get the last native value (may be datetime/str/number)
@@ -341,7 +357,6 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         else:
             token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
-    # NOTE: unchanged helper body below – kept exactly as before
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
 
         if token_expiration_enabled:

@@ -14,6 +14,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION, DOMAIN
 from .coordinator import GoogleFindMyCoordinator
@@ -28,20 +29,41 @@ PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
 )
 
 
+def _maybe_update_device_registry_name(hass: HomeAssistant, entity_id: str, new_name: str) -> None:
+    """Update the device's name in the registry if the user hasn't overridden it.
+
+    Best practice:
+    - Do not touch user-defined names (name_by_user).
+    - Keep device registry name aligned with the upstream device label so that
+      entity names composed via has_entity_name=True stay current.
+    """
+    try:
+        ent_reg = er.async_get(hass)
+        ent = ent_reg.async_get(entity_id)
+        if not ent or not ent.device_id:
+            return
+        dev_reg = dr.async_get(hass)
+        dev = dev_reg.async_get(ent.device_id)
+        if not dev or dev.name_by_user:
+            return
+        if new_name and dev.name != new_name:
+            dev_reg.async_update_device(device_id=ent.device_id, name=new_name)
+            _LOGGER.debug(
+                "Device registry name updated for %s: '%s' -> '%s'",
+                entity_id,
+                dev.name,
+                new_name,
+            )
+    except Exception as e:
+        _LOGGER.debug("Device registry name update failed for %s: %s", entity_id, e)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Google Find My Device button entities.
-
-    Design goals:
-    - Create Play Sound buttons for devices available at setup time.
-    - Dynamically add buttons for devices that appear later (post-initial refresh),
-      guarded by a known_ids set to avoid duplicates.
-    - Do NOT create skeleton buttons for unknown devices, as buttons do not benefit
-      from RestoreEntity like sensors or trackers do.
-    """
+    """Set up Google Find My Device button entities."""
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][config_entry.entry_id]
 
     known_ids: set[str] = set()
@@ -62,7 +84,6 @@ async def async_setup_entry(
     # Dynamically add buttons when new devices appear later
     @callback
     def _add_new_devices() -> None:
-        """Add entities for newly discovered devices."""
         new_entities: list[GoogleFindMyPlaySoundButton] = []
         for device in coordinator.data or []:
             dev_id = device.get("id")
@@ -98,11 +119,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     # ---------------- Availability ----------------
     @property
     def available(self) -> bool:
-        """Derive availability from coordinator.can_play_sound().
-
-        Optimistic UX: if capability is unknown internally, the coordinator returns True,
-        so the button remains usable while the API enforces reality.
-        """
+        """Derive availability from coordinator.can_play_sound()."""
         dev_id = self._device["id"]
         try:
             return self.coordinator.can_play_sound(dev_id)
@@ -118,7 +135,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     @callback
     def _handle_coordinator_update(self) -> None:
         """React to coordinator updates (availability and device name may change)."""
-        # Keep the raw device name in sync for the device registry.
+        # Keep the raw device name in sync and update device registry if needed.
         try:
             data = getattr(self.coordinator, "data", None) or []
             my_id = self._device["id"]
@@ -126,7 +143,15 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
                 if dev.get("id") == my_id:
                     new_name = dev.get("name")
                     if new_name and new_name != self._device.get("name"):
+                        old = self._device.get("name")
                         self._device["name"] = new_name
+                        _maybe_update_device_registry_name(self.hass, self.entity_id, new_name)
+                        _LOGGER.debug(
+                            "Button device label refreshed for %s: '%s' -> '%s'",
+                            my_id,
+                            old,
+                            new_name,
+                        )
                     break
         except (AttributeError, TypeError):
             pass
@@ -192,11 +217,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
 
     # ---------------- Action ----------------
     async def async_press(self) -> None:
-        """Handle the button press.
-
-        Pre-check via availability avoids hitting the API when push/FCM is not ready
-        or the device isn't ring-capable.
-        """
+        """Handle the button press."""
         device_id = self._device["id"]
         device_name = self._device.get("name", device_id)
 
