@@ -110,12 +110,14 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     _attr_source_type = SourceType.GPS
     _attr_entity_category = None  # ensure tracker is not diagnostic
 
-    # ---- Display-name policy (keeps it distinct from other integrations) ----
+    # ---- Display-name policy (no legacy prefixes) ----
     @staticmethod
     def _display_name(raw: str | None) -> str:
-        """Return the UI display name with a fixed prefix."""
-        base = raw or "Google Find My Device"
-        return f"Find My - {base}"
+        """Return the UI display name without legacy prefixes."""
+        name = (raw or "").strip()
+        if name.lower().startswith("find my - "):
+            name = name[10:].strip()
+        return name or "Google Find My Device"
 
     def __init__(
         self,
@@ -201,7 +203,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
-            name=self._device.get("name"),  # raw device label (no prefix) stays on the device container
+            name=self._display_name(self._device.get("name")),
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}" if base_url else None,
@@ -329,8 +331,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         - Keep the device's human-readable name in sync with the coordinator snapshot.
         - Maintain 'last good' accuracy data when new fixes are worse than the threshold.
         """
-        # Sync the raw device name from the coordinator's public data and
-        # also keep the entity display name (with prefix) in sync.
+        # Sync the raw device name from the coordinator and keep the entity display name in sync (no prefixes).
         try:
             data = getattr(self.coordinator, "data", None) or []
             my_id = self._device["id"]
