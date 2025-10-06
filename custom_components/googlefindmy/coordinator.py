@@ -70,7 +70,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         tracked_devices: Optional[List[str]] = None,
         location_poll_interval: int = 300,
         device_poll_delay: int = 5,
-        min_poll_interval: int = 120,
+        min_poll_interval: int = 1,
         min_accuracy_threshold: int = 100,
         allow_history_fallback: bool = False,
     ) -> None:
