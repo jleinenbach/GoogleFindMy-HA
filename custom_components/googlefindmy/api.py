@@ -5,22 +5,24 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
+from aiohttp import ClientSession
+
 from .Auth.token_cache import set_memory_cache
 from .Auth.username_provider import username_string
-from .NovaApi.ListDevices.nbe_list_devices import (
-    request_device_list,
-    async_request_device_list,
-)
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
     get_location_data_for_device,
 )
 from .NovaApi.ExecuteAction.PlaySound.start_sound_request import start_sound_request
+from .NovaApi.ListDevices.nbe_list_devices import (
+    async_request_device_list,
+    request_device_list,
+)
 from .NovaApi.nova_request import nova_request
 from .NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from .ProtoDecoders.decoder import (
-    parse_device_list_protobuf,
     get_canonic_ids,
     get_devices_with_location,
+    parse_device_list_protobuf,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,6 +35,7 @@ def _infer_can_ring_slot(device: Dict[str, Any]) -> Optional[bool]:
     - device["can_ring"] -> bool
     - device["canRing"] -> bool
     - device["capabilities"] -> list[str] / dict[str,bool]
+
     Returns:
         True/False when we could infer a verdict, otherwise None.
     """
@@ -58,7 +61,9 @@ def _build_can_ring_index(parsed_device_list: Any) -> Dict[str, bool]:
     """Build a mapping canonical_id -> can_ring (where determinable)."""
     index: Dict[str, bool] = {}
     try:
-        devices = get_devices_with_location(parsed_device_list)  # may include caps even without location
+        devices = get_devices_with_location(
+            parsed_device_list
+        )  # may include caps even without location
     except Exception:
         devices = []
 
@@ -81,16 +86,24 @@ class GoogleFindMyAPI:
         oauth_token: Optional[str] = None,
         google_email: Optional[str] = None,
         secrets_data: Optional[dict] = None,
+        session: Optional[ClientSession] = None,
     ) -> None:
         """Initialize the API wrapper.
 
         The API reads credentials from our in-memory token cache. We seed that cache from either:
         - A full secrets bundle (GoogleFindMyTools), or
         - Individual OAuth token + Google email.
+
+        Args:
+            oauth_token: The OAuth token for authentication.
+            google_email: The user's Google email address.
+            secrets_data: A dictionary containing the full secrets bundle.
+            session: The aiohttp ClientSession to use for requests.
         """
         self.secrets_data = secrets_data
         self.oauth_token = oauth_token
         self.google_email = google_email
+        self._session = session  # HA-managed aiohttp session
 
         if secrets_data:
             self._initialize_from_secrets(secrets_data)
@@ -103,12 +116,41 @@ class GoogleFindMyAPI:
             set_memory_cache(cache_data)
 
     # ---------------------------------------------------------------------
+    # Internal compatibility helpers
+    # ---------------------------------------------------------------------
+    def _req_device_list(self) -> str:
+        """Call request_device_list with session if supported (compat-safe)."""
+        try:
+            return request_device_list(session=self._session)
+        except TypeError:
+            _LOGGER.debug("Falling back to request_device_list without session")
+            return request_device_list()
+
+    async def _async_req_device_list(self, username: Optional[str] = None) -> str:
+        """Call async_request_device_list with session if supported (compat-safe)."""
+        try:
+            return await async_request_device_list(username, session=self._session)
+        except TypeError:
+            _LOGGER.debug("Falling back to async_request_device_list without session")
+            return await async_request_device_list(username)
+
+    async def _async_get_location(self, device_id: str, device_name: str) -> dict[str, Any]:
+        """Call get_location_data_for_device with session if supported (compat-safe)."""
+        try:
+            return await get_location_data_for_device(
+                device_id, device_name, session=self._session
+            )
+        except TypeError:
+            _LOGGER.debug("Falling back to get_location_data_for_device without session")
+            return await get_location_data_for_device(device_id, device_name)
+
+    # ---------------------------------------------------------------------
     # Init helpers
     # ---------------------------------------------------------------------
     def _initialize_from_secrets(self, secrets: dict) -> None:
         """Initialize from secrets.json (GoogleFindMyTools) into memory cache.
 
-        NOTE: No blocking I/O here; we only seed memory. Persistent persistence
+        NOTE: No blocking I/O here; we only seed memory. Persistent storage
         is handled elsewhere asynchronously by the integration.
         """
         enhanced = dict(secrets)
@@ -117,7 +159,9 @@ class GoogleFindMyAPI:
             enhanced[username_string] = self.google_email
 
         set_memory_cache(enhanced)
-        _LOGGER.debug("Seeded in-memory token cache with %d keys from secrets bundle", len(enhanced))
+        _LOGGER.debug(
+            "Seeded in-memory token cache with %d keys from secrets bundle", len(enhanced)
+        )
 
     # ---------------------------------------------------------------------
     # Device enumeration
@@ -125,7 +169,8 @@ class GoogleFindMyAPI:
     def get_basic_device_list(self) -> List[Dict[str, Any]]:
         """Return a lightweight list of devices (id/name), optionally with 'can_ring'."""
         try:
-            result_hex = request_device_list()
+            # Use compatibility wrapper for session handling.
+            result_hex = self._req_device_list()
             parsed = parse_device_list_protobuf(result_hex)
             canonic_ids = get_canonic_ids(parsed)
             # Try to enrich with capability flags
@@ -146,13 +191,18 @@ class GoogleFindMyAPI:
             _LOGGER.debug("Failed to get basic device list: %s", err)
             raise
 
-    async def async_get_basic_device_list(self, username: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def async_get_basic_device_list(
+        self, username: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """Async variant of the lightweight device list, used by config/options flow."""
         try:
             if not username and self.secrets_data:
-                username = self.secrets_data.get("googleHomeUsername") or self.secrets_data.get("google_email")
+                username = self.secrets_data.get(
+                    "googleHomeUsername"
+                ) or self.secrets_data.get("google_email")
 
-            result_hex = await async_request_device_list(username)
+            # Use compatibility wrapper for session handling.
+            result_hex = await self._async_req_device_list(username)
             parsed = parse_device_list_protobuf(result_hex)
             canonic_ids = get_canonic_ids(parsed)
             can_ring_index = _build_can_ring_index(parsed)
@@ -177,7 +227,8 @@ class GoogleFindMyAPI:
         """Return devices with basic info only (no up-front location fetch)."""
         try:
             _LOGGER.info("API v3.0: Enumerating devices (basic info only)")
-            result_hex = request_device_list()
+            # Use compatibility wrapper for session handling.
+            result_hex = self._req_device_list()
             parsed = parse_device_list_protobuf(result_hex)
             canonic_ids = get_canonic_ids(parsed)
             can_ring_index = _build_can_ring_index(parsed)
@@ -230,21 +281,37 @@ class GoogleFindMyAPI:
             )
             return {}
         except Exception as err:
-            _LOGGER.debug("Failed to get location for %s (%s): %s", device_name, device_id, err)
+            _LOGGER.debug(
+                "Failed to get location for %s (%s): %s", device_name, device_id, err
+            )
             return {}
 
-    async def async_get_device_location(self, device_id: str, device_name: str) -> Dict[str, Any]:
+    async def async_get_device_location(
+        self, device_id: str, device_name: str
+    ) -> Dict[str, Any]:
         """Async, HA-compatible location request for a single device."""
         try:
-            _LOGGER.info("API v3.0 Async: Requesting location for %s (%s)", device_name, device_id)
-            location_data = await get_location_data_for_device(device_id, device_name)
+            _LOGGER.info(
+                "API v3.0 Async: Requesting location for %s (%s)", device_name, device_id
+            )
+            # Use compatibility wrapper for session handling.
+            location_data = await self._async_get_location(device_id, device_name)
             if location_data and len(location_data) > 0:
-                _LOGGER.info("API v3.0 Async: Received %d location record(s) for %s", len(location_data), device_name)
+                _LOGGER.info(
+                    "API v3.0 Async: Received %d location record(s) for %s",
+                    len(location_data),
+                    device_name,
+                )
                 return location_data[0]
             _LOGGER.warning("API v3.0 Async: No location data for %s", device_name)
             return {}
         except Exception as err:
-            _LOGGER.debug("Failed to get async location for %s (%s): %s", device_name, device_id, err)
+            _LOGGER.debug(
+                "Failed to get async location for %s (%s): %s",
+                device_name,
+                device_id,
+                err,
+            )
             return {}
 
     def locate_device(self, device_id: str) -> Dict[str, Any]:
@@ -298,7 +365,8 @@ class GoogleFindMyAPI:
 
         # Best-effort capability probe (lightweight list; may still be network-bound)
         try:
-            result_hex = request_device_list()
+            # Use compatibility wrapper for session handling.
+            result_hex = self._req_device_list()
             parsed = parse_device_list_protobuf(result_hex)
             cap_index = _build_can_ring_index(parsed)
             if device_id in cap_index:
@@ -334,20 +402,27 @@ class GoogleFindMyAPI:
                 return False
 
             # Do NOT log token contents; emit only coarse diagnostics.
-            _LOGGER.info("Sending Play Sound to %s (token length=%s)", device_id, len(fcm_token))
+            _LOGGER.info(
+                "Sending Play Sound to %s (token length=%s)", device_id, len(fcm_token)
+            )
 
             # Build payload and send
             hex_payload = start_sound_request(device_id, fcm_token)
             _LOGGER.debug("Sound request payload length: %s chars", len(hex_payload))
 
-            result = nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+            # Pass the session to all underlying web requests.
+            result = nova_request(
+                NOVA_ACTION_API_SCOPE, hex_payload, session=self._session
+            )
 
             # Success case: nova_request returns empty string (HTTP 200, no body).
-            ok = (result is not None)
+            ok = result is not None
             if ok:
                 _LOGGER.info("Play Sound submitted successfully for %s", device_id)
             else:
-                _LOGGER.error("Play Sound failed for %s (nova_request returned None)", device_id)
+                _LOGGER.error(
+                    "Play Sound failed for %s (nova_request returned None)", device_id
+                )
             return bool(ok)
 
         except Exception as err:
