@@ -98,12 +98,12 @@ class GoogleFindMyAPI:
             oauth_token: The OAuth token for authentication.
             google_email: The user's Google email address.
             secrets_data: A dictionary containing the full secrets bundle.
-            session: The aiohttp ClientSession to use for requests.
+            session: The aiohttp ClientSession to use for requests (HA-managed).
         """
         self.secrets_data = secrets_data
         self.oauth_token = oauth_token
         self.google_email = google_email
-        self._session = session  # HA-managed aiohttp session
+        self._session = session  # HA-managed aiohttp session for async calls
 
         if secrets_data:
             self._initialize_from_secrets(secrets_data)
@@ -355,9 +355,9 @@ class GoogleFindMyAPI:
         """Return a verdict whether 'Play Sound' is supported for this device.
 
         Strategy:
-        - If push is not ready -> False.
-        - Try to infer device capability from a fresh device list -> True/False when known.
-        - If we cannot tell -> return None (let the caller decide optimistically).
+                - If push is not ready -> False.
+                - Try to infer device capability from a fresh device list -> True/False when known.
+                - If we cannot tell -> return None (let the caller decide optimistically).
         """
         # Quick gate on push readiness
         if not self.is_push_ready():
@@ -410,12 +410,10 @@ class GoogleFindMyAPI:
             hex_payload = start_sound_request(device_id, fcm_token)
             _LOGGER.debug("Sound request payload length: %s chars", len(hex_payload))
 
-            # Pass the session to all underlying web requests.
-            result = nova_request(
-                NOVA_ACTION_API_SCOPE, hex_payload, session=self._session
-            )
+            # Sync nova_request() does not accept aiohttp session (uses 'requests').
+            result = nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
 
-            # Success case: nova_request returns empty string (HTTP 200, no body).
+            # Success case: nova_request returns hex (can be empty string when body is empty).
             ok = result is not None
             if ok:
                 _LOGGER.info("Play Sound submitted successfully for %s", device_id)
