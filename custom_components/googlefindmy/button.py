@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from typing import Any
+from typing import Any, Optional
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -26,6 +26,22 @@ PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
     translation_key="play_sound",  # Links to strings.json for the entity name
     icon="mdi:volume-high",
 )
+
+# Placeholder used during early boot; never prefix this into a final display name.
+_PLACEHOLDER_NAME = "Google Find My Device"
+
+
+def _display_name(raw: Optional[str]) -> Optional[str]:
+    """Return the final entity display name or None if we should defer.
+
+    Important rules:
+    - Only build a composite name when a *real* device label is available.
+    - Never use the placeholder text to avoid duplicate names across entities.
+    """
+    base = (raw or "").strip()
+    if not base or base == _PLACEHOLDER_NAME:
+        return None
+    return f"Find My – {base} • Play Sound"
 
 
 async def async_setup_entry(
@@ -84,7 +100,9 @@ async def async_setup_entry(
 class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     """Button to trigger 'Play Sound' on a Google Find My Device."""
 
-    _attr_has_entity_name = True  # Let HA compose "<Device Name> <Entity Name>"
+    # We provide a full display name ourselves; keep this False to avoid HA composing names.
+    _attr_has_entity_name = False
+    _attr_should_poll = False  # explicit: buttons are event-driven
     entity_description = PLAY_SOUND_DESCRIPTION
 
     def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:
@@ -93,6 +111,13 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         self._device = device
         dev_id = device["id"]
         self._attr_unique_id = f"{DOMAIN}_{dev_id}_play_sound"
+
+        # Set an initial display name only if we have a real device label.
+        dn = _display_name(device.get("name"))
+        if dn:
+            self._attr_name = dn
+        # else: leave name unset for now; UI will use the entity_id temporarily.
+        # We will resync the final name once the coordinator delivers the real label.
 
     # ---------------- Availability ----------------
     @property
@@ -117,19 +142,29 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     @callback
     def _handle_coordinator_update(self) -> None:
         """React to coordinator updates (availability and device name may change)."""
-        # Sync the device name from the coordinator's public data.
+        # Sync the device label and, if it became real, update the entity display name.
         try:
             data = getattr(self.coordinator, "data", None) or []
             my_id = self._device["id"]
             for dev in data:
                 if dev.get("id") == my_id:
-                    new_name = dev.get("name")
-                    if new_name and new_name != self._device.get("name"):
-                        # Update internal name so device_info reflects the latest label.
-                        self._device["name"] = new_name
+                    new_label = dev.get("name")
+                    old_label = self._device.get("name")
+                    if new_label and new_label != old_label:
+                        self._device["name"] = new_label
+                        # Recompute display name with guard against the placeholder.
+                        dn = _display_name(new_label)
+                        if dn and self._attr_name != dn:
+                            _LOGGER.debug(
+                                "Updating button name for %s: '%s' -> '%s'",
+                                my_id,
+                                self._attr_name,
+                                dn,
+                            )
+                            self._attr_name = dn
                     break
         except (AttributeError, TypeError):
-            # This is a non-critical update, so we can ignore failures.
+            # Non-critical; keep going.
             pass
 
         self.async_write_ha_state()
@@ -154,6 +189,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
 
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
+            # Device label stays the raw device name (no "Find My –" prefix) for registry clarity.
             name=self._device.get("name"),
             manufacturer="Google",
             model="Find My Device",
