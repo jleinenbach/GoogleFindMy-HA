@@ -329,7 +329,15 @@ async def _get_initial_token_async(username, _logger):
 # -----------------------------------------------------------------------------------------
 
 
-def nova_request(api_scope, hex_payload):
+def nova_request(api_scope, hex_payload, session: aiohttp.ClientSession | None = None):
+    """
+    Synchronous Nova API request.
+
+    NOTE:
+    - Accepts an optional aiohttp.ClientSession for call-site compatibility, but **ignores** it here,
+      because the sync path uses 'requests'. This prevents TypeErrors from callers that pass 'session='.
+    - If you need true async & shared session, use 'async_nova_request(...)'.
+    """
     url = "https://android.googleapis.com/nova/" + api_scope
 
     # Try to get ADM token from cache first, then generate if needed
