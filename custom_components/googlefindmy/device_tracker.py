@@ -117,8 +117,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         super().__init__(coordinator)
         self._device = device
         self._attr_unique_id = f"{DOMAIN}_{device['id']}"
-        # `_attr_name` is intentionally not set. With `has_entity_name=False`,
-        # the entity's name will automatically track the device's name.
+        # NEW: Set an explicit entity display name from the current device name.
+        # Without this, HA leaves the Name field empty when has_entity_name=False.
+        self._attr_name = device.get("name") or "Google Find My Device"
         self._last_good_accuracy_data: dict[str, Any] | None = None  # Persisted coordinates for writes
 
     async def async_added_to_hass(self) -> None:
@@ -229,7 +230,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
         UX rationale:
         - If the coordinator does not yet have live data, keep the entity available
-          when we restored a valid location to avoid 'unavailable' after reboot.
+        when we restored a valid location to avoid 'unavailable' after reboot.
         """
         device_data = self._current_device_data
         if device_data:
@@ -328,8 +329,19 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
                 if dev.get("id") == my_id:
                     new_name = dev.get("name")
                     if new_name and new_name != self._device.get("name"):
-                        # Update internal name so device_info reflects the latest label.
+                        old = self._device.get("name")
                         self._device["name"] = new_name
+                        # NEW: Also update the entity display name to keep UI in sync.
+                        # This matters because has_entity_name=False does not auto-copy.
+                        if self._attr_name != new_name:
+                            _LOGGER.debug(
+                                "Updating entity name for %s (%s): '%s' -> '%s'",
+                                self.entity_id,
+                                my_id,
+                                old,
+                                new_name,
+                            )
+                            self._attr_name = new_name
                     break
         except (AttributeError, TypeError):
             # This is a non-critical update, so we can ignore failures.
