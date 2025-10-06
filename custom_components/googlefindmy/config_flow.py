@@ -9,7 +9,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -87,8 +87,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._available_devices: List[Tuple[str, str]] = []
 
     @staticmethod
+    @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> config_entries.OptionsFlow:
-        return OptionsFlowHandler(config_entry)
+        """Create the options flow.
+
+        Note:
+            Do not pass config_entry into the handler and do not assign
+            self.config_entry manually. The base class provides it.
+        """
+        return OptionsFlowHandler()
 
     # ---------- User entry point ----------
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -321,11 +328,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return None
 
 
-class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Options flow to (a) update non-secret settings and (b) optionally refresh credentials."""
+class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
+    """Options flow to (a) update non-secret settings and (b) optionally refresh credentials.
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        self.config_entry = config_entry  # provided by parent in modern HA
+    Notes:
+        - Do not assign self.config_entry here; the base class provides it.
+        - OptionsFlowWithReload will reload the integration when options change
+          if the flow ends with async_create_entry(data=...).
+    """
 
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -358,7 +368,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     # ---------- Settings (non-secret) ----------
     async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Update non-secret options. Writes to options; mirrors to data for legacy HA only."""
+        """Update non-secret options.
+
+        Best practice:
+            - Return async_create_entry(data=options) to commit options.
+            - OptionsFlowWithReload will reload the integration automatically.
+            - If legacy code still reads options from entry.data, mirror non-secret
+              values into data (compat only) before returning the entry.
+        """
         errors: Dict[str, str] = {}
 
         entry = self.config_entry
@@ -371,10 +388,16 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         current_delay = opt.get(OPT_DEVICE_POLL_DELAY, dat.get(OPT_DEVICE_POLL_DELAY, 5))
         current_min_acc = opt.get(OPT_MIN_ACCURACY_THRESHOLD, dat.get(OPT_MIN_ACCURACY_THRESHOLD, 100))
         current_move_thr = opt.get(OPT_MOVEMENT_THRESHOLD, dat.get(OPT_MOVEMENT_THRESHOLD, 50))
-        current_gh_enabled = opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, dat.get(OPT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_ENABLED))
-        current_gh_keywords = opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, dat.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS))
+        current_gh_enabled = opt.get(
+            OPT_GOOGLE_HOME_FILTER_ENABLED, dat.get(OPT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_ENABLED)
+        )
+        current_gh_keywords = opt.get(
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS, dat.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)
+        )
         current_stats = opt.get(OPT_ENABLE_STATS_ENTITIES, dat.get(OPT_ENABLE_STATS_ENTITIES, True))
-        current_map_token_exp = opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, dat.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION))
+        current_map_token_exp = opt.get(
+            OPT_MAP_VIEW_TOKEN_EXPIRATION, dat.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+        )
 
         # Build device list (best-effort; do not fail the form)
         device_options: Dict[str, str] = {}
@@ -398,13 +421,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: user_input.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, current_map_token_exp),
             }
 
-            # Update options; also mirror non-secrets into data for legacy readers (never mirror credentials).
+            # Mirror non-secrets into data for legacy readers (no options here!).
+            # Options update + reload will be handled by async_create_entry below.
             shadow_data = dict(entry.data)
             shadow_data.update(new_options)
-            self.hass.config_entries.async_update_entry(entry, options=new_options, data=shadow_data)
+            self.hass.config_entries.async_update_entry(entry, data=shadow_data)
 
-            # UX finish step (confirmation)
-            return await self.async_step_finish(mode="settings")
+            # Commit options and trigger automatic reload via OptionsFlowWithReload.
+            return self.async_create_entry(title="", data=new_options)
 
         schema = vol.Schema(
             {
