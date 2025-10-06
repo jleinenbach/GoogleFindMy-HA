@@ -17,6 +17,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -27,6 +28,30 @@ from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _maybe_update_device_registry_name(hass, entity_id: str, new_name: str) -> None:
+    """Write the real Google device label into the device registry once known.
+
+    Never touch if the user renamed the device (name_by_user is set).
+    """
+    try:
+        ent_reg = er.async_get(hass)
+        ent = ent_reg.async_get(entity_id)
+        if not ent or not ent.device_id:
+            return
+        dev_reg = dr.async_get(hass)
+        dev = dev_reg.async_get(ent.device_id)
+        # Respect user overrides
+        if not dev or dev.name_by_user:
+            return
+        if new_name and dev.name != new_name:
+            dev_reg.async_update_device(device_id=ent.device_id, name=new_name)
+            _LOGGER.debug(
+                "Device registry name updated for %s: '%s' -> '%s'",
+                entity_id, dev.name, new_name
+            )
+    except Exception as e:
+        _LOGGER.debug("Device registry name update failed for %s: %s", entity_id, e)
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -328,9 +353,14 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             for dev in data:
                 if dev.get("id") == my_id:
                     new_name = dev.get("name")
+                    # Ignore bootstrap placeholder names
+                    if not new_name or new_name == "Google Find My Device":
+                        break 
                     if new_name and new_name != self._device.get("name"):
                         old = self._device.get("name")
                         self._device["name"] = new_name
+                        # Keep device registry in sync (no-op if user renamed device)
+                        _maybe_update_device_registry_name(self.hass, self.entity_id, new_name)
                         # NEW: Also update the entity display name to keep UI in sync.
                         # This matters because has_entity_name=False does not auto-copy.
                         if self._attr_name != new_name:
