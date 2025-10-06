@@ -113,7 +113,6 @@ async def async_setup_entry(
         # Startup restore path: create skeletons from tracked_devices so Restore works immediately
         tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
         for dev_id in tracked_ids:
-            # Neutral default; do NOT leak the technical id into the visible name
             name = "Google Find My Device"
             entities.append(GoogleFindMyLastSeenSensor(coordinator, {"id": dev_id, "name": name}))
             known_ids.add(dev_id)
@@ -170,9 +169,7 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
             "crowd_sourced_updates": "Crowd-sourced Updates",
         }
         self._attr_name = f"Google Find My {fallback_names.get(stat_key, stat_key.replace('_', ' ').title())}"
-        # Units are counts of updates
         self._attr_native_unit_of_measurement = "updates"
-        # state_class provided by description
 
     @property
     def native_value(self) -> int | None:
@@ -199,17 +196,9 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
 class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
     """Per-device sensor exposing the last_seen timestamp."""
 
-    _attr_has_entity_name = True  # default; we override _attr_name to add a prefix
-
-    @staticmethod
-    def _display_name(raw: str | None) -> str:
-        """Build the entity display name with a fixed prefix and suffix.
-
-        Note:
-        - We do not touch DeviceInfo.name (device container stays the raw label).
-        """
-        base = raw or "Google Find My Device"
-        return f"Find My - {base} - Last Seen"
+    # Best practice: let HA compose "<Device Name> <translated entity name>"
+    _attr_has_entity_name = True
+    # Name comes from translation_key in LAST_SEEN_DESCRIPTION; we do not set _attr_name.
 
     def __init__(self, coordinator, device: dict[str, Any]) -> None:
         """Initialize the sensor."""
@@ -219,8 +208,6 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         safe_id = self._device_id if self._device_id is not None else "unknown"
         self.entity_description = LAST_SEEN_DESCRIPTION
         self._attr_unique_id = f"{DOMAIN}_{safe_id}_last_seen"
-        # Explicit entity display name to keep the "Find My -" prefix.
-        self._attr_name = self._display_name(device.get("name"))
         self._attr_native_value: datetime | None = None
 
     @callback
@@ -233,27 +220,9 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                 if dev.get("id") == my_id:
                     new_name = dev.get("name")
                     if new_name and new_name != self._device.get("name"):
-                        old = self._device.get("name")
-                        _LOGGER.debug(
-                            "Coordinator provided Google name for %s: '%s' -> '%s'",
-                            my_id,
-                            old,
-                            new_name,
-                        )
                         self._device["name"] = new_name
                         # Keep device registry in sync (no-op if user renamed device)
                         _maybe_update_device_registry_name(self.hass, self.entity_id, new_name)
-                    # Keep the display name (with prefix) in sync as well.
-                    desired = self._display_name(self._device.get("name"))
-                    if self._attr_name != desired:
-                        _LOGGER.debug(
-                            "Updating sensor name for %s (%s): '%s' -> '%s'",
-                            self.entity_id,
-                            my_id,
-                            self._attr_name,
-                            desired,
-                        )
-                        self._attr_name = desired
                     break
         except (AttributeError, TypeError) as e:
             _LOGGER.debug("Name refresh failed for %s: %s", self._device_id, e)
@@ -277,7 +246,6 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                         dt = dt.replace(tzinfo=timezone.utc)
                     new_dt = dt
                 except ValueError:
-                    # not a valid ISO string; ignore and keep previous
                     new_dt = None
         except (AttributeError, TypeError, ValueError) as e:
             _LOGGER.debug("Invalid last_seen for %s: %s", self._device.get("name", self._device_id), e)
@@ -286,7 +254,6 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         if new_dt is not None:
             self._attr_native_value = new_dt
         else:
-            # Keep the previous timestamp to avoid flipping to 'unavailable'.
             if previous is not None:
                 _LOGGER.debug(
                     "Keeping previous last_seen for %s (no update available)",
@@ -296,12 +263,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
-        """Restore last_seen from HA's persistent store and seed coordinator cache.
-
-        Why:
-        - Enables immediate usefulness after restart before the first poll.
-        - Uses the coordinator's public API to avoid private attribute access.
-        """
+        """Restore last_seen from HA's persistent store and seed coordinator cache."""
         await super().async_added_to_hass()
 
         # Use RestoreSensor API to get the last native value (may be datetime/str/number)
