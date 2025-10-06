@@ -43,3 +43,29 @@ locate_device_external:
 refresh_device_urls:
   name: Refresh Device URLs
   description: Recompute and update each device's configuration_url to point to the map view (use after base-URL or token policy changes)
+
+rebuild_registry:
+  name: Rebuild / Migrate Registry
+  description: Maintenance: run a soft data→options migration or rebuild entities/devices for this integration.
+  fields:
+    mode:
+      name: Mode
+      description: Choose 'Rebuild' to remove entities/devices and reload; 'Migrate' only re-applies the soft data→options migration.
+      # Field is optional as the backend provides a safe default ('rebuild').
+      required: false
+      default: rebuild
+      selector:
+        select:
+          options:
+            - label: Rebuild (remove + reload)
+              value: rebuild
+            - label: Migrate (data→options only)
+              value: migrate
+    device_ids:
+      name: Devices (optional)
+      description: Limit the operation to specific devices. Leave empty to target all Google Find My devices. (This selector passes HA device IDs.)
+      required: false
+      selector:
+        device:
+          multiple: true
+          integration: googlefindmy

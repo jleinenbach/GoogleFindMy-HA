@@ -4,17 +4,18 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    ATTR_GPS_ACCURACY,  # use HA core constant
+    ATTR_GPS_ACCURACY,
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
@@ -101,10 +102,11 @@ async def async_setup_entry(
 class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity):
     """Representation of a Google Find My Device tracker."""
 
-    # Convention: trackers represent the device itself (no entity name suffix)
+    # Convention: trackers represent the device itself, so the entity name
+    # should not have a suffix and will follow the device name.
     _attr_has_entity_name = False
     _attr_source_type = SourceType.GPS
-    _attr_entity_category = None  # ensure tracker is not diagnostic
+    _attr_entity_category = None  # Ensure tracker is not diagnostic
 
     def __init__(
         self,
@@ -115,8 +117,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         super().__init__(coordinator)
         self._device = device
         self._attr_unique_id = f"{DOMAIN}_{device['id']}"
-        # No _attr_name on purpose: with has_entity_name=False the entity name follows the device name.
-        self._last_good_accuracy_data: dict[str, Any] | None = None  # persisted coordinates for writes
+        # `_attr_name` is intentionally not set. With `has_entity_name=False`,
+        # the entity's name will automatically track the device's name.
+        self._last_good_accuracy_data: dict[str, Any] | None = None  # Persisted coordinates for writes
 
     async def async_added_to_hass(self) -> None:
         """Restore last known location and seed the coordinator cache.
@@ -129,17 +132,19 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
         try:
             last_state = await self.async_get_last_state()
-        except Exception as err:  # noqa: BLE001
+        except (RuntimeError, AttributeError) as err:
             _LOGGER.debug("Failed to get last state for %s: %s", self.entity_id, err)
             return
 
         if not last_state:
             return
 
-        # Standard device_tracker attributes (with safe fallbacks)
+        # Standard device_tracker attributes (with safe fallbacks for legacy keys)
         lat = last_state.attributes.get(ATTR_LATITUDE, last_state.attributes.get("latitude"))
         lon = last_state.attributes.get(ATTR_LONGITUDE, last_state.attributes.get("longitude"))
-        acc = last_state.attributes.get(ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy"))
+        acc = last_state.attributes.get(
+            ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy")
+        )
 
         restored: dict[str, Any] = {}
         try:
@@ -158,23 +163,21 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             dev_id = self._device["id"]
             try:
                 self.coordinator.prime_device_location_cache(dev_id, restored)
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Failed to seed coordinator cache for %s: %s", self.entity_id, err)
+            except (AttributeError, TypeError) as err:
+                _LOGGER.debug(
+                    "Failed to seed coordinator cache for %s: %s", self.entity_id, err
+                )
 
             self.async_write_ha_state()
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return device info, incl. a configuration_url to the map view.
-
-        We build the path locally so we can later switch to redirect endpoints without
-        touching base URL resolution elsewhere.
-        """
+        """Return device info, including a configuration_url to the map view."""
         # Build token + path first
         auth_token = self._get_map_token()
         path = self._build_map_path(self._device["id"], auth_token, redirect=False)
 
-        # For now return an absolute URL; the redirect view keeps it robust across origins.
+        # Return an absolute URL; the redirect view keeps it robust across origins.
         try:
             base_url = get_url(
                 self.hass,
@@ -183,7 +186,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
                 allow_external=True,
                 allow_internal=True,
             )
-        except Exception as e:  # noqa: BLE001
+        except HomeAssistantError as e:
             _LOGGER.debug("Could not determine Home Assistant URL, using fallback: %s", e)
             base_url = "http://homeassistant.local:8123"
 
@@ -192,8 +195,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             name=self._device.get("name"),
             manufacturer="Google",
             model="Find My Device",
-            configuration_url=f"{base_url}{path}",  # later: just `path` if we move to redirect-only
-            serial_number=self._device["id"],  # expose technical ID semantically
+            configuration_url=f"{base_url}{path}" if base_url else None,
+            # Expose the technical ID in the semantically correct field.
+            serial_number=self._device["id"],
         )
 
     def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
@@ -208,8 +212,10 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         dev_id = self._device["id"]
         try:
             return self.coordinator.get_device_location_data(dev_id)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Coordinator.get_device_location_data failed for %s: %s", dev_id, err)
+        except (AttributeError, TypeError) as err:
+            _LOGGER.debug(
+                "Coordinator.get_device_location_data failed for %s: %s", dev_id, err
+            )
             return None
 
     @property
@@ -268,7 +274,10 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         attributes: dict[str, Any] = {}
         if device_data := self._current_device_data:
             if last_seen_ts := device_data.get("last_seen"):
-                attributes["last_seen"] = datetime.fromtimestamp(last_seen_ts).isoformat()
+                # Use timezone-aware UTC for consistency across the integration
+                attributes["last_seen"] = datetime.fromtimestamp(
+                    float(last_seen_ts), tz=timezone.utc
+                ).isoformat()
             if altitude := device_data.get("altitude"):
                 attributes["altitude"] = altitude
             if status := device_data.get("status"):
@@ -283,9 +292,11 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         """Generate a simple token for map authentication (options-first)."""
         config_entry = getattr(self.coordinator, "config_entry", None)
         if config_entry:
-            token_expiration_enabled = config_entry.options.get(
-                "map_view_token_expiration",
-                config_entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
+            # Helper defined in __init__.py for options-first reading
+            from . import _opt
+
+            token_expiration_enabled = _opt(
+                config_entry, "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             )
         else:
             token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
@@ -309,6 +320,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         - Keep the device's human-readable name in sync with the coordinator snapshot.
         - Maintain 'last good' accuracy data when new fixes are worse than the threshold.
         """
+        # Sync the device name from the coordinator's public data.
         try:
             data = getattr(self.coordinator, "data", None) or []
             my_id = self._device["id"]
@@ -319,16 +331,18 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
                         # Update internal name so device_info reflects the latest label.
                         self._device["name"] = new_name
                     break
-        except Exception:  # noqa: BLE001
+        except (AttributeError, TypeError):
+            # This is a non-critical update, so we can ignore failures.
             pass
 
         config_entry = getattr(self.coordinator, "config_entry", None)
         if config_entry:
-            min_accuracy_threshold = config_entry.options.get("min_accuracy_threshold", 0)
+            # Helper defined in __init__.py for options-first reading
+            from . import _opt
+
+            min_accuracy_threshold = _opt(config_entry, "min_accuracy_threshold", 0)
         else:
-            # Legacy fallback kept for backward compatibility with older builds.
-            cfg = self.hass.data.get(DOMAIN, {}).get("config_data", {})
-            min_accuracy_threshold = cfg.get("min_accuracy_threshold", 0)
+            min_accuracy_threshold = 0  # Fallback if entry is not available
 
         device_data = self._current_device_data
         if not device_data:
@@ -339,10 +353,12 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         lat = device_data.get("latitude")
         lon = device_data.get("longitude")
 
-        # Keep best-known fix when accuracy filtering rejects current one.
-        is_good = (
-            min_accuracy_threshold <= 0
-            or (accuracy is not None and lat is not None and lon is not None and accuracy <= min_accuracy_threshold)
+        # Keep best-known fix when accuracy filtering rejects the current one.
+        is_good = min_accuracy_threshold <= 0 or (
+            accuracy is not None
+            and lat is not None
+            and lon is not None
+            and accuracy <= min_accuracy_threshold
         )
 
         if is_good:

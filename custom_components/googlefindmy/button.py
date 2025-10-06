@@ -9,20 +9,21 @@ from typing import Any
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.network import get_url
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION, DOMAIN
 from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-# Single, reusable entity description with translations
+# A single, reusable entity description is efficient and allows for translation.
 PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
     key="play_sound",
-    translation_key="play_sound",
+    translation_key="play_sound",  # Links to strings.json for the entity name
     icon="mdi:volume-high",
 )
 
@@ -38,8 +39,8 @@ async def async_setup_entry(
     - Create Play Sound buttons for devices available at setup time.
     - Dynamically add buttons for devices that appear later (post-initial refresh),
       guarded by a known_ids set to avoid duplicates.
-    - Do NOT create skeleton buttons for unknown devices (buttons do not benefit
-      from Restore like sensors/trackers do).
+    - Do NOT create skeleton buttons for unknown devices, as buttons do not benefit
+      from RestoreEntity like sensors or trackers do.
     """
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][config_entry.entry_id]
 
@@ -47,7 +48,7 @@ async def async_setup_entry(
     entities: list[GoogleFindMyPlaySoundButton] = []
 
     # Initial population from coordinator.data (if already available)
-    for device in (coordinator.data or []):
+    for device in coordinator.data or []:
         dev_id = device.get("id")
         name = device.get("name")
         if dev_id and name and dev_id not in known_ids:
@@ -62,8 +63,9 @@ async def async_setup_entry(
     # Dynamically add buttons when new devices appear later
     @callback
     def _add_new_devices() -> None:
+        """Add entities for newly discovered devices."""
         new_entities: list[GoogleFindMyPlaySoundButton] = []
-        for device in (coordinator.data or []):
+        for device in coordinator.data or []:
             dev_id = device.get("id")
             name = device.get("name")
             if dev_id and name and dev_id not in known_ids:
@@ -84,7 +86,6 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
 
     _attr_has_entity_name = True  # Let HA compose "<Device Name> <Entity Name>"
     entity_description = PLAY_SOUND_DESCRIPTION
-    _attr_name = "Play Sound"  # translated via translation_key
 
     def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:
         """Initialize the button."""
@@ -96,45 +97,41 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     # ---------------- Availability ----------------
     @property
     def available(self) -> bool:
-        """Expose availability based on coordinator.can_play_sound().
+        """Derive availability from coordinator.can_play_sound().
 
-        Optimistic UX: if the capability is unknown or the coordinator is older
-        and does not provide can_play_sound(), return True so the UI remains usable.
-        The API call itself enforces reality and applies a cooldown on failure.
+        Optimistic UX: if capability is unknown internally, the coordinator returns True,
+        so the button remains usable while the API enforces reality.
         """
         dev_id = self._device["id"]
-        can_play = getattr(self.coordinator, "can_play_sound", None)
-
-        if callable(can_play):
-            try:
-                verdict = can_play(dev_id)  # may be True/False
-                _LOGGER.debug(
-                    "PlaySound availability for %s (%s): can_play_sound -> %r",
-                    self._device.get("name", dev_id),
-                    dev_id,
-                    verdict,
-                )
-                return bool(verdict)
-            except Exception as err:  # keep optimistic behavior on transient errors
-                _LOGGER.debug(
-                    "PlaySound availability check for %s (%s) raised %s; defaulting to True",
-                    self._device.get("name", dev_id),
-                    dev_id,
-                    err,
-                )
-                return True
-
-        _LOGGER.debug(
-            "PlaySound availability for %s (%s): legacy coordinator (no can_play_sound) -> default True",
-            self._device.get("name", dev_id),
-            dev_id,
-        )
-        return True
+        try:
+            return self.coordinator.can_play_sound(dev_id)
+        except (AttributeError, TypeError) as err:
+            _LOGGER.debug(
+                "PlaySound availability check for %s (%s) raised %s; defaulting to True",
+                self._device.get("name", dev_id),
+                dev_id,
+                err,
+            )
+            return True  # Optimistic fallback
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """React to coordinator updates (availability may change)."""
-        _LOGGER.debug("Coordinator update received for %s", self._attr_unique_id)
+        """React to coordinator updates (availability and device name may change)."""
+        # Sync the device name from the coordinator's public data.
+        try:
+            data = getattr(self.coordinator, "data", None) or []
+            my_id = self._device["id"]
+            for dev in data:
+                if dev.get("id") == my_id:
+                    new_name = dev.get("name")
+                    if new_name and new_name != self._device.get("name"):
+                        # Update internal name so device_info reflects the latest label.
+                        self._device["name"] = new_name
+                    break
+        except (AttributeError, TypeError):
+            # This is a non-critical update, so we can ignore failures.
+            pass
+
         self.async_write_ha_state()
 
     # ---------------- Device Info + Map Link ----------------
@@ -149,7 +146,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
                 allow_external=True,
                 allow_internal=True,
             )
-        except Exception:
+        except HomeAssistantError:
             base_url = "http://homeassistant.local:8123"
 
         auth_token = self._get_map_token()
@@ -157,11 +154,12 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
 
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
-            name=self._device["name"],
+            name=self._device.get("name"),
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
-            serial_number=self._device["id"],  # semantic: device ID is the serial number
+            # Expose the technical ID in the semantically correct field.
+            serial_number=self._device["id"],
         )
 
     @staticmethod
@@ -175,9 +173,11 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         """Generate a simple map token (options-first; weekly/static)."""
         config_entry = getattr(self.coordinator, "config_entry", None)
         if config_entry:
-            token_expiration_enabled = config_entry.options.get(
-                "map_view_token_expiration",
-                config_entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
+            # Helper defined in __init__.py for options-first reading
+            from . import _opt
+
+            token_expiration_enabled = _opt(
+                config_entry, "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             )
         else:
             token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
@@ -195,8 +195,8 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Handle the button press.
 
-        We perform a pre-check using availability to avoid hitting the API
-        when Push/FCM is not ready or the device isn't ring-capable.
+        Pre-check via availability avoids hitting the API when push/FCM is not ready
+        or the device isn't ring-capable.
         """
         device_id = self._device["id"]
         device_name = self._device.get("name", device_id)
@@ -213,8 +213,8 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         try:
             result = await self.coordinator.async_play_sound(device_id)
             if result:
-                _LOGGER.info("Successfully played sound on %s", device_name)
+                _LOGGER.info("Successfully submitted Play Sound request for %s", device_name)
             else:
-                _LOGGER.warning("Failed to play sound on %s", device_name)
+                _LOGGER.warning("Failed to play sound on %s (request may have been rejected)", device_name)
         except Exception as err:
             _LOGGER.error("Error playing sound on %s: %s", device_name, err)

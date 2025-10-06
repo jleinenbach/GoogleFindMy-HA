@@ -319,6 +319,10 @@ def _get_local_ip_sync() -> str:
 
 async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindMyCoordinator) -> None:
     """Register services for the integration."""
+    # Guard: register services only once per HA instance
+    domain_bucket = hass.data.setdefault(DOMAIN, {})
+    if domain_bucket.get("services_registered"):
+        return
 
     def _resolve_canonical_from_any(arg: str) -> tuple[str, str]:
         """Resolve any device identifier to (canonical_id, friendly_name).
@@ -472,37 +476,45 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         ent_reg = er.async_get(hass)
         entries = hass.config_entries.async_entries(DOMAIN)
 
+        _LOGGER.info(
+            "googlefindmy.rebuild_registry requested: mode=%s, device_ids=%s",
+            mode,
+            "none" if not raw_ids else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
+        )
+
         if mode == "migrate":
-            # In 'migrate' mode, re-run the idempotent soft-migration for all config entries.
-            # This is a non-destructive way to apply metadata fixes.
+            # Re-run the idempotent soft-migration for all config entries.
             for entry in entries:
                 try:
                     await _async_soft_migrate_data_to_options(hass, entry)
-                except Exception as err:  # Broad exception to ensure the service never crashes.
+                except Exception as err:  # keep the service robust
                     _LOGGER.error("Soft-migrate failed for entry %s: %s", entry.entry_id, err)
-            _LOGGER.info("googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).", len(entries))
+            _LOGGER.info(
+                "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
+                len(entries),
+            )
             return
 
         if mode != "rebuild":
-            # Guard against unsupported modes.
             _LOGGER.error("Unsupported mode '%s' for rebuild_registry; use 'migrate' or 'rebuild'.", mode)
             return
 
         # --- rebuild mode ---
-        # Determine the target devices for the rebuild operation.
+        # Determine target devices & which entries are affected.
+        affected_entry_ids: set[str] = set()
         if target_device_ids:
-            # If specific device_ids are provided, filter them to ensure they exist.
-            candidate_devices = {d for d in target_device_ids if dev_reg.async_get(d) is not None}
-        else:
-            # If no device_ids are specified, target all devices associated with this integration.
             candidate_devices = set()
-            for entry in entries:
-                for dev in dev_reg.devices.values():
-                    if (
-                        entry.entry_id in dev.config_entries
-                        and any(domain == DOMAIN for domain, _ in dev.identifiers)
-                    ):
-                        candidate_devices.add(dev.id)
+            for d in target_device_ids:
+                dev = dev_reg.async_get(d)
+                if dev is not None:
+                    candidate_devices.add(dev.id)
+                    affected_entry_ids.update(dev.config_entries)
+        else:
+            candidate_devices = set()
+            for dev in dev_reg.devices.values():
+                if any(domain == DOMAIN for domain, _ in dev.identifiers):
+                    candidate_devices.add(dev.id)
+                    affected_entry_ids.update(dev.config_entries)
 
         if not candidate_devices:
             _LOGGER.info("googlefindmy.rebuild_registry: no matching devices to rebuild.")
@@ -511,7 +523,7 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         removed_entities = 0
         removed_devices = 0
 
-        # First pass: remove all entities associated with the target devices.
+        # Remove all entities bound to the target devices.
         for ent in list(ent_reg.entities.values()):
             if ent.platform == DOMAIN and ent.device_id in candidate_devices:
                 try:
@@ -520,12 +532,11 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 except Exception as err:
                     _LOGGER.error("Failed to remove entity %s: %s", ent.entity_id, err)
 
-        # Second pass: remove orphaned target devices (those with no remaining entities).
+        # Remove orphaned devices (no remaining entities).
         for dev_id in list(candidate_devices):
             dev = dev_reg.async_get(dev_id)
             if dev is None:
                 continue
-            # Check if any entities are still linked to this device.
             has_entities = any(e.device_id == dev_id for e in ent_reg.entities.values())
             if not has_entities:
                 try:
@@ -534,8 +545,9 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 except Exception as err:
                     _LOGGER.error("Failed to remove device %s: %s", dev_id, err)
 
-        # Final step: reload all config entries to allow them to recreate entities cleanly.
-        for entry in entries:
+        # Reload only affected config entries to recreate entities.
+        to_reload = [e for e in entries if e.entry_id in affected_entry_ids] or list(entries)
+        for entry in to_reload:
             try:
                 await hass.config_entries.async_reload(entry.entry_id)
             except Exception as err:
@@ -543,15 +555,23 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
 
         _LOGGER.info(
             "googlefindmy.rebuild_registry: rebuild finished: removed %d entit(y/ies), %d device(s), entries reloaded=%d",
-            removed_entities, removed_devices, len(entries)
+            removed_entities,
+            removed_devices,
+            len(to_reload),
         )
 
     # Register all services for the integration.
     hass.services.async_register(
-        DOMAIN, SERVICE_LOCATE_DEVICE, async_locate_device_service, schema=vol.Schema({vol.Required("device_id"): cv.string})
+        DOMAIN,
+        SERVICE_LOCATE_DEVICE,
+        async_locate_device_service,
+        schema=vol.Schema({vol.Required("device_id"): cv.string}),
     )
     hass.services.async_register(
-        DOMAIN, SERVICE_PLAY_SOUND, async_play_sound_service, schema=vol.Schema({vol.Required("device_id"): cv.string})
+        DOMAIN,
+        SERVICE_PLAY_SOUND,
+        async_play_sound_service,
+        schema=vol.Schema({vol.Required("device_id"): cv.string}),
     )
     hass.services.async_register(
         DOMAIN,
@@ -565,9 +585,14 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         DOMAIN,
         SERVICE_REBUILD_REGISTRY,
         async_rebuild_registry_service,
-        schema=vol.Schema({
-            vol.Optional("mode", default="rebuild"): vol.In(["migrate", "rebuild"]),
-            # Allow 'device_ids' to be a single string or a list of strings for flexibility.
-            vol.Optional("device_ids"): vol.Any(cv.string, [cv.string]),
-        }),
+        schema=vol.Schema(
+            {
+                vol.Optional("mode", default="rebuild"): vol.In(["migrate", "rebuild"]),
+                # Allow 'device_ids' to be a single string or a list of strings.
+                vol.Optional("device_ids"): vol.Any(cv.string, [cv.string]),
+            }
+        ),
     )
+
+    # Mark services as registered (prevents duplicate registration on reloads)
+    domain_bucket["services_registered"] = True
