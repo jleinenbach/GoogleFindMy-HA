@@ -21,6 +21,7 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from .const import DOMAIN, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
@@ -55,6 +56,27 @@ STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
 }
+
+
+# See device_tracker.py for rationale.
+def _maybe_update_device_registry_name(hass, entity_id: str, new_name: str) -> None:
+    try:
+        ent_reg = er.async_get(hass)
+        ent = ent_reg.async_get(entity_id)
+        if not ent or not ent.device_id:
+            return
+        dev_reg = dr.async_get(hass)
+        dev = dev_reg.async_get(ent.device_id)
+        if not dev or dev.name_by_user:
+            return
+        if new_name and dev.name != new_name:
+            dev_reg.async_update_device(device_id=ent.device_id, name=new_name)
+            _LOGGER.debug(
+                "Device registry name updated for %s: '%s' -> '%s'",
+                entity_id, dev.name, new_name
+            )
+    except Exception as e:
+        _LOGGER.debug("Device registry name update failed for %s: %s", entity_id, e)
 
 
 async def async_setup_entry(
@@ -219,6 +241,8 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                             new_name,
                         )
                         self._device["name"] = new_name
+                        # Keep device registry in sync (no-op if user renamed device)
+                        _maybe_update_device_registry_name(self.hass, self.entity_id, new_name)
                     # Keep the display name (with prefix) in sync as well.
                     desired = self._display_name(self._device.get("name"))
                     if self._attr_name != desired:
