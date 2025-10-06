@@ -274,10 +274,29 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
     @property
     def location_name(self) -> str | None:
-        """Return a semantic location (if provided by the API)."""
-        if device_data := self._current_device_data:
-            return device_data.get("semantic_name")
-        return None
+        """Return a human place label only when it should override zone logic.
+
+        Rules:
+        - If we have valid coordinates, let HA compute the zone name.
+        - If we don't have coordinates, fall back to Google's semantic label.
+        - Never override zones with generic 'home' labels from Google.
+        """
+        data = self._current_device_data
+        if not data:
+            return None
+
+        lat = data.get("latitude")
+        lon = data.get("longitude")
+        sem = data.get("semantic_name")
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+            # Coordinates present -> let HA zone engine decide (consistent naming).
+            return None
+
+        if isinstance(sem, str) and sem.strip().casefold() in {"home", "zuhause"}:
+            # Don't fight the zone name for 'home' semantics.
+            return None
+
+        return sem
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
