@@ -86,11 +86,10 @@ async def async_setup_entry(
         # No live data yet: create skeletons for configured tracked IDs (restore-friendly).
         tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
         for dev_id in tracked_ids:
-            # Neutral bootstrap name for early boot; replaced on first update.
-            name = "Google Find My Device"
+            # Avoid writing a placeholder name into the device registry during cold boot.
             known_ids.add(dev_id)
             entities.append(
-                GoogleFindMyDeviceTracker(coordinator, {"id": dev_id, "name": name})
+                GoogleFindMyDeviceTracker(coordinator, {"id": dev_id})
             )
         if tracked_ids:
             _LOGGER.debug(
@@ -220,13 +219,25 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             _LOGGER.debug("Could not determine Home Assistant URL, using fallback: %s", e)
             base_url = "http://homeassistant.local:8123"
 
+        raw_name = self._device.get("name")
+        display_name = self._display_name(raw_name) if raw_name else None
+
+        # If we only have the bootstrap placeholder, don't override stored registry name
+        use_name = None
+        use_default_name = None
+        if raw_name and display_name != "Google Find My Device":
+            use_name = display_name
+        else:
+            use_default_name = "Google Find My Device"
+
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
-            name=self._display_name(self._device.get("name")),
+            name=use_name,
+            default_name=use_default_name,
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}" if base_url else None,
-            serial_number=self._device["id"],  # technical id in the proper field
+            serial_number=self._device["id"],
         )
 
     def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
