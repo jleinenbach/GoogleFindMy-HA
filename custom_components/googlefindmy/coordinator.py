@@ -61,7 +61,7 @@ def _sync_get_last_gps_from_history(
 
 
 class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
-    """Coordinator that manages polling and cache for Google Find My Device."""
+    """Coordinator that manages polling, cache, and push updates for Google Find My Device."""
 
     # ---------------------------- Lifecycle ---------------------------------
     def __init__(
@@ -574,6 +574,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         slot = self._device_location_data.setdefault(device_id, {})
         slot.setdefault("last_seen", float(ts_epoch))
 
+    def update_device_cache(self, device_id: str, location_data: Dict[str, Any]) -> None:
+        """Public, encapsulated update of the internal location cache for one device.
+
+        Used by the FCM receiver (push path). Expects validated fields.
+        """
+        if not isinstance(location_data, dict):
+            _LOGGER.debug("Ignored cache update for %s: payload is not a dict", device_id)
+            return
+
+        # Shallow copy to avoid caller-side mutation
+        slot = dict(location_data)
+
+        # Ensure last_updated is present
+        slot.setdefault("last_updated", time.time())
+
+        # Keep human-friendly name mapping up-to-date if provided alongside
+        name = slot.get("name")
+        if isinstance(name, str) and name:
+            self._device_names[device_id] = name
+
+        self._device_location_data[device_id] = slot
+
     def get_device_last_seen(self, device_id: str) -> Optional[datetime]:
         """Return last_seen as timezone-aware datetime (UTC) if cached."""
         ts = self._device_location_data.get(device_id, {}).get("last_seen")
@@ -591,6 +613,36 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def get_device_name_map(self) -> Dict[str, str]:
         """Return a shallow copy of the internal device-id -> name mapping."""
         return dict(self._device_names)
+
+    # ---------------------------- Push updates ------------------------------
+    def push_updated(self, device_ids: Optional[List[str]] = None) -> None:
+        """Publish a fresh snapshot to listeners after push (FCM) cache updates.
+
+        - Avoids triggering a poll; pushes cache state immediately.
+        - Resets the poll baseline to 'now' to prevent immediate re-polling.
+        """
+        wall_now = time.time()
+        self._last_poll_mono = time.monotonic()  # reset poll timer
+
+        # Choose device ids for the snapshot
+        if device_ids:
+            ids = device_ids
+        else:
+            # union of all known names and cached locations
+            ids = list({*self._device_names.keys(), *self._device_location_data.keys()})
+
+        # Respect tracked_devices semantics: empty list => include all
+        if self.tracked_devices:
+            ids = [d for d in ids if d in self.tracked_devices]
+
+        # Build "devices" stubs from id->name mapping
+        devices_stub: List[Dict[str, Any]] = [
+            {"id": dev_id, "name": self._device_names.get(dev_id, dev_id)} for dev_id in ids
+        ]
+
+        snapshot = self._build_snapshot_from_cache(devices_stub, wall_now=wall_now)
+        self.async_set_updated_data(snapshot)
+        _LOGGER.debug("Pushed snapshot for %d device(s) via push_updated()", len(snapshot))
 
     # ---------------------------- Play sound helpers ------------------------
     def _api_push_ready(self) -> bool:
