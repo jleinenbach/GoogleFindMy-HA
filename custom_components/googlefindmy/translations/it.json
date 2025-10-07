@@ -57,8 +57,7 @@
     "abort": {
       "already_configured": "Google Find My Device è già configurato.",
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
-      "reauth_successful": "Ri-autenticazione riuscita.",
-      "reconfigure_successful": "Riconfigurazione riuscita."
+      "reauth_successful": "Ri-autenticazione riuscita."
     }
   },
   "options": {
@@ -136,7 +135,7 @@
       "description": "Aggiorna gli URL di configurazione dei dispositivi Google Find My per puntare alla vista mappa integrata.",
       "fields": {}
     },
-    "locate_device_external": {
+    "locate_external": {
       "name": "Localizza dispositivo (esterno)",
       "description": "Localizza un dispositivo utilizzando il servizio esterno (delegato alla localizzazione normale).",
       "fields": {
@@ -166,6 +165,16 @@
     }
   },
   "entity": {
+    "button": {
+      "play_sound": {
+        "name": "Riproduci suono"
+      }
+    },
+    "binary_sensor": {
+      "polling": {
+        "name": "Interrogazione"
+      }
+    },
     "sensor": {
       "last_seen": {
         "name": "Ultima volta visto"
