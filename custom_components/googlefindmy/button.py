@@ -54,7 +54,7 @@ def _maybe_update_device_registry_name(hass: HomeAssistant, entity_id: str, new_
                 dev.name,
                 new_name,
             )
-    except Exception as e:
+    except Exception as e:  # Avoid noisy errors during boot/races
         _LOGGER.debug("Device registry name update failed for %s: %s", entity_id, e)
 
 
@@ -166,7 +166,11 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     # ---------------- Device Info + Map Link ----------------
     @property
     def device_info(self) -> DeviceInfo:
-        """Return DeviceInfo with a stable configuration_url and safe naming."""
+        """Return DeviceInfo with a stable configuration_url and safe naming.
+
+        IMPORTANT: Do not mix `default_*` keys with `identifiers`. Always provide
+        a concrete `name` so the info cleanly matches the 'Primary' device-info category.
+        """
         try:
             base_url = get_url(
                 self.hass,
@@ -181,15 +185,13 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         auth_token = self._get_map_token()
         path = self._build_map_path(self._device["id"], auth_token, redirect=False)
 
-        # Avoid overwriting stored device names during cold boot:
+        # Always provide a concrete `name` (no default_name) to satisfy device-info validation.
         raw_name = (self._device.get("name") or "").strip()
-        use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
-        use_default_name = None if use_name else "Google Find My Device"
+        safe_name = raw_name if raw_name else "Google Find My Device"
 
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
-            name=use_name,
-            default_name=use_default_name,
+            name=safe_name,
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
@@ -249,5 +251,5 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
                     "Failed to play sound on %s (request may have been rejected)",
                     device_name,
                 )
-        except Exception as err:
+        except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error playing sound on %s: %s", device_name, err)
