@@ -76,7 +76,10 @@
         "data": {
           "secrets_json": "Nowy secrets.json (pełna zawartość)",
           "oauth_token": "Nowy token OAuth",
-          "google_email": "Adres e-mail Google"
+          "google_email": "Adres e-mail Google",
+          "new_secrets_json": "Nowy plik secrets.json (pełna zawartość)",
+          "new_oauth_token": "Nowy token OAuth",
+          "new_google_email": "Nowy adres e-mail Google"
         }
       },
       "settings": {
@@ -185,8 +188,23 @@
       "stat_background_updates": {
         "name": "Aktualizacje w tle"
       },
+      "stat_polled_updates": {
+        "name": "Aktualizacje z odpytywania"
+      },
       "stat_crowd_sourced_updates": {
         "name": "Aktualizacje społecznościowe"
+      },
+      "stat_history_fallback_used": {
+        "name": "Użyto danych z historii"
+      },
+      "stat_timeouts": {
+        "name": "Przekroczenia czasu"
+      },
+      "stat_invalid_coords": {
+        "name": "Nieprawidłowe współrzędne"
+      },
+      "stat_low_quality_dropped": {
+        "name": "Odrzucono zbyt niską dokładność"
       }
     }
   }
