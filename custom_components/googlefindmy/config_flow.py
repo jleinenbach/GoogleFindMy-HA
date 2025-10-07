@@ -361,32 +361,13 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
 
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Show a small menu: edit settings vs. update credentials."""
-        if selector:
-            menu_schema = vol.Schema(
-                {
-                    vol.Required("action"): selector(
-                        {
-                            "select": {
-                                "options": [
-                                    {"value": "settings", "label": "Tracking & polling settings"},
-                                    {"value": "credentials", "label": "Update credentials (hidden fields)"},
-                                ]
-                            }
-                        }
-                    )
-                }
-            )
-        else:
-            menu_schema = vol.Schema({vol.Required("action"): vol.In(["settings", "credentials"])})
-
-        if user_input is not None:
-            action = user_input["action"]
-            if action == "settings":
-                return await self.async_step_settings()
-            if action == "credentials":
-                return await self.async_step_credentials()
-        return self.async_show_form(step_id="init", data_schema=menu_schema)
+        """Show a small menu: edit settings vs. update credentials (uses translations)."""
+        # With async_show_menu we don't build a schema; HA renders translated menu options:
+        # translations: options.step.init.menu_options.settings / credentials
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["settings", "credentials"],
+        )
 
     # ---------- Settings (non-secret) ----------
     async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
