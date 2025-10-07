@@ -24,14 +24,40 @@ from homeassistant.helpers.network import get_url
 from .Auth.token_cache import async_load_cache_from_file
 from .Auth.username_provider import username_string
 from .const import (
-    CONF_OAUTH_TOKEN,
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    # Core
     DOMAIN,
+    # Credentials/data keys
+    CONF_OAUTH_TOKEN,
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+    # Options keys & canonical list
+    OPTION_KEYS,
+    OPT_TRACKED_DEVICES,
+    OPT_LOCATION_POLL_INTERVAL,
+    OPT_DEVICE_POLL_DELAY,
+    OPT_MIN_POLL_INTERVAL,
+    OPT_MIN_ACCURACY_THRESHOLD,
+    OPT_ALLOW_HISTORY_FALLBACK,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    # Defaults
+    DEFAULT_OPTIONS,
+    DEFAULT_LOCATION_POLL_INTERVAL,
+    DEFAULT_DEVICE_POLL_DELAY,
+    DEFAULT_MIN_POLL_INTERVAL,
+    DEFAULT_MIN_ACCURACY_THRESHOLD,
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    # Services
     SERVICE_LOCATE_DEVICE,
-    SERVICE_LOCATE_EXTERNAL,
     SERVICE_PLAY_SOUND,
-    SERVICE_REFRESH_URLS,
+    SERVICE_LOCATE_EXTERNAL,
+    SERVICE_REFRESH_DEVICE_URLS,
     SERVICE_REBUILD_REGISTRY,
+    # Rebuild service schema constants
+    ATTR_MODE,
+    ATTR_DEVICE_IDS,
+    MODE_REBUILD,
+    MODE_MIGRATE,
+    REBUILD_REGISTRY_MODES,
 )
 from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
@@ -58,21 +84,6 @@ PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
 ]
-
-# Settings that belong to entry.options (never secrets). Single source of truth.
-_OPTION_KEYS: tuple[str, ...] = (
-    "tracked_devices",
-    "location_poll_interval",
-    "device_poll_delay",
-    "min_poll_interval",
-    "min_accuracy_threshold",
-    "movement_threshold",
-    "allow_history_fallback",
-    "google_home_filter_enabled",
-    "google_home_filter_keywords",
-    "enable_stats_entities",
-    "map_view_token_expiration",
-)
 
 
 def _redact_url_token(url: str) -> str:
@@ -124,7 +135,7 @@ async def _async_save_individual_credentials(oauth_token: str, google_email: str
     from .Auth.token_cache import async_set_cached_value
 
     try:
-        await async_set_cached_value("oauth_token", oauth_token)
+        await async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
         await async_set_cached_value(username_string, google_email)
     except OSError as err:
         _LOGGER.warning("Failed to save individual credentials to cache: %s", err)
@@ -139,14 +150,14 @@ def _opt(entry: ConfigEntry, key: str, default: Any) -> Any:
 
 def _effective_config(entry: ConfigEntry) -> dict[str, Any]:
     """Assemble a dict of non-secret runtime settings (options-first)."""
-    return {k: _opt(entry, k, None) for k in _OPTION_KEYS}
+    return {k: _opt(entry, k, None) for k in OPTION_KEYS}
 
 
 async def _async_soft_migrate_data_to_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Idempotently copy known settings from data -> options (never move secrets)."""
     new_options = dict(entry.options)
     changed = False
-    for k in _OPTION_KEYS:
+    for k in OPTION_KEYS:
         if k not in new_options and k in entry.data:
             new_options[k] = entry.data[k]
             changed = True
@@ -256,13 +267,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _async_soft_migrate_data_to_options(hass, entry)
 
     # Acquire shared FCM and keep it alive while this entry exists
-    fcm = await _async_acquire_shared_fcm(hass)
-    entry.async_on_unload(lambda: hass.async_create_task(_async_release_shared_fcm(hass), name="googlefindmy.release_fcm"))
+    _ = await _async_acquire_shared_fcm(hass)
+    entry.async_on_unload(
+        lambda: hass.async_create_task(
+            _async_release_shared_fcm(hass), name="googlefindmy.release_fcm"
+        )
+    )
 
     # Credentials handling (secrets-only in data)
-    secrets_data = entry.data.get("secrets_data")
+    secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
-    google_email = entry.data.get("google_email")
+    google_email = entry.data.get(CONF_GOOGLE_EMAIL)
 
     if secrets_data:
         await _async_save_secrets_data(secrets_data)
@@ -271,19 +286,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _async_save_individual_credentials(oauth_token, google_email)
         _LOGGER.debug("Persisted individual credentials to token cache")
     else:
-        _LOGGER.error("No credentials found in config entry (neither secrets_data nor oauth_token+google_email)")
+        _LOGGER.error(
+            "No credentials found in config entry (neither secrets_data nor oauth_token+google_email)"
+        )
         raise ConfigEntryNotReady("Credentials missing")
 
     # Build effective runtime settings (options-first)
     coordinator = GoogleFindMyCoordinator(
         hass,
         secrets_data=secrets_data,  # may be None with individual-credentials path; token cache is prepped
-        tracked_devices=_opt(entry, "tracked_devices", []),
-        location_poll_interval=_opt(entry, "location_poll_interval", 300),
-        device_poll_delay=_opt(entry, "device_poll_delay", 5),
-        min_poll_interval=_opt(entry, "min_poll_interval", 120),
-        min_accuracy_threshold=_opt(entry, "min_accuracy_threshold", 100),
-        allow_history_fallback=_opt(entry, "allow_history_fallback", False),
+        tracked_devices=_opt(entry, OPT_TRACKED_DEVICES, DEFAULT_OPTIONS.get(OPT_TRACKED_DEVICES, [])),
+        location_poll_interval=_opt(entry, OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL),
+        device_poll_delay=_opt(entry, OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
+        min_poll_interval=_opt(entry, OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
+        min_accuracy_threshold=_opt(entry, OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD),
+        allow_history_fallback=_opt(entry, OPT_ALLOW_HISTORY_FALLBACK, False),
     )
     coordinator.config_entry = entry  # convenience for platforms
 
@@ -468,7 +485,7 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
         if config_entries:
             e0 = config_entries[0]
-            token_expiration_enabled = _opt(e0, "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+            token_expiration_enabled = _opt(e0, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
 
         if token_expiration_enabled:
             week = str(int(time.time() // 604800))  # weekly rotation bucket
@@ -495,8 +512,8 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
 
     async def async_rebuild_registry_service(call: ServiceCall) -> None:
         """Migrate soft settings or rebuild the registry (optionally scoped to device_ids)."""
-        mode: str = str(call.data.get("mode", "rebuild")).lower()
-        raw_ids = call.data.get("device_ids")
+        mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
+        raw_ids = call.data.get(ATTR_DEVICE_IDS)
 
         if isinstance(raw_ids, str):
             target_device_ids = {raw_ids}
@@ -515,7 +532,7 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             "none" if not raw_ids else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
         )
 
-        if mode == "migrate":
+        if mode == MODE_MIGRATE:
             for entry in entries:
                 try:
                     await _async_soft_migrate_data_to_options(hass, entry)
@@ -527,8 +544,12 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             )
             return
 
-        if mode != "rebuild":
-            _LOGGER.error("Unsupported mode '%s' for rebuild_registry; use 'migrate' or 'rebuild'.", mode)
+        if mode != MODE_REBUILD:
+            _LOGGER.error(
+                "Unsupported mode '%s' for rebuild_registry; use one of: %s",
+                mode,
+                ", ".join(REBUILD_REGISTRY_MODES),
+            )
             return
 
         affected_entry_ids: set[str] = set()
@@ -606,15 +627,20 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         async_locate_external_service,
         schema=vol.Schema({vol.Required("device_id"): cv.string, vol.Optional("device_name"): cv.string}),
     )
-    hass.services.async_register(DOMAIN, SERVICE_REFRESH_URLS, async_refresh_device_urls_service, schema=vol.Schema({}))
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REFRESH_DEVICE_URLS,
+        async_refresh_device_urls_service,
+        schema=vol.Schema({}),
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_REBUILD_REGISTRY,
         async_rebuild_registry_service,
         schema=vol.Schema(
             {
-                vol.Optional("mode", default="rebuild"): vol.In(["migrate", "rebuild"]),
-                vol.Optional("device_ids"): vol.Any(cv.string, [cv.string]),
+                vol.Optional(ATTR_MODE, default=MODE_REBUILD): vol.In(REBUILD_REGISTRY_MODES),
+                vol.Optional(ATTR_DEVICE_IDS): vol.Any(cv.string, [cv.string]),
             }
         ),
     )
