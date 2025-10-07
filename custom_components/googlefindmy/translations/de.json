@@ -30,7 +30,13 @@
         "data": {
           "tracked_devices": "Getrackte Geräte",
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
-          "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)"
+          "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",
+          "min_accuracy_threshold": "Mindestgenauigkeit (m)",
+          "movement_threshold": "Bewegungsschwelle (m)",
+          "google_home_filter_enabled": "Google-Home-Geräte filtern",
+          "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
+          "enable_stats_entities": "Statistik-Entitäten erstellen",
+          "map_view_token_expiration": "Ablauf von Map-View-Tokens aktivieren"
         }
       },
       "reauth_confirm": {
@@ -67,16 +73,12 @@
       },
       "credentials": {
         "title": "Zugangsdaten aktualisieren (optional)",
-        "description": "Aktualisiere Zugangsdaten, ohne bestehende Werte offenzulegen. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth-Token** und (optional) **Google-E-Mail** eingeben.\n\nFalls angegeben, werden die Zugangsdaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
+        "description": "Aktualisiere Zugangsdaten, ohne bestehende Werte offenzulegen. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth-Token** und **Google-E-Mail** eingeben.\n\nFalls angegeben, werden die Zugangsdaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
         "data": {
-          "new_secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "new_oauth_token": "Neuer OAuth-Token",
-          "new_google_email": "Google-E-Mail (optional)"
+          "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
+          "oauth_token": "Neuer OAuth-Token",
+          "google_email": "Google-E-Mail"
         }
-      },
-      "finish": {
-        "title": "Vorgang gestartet",
-        "description": "Die „{mode}“-Operation wurde gestartet. Details findest du im Log."
       },
       "settings": {
         "title": "Optionen",
@@ -103,45 +105,62 @@
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich."
+    },
+    "abort": {
+      "reconfigure_successful": "Neu-Konfiguration erfolgreich."
     }
   },
   "services": {
     "locate_device": {
       "name": "Gerät lokalisieren",
-      "description": "Ermittelt die aktuelle Position eines Geräts von Google Find My Device.",
+      "description": "Ermittelt die aktuelle Position eines Google-Find-My-Geräts.",
       "fields": {
         "device_id": {
-          "name": "Geräte-ID",
-          "description": "Die ID des zu lokalisierenden Geräts."
+          "name": "Gerät",
+          "description": "Wähle ein Gerät aus (oder übergib eine kanonische ID über die Entwickler-Werkzeuge)."
         }
       }
     },
     "play_sound": {
       "name": "Ton abspielen",
-      "description": "Spielt einen Ton auf einem Gerät von Google Find My Device ab.",
+      "description": "Spielt einen Ton auf einem Google-Find-My-Gerät ab.",
       "fields": {
         "device_id": {
-          "name": "Geräte-ID",
-          "description": "Die ID des Geräts, auf dem der Ton abgespielt wird."
+          "name": "Gerät",
+          "description": "Wähle ein Gerät aus (oder übergib eine kanonische ID über die Entwickler-Werkzeuge)."
         }
       }
     },
     "refresh_device_urls": {
       "name": "Geräte-URLs aktualisieren",
-      "description": "Aktualisiert die Konfigurations-URLs für Geräte von Google Find My Device, damit sie auf die integrierte Kartenansicht zeigen.",
+      "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
       "fields": {}
     },
     "locate_external": {
       "name": "Gerät lokalisieren (extern)",
-      "description": "Lokalisierung über den externen Dienst (delegiert an die normale Lokalisierung).",
+      "description": "Lokalisierung über den externen Helfer; delegiert an die normale Lokalisierung.",
       "fields": {
         "device_id": {
-          "name": "Geräte-ID",
-          "description": "Die ID des zu lokalisierenden Geräts."
+          "name": "Gerät",
+          "description": "Wähle ein Gerät aus (oder übergib eine kanonische ID über die Entwickler-Werkzeuge)."
         },
         "device_name": {
           "name": "Gerätename (optional)",
           "description": "Optionaler, menschenlesbarer Name für das Logging."
+        }
+      }
+    },
+    "rebuild_registry": {
+      "name": "Registry neu aufbauen / migrieren",
+      "description": "Wartung: führe eine Soft-Migration (data→options) aus oder baue Entitäten/Geräte dieser Integration neu auf.",
+      "fields": {
+        "mode": {
+          "name": "Modus",
+          "description": "„Rebuild“ entfernt Entitäten/Geräte und lädt neu; „Migrate“ wendet nur die Soft-Migration data→options an."
+        },
+        "device_ids": {
+          "name": "Geräte (optional)",
+          "description": "Begrenze den Vorgang auf bestimmte Geräte. Leer lassen, um alle Google-Find-My-Geräte zu berücksichtigen."
         }
       }
     }
