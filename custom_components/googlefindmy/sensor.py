@@ -331,9 +331,15 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
             _LOGGER.debug("Could not determine Home Assistant URL, using fallback: %s", e)
             base_url = "http://homeassistant.local:8123"
 
+        raw_name = self._device.get("name")
+        display_name = (raw_name or "").strip()
+        use_name = display_name if display_name and display_name != "Google Find My Device" else None
+        use_default_name = None if use_name else "Google Find My Device"
+
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
-            name=self._device.get("name"),
+            name=use_name,
+            default_name=use_default_name,
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
