@@ -99,9 +99,6 @@
         }
       }
     },
-    "abort": {
-      "reconfigure_successful": "Neu-Konfiguration erfolgreich."
-    },
     "error": {
       "invalid_json": "Ungültiges JSON im Inhalt der secrets.json.",
       "invalid": "Validierung fehlgeschlagen. Bitte Eingaben prüfen.",
