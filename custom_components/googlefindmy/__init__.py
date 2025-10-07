@@ -257,7 +257,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Acquire shared FCM and keep it alive while this entry exists
     fcm = await _async_acquire_shared_fcm(hass)
-    entry.async_on_unload(lambda: hass.async_create_task(_async_release_shared_fcm(hass)))
+    entry.async_on_unload(lambda: hass.async_create_task(_async_release_shared_fcm(hass), name="googlefindmy.release_fcm"))
 
     # Credentials handling (secrets-only in data)
     secrets_data = entry.data.get("secrets_data")
@@ -351,6 +351,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         # Drop coordinator
         hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
+        # Clear runtime_data to avoid holding references after unload.
+        try:
+            entry.runtime_data = None  # type: ignore[assignment]
+        except Exception:
+            # Defensive: older cores may not expose runtime_data; ignore cleanly.
+            pass
         # Release shared FCM (may stop if last entry)
         await _async_release_shared_fcm(hass)
     return unload_ok
