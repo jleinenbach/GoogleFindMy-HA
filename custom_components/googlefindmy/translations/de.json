@@ -57,8 +57,7 @@
     "abort": {
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
-      "reauth_successful": "Erneute Authentifizierung erfolgreich.",
-      "reconfigure_successful": "Neu-Konfiguration erfolgreich."
+      "reauth_successful": "Erneute Authentifizierung erfolgreich."
     }
   },
   "options": {
@@ -107,7 +106,7 @@
       "required": "Dieses Feld ist erforderlich."
     },
     "abort": {
-      "reconfigure_successful": "Neu-Konfiguration erfolgreich."
+      "reconfigure_successful": "Neukonfiguration erfolgreich."
     }
   },
   "services": {
@@ -166,6 +165,16 @@
     }
   },
   "entity": {
+    "button": {
+      "play_sound": {
+        "name": "Ton abspielen"
+      }
+    },
+    "binary_sensor": {
+      "polling": {
+        "name": "Abfrage"
+      }
+    },
     "sensor": {
       "last_seen": {
         "name": "Zuletzt gesehen"
