@@ -117,3 +117,16 @@ REBUILD_REGISTRY_MODES: tuple[str, str] = (MODE_REBUILD, MODE_MIGRATE)
 # ---------------------------------------------------------------------------
 # Using constants allows tuning without touching multiple call sites.
 LOCATION_REQUEST_TIMEOUT_S = 30
+
+# ---------------------------------------------------------------------------
+# FCM socket tuning (used by Auth.firebase_messaging client)
+# ---------------------------------------------------------------------------
+# These constants provide sane defaults for the FCM push socket. They are not
+# exposed as user options; they are used when we construct the internal
+# FcmPushClientConfig so we can tune behavior without spreading literals.
+FCM_CLIENT_HEARTBEAT_INTERVAL_S = 20   # matches FcmPushClientConfig default
+FCM_SERVER_HEARTBEAT_INTERVAL_S = 10   # matches FcmPushClientConfig default
+FCM_IDLE_RESET_AFTER_S = 90.0          # supervisor treats stream as stale after this idle
+FCM_CONNECTION_RETRY_COUNT = 5         # number of attempts before giving up a connect cycle
+FCM_MONITOR_INTERVAL_S = 1             # supervisor tick cadence
+FCM_ABORT_ON_SEQ_ERROR_COUNT = 3       # None disables abort; keep small to fail fast
