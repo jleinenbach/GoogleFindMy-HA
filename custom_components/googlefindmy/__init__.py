@@ -287,6 +287,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     coordinator.config_entry = entry  # convenience for platforms
 
+    # Expose runtime object on the entry for modern consumers (diagnostics, repair, etc.).
+    # This contains no secrets; coordinator already keeps sensitive data out of public attrs.
+    entry.runtime_data = coordinator
+
     # Optional: attach Google Home filter (options-first configuration)
     from .google_home_filter import GoogleHomeFilter
 
