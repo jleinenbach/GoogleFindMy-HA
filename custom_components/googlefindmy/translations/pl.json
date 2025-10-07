@@ -30,21 +30,27 @@
         "data": {
           "tracked_devices": "Śledzone urządzenia",
           "location_poll_interval": "Interwał odpytywania lokalizacji (s)",
-          "device_poll_delay": "Opóźnienie między odpytywaniem urządzeń (s)"
+          "device_poll_delay": "Opóźnienie między odpytywaniem urządzeń (s)",
+          "min_accuracy_threshold": "Minimalna dokładność (m)",
+          "movement_threshold": "Próg ruchu (m)",
+          "google_home_filter_enabled": "Filtruj urządzenia Google Home",
+          "google_home_filter_keywords": "Słowa kluczowe filtra (oddzielone przecinkami)",
+          "enable_stats_entities": "Twórz encje statystyczne",
+          "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy"
         }
       },
       "reauth_confirm": {
         "title": "Ponowne uwierzytelnienie",
-        "description": "Twoje dane logowania są nieprawidłowe lub wygasły. Podaj poniżej nowe dane.\n\nWskazówka: możesz wkleić pełną zawartość nowego pliku secrets.json **albo** podać nowy token OAuth i adres e-mail."
+        "description": "Twoje poświadczenia są nieprawidłowe lub wygasły. Podaj poniżej nowe.\n\nWskazówka: możesz wkleić pełną zawartość nowego pliku secrets.json **albo** podać nowy token OAuth i adres e-mail."
       }
     },
     "error": {
       "auth_failed": "Uwierzytelnianie nie powiodło się. Spróbuj ponownie.",
       "invalid_token": "Podano nieprawidłowy token lub brakuje wymaganych pól.",
       "invalid_json": "Nieprawidłowy format JSON w zawartości pliku secrets.json.",
-      "no_devices": "Nie znaleziono urządzeń. Upewnij się, że usługa „Znajdź moje urządzenie” jest włączona na Twoim koncie Google.",
+      "no_devices": "Nie znaleziono urządzeń. Upewnij się, że „Znajdź moje urządzenie” jest włączone na Twoim koncie Google.",
       "cannot_connect": "Nie udało się połączyć z interfejsem Google API. Może to być problem tymczasowy — spróbuj ponownie później.",
-      "choose_one": "Podaj dokładnie jedną metodę uwierzytelnienia.",
+      "choose_one": "Podaj dokładnie jedną metodę poświadczeń.",
       "required": "To pole jest wymagane.",
       "unknown": "Wystąpił nieoczekiwany błąd."
     },
@@ -67,16 +73,12 @@
       },
       "credentials": {
         "title": "Aktualizuj poświadczenia (opcjonalnie)",
-        "description": "Zaktualizuj poświadczenia bez ujawniania istniejących wartości. Podaj dokładnie jedną metodę:\n\n• Wklej pełną zawartość nowego **secrets.json**\n**albo**\n• Podaj nowy **token OAuth** i (opcjonalnie) **adres e-mail Google**.\n\nJeśli podasz nowe dane, zostaną one zweryfikowane i zapisane; integracja przeładuje się bez zmiany nazw Twoich encji.",
+        "description": "Zaktualizuj poświadczenia bez ujawniania istniejących wartości. Podaj dokładnie jedną metodę:\n\n• Wklej pełną zawartość nowego **secrets.json**\n**albo**\n• Podaj nowy **token OAuth** i **adres e-mail Google**.\n\nJeśli podasz nowe dane, zostaną one zweryfikowane i zapisane; integracja przeładuje się bez zmiany nazw Twoich encji.",
         "data": {
-          "new_secrets_json": "Nowy secrets.json (pełna zawartość)",
-          "new_oauth_token": "Nowy token OAuth",
-          "new_google_email": "Adres e-mail Google (opcjonalnie)"
+          "secrets_json": "Nowy secrets.json (pełna zawartość)",
+          "oauth_token": "Nowy token OAuth",
+          "google_email": "Adres e-mail Google"
         }
-      },
-      "finish": {
-        "title": "Działanie uruchomione",
-        "description": "Operacja „{mode}” została uruchomiona. Szczegóły znajdziesz w dziennikach."
       },
       "settings": {
         "title": "Opcje",
@@ -101,8 +103,11 @@
       "invalid_json": "Nieprawidłowy format JSON w zawartości pliku secrets.json.",
       "invalid": "Walidacja nie powiodła się. Sprawdź swoje dane.",
       "cannot_connect": "Nie udało się połączyć z interfejsem Google API.",
-      "choose_one": "Podaj dokładnie jedną metodę uwierzytelnienia.",
+      "choose_one": "Podaj dokładnie jedną metodę poświadczeń.",
       "required": "To pole jest wymagane."
+    },
+    "abort": {
+      "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie."
     }
   },
   "services": {
@@ -111,8 +116,8 @@
       "description": "Pobierz bieżącą lokalizację urządzenia Google Find My.",
       "fields": {
         "device_id": {
-          "name": "ID urządzenia",
-          "description": "Identyfikator urządzenia do zlokalizowania."
+          "name": "Urządzenie",
+          "description": "Wybierz urządzenie Google Find My (lub przekaż kanoniczny identyfikator przez Narzędzia deweloperskie)."
         }
       }
     },
@@ -121,8 +126,8 @@
       "description": "Odtwórz dźwięk na urządzeniu Google Find My.",
       "fields": {
         "device_id": {
-          "name": "ID urządzenia",
-          "description": "Identyfikator urządzenia, na którym zostanie odtworzony dźwięk."
+          "name": "Urządzenie",
+          "description": "Wybierz urządzenie Google Find My (lub przekaż kanoniczny identyfikator przez Narzędzia deweloperskie)."
         }
       }
     },
@@ -131,17 +136,31 @@
       "description": "Odświeża adresy URL konfiguracji urządzeń Google Find My tak, aby wskazywały na zintegrowany widok mapy.",
       "fields": {}
     },
-    "locate_external": {
-      "name": "Zlokalizuj urządzenie (zewnętrzne)",
+    "locate_device_external": {
+      "name": "Zlokalizuj urządzenie (zewnętrznie)",
       "description": "Zlokalizuj urządzenie przy użyciu zewnętrznej usługi (deleguje do zwykłej lokalizacji).",
       "fields": {
         "device_id": {
-          "name": "ID urządzenia",
-          "description": "Identyfikator urządzenia do zlokalizowania."
+          "name": "Urządzenie",
+          "description": "Wybierz urządzenie Google Find My (lub przekaż kanoniczny identyfikator przez Narzędzia deweloperskie)."
         },
         "device_name": {
           "name": "Nazwa urządzenia (opcjonalnie)",
-          "description": "Opcjonalna, czytelna dla człowieka nazwa do logów."
+          "description": "Opcjonalna, czytelna nazwa używana wyłącznie w logach."
+        }
+      }
+    },
+    "rebuild_registry": {
+      "name": "Odbuduj / Migruj rejestr",
+      "description": "Konserwacja: wykonaj miękką migrację dane→opcje lub odbuduj encje/urządzenia dla tej integracji.",
+      "fields": {
+        "mode": {
+          "name": "Tryb",
+          "description": "Wybierz „Odbuduj”, aby usunąć encje/urządzenia i przeładować; „Migruj” ponownie zastosuje jedynie miękką migrację dane→opcje."
+        },
+        "device_ids": {
+          "name": "Urządzenia (opcjonalnie)",
+          "description": "Ogranicz operację do wybranych urządzeń. Pozostaw puste, aby objąć wszystkie urządzenia Google Find My."
         }
       }
     }
