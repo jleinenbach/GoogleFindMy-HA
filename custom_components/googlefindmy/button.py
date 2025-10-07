@@ -142,7 +142,12 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
             for dev in data:
                 if dev.get("id") == my_id:
                     new_name = dev.get("name")
-                    if new_name and new_name != self._device.get("name"):
+                    # Never write bootstrap placeholders into the registry
+                    if (
+                        new_name
+                        and new_name != "Google Find My Device"
+                        and new_name != self._device.get("name")
+                    ):
                         old = self._device.get("name")
                         self._device["name"] = new_name
                         _maybe_update_device_registry_name(self.hass, self.entity_id, new_name)
@@ -161,7 +166,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
     # ---------------- Device Info + Map Link ----------------
     @property
     def device_info(self) -> DeviceInfo:
-        """Return DeviceInfo with a stable configuration_url and proper metadata."""
+        """Return DeviceInfo with a stable configuration_url and safe naming."""
         try:
             base_url = get_url(
                 self.hass,
@@ -176,14 +181,19 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         auth_token = self._get_map_token()
         path = self._build_map_path(self._device["id"], auth_token, redirect=False)
 
+        # Avoid overwriting stored device names during cold boot:
+        raw_name = (self._device.get("name") or "").strip()
+        use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
+        use_default_name = None if use_name else "Google Find My Device"
+
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
-            # Device label stays the raw device name (no extra prefixes) for registry clarity.
-            name=self._device.get("name"),
+            name=use_name,
+            default_name=use_default_name,
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
-            serial_number=self._device["id"],  # technical id in a semantically correct field
+            serial_number=self._device["id"],  # technical id in the proper field
         )
 
     @staticmethod
