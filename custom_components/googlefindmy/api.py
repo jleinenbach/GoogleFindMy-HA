@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 from aiohttp import ClientSession
 
@@ -12,13 +12,16 @@ from .Auth.username_provider import username_string
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
     get_location_data_for_device,
 )
-from .NovaApi.ExecuteAction.PlaySound.start_sound_request import start_sound_request
+from .NovaApi.ExecuteAction.PlaySound.start_sound_request import (
+    async_submit_start_sound_request,
+)
+from .NovaApi.ExecuteAction.PlaySound.stop_sound_request import (
+    async_submit_stop_sound_request,
+)
 from .NovaApi.ListDevices.nbe_list_devices import (
     async_request_device_list,
     request_device_list,
 )
-from .NovaApi.nova_request import nova_request, async_nova_request
-from .NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from .ProtoDecoders.decoder import (
     get_canonic_ids,
     get_devices_with_location,
@@ -26,6 +29,36 @@ from .ProtoDecoders.decoder import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class FcmReceiverProtocol(Protocol):
+    """Lightweight protocol for the shared FCM receiver used by this module.
+
+    Notes:
+        - Only the minimal surface needed here is declared to keep coupling low.
+        - The receiver is expected to be a long-lived, HA-managed singleton registered
+          from __init__.py via the register_fcm_receiver_provider() function below.
+    """
+
+    def get_fcm_token(self) -> Optional[str]:
+        ...
+
+
+# Module-local FCM provider getter; installed by the integration at setup time.
+_FCM_ReceiverGetter: Optional[Callable[[], FcmReceiverProtocol]] = None
+
+
+def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
+    """Register a getter that returns the shared FCM receiver (HA-managed)."""
+    global _FCM_ReceiverGetter
+    _FCM_ReceiverGetter = getter
+
+
+def unregister_fcm_receiver_provider() -> None:
+    """Unregister the FCM receiver provider (called on unload/reload)."""
+    global _FCM_ReceiverGetter
+    _FCM_ReceiverGetter = None
 
 
 def _infer_can_ring_slot(device: Dict[str, Any]) -> Optional[bool]:
@@ -210,31 +243,40 @@ class GoogleFindMyAPI:
             pass
         return records[0]
 
+    # ---------------------------------------------------------------------
+    # FCM helpers (via shared provider)
+    # ---------------------------------------------------------------------
     def _get_fcm_token_for_action(self) -> Optional[str]:
-        """Return a valid FCM token for action requests or None if unavailable.
+        """Return a valid FCM token for action requests via the shared receiver.
 
-        Uses lazy import to avoid heavy imports for users not using push actions.
+        Notes:
+            - Uses the provider installed by the integration (HA-managed singleton).
+            - Returns None if the provider is missing or a token cannot be obtained.
         """
-        try:
-            from .Auth.fcm_receiver_ha import FcmReceiverHA  # lazy import
-        except Exception as err:
-            _LOGGER.error("Cannot obtain FCM token: FCM receiver import failed: %s", err)
+        if _FCM_ReceiverGetter is None:
+            _LOGGER.error("Cannot obtain FCM token: no provider registered.")
             return None
 
         try:
-            fcm_receiver = FcmReceiverHA()
-            if not getattr(fcm_receiver, "credentials", None):
-                _LOGGER.error("Cannot obtain FCM token: credentials missing")
-                return None
-
-            token = fcm_receiver.get_fcm_token()
-            if not token or not isinstance(token, str) or len(token) < 10:
-                _LOGGER.error("Cannot obtain FCM token: token not available or invalid")
-                return None
-            return token
+            receiver = _FCM_ReceiverGetter()
         except Exception as err:
-            _LOGGER.error("Cannot obtain FCM token: %s", err)
+            _LOGGER.error("Cannot obtain FCM token: provider callable failed: %s", err)
             return None
+
+        if receiver is None:
+            _LOGGER.error("Cannot obtain FCM token: provider returned None.")
+            return None
+
+        try:
+            token = receiver.get_fcm_token()
+        except Exception as err:
+            _LOGGER.error("Cannot obtain FCM token from shared receiver: %s", err)
+            return None
+
+        if not token or not isinstance(token, str) or len(token) < 10:
+            _LOGGER.error("FCM token not available or invalid (via shared receiver).")
+            return None
+        return token
 
     # ---------------------------------------------------------------------
     # Init helpers
@@ -308,21 +350,10 @@ class GoogleFindMyAPI:
     # Location
     # ---------------------------------------------------------------------
     def get_device_location(self, device_id: str, device_name: str) -> Dict[str, Any]:
-        """Sync wrapper for a per-device async location request.
-
-        IMPORTANT:
-            This method is intended to be executed in a worker thread
-            (via hass.async_add_executor_job). It must not run in the main loop.
-
-        Error handling:
-            Returns an EMPTY DICT on error. The caller should treat this as "no data".
-        """
+        """Thin sync wrapper around async_get_device_location for non-HA contexts."""
         try:
-            _LOGGER.info("API v3.0: Requesting location for %s (%s)", device_name, device_id)
-            # Execute coroutine in this thread to avoid 'never awaited'
             return asyncio.run(self.async_get_device_location(device_id, device_name))
         except RuntimeError as loop_err:
-            # Called from an active event loop (incorrect usage)
             _LOGGER.error(
                 "get_device_location() was called from an active event loop. "
                 "Use async_get_device_location() instead. Error: %s",
@@ -373,23 +404,12 @@ class GoogleFindMyAPI:
         return self.get_device_location(device_id, device_id)
 
     # ---------------------------------------------------------------------
-    # Play Sound / Push readiness
+    # Play/Stop Sound / Push readiness
     # ---------------------------------------------------------------------
     def is_push_ready(self) -> bool:
         """Return True if the push transport (FCM) is initialized and has a usable token."""
-        try:
-            # Use the same token retrieval logic used for actions, but without logs at ERROR level.
-            # We keep this check lightweight and quiet by duplicating minimal logic.
-            from .Auth.fcm_receiver_ha import FcmReceiverHA  # lazy import
-            fcm = FcmReceiverHA()
-            if not getattr(fcm, "credentials", None):
-                return False
-            token = fcm.get_fcm_token()
-            if not token or not isinstance(token, str) or len(token) < 10:
-                return False
-            return True
-        except Exception:
-            return False
+        # Single source of truth: if we can obtain a non-empty token, push is ready.
+        return self._get_fcm_token_for_action() is not None
 
     @property
     def push_ready(self) -> bool:
@@ -417,37 +437,38 @@ class GoogleFindMyAPI:
         # Unknown -> let Coordinator fall back optimistically without network I/O
         return None
 
+    # ---------- Play/Stop Sound (sync thin wrappers; for CLI/non-HA) ----------
     def play_sound(self, device_id: str) -> bool:
-        """Send a 'Play Sound' command to a device (sync legacy path).
-
-        NOTE:
-            Retained for non-HA/CLI use. Home Assistant calls async_play_sound().
-
-        Returns:
-            True on successful submission to the Google Action API (HTTP 200),
-            False otherwise.
-        """
-        token = self._get_fcm_token_for_action()
-        if not token:
-            return False
-
+        """Thin sync wrapper around async_play_sound for non-HA contexts."""
         try:
-            _LOGGER.info("Sending Play Sound to %s (sync path)", device_id)
-            hex_payload = start_sound_request(device_id, token)
-            _LOGGER.debug("Sound request payload length: %s chars", len(hex_payload))
-
-            # Sync nova_request() uses 'requests'; no aiohttp session is passed.
-            result = nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
-            ok = result is not None
-            if ok:
-                _LOGGER.info("Play Sound submitted successfully for %s", device_id)
-            else:
-                _LOGGER.error("Play Sound failed for %s (empty response)", device_id)
-            return bool(ok)
+            return asyncio.run(self.async_play_sound(device_id))
+        except RuntimeError as loop_err:
+            _LOGGER.error(
+                "play_sound() was called from an active event loop. "
+                "Use async_play_sound() instead. Error: %s",
+                loop_err,
+            )
+            return False
         except Exception as err:
             _LOGGER.error("Failed to play sound on %s: %s", device_id, err)
             return False
 
+    def stop_sound(self, device_id: str) -> bool:
+        """Thin sync wrapper around async_stop_sound for non-HA contexts."""
+        try:
+            return asyncio.run(self.async_stop_sound(device_id))
+        except RuntimeError as loop_err:
+            _LOGGER.error(
+                "stop_sound() was called from an active event loop. "
+                "Use async_stop_sound() instead. Error: %s",
+                loop_err,
+            )
+            return False
+        except Exception as err:
+            _LOGGER.error("Failed to stop sound on %s: %s", device_id, err)
+            return False
+
+    # ---------- Play/Stop Sound (async; HA-first) ----------
     async def async_play_sound(self, device_id: str) -> bool:
         """Send a 'Play Sound' command to a device (async path for HA)."""
         token = self._get_fcm_token_for_action()
@@ -455,20 +476,41 @@ class GoogleFindMyAPI:
             return False
 
         try:
-            _LOGGER.info("Sending Play Sound (async) to %s", device_id)
-            hex_payload = start_sound_request(device_id, token)
-            _LOGGER.debug("Sound request payload length (async): %s chars", len(hex_payload))
-
-            # Use async Nova path with HA-managed session if available
-            result_hex = await async_nova_request(
-                NOVA_ACTION_API_SCOPE, hex_payload, username=self.google_email, session=self._session
+            _LOGGER.info("Submitting Play Sound (async) for %s", device_id)
+            # Delegate payload build + transport to the submitter; provide HA session.
+            # NOTE: If Nova later requires an explicit username for action endpoints,
+            # extend submitter signatures to accept and forward it consistently.
+            result_hex = await async_submit_start_sound_request(
+                device_id, token, session=self._session
             )
             ok = result_hex is not None
             if ok:
                 _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
             else:
-                _LOGGER.error("Play Sound (async) failed for %s (empty response)", device_id)
+                _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
             return bool(ok)
         except Exception as err:
             _LOGGER.error("Failed to play sound (async) on %s: %s", device_id, err)
+            return False
+
+    async def async_stop_sound(self, device_id: str) -> bool:
+        """Send a 'Stop Sound' command to a device (async path for HA)."""
+        token = self._get_fcm_token_for_action()
+        if not token:
+            return False
+
+        try:
+            _LOGGER.info("Submitting Stop Sound (async) for %s", device_id)
+            # NOTE: See comment in async_play_sound() about potential username forwarding.
+            result_hex = await async_submit_stop_sound_request(
+                device_id, token, session=self._session
+            )
+            ok = result_hex is not None
+            if ok:
+                _LOGGER.info("Stop Sound (async) submitted successfully for %s", device_id)
+            else:
+                _LOGGER.error("Stop Sound (async) submission failed for %s", device_id)
+            return bool(ok)
+        except Exception as err:
+            _LOGGER.error("Failed to stop sound (async) on %s: %s", device_id, err)
             return False
