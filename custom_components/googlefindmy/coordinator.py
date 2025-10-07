@@ -122,8 +122,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
-        # Load persistent statistics asynchronously
-        hass.async_create_task(self._async_load_stats())
+        # Debounced stats persistence (avoid flushing on every increment)
+        self._stats_save_task: Optional[asyncio.Task] = None
+        self._stats_debounce_seconds: float = 5.0
+
+        # Load persistent statistics asynchronously (name the task for better debugging)
+        hass.async_create_task(self._async_load_stats(), name=f"{DOMAIN}.load_stats")
 
         super().__init__(
             hass,
@@ -147,10 +151,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         a background poll cycle when the interval has elapsed.
         """
         try:
-            # 1) Always fetch the lightweight device list (sync API; run in executor)
-            all_devices = await self.hass.async_add_executor_job(
-                self.api.get_basic_device_list
-            )
+            # 1) Always fetch the lightweight device list using native async API (no executor)
+            all_devices = await self.api.async_get_basic_device_list()
 
             # 2) Filter to tracked devices if explicitly configured
             if self.tracked_devices:
@@ -174,7 +176,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             effective_interval = max(self.location_poll_interval, self.min_poll_interval)
 
             if not self._startup_complete:
-                # First run: set baseline, do not poll immediately
+                # Defer the first poll to avoid startup load; it will run after the first interval.
                 self._startup_complete = True
                 self._last_poll_mono = now_mono
                 _LOGGER.debug("First startup - set poll baseline; next poll follows normal schedule")
@@ -186,7 +188,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         len(devices),
                         effective_interval,
                     )
-                    self.hass.async_create_task(self._async_start_poll_cycle(devices))
+                    self.hass.async_create_task(
+                        self._async_start_poll_cycle(devices),
+                        name=f"{DOMAIN}.poll_cycle",
+                    )
                 else:
                     _LOGGER.debug(
                         "Poll not due (elapsed=%.1fs/%ss) or already running=%s",
@@ -358,6 +363,50 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 self.async_set_updated_data(end_snapshot)
 
     # ---------------------------- Snapshot helpers --------------------------
+    def _build_base_snapshot_entry(self, device_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Create the base snapshot entry for a device (no cache lookups here).
+
+        This centralizes the common fields to keep snapshot builders DRY.
+        """
+        dev_id = device_dict["id"]
+        dev_name = device_dict.get("name", dev_id)
+        return {
+            "name": dev_name,
+            "id": dev_id,
+            "device_id": dev_id,
+            "latitude": None,
+            "longitude": None,
+            "altitude": None,
+            "accuracy": None,
+            "last_seen": None,
+            "status": "Waiting for location poll",
+            "is_own_report": None,
+            "semantic_name": None,
+            "battery_level": None,
+        }
+
+    def _update_entry_from_cache(self, entry: Dict[str, Any], wall_now: float) -> bool:
+        """Update the given snapshot entry in place from the in-memory cache.
+
+        Returns:
+            True if the cache contained data for this device and the entry was updated, else False.
+        """
+        dev_id = entry["device_id"]
+        cached = self._device_location_data.get(dev_id)
+        if not cached:
+            return False
+
+        entry.update(cached)
+        last_updated_ts = cached.get("last_updated", 0)
+        age = max(0.0, wall_now - float(last_updated_ts))
+        if age < self.location_poll_interval:
+            entry["status"] = "Location data current"
+        elif age < self.location_poll_interval * 2:
+            entry["status"] = "Location data aging"
+        else:
+            entry["status"] = "Location data stale"
+        return True
+
     def _build_snapshot_from_cache(
         self, devices: List[Dict[str, Any]], wall_now: float
     ) -> List[Dict[str, Any]]:
@@ -367,34 +416,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """
         snapshot: List[Dict[str, Any]] = []
         for dev in devices:
-            dev_id = dev["id"]
-            dev_name = dev.get("name", dev_id)
-            info: Dict[str, Any] = {
-                "name": dev_name,
-                "id": dev_id,
-                "device_id": dev_id,
-                "latitude": None,
-                "longitude": None,
-                "altitude": None,
-                "accuracy": None,
-                "last_seen": None,
-                "status": "Waiting for location poll",
-                "is_own_report": None,
-                "semantic_name": None,
-                "battery_level": None,
-            }
-            cached = self._device_location_data.get(dev_id)
-            if cached:
-                info.update(cached)
-                last_updated_ts = cached.get("last_updated", 0)
-                age = max(0.0, wall_now - float(last_updated_ts))
-                if age < self.location_poll_interval:
-                    info["status"] = "Location data current"
-                elif age < self.location_poll_interval * 2:
-                    info["status"] = "Location data aging"
-                else:
-                    info["status"] = "Location data stale"
-            snapshot.append(info)
+            entry = self._build_base_snapshot_entry(dev)
+            # If cache has info, update status accordingly; otherwise keep default status.
+            self._update_entry_from_cache(entry, wall_now)
+            snapshot.append(entry)
         return snapshot
 
     async def _async_build_device_snapshot_with_fallbacks(
@@ -406,49 +431,24 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         ent_reg = er.async_get(self.hass)
 
         for dev in devices:
-            dev_id = dev["id"]
-            dev_name = dev.get("name", dev_id)
-
-            info: Dict[str, Any] = {
-                "name": dev_name,
-                "id": dev_id,
-                "device_id": dev_id,
-                "latitude": None,
-                "longitude": None,
-                "altitude": None,
-                "accuracy": None,
-                "last_seen": None,
-                "status": "Waiting for location poll",
-                "is_own_report": None,
-                "semantic_name": None,
-                "battery_level": None,
-            }
+            entry = self._build_base_snapshot_entry(dev)
 
             # Prefer cached result
-            cached = self._device_location_data.get(dev_id)
-            if cached:
-                info.update(cached)
-                last_updated_ts = cached.get("last_updated", 0)
-                age = max(0.0, wall_now - float(last_updated_ts))
-                if age < self.location_poll_interval:
-                    info["status"] = "Location data current"
-                elif age < self.location_poll_interval * 2:
-                    info["status"] = "Location data aging"
-                else:
-                    info["status"] = "Location data stale"
-                snapshot.append(info)
+            if self._update_entry_from_cache(entry, wall_now):
+                snapshot.append(entry)
                 continue
 
             # No cache -> Registry + State (cheap, non-blocking)
+            dev_id = entry["device_id"]
             unique_id = f"{DOMAIN}_{dev_id}"
             entity_id = ent_reg.async_get_entity_id("device_tracker", DOMAIN, unique_id)
             if not entity_id:
                 _LOGGER.debug(
                     "No entity registry entry for device '%s' (unique_id=%s); skipping any fallback.",
-                    dev_name,
+                    entry["name"],
                     unique_id,
                 )
-                snapshot.append(info)
+                snapshot.append(entry)
                 continue
 
             state = self.hass.states.get(entity_id)
@@ -457,7 +457,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 lon = state.attributes.get("longitude")
                 acc = state.attributes.get("gps_accuracy")
                 if lat is not None and lon is not None:
-                    info.update(
+                    entry.update(
                         {
                             "latitude": lat,
                             "longitude": lon,
@@ -466,14 +466,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             "status": "Using current state",
                         }
                     )
-                    snapshot.append(info)
+                    snapshot.append(entry)
                     continue
 
             # Optional loud history fallback
             if self.allow_history_fallback:
                 _LOGGER.warning(
                     "No live state for %s (entity_id=%s); attempting history fallback via Recorder.",
-                    dev_name,
+                    entry["name"],
                     entity_id,
                 )
                 rec = get_recorder(self.hass)
@@ -481,17 +481,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     _sync_get_last_gps_from_history, self.hass, entity_id
                 )
                 if result:
-                    info.update(result)
+                    entry.update(result)
                     self.increment_stat("history_fallback_used")
                 else:
                     _LOGGER.warning(
                         "No historical GPS data found for %s (entity_id=%s). "
                         "Entity may be excluded from Recorder.",
-                        dev_name,
+                        entry["name"],
                         entity_id,
                     )
 
-            snapshot.append(info)
+            snapshot.append(entry)
 
         return snapshot
 
@@ -519,15 +519,35 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         except Exception as err:
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
 
+    async def _debounced_save_stats(self) -> None:
+        """Debounce wrapper to coalesce frequent stat updates into a single write."""
+        try:
+            await asyncio.sleep(self._stats_debounce_seconds)
+            await self._async_save_stats()
+        except asyncio.CancelledError:
+            # Expected if a new increment arrives before the delay elapses; do nothing.
+            return
+        except Exception as err:
+            _LOGGER.debug("Debounced stats save failed: %s", err)
+
+    def _schedule_stats_persist(self) -> None:
+        """(Re)schedule a debounced persistence task for statistics."""
+        # Cancel a pending writer, if any, and schedule a fresh one.
+        if self._stats_save_task and not self._stats_save_task.done():
+            self._stats_save_task.cancel()
+        self._stats_save_task = self.hass.async_create_task(
+            self._debounced_save_stats(), name=f"{DOMAIN}.save_stats_debounced"
+        )
+
     def increment_stat(self, stat_name: str) -> None:
-        """Increment a statistic counter and schedule async persistence."""
+        """Increment a statistic counter and schedule debounced persistence."""
         if stat_name in self.stats:
             before = self.stats[stat_name]
             self.stats[stat_name] = before + 1
             _LOGGER.debug(
                 "Incremented %s from %s to %s", stat_name, before, self.stats[stat_name]
             )
-            self.hass.async_create_task(self._async_save_stats())
+            self._schedule_stats_persist()
         else:
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
@@ -723,11 +743,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     # ---------------------------- Passthrough API ---------------------------
     async def async_locate_device(self, device_id: str) -> Dict[str, Any]:
-        """Locate a device (executes blocking client code in executor)."""
-        return await self.hass.async_add_executor_job(self.api.locate_device, device_id)
+        """Locate a device using the native async API (no executor)."""
+        name = self.get_device_display_name(device_id) or device_id
+        return await self.api.async_get_device_location(device_id, name)
 
     async def async_play_sound(self, device_id: str) -> bool:
-        """Play sound on a device (executes blocking client code in executor).
+        """Play sound on a device using the native async API (no executor).
 
         Guard with can_play_sound(); on failure, start a short cooldown to avoid repeated errors.
         """
@@ -738,13 +759,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             )
             return False
         try:
-            ok = await self.hass.async_add_executor_job(self.api.play_sound, device_id)
+            ok = await self.api.async_play_sound(device_id)
             if not ok:
                 self._note_push_transport_problem()
             return bool(ok)
         except Exception as err:
             _LOGGER.debug(
-                "play_sound raised for %s: %s; entering cooldown", device_id, err
+                "async_play_sound raised for %s: %s; entering cooldown", device_id, err
             )
             self._note_push_transport_problem()
             return False

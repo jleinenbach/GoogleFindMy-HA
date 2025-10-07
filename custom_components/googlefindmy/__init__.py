@@ -35,6 +35,8 @@ from .const import (
 )
 from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
+# --- NEW (HA best practice): register a shared aiohttp session for Nova API ---
+from .NovaApi import nova_request as nova  # Provides register_hass/unregister_session_provider
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -208,6 +210,15 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration from a config entry (entities-first, options-first)."""
+
+    # --- NEW (HA best practice): Register HA-managed aiohttp session for Nova API ---
+    # Why:
+    #   - Reuse HA's shared HTTP session for efficiency and connection pooling.
+    #   - Avoid creating temporary per-request sessions at first boot.
+    #   - Ensure cleanup on unload/reload via entry.async_on_unload.
+    # Priority inside nova: explicit session > registered provider > short-lived fallback (DEBUG only).
+    nova.register_hass(hass)
+    entry.async_on_unload(nova.unregister_session_provider)
 
     # Load persisted token cache (best-effort)
     try:
