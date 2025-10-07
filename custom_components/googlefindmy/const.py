@@ -56,7 +56,7 @@ MIGRATE_DATA_KEYS_TO_OPTIONS: tuple[str, ...] = OPTION_KEYS
 UPDATE_INTERVAL = 60  # seconds for HA DataUpdateCoordinator "tick" (lightweight)
 DEFAULT_LOCATION_POLL_INTERVAL = 300  # seconds; start a new polling cycle
 DEFAULT_DEVICE_POLL_DELAY = 5         # seconds; inter-device delay within one cycle
-DEFAULT_MIN_POLL_INTERVAL = 1         # seconds; hard lower bound between cycles
+DEFAULT_MIN_POLL_INTERVAL = 60        # seconds; hard lower bound between cycles
 
 # Quality/logic thresholds
 DEFAULT_MIN_ACCURACY_THRESHOLD = 100  # meters; drop worse fixes (0 => disabled)
@@ -95,7 +95,8 @@ DEFAULT_OPTIONS: dict[str, object] = {
 # ---------------------------------------------------------------------------
 SERVICE_LOCATE_DEVICE = "locate_device"
 SERVICE_PLAY_SOUND = "play_sound"
-SERVICE_LOCATE_EXTERNAL = "locate_external"
+# Align with services.yaml and __init__.py registration
+SERVICE_LOCATE_EXTERNAL = "locate_device_external"
 
 # Be consistent with service name used in translations and __init__.py
 SERVICE_REFRESH_DEVICE_URLS = "refresh_device_urls"
