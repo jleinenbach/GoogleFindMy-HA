@@ -1,6 +1,8 @@
 """Google Find My Device integration for Home Assistant.
 
-Version: 2.3 - Shared FCM provider, OptionsFlowWithReload compliant, refined lifecycle.
+Version: 2.4 — Fix: avoid double FCM release (use unload hook only).
+Shared FCM provider (single instance), clear sync unload contract,
+coordinator↔FCM wiring, OptionsFlowWithReload compliant, refined lifecycle.
 """
 from __future__ import annotations
 
@@ -64,7 +66,7 @@ from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
 # HA-managed aiohttp session for Nova API
 from .NovaApi import nova_request as nova  # Provides register_hass/unregister_session_provider (optional)
 
-# NEW: shared FCM provider wiring
+# Shared FCM provider (HA-managed singleton)
 from .Auth.fcm_receiver_ha import FcmReceiverHA
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
     register_fcm_receiver_provider as loc_register_fcm_provider,
@@ -209,7 +211,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         bucket["fcm_receiver"] = fcm
         _LOGGER.info("Shared FCM receiver initialized")
 
-        # Register provider for both consumer modules
+        # Register provider for both consumer modules (API + LocateTracker)
         loc_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
         api_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
 
@@ -278,7 +280,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _async_soft_migrate_data_to_options(hass, entry)
 
     # Acquire shared FCM and keep it alive while this entry exists
-    _ = await _async_acquire_shared_fcm(hass)
+    fcm = await _async_acquire_shared_fcm(hass)
 
     async def _on_unload_release_fcm() -> None:
         """Release the shared FCM receiver when this config entry unloads."""
@@ -318,6 +320,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         allow_history_fallback=_opt(entry, OPT_ALLOW_HISTORY_FALLBACK, DEFAULT_OPTIONS.get(OPT_ALLOW_HISTORY_FALLBACK, False)),
     )
     coordinator.config_entry = entry  # convenience for platforms
+
+    # Register the coordinator with the shared FCM receiver (clear synchronous contract).
+    fcm.register_coordinator(coordinator)
+    # Ensure deregistration on unload (simple synchronous callback, per HA best practices).
+    entry.async_on_unload(lambda: fcm.unregister_coordinator(coordinator))
 
     # Expose runtime object on the entry for modern consumers (diagnostics, repair, etc.).
     # This contains no secrets; coordinator already keeps sensitive data out of public attrs.
@@ -378,7 +385,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry and its platforms."""
+    """Unload a config entry and its platforms.
+
+    Note: FCM release is handled exclusively by the unload hook registered in setup.
+    """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         # Drop coordinator
@@ -389,8 +399,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception:
             # Defensive: older cores may not expose runtime_data; ignore cleanly.
             pass
-        # Release shared FCM (may stop if last entry)
-        await _async_release_shared_fcm(hass)
     return unload_ok
 
 
