@@ -1,440 +1,431 @@
 """Home Assistant compatible FCM receiver for Google Find My Device."""
+from __future__ import annotations
+
 import asyncio
 import base64
 import binascii
+import json
 import logging
-from typing import Optional, Callable, Dict, Any
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 from custom_components.googlefindmy.Auth.token_cache import (
-    set_cached_value, 
-    get_cached_value, 
-    async_set_cached_value, 
     async_get_cached_value,
-    async_load_cache_from_file
+    async_load_cache_from_file,
+    async_set_cached_value,
+    get_cached_value,  # sync fallback for early boot
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class FcmReceiverHA:
-    """FCM Receiver that works with Home Assistant's async architecture."""
-    
-    _instance = None
-    
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(FcmReceiverHA, cls).__new__(cls, *args, **kwargs)
-        return cls._instance
-    
-    def __init__(self):
-        """Initialize the FCM receiver for Home Assistant."""
-        if hasattr(self, '_initialized') and self._initialized:
-            return
-        self._initialized = True
-        
-        self.credentials = None
-        self.location_update_callbacks: Dict[str, Callable] = {}
-        self.coordinators = []  # List of coordinators that can receive background updates
-        self.pc = None
-        self._listening = False
-        self._listen_task = None
-        
+    """FCM Receiver integrated with Home Assistant's async lifecycle.
+
+    Design:
+      - No internal singleton: HA manages a single shared instance in hass.data.
+      - Synchronous register/unregister methods to match async_on_unload contract.
+      - Push-to-entities: prefer coordinator.push_updated() (if present) over refresh.
+      - Encapsulation: never mutate coordinator private attrs when a public API exists.
+    """
+
+    def __init__(self) -> None:
+        self.credentials: Optional[dict] = None
+        # Per-request callbacks waiting for a specific device response
+        self.location_update_callbacks: Dict[str, Callable[[str, str], None]] = {}
+        # Coordinators eligible to receive background updates
+        self.coordinators: List[Any] = []
+
+        self.pc = None  # FcmPushClient instance
+        self._listening: bool = False
+        self._listen_task: Optional[asyncio.Task] = None
+
         # Firebase project configuration for Google Find My Device
         self.project_id = "google.com:api-project-289722593072"
         self.app_id = "1:289722593072:android:3cfcf5bc359f0308"
         self.api_key = "AIzaSyD_gko3P392v6how2H7UpdeXQ0v2HLettc"
         self.message_sender_id = "289722593072"
-        
-        # Note: credentials will be loaded asynchronously in async_initialize
-        
-    async def async_initialize(self):
-        """Async initialization that works with Home Assistant."""
+
+    # -------------------- Lifecycle --------------------
+
+    async def async_initialize(self) -> bool:
+        """Initialize receiver and underlying push client."""
         try:
-            # Load cached credentials asynchronously to avoid blocking I/O
             await async_load_cache_from_file()
-            self.credentials = await async_get_cached_value('fcm_credentials')
-            
-            # Parse JSON string if credentials were saved as JSON
-            if isinstance(self.credentials, str):
-                import json
-                try:
-                    self.credentials = json.loads(self.credentials)
-                    _LOGGER.debug("Parsed FCM credentials from JSON string")
-                except json.JSONDecodeError as e:
-                    _LOGGER.error(f"Failed to parse FCM credentials JSON: {e}")
-                    return False
-            
-            # Import FCM libraries
-            from custom_components.googlefindmy.Auth.firebase_messaging import FcmRegisterConfig, FcmPushClient
-            
-            fcm_config = FcmRegisterConfig(
-                project_id=self.project_id,
-                app_id=self.app_id,
-                api_key=self.api_key,
-                messaging_sender_id=self.message_sender_id,
-                bundle_id="com.google.android.apps.adm",
+        except OSError as err:
+            _LOGGER.debug("Token cache preload failed (continuing): %s", err)
+
+        creds: Any = await async_get_cached_value("fcm_credentials")
+        if isinstance(creds, str):
+            try:
+                creds = json.loads(creds)
+            except json.JSONDecodeError as e:
+                _LOGGER.error("Failed to parse FCM credentials JSON: %s", e)
+                return False
+        self.credentials = creds if isinstance(creds, dict) else None
+
+        # Lazy import to avoid heavy deps at import time
+        try:
+            from custom_components.googlefindmy.Auth.firebase_messaging import (  # type: ignore
+                FcmPushClient,
+                FcmRegisterConfig,
             )
-            
-            # Create push client with callbacks
-            self.pc = FcmPushClient(
-                self._on_notification, 
-                fcm_config, 
-                self.credentials, 
-                self._on_credentials_updated
-            )
-            
-            _LOGGER.info("FCM receiver initialized successfully")
-            return True
-            
-        except Exception as e:
-            _LOGGER.error(f"Failed to initialize FCM receiver: {e}")
+        except ImportError as err:
+            _LOGGER.error("Failed to import FCM client support: %s", err)
             return False
-    
-    async def async_register_for_location_updates(self, device_id: str, callback: Callable) -> Optional[str]:
-        """Register for location updates asynchronously."""
+
+        fcm_config = FcmRegisterConfig(
+            project_id=self.project_id,
+            app_id=self.app_id,
+            api_key=self.api_key,
+            messaging_sender_id=self.message_sender_id,
+            bundle_id="com.google.android.apps.adm",
+        )
+
         try:
-            # Add callback to dict
-            self.location_update_callbacks[device_id] = callback
-            _LOGGER.debug(f"Registered FCM callback for device: {device_id}")
-            
-            # If not listening, start listening
-            if not self._listening:
-                await self._start_listening()
-            
-            # Return FCM token if available
-            if self.credentials and 'fcm' in self.credentials and 'registration' in self.credentials['fcm']:
-                token = self.credentials['fcm']['registration']['token']
-                _LOGGER.info(f"FCM token available: {token[:20]}...")
-                return token
-            else:
-                _LOGGER.warning("FCM credentials not available")
-                return None
-                
-        except Exception as e:
-            _LOGGER.error(f"Failed to register for location updates: {e}")
-            return None
-    
+            self.pc = FcmPushClient(
+                self._on_notification,
+                fcm_config,
+                self.credentials,
+                self._on_credentials_updated,
+            )
+        except Exception as err:
+            _LOGGER.error("Failed to construct FCM push client: %s", err)
+            return False
+
+        _LOGGER.info("FCM receiver initialized")
+        return True
+
+    async def async_register_for_location_updates(
+        self, device_id: str, callback: Callable[[str, str], None]
+    ) -> Optional[str]:
+        """Register a per-request callback for a device and ensure listener is running."""
+        self.location_update_callbacks[device_id] = callback
+        _LOGGER.debug("Registered FCM callback for device: %s", device_id)
+
+        if not self._listening:
+            await self._start_listening()
+
+        token = self.get_fcm_token()
+        if not token:
+            _LOGGER.warning("FCM credentials/token not available after registration")
+        return token
+
     async def async_unregister_for_location_updates(self, device_id: str) -> None:
-        """Unregister a device from location updates."""
-        try:
-            if device_id in self.location_update_callbacks:
-                del self.location_update_callbacks[device_id]
-                _LOGGER.debug(f"Unregistered FCM callback for device: {device_id}")
-            else:
-                _LOGGER.debug(f"No FCM callback found to unregister for device: {device_id}")
-        except Exception as e:
-            _LOGGER.error(f"Failed to unregister location updates for {device_id}: {e}")
-    
-    def register_coordinator(self, coordinator) -> None:
+        """Remove a per-request callback for a device."""
+        self.location_update_callbacks.pop(device_id, None)
+        _LOGGER.debug("Unregistered FCM callback for device: %s", device_id)
+
+    # -------------------- Coordinator wiring (sync by contract) --------------------
+
+    def register_coordinator(self, coordinator: Any) -> None:
         """Register a coordinator to receive background location updates."""
         if coordinator not in self.coordinators:
             self.coordinators.append(coordinator)
-            _LOGGER.debug(f"Registered coordinator for background FCM updates")
-    
-    def unregister_coordinator(self, coordinator) -> None:
-        """Unregister a coordinator from background FCM updates."""
-        if coordinator in self.coordinators:
-            self.coordinators.remove(coordinator)
-            _LOGGER.debug(f"Unregistered coordinator from background FCM updates")
-    
-    async def _start_listening(self):
-        """Start listening for FCM messages."""
+            _LOGGER.debug("Coordinator registered (total=%d)", len(self.coordinators))
+
+    def unregister_coordinator(self, coordinator: Any) -> None:
+        """Unregister a coordinator (sync; safe for async_on_unload)."""
         try:
-            if not self.pc:
-                await self.async_initialize()
-            
-            if self.pc:
-                # Register with FCM
-                await self._register_for_fcm()
-                
-                # Start listening in background task
-                self._listen_task = asyncio.create_task(self._listen_for_messages())
-                self._listening = True
-                _LOGGER.info("Started listening for FCM notifications")
-            else:
-                _LOGGER.error("Failed to create FCM push client")
-                
-        except Exception as e:
-            _LOGGER.error(f"Failed to start FCM listening: {e}")
-    
-    async def _register_for_fcm(self):
-        """Register with FCM to get token."""
+            self.coordinators.remove(coordinator)
+            _LOGGER.debug("Coordinator unregistered (total=%d)", len(self.coordinators))
+        except ValueError:
+            pass  # already removed
+
+    # -------------------- Internal listening --------------------
+
+    async def _start_listening(self) -> None:
+        if not self.pc:
+            ok = await self.async_initialize()
+            if not ok:
+                return
+
+        await self._register_for_fcm()
+
+        # Start background listener task
+        self._listen_task = asyncio.create_task(self._listen_for_messages(), name="googlefindmy.fcm_listener")
+        self._listening = True
+        _LOGGER.info("Started listening for FCM notifications")
+
+    async def _register_for_fcm(self) -> None:
         if not self.pc:
             return
-            
-        fcm_token = None
-        retries = 0
-        
-        while fcm_token is None and retries < 3:
+
+        for attempt in range(1, 4):
             try:
-                fcm_token = await self.pc.checkin_or_register()
-                if fcm_token:
-                    _LOGGER.info(f"FCM registration successful, token: {fcm_token[:20]}...")
-                else:
-                    _LOGGER.warning(f"FCM registration attempt {retries + 1} failed")
-                    retries += 1
-                    await asyncio.sleep(5)
-            except Exception as e:
-                _LOGGER.error(f"FCM registration error: {e}")
-                retries += 1
-                await asyncio.sleep(5)
-    
-    async def _listen_for_messages(self):
-        """Listen for FCM messages in background."""
+                token = await self.pc.checkin_or_register()
+                if token:
+                    _LOGGER.info("FCM registered (attempt %d), token: %s…", attempt, token[:20])
+                    return
+                _LOGGER.warning("FCM registration returned no token (attempt %d)", attempt)
+            except (ConnectionError, TimeoutError) as err:
+                _LOGGER.error("FCM registration network error (attempt %d): %s", attempt, err)
+            except Exception as err:  # final guard
+                _LOGGER.error("FCM registration unexpected error (attempt %d): %s", attempt, err)
+            await asyncio.sleep(5)
+
+    async def _listen_for_messages(self) -> None:
         try:
             if self.pc:
                 await self.pc.start()
-                _LOGGER.info("FCM message listener started")
-        except Exception as e:
-            _LOGGER.error(f"FCM listen error: {e}")
+                _LOGGER.debug("FCM message listener started")
+        except (ConnectionError, TimeoutError) as err:
+            _LOGGER.error("FCM listen network error: %s", err)
+        except Exception as err:
+            _LOGGER.error("FCM listen unexpected error: %s", err)
+        finally:
             self._listening = False
-    
-    def _on_notification(self, obj: Dict[str, Any], notification, data_message):
-        """Handle incoming FCM notification."""
+
+    # -------------------- Incoming notifications --------------------
+
+    def _on_notification(self, obj: Dict[str, Any], notification, data_message) -> None:
+        """Handle incoming FCM notification (sync callback from client)."""
         try:
-            # Check if the payload is present
-            if 'data' in obj and 'com.google.android.apps.adm.FCM_PAYLOAD' in obj['data']:
-                # Decode the base64 string with padding fix
-                base64_string = obj['data']['com.google.android.apps.adm.FCM_PAYLOAD']
-                
-                # Add proper Base64 padding if missing
-                missing_padding = len(base64_string) % 4
-                if missing_padding:
-                    base64_string += '=' * (4 - missing_padding)
-                
-                try:
-                    decoded_bytes = base64.b64decode(base64_string)
-                except Exception as decode_error:
-                    _LOGGER.error(f"FCM Base64 decode failed in _on_notification: {decode_error}")
-                    _LOGGER.debug(f"Problematic Base64 string (length={len(base64_string)}): {base64_string[:50]}...")
-                    return
-                
-                # Convert to hex string
-                hex_string = binascii.hexlify(decoded_bytes).decode('utf-8')
-                
-                _LOGGER.info(f"Received FCM location response: {len(hex_string)} chars")
-                
-                # Extract canonic_id from response to find the right callback
-                canonic_id = None
-                try:
-                    canonic_id = self._extract_canonic_id_from_response(hex_string)
-                except Exception as extract_error:
-                    _LOGGER.error(f"Failed to extract canonic_id from FCM response: {extract_error}")
-                    return
-                
-                if canonic_id and canonic_id in self.location_update_callbacks:
-                    callback = self.location_update_callbacks[canonic_id]
-                    try:
-                        # Run callback in executor to avoid blocking the event loop
-                        asyncio.create_task(self._run_callback_async(callback, canonic_id, hex_string))
-                    except Exception as e:
-                        _LOGGER.error(f"Error scheduling FCM callback for device {canonic_id}: {e}")
-                elif canonic_id:
-                    # Check if this is a tracked device from any coordinator
-                    handled_by_coordinator = False
-                    for coordinator in self.coordinators:
-                        if hasattr(coordinator, 'tracked_devices') and canonic_id in coordinator.tracked_devices:
-                            _LOGGER.info(f"Processing background FCM update for tracked device {coordinator._device_names.get(canonic_id, canonic_id[:8])}")
-                            # Process background update
-                            asyncio.create_task(self._process_background_update(coordinator, canonic_id, hex_string))
-                            handled_by_coordinator = True
-                            break
-                    
-                    if not handled_by_coordinator:
-                        # Check if we have any active callbacks
-                        registered_count = len(self.location_update_callbacks)
-                        if registered_count > 0:
-                            registered_devices = list(self.location_update_callbacks.keys())
-                            _LOGGER.debug(f"Received FCM response for untracked device {canonic_id[:8]}... "
-                                        f"Currently waiting for: {[d[:8]+'...' for d in registered_devices]}")
-                        else:
-                            _LOGGER.debug(f"Received FCM response for untracked device {canonic_id[:8]}... "
-                                        f"(not in any coordinator's tracked devices)")
-                else:
-                    _LOGGER.debug("Could not extract canonic_id from FCM response")
-            else:
-                _LOGGER.debug("FCM notification without location payload")
-                
-        except Exception as e:
-            _LOGGER.error(f"Error processing FCM notification: {e}")
-    
-    def _extract_canonic_id_from_response(self, hex_response: str) -> Optional[str]:
-        """Extract canonic_id from FCM response to identify which device sent it."""
-        try:
-            # Import with fallback for different module loading contexts
+            payload = (obj.get("data") or {}).get("com.google.android.apps.adm.FCM_PAYLOAD")
+            if not payload:
+                _LOGGER.debug("FCM notification without FMD payload")
+                return
+
+            # Base64 decode with padding
+            pad = len(payload) % 4
+            if pad:
+                payload += "=" * (4 - pad)
+
             try:
-                from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
-            except ImportError:
-                from .ProtoDecoders.decoder import parse_device_update_protobuf
-            
+                decoded = base64.b64decode(payload)
+            except (binascii.Error, ValueError) as err:
+                _LOGGER.error("FCM Base64 decode failed: %s", err)
+                return
+
+            hex_string = binascii.hexlify(decoded).decode("utf-8")
+            _LOGGER.info("Received FCM location response: %d chars", len(hex_string))
+
+            canonic_id = self._extract_canonic_id_from_response(hex_string)
+            if not canonic_id:
+                _LOGGER.debug("FCM response has no canonical id")
+                return
+
+            # Direct per-request callback?
+            cb = self.location_update_callbacks.get(canonic_id)
+            if cb:
+                asyncio.create_task(self._run_callback_async(cb, canonic_id, hex_string))
+                return
+
+            # Background path via registered coordinators (iterate over a copy to avoid races)
+            for coordinator in self.coordinators.copy():
+                if self._is_tracked(coordinator, canonic_id):
+                    name = getattr(coordinator, "_device_names", {}).get(canonic_id, canonic_id[:8])
+                    _LOGGER.info("Processing background FCM update for %s", name)
+                    asyncio.create_task(self._process_background_update(coordinator, canonic_id, hex_string))
+                    return
+
+            # Not matched to any waiting callback or coordinator
+            if self.location_update_callbacks:
+                waiting = [d[:8] + "…" for d in self.location_update_callbacks.keys()]
+                _LOGGER.debug(
+                    "FCM response for %s… not matched; currently waiting for: %s",
+                    canonic_id[:8],
+                    waiting,
+                )
+            else:
+                _LOGGER.debug("FCM response for %s… (no registered coordinators or callbacks)", canonic_id[:8])
+
+        except Exception as err:
+            # Final guard to avoid crashing the receiver callback
+            _LOGGER.error("Error processing FCM notification: %s", err)
+
+    # -------------------- Helpers --------------------
+
+    @staticmethod
+    def _norm(dev_id: str) -> str:
+        return (dev_id or "").replace("-", "").lower()
+
+    def _is_tracked(self, coordinator: Any, canonic_id: str) -> bool:
+        """True if device is tracked by coordinator.
+
+        Semantics: empty tracked_devices => track ALL devices.
+        """
+        tracked = getattr(coordinator, "tracked_devices", []) or []
+        if not tracked:
+            return True
+        nid = self._norm(canonic_id)
+        return any(self._norm(did) == nid for did in tracked)
+
+    def _extract_canonic_id_from_response(self, hex_response: str) -> Optional[str]:
+        """Extract canonical id via the decoder."""
+        try:
+            from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf  # type: ignore
+
             device_update = parse_device_update_protobuf(hex_response)
-            
-            if (device_update.HasField("deviceMetadata") and 
-                device_update.deviceMetadata.identifierInformation.canonicIds.canonicId):
-                return device_update.deviceMetadata.identifierInformation.canonicIds.canonicId[0].id
-        except Exception as e:
-            _LOGGER.debug(f"Failed to extract canonic_id from FCM response: {e}")
+            if device_update.HasField("deviceMetadata"):
+                ids = device_update.deviceMetadata.identifierInformation.canonicIds.canonicId
+                if ids:
+                    return ids[0].id
+        except Exception as err:
+            _LOGGER.debug("Failed to extract canonical id from FCM response: %s", err)
         return None
 
-    async def _run_callback_async(self, callback, canonic_id: str, hex_string: str):
-        """Run callback in executor to avoid blocking the event loop."""
+    async def _run_callback_async(self, callback: Callable[[str, str], None], canonic_id: str, hex_string: str) -> None:
+        """Run potentially blocking callback in a thread."""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, callback, canonic_id, hex_string)
+
+    async def _process_background_update(self, coordinator: Any, canonic_id: str, hex_string: str) -> None:
+        """Decode and inject location into coordinator cache, then push-update entities."""
         try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            # Run the potentially blocking callback in a thread executor with canonic_id
-            await loop.run_in_executor(None, callback, canonic_id, hex_string)
-        except Exception as e:
-            _LOGGER.error(f"Error in async FCM callback for device {canonic_id}: {e}")
-    
-    async def _process_background_update(self, coordinator, canonic_id: str, hex_string: str):
-        """Process background FCM update for a tracked device."""
-        try:
-            import asyncio
-            import time
-            
-            # Run the location processing in executor to avoid blocking
             location_data = await asyncio.get_event_loop().run_in_executor(
                 None, self._decode_background_location, hex_string
             )
-            
-            if location_data:
-                device_name = coordinator._device_names.get(canonic_id, canonic_id[:8])
+            if not location_data:
+                _LOGGER.debug("No location data in background update for %s", canonic_id)
+                return
 
-                # Apply Google Home device filtering
-                semantic_name = location_data.get('semantic_name')
-                if semantic_name and hasattr(coordinator, 'google_home_filter'):
-                    should_filter, replacement_location = coordinator.google_home_filter.should_filter_detection(canonic_id, semantic_name)
-                    if should_filter:
-                        _LOGGER.debug(f"FCM: Filtering out Google Home spam detection for {device_name}")
-                        return  # Skip processing this update
-                    elif replacement_location:
-                        _LOGGER.info(f"FCM: Google Home filter: Device {device_name} detected at '{semantic_name}', using '{replacement_location}'")
-                        location_data = location_data.copy()
-                        location_data['semantic_name'] = replacement_location
+            device_name = getattr(coordinator, "_device_names", {}).get(canonic_id, canonic_id[:8])
 
-                # Check if this is actually new location data (avoid duplicates)
-                current_last_seen = location_data.get('last_seen')
-                existing_data = coordinator._device_location_data.get(canonic_id, {})
-                existing_last_seen = existing_data.get('last_seen')
+            # Optional Google Home filter
+            semantic_name = location_data.get("semantic_name")
+            ghf = getattr(coordinator, "google_home_filter", None)
+            if semantic_name and ghf is not None:
+                should_filter, replacement = ghf.should_filter_detection(canonic_id, semantic_name)
+                if should_filter:
+                    _LOGGER.debug("Filtered Google Home detection for %s", device_name)
+                    return
+                if replacement:
+                    location_data = {**location_data, "semantic_name": replacement}
+                    _LOGGER.info(
+                        "Google Home filter: %s detected at '%s' -> using '%s'",
+                        device_name,
+                        semantic_name,
+                        replacement,
+                    )
 
-                if current_last_seen != existing_last_seen:
-                    # Store in coordinator's location cache only if last_seen changed
-                    coordinator._device_location_data[canonic_id] = location_data.copy()
-                    coordinator._device_location_data[canonic_id]["last_updated"] = time.time()
+            # De-duplicate by last_seen
+            current_last_seen = location_data.get("last_seen")
+            existing = getattr(coordinator, "_device_location_data", {}).get(canonic_id, {})
+            if existing.get("last_seen") == current_last_seen:
+                _LOGGER.debug("Duplicate background update for %s (last_seen=%s)", device_name, current_last_seen)
+                coordinator.increment_stat("skipped_duplicates")
+                return
 
-                    _LOGGER.info(f"Stored NEW background location update for {device_name} (last_seen: {current_last_seen})")
+            # Commit to coordinator cache via public API if available (encapsulation)
+            slot = dict(location_data)
+            slot["last_updated"] = time.time()
 
-                    # Increment background update counter
-                    coordinator.increment_stat("background_updates")
-
-                    # Check if it's a crowd-sourced update (not own report)
-                    is_own_report = location_data.get('is_own_report')
-                    _LOGGER.info(f"FCM location saved for {device_name}: is_own_report={is_own_report}")
-                    if is_own_report is False:
-                        coordinator.increment_stat("crowd_sourced_updates")
-                        _LOGGER.info(f"Crowd-sourced update detected for {device_name} via FCM")
-
-                    # Trigger coordinator update to refresh entities
-                    await coordinator.async_request_refresh()
-                else:
-                    _LOGGER.debug(f"Skipping duplicate background location update for {device_name} (same last_seen: {current_last_seen})")
-                    coordinator.increment_stat("skipped_duplicates")
+            update_cache = getattr(coordinator, "update_device_cache", None)
+            if callable(update_cache):
+                update_cache(canonic_id, slot)
             else:
-                _LOGGER.debug(f"No location data in background update for device {canonic_id}")
-                
-        except Exception as e:
-            _LOGGER.error(f"Error processing background update for device {canonic_id}: {e}")
-    
-    def _decode_background_location(self, hex_string: str) -> dict:
-        """Decode location data from hex string (runs in executor)."""
-        try:
-            # Import with robust fallback for different module loading contexts
-            try:
-                from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
-                from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
-            except ImportError:
+                # Transitional fallback for older coordinators (to be removed once all callers updated)
                 try:
-                    # Try relative import from Auth directory
-                    from ..ProtoDecoders.decoder import parse_device_update_protobuf
-                    from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
-                except ImportError:
-                    # Last resort - try from current working directory
-                    import sys
-                    import os
-                    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-                    from ProtoDecoders.decoder import parse_device_update_protobuf
-                    from NovaApi.ExecuteAction.LocateTracker.decrypt_locations import decrypt_location_response_locations
-            
-            # Parse and decrypt
+                    coordinator._device_location_data[canonic_id] = slot  # noqa: SLF001
+                    _LOGGER.debug(
+                        "Fallback: wrote to coordinator._device_location_data directly (consider upgrading coordinator)"
+                    )
+                except Exception as err:
+                    _LOGGER.error("Coordinator cache update failed for %s: %s", canonic_id, err)
+                    return
+
+            _LOGGER.info("Stored NEW background location update for %s (last_seen=%s)", device_name, current_last_seen)
+
+            coordinator.increment_stat("background_updates")
+            if location_data.get("is_own_report") is False:
+                coordinator.increment_stat("crowd_sourced_updates")
+                _LOGGER.info("Crowd-sourced update detected for %s via FCM", device_name)
+
+            # Push entities immediately (no poll). Prefer dedicated push method if available.
+            push = getattr(coordinator, "push_updated", None)
+            if callable(push):
+                push()
+            else:
+                await coordinator.async_request_refresh()
+
+        except Exception as err:
+            _LOGGER.error("Error processing background update for %s: %s", canonic_id, err)
+
+    def _decode_background_location(self, hex_string: str) -> dict:
+        """Decode background location using our protobuf decoders (CPU-bound)."""
+        try:
+            from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf  # type: ignore
+            from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (  # type: ignore
+                decrypt_location_response_locations,
+            )
+
             device_update = parse_device_update_protobuf(hex_string)
-            location_data = decrypt_location_response_locations(device_update)
-            
-            if location_data and len(location_data) > 0:
-                return location_data[0]
+            locations = decrypt_location_response_locations(device_update) or []
+            return locations[0] if locations else {}
+        except Exception as err:
+            _LOGGER.error("Failed to decode background location data: %s", err)
             return {}
-            
-        except Exception as e:
-            _LOGGER.error(f"Failed to decode background location data: {e}")
-            return {}
-    
-    def _on_credentials_updated(self, creds):
-        """Handle credential updates."""
-        # PATCH: Normalize credentials if provided as a JSON string to ensure consistent dict type for downstream consumers and cache.
-        creds_to_store = creds
-        if isinstance(creds_to_store, str):
+
+    # -------------------- Credentials & stop --------------------
+
+    def _on_credentials_updated(self, creds: Any) -> None:
+        """Update in-memory creds and persist asynchronously."""
+        normalized: Any = creds
+        if isinstance(normalized, str):
             try:
-                import json
-                creds_to_store = json.loads(creds_to_store)
-            except Exception:
-                _LOGGER.debug("Received FCM credentials as non-JSON string; storing raw value (read-path is hardened).")
-        self.credentials = creds_to_store
-        # Schedule async update to avoid blocking I/O in callback
+                normalized = json.loads(normalized)
+            except json.JSONDecodeError:
+                _LOGGER.debug("FCM credentials arrived as non-JSON string; storing raw value.")
+        self.credentials = normalized if isinstance(normalized, dict) else None
         asyncio.create_task(self._async_save_credentials())
         _LOGGER.info("FCM credentials updated")
-    
-    async def _async_save_credentials(self):
-        """Save credentials asynchronously."""
+
+    async def _async_save_credentials(self) -> None:
         try:
-            await async_set_cached_value('fcm_credentials', self.credentials)
-        except Exception as e:
-            _LOGGER.error(f"Failed to save FCM credentials: {e}")
-    
-    async def async_stop(self):
-        """Stop listening for FCM messages."""
-        try:
-            if self._listen_task:
-                self._listen_task.cancel()
-                try:
-                    await self._listen_task
-                except asyncio.CancelledError:
-                    pass
-                
-            if self.pc:
-                try:
-                    # Check if the push client was properly started before trying to stop
-                    if (hasattr(self.pc, 'stop') and callable(getattr(self.pc, 'stop')) and
-                        hasattr(self.pc, 'stopping_lock') and self.pc.stopping_lock is not None):
-                        await self.pc.stop()
-                    else:
-                        _LOGGER.debug("FCM push client not fully initialized, skipping stop")
-                        # Just set the client to None to clean up
-                        self.pc = None
-                except TypeError as type_error:
-                    if "asynchronous context manager protocol" in str(type_error):
-                        _LOGGER.debug(f"FCM push client stop method has context manager issue, skipping: {type_error}")
-                    else:
-                        _LOGGER.warning(f"Type error stopping FCM push client: {type_error}")
-                except Exception as pc_error:
-                    _LOGGER.debug(f"Error stopping FCM push client: {pc_error}")
-                
-            self._listening = False
-            _LOGGER.info("FCM receiver stopped")
-            
-        except Exception as e:
-            _LOGGER.error(f"Error stopping FCM receiver: {e}")
-    
+            await async_set_cached_value("fcm_credentials", self.credentials)
+        except Exception as err:
+            _LOGGER.error("Failed to save FCM credentials: %s", err)
+
+    async def async_stop(self) -> None:
+        """Stop the background listener and push client."""
+        # Stop listener task
+        if self._listen_task:
+            self._listen_task.cancel()
+            try:
+                await self._listen_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._listen_task = None
+        self._listening = False
+
+        # Stop push client
+        if self.pc:
+            try:
+                await self.pc.stop()
+            except (ConnectionError, TimeoutError) as err:
+                _LOGGER.debug("FCM push client stop network error: %s", err)
+            except Exception as err:
+                _LOGGER.debug("FCM push client stop unexpected error: %s", err)
+            finally:
+                self.pc = None
+
+        _LOGGER.info("FCM receiver stopped")
+
+    # -------------------- Public token accessor --------------------
+
     def get_fcm_token(self) -> Optional[str]:
-        """Get current FCM token if available."""
-        if self.credentials and 'fcm' in self.credentials and 'registration' in self.credentials['fcm']:
-            return self.credentials['fcm']['registration']['token']
+        """Return current FCM token if available (best-effort)."""
+        creds = self.credentials
+        if isinstance(creds, dict):
+            token = (creds.get("fcm") or {}).get("registration", {}).get("token")
+            if token:
+                return token
+
+        # Early-boot fallback: try sync cache
+        try:
+            cached: Any = get_cached_value("fcm_credentials")
+            if isinstance(cached, str):
+                cached = json.loads(cached)
+            if isinstance(cached, dict):
+                token = (cached.get("fcm") or {}).get("registration", {}).get("token")
+                if token:
+                    return token
+        except json.JSONDecodeError:
+            _LOGGER.debug("Cached FCM credentials are not valid JSON")
+        except Exception:
+            # final guard
+            pass
+
         return None
