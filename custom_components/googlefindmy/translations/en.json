@@ -99,6 +99,9 @@
         }
       }
     },
+    "abort": {
+      "reconfigure_successful": "Reconfiguration successful."
+    },
     "error": {
       "invalid_json": "Invalid JSON format in secrets.json content.",
       "invalid": "Validation failed. Please check your input.",
