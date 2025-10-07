@@ -17,6 +17,25 @@ from custom_components.googlefindmy.Auth.adm_token_retrieval import get_adm_toke
 from custom_components.googlefindmy.Auth.username_provider import get_username
 
 
+# ------------------------ Optional Home Assistant hooks ------------------------
+# These hooks allow the integration to supply a shared aiohttp ClientSession.
+# When registered, async_nova_request() will reuse HA's session instead of
+# creating a temporary one. This avoids unnecessary connection pools.
+_HASS_REF = None  # type: ignore[var-annotated]
+
+
+def register_hass(hass) -> None:
+    """Register a Home Assistant instance to provide a shared ClientSession."""
+    global _HASS_REF
+    _HASS_REF = hass
+
+
+def unregister_session_provider() -> None:
+    """Unregister the Home Assistant instance reference."""
+    global _HASS_REF
+    _HASS_REF = None
+
+
 # ------------------------ TTL policy helper (shared by sync/async) ------------------------
 class TTLPolicy:
     """Token TTL/probe policy (synchronous I/O). Encapsulates probe arming, jitter and proactive refresh."""
@@ -518,9 +537,20 @@ async def async_nova_request(api_scope, hex_payload, username=None, session: aio
     # Prefer a provided session (integration-owned) to avoid per-call session overhead.
     ephemeral = False
     if session is None:
-        _logger.warning("No aiohttp.ClientSession provided; creating a temporary session (suboptimal).")
-        session = aiohttp.ClientSession()
-        ephemeral = True
+        hass = _HASS_REF
+        if hass is not None:
+            try:
+                # Use HA-managed shared session
+                from homeassistant.helpers.aiohttp_client import async_get_clientsession
+                session = async_get_clientsession(hass)
+            except Exception as e:
+                _logger.debug(f"HA session provider not available: {e}; creating a temporary session.")
+                session = aiohttp.ClientSession()
+                ephemeral = True
+        else:
+            _logger.debug("No registered Home Assistant instance; creating a temporary aiohttp session.")
+            session = aiohttp.ClientSession()
+            ephemeral = True
     try:
         for attempt in range(max_retries):
             try:
