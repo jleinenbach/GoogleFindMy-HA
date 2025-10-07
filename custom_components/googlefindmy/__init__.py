@@ -279,11 +279,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Acquire shared FCM and keep it alive while this entry exists
     _ = await _async_acquire_shared_fcm(hass)
-    entry.async_on_unload(
-        lambda: hass.async_create_task(
-            _async_release_shared_fcm(hass), name="googlefindmy.release_fcm"
-        )
-    )
+
+    async def _on_unload_release_fcm() -> None:
+        """Release the shared FCM receiver when this config entry unloads."""
+        try:
+            await _async_release_shared_fcm(hass)
+        except Exception as err:  # Defensive: never break unload pipeline
+            _LOGGER.debug("FCM release during unload raised: %s", err)
+
+    entry.async_on_unload(_on_unload_release_fcm)
 
     # Credentials handling (secrets-only in data)
     secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
