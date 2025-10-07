@@ -30,7 +30,13 @@
         "data": {
           "tracked_devices": "Tracked devices",
           "location_poll_interval": "Location poll interval (s)",
-          "device_poll_delay": "Device poll delay (s)"
+          "device_poll_delay": "Device poll delay (s)",
+          "min_accuracy_threshold": "Minimum accuracy (m)",
+          "movement_threshold": "Movement threshold (m)",
+          "google_home_filter_enabled": "Filter Google Home devices",
+          "google_home_filter_keywords": "Filter keywords (comma-separated)",
+          "enable_stats_entities": "Create statistics entities",
+          "map_view_token_expiration": "Enable map view token expiration"
         }
       },
       "reauth_confirm": {
@@ -67,16 +73,12 @@
       },
       "credentials": {
         "title": "Update credentials (optional)",
-        "description": "Update credentials without exposing existing values. Provide exactly one method:\n\n• Paste full contents of a new **secrets.json**\n**or**\n• Enter a new **OAuth token** and (optionally) **Google email**.\n\nIf provided, credentials will be validated and stored; the integration will reload without changing your entity names.",
+        "description": "Update credentials without exposing existing values. Provide exactly one method:\n\n• Paste full contents of a new **secrets.json**\n**or**\n• Enter a new **OAuth token** and **Google email**.\n\nIf provided, credentials will be validated and stored; the integration will reload without changing your entity names.",
         "data": {
-          "new_secrets_json": "New secrets.json (full contents)",
-          "new_oauth_token": "New OAuth token",
-          "new_google_email": "Google email (optional)"
+          "secrets_json": "New secrets.json (full contents)",
+          "oauth_token": "New OAuth token",
+          "google_email": "Google email"
         }
-      },
-      "finish": {
-        "title": "Action started",
-        "description": "The “{mode}” operation was started. Check the logs for details."
       },
       "settings": {
         "title": "Options",
@@ -103,6 +105,9 @@
       "cannot_connect": "Failed to connect to the Google API.",
       "choose_one": "Please provide exactly one credential method.",
       "required": "This field is required."
+    },
+    "abort": {
+      "reconfigure_successful": "Reconfiguration successful."
     }
   },
   "services": {
@@ -131,9 +136,9 @@
       "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view.",
       "fields": {}
     },
-    "locate_device_external": {
+    "locate_external": {
       "name": "Locate Device (External)",
-      "description": "Locate a device using the external service (delegates to the normal locate).",
+      "description": "Locate a device using the external helper; delegates to the normal locate operation.",
       "fields": {
         "device_id": {
           "name": "Device",
