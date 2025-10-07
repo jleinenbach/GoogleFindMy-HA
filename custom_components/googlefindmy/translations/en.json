@@ -57,8 +57,7 @@
     "abort": {
       "already_configured": "Google Find My Device is already configured.",
       "cannot_connect": "Failed to connect to Google Find My Device.",
-      "reauth_successful": "Reauthentication successful.",
-      "reconfigure_successful": "Reconfiguration successful."
+      "reauth_successful": "Reauthentication successful."
     }
   },
   "options": {
@@ -166,6 +165,16 @@
     }
   },
   "entity": {
+    "button": {
+      "play_sound": {
+        "name": "Play sound"
+      }
+    },
+    "binary_sensor": {
+      "polling": {
+        "name": "Polling"
+      }
+    },
     "sensor": {
       "last_seen": {
         "name": "Last Seen"
