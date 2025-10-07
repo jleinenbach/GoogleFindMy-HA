@@ -23,8 +23,12 @@ except Exception:  # noqa: BLE001
 from .api import GoogleFindMyAPI
 from .const import (
     DOMAIN,
+    # Data (credentials, immutable)
     CONF_OAUTH_TOKEN,
-    # Option keys (single source of truth)
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+    DATA_AUTH_METHOD,
+    # Options (user-changeable)
     OPT_TRACKED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
@@ -35,8 +39,13 @@ from .const import (
     OPT_ENABLE_STATS_ENTITIES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     # Defaults
+    DEFAULT_LOCATION_POLL_INTERVAL,
+    DEFAULT_DEVICE_POLL_DELAY,
+    DEFAULT_MIN_ACCURACY_THRESHOLD,
+    DEFAULT_MOVEMENT_THRESHOLD,
     DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
     DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
+    DEFAULT_ENABLE_STATS_ENTITIES,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
 )
 
@@ -71,7 +80,7 @@ STEP_SECRETS_DATA_SCHEMA = vol.Schema(
 STEP_INDIVIDUAL_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_OAUTH_TOKEN, description="OAuth token"): str,
-        vol.Required("google_email", description="Google email address"): str,
+        vol.Required(CONF_GOOGLE_EMAIL, description="Google email address"): str,
     }
 )
 
@@ -120,8 +129,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 secrets_data = json.loads(raw)
                 # Store raw secrets payload in memory to construct API and fetch devices next
                 self._auth_data = {
-                    "auth_method": _AUTH_METHOD_SECRETS,
-                    "secrets_data": secrets_data,
+                    DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                    DATA_SECRET_BUNDLE: secrets_data,
                 }
                 return await self.async_step_device_selection()
             except json.JSONDecodeError:
@@ -137,12 +146,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: Dict[str, str] = {}
         if user_input is not None:
             oauth_token = user_input.get(CONF_OAUTH_TOKEN)
-            google_email = user_input.get("google_email")
+            google_email = user_input.get(CONF_GOOGLE_EMAIL)
             if oauth_token and google_email:
                 self._auth_data = {
-                    "auth_method": _AUTH_METHOD_INDIVIDUAL,
+                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
                     CONF_OAUTH_TOKEN: oauth_token,
-                    "google_email": google_email,
+                    CONF_GOOGLE_EMAIL: google_email,
                 }
                 return await self.async_step_device_selection()
             errors["base"] = "invalid_token"
@@ -152,17 +161,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ---------- Shared helper to create API from stored auth_data ----------
     async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, Optional[str]]:
         """Build API instance and derive a username if available (async-safe)."""
-        if self._auth_data.get("auth_method") == _AUTH_METHOD_SECRETS:
-            secrets_data = self._auth_data.get("secrets_data") or {}
+        if self._auth_data.get(DATA_AUTH_METHOD) == _AUTH_METHOD_SECRETS:
+            secrets_data = self._auth_data.get(DATA_SECRET_BUNDLE) or {}
             api = GoogleFindMyAPI(secrets_data=secrets_data)
             username = secrets_data.get("googleHomeUsername") or secrets_data.get("google_email")
             return api, username
         # Manual path
         api = GoogleFindMyAPI(
             oauth_token=self._auth_data.get(CONF_OAUTH_TOKEN),
-            google_email=self._auth_data.get("google_email"),
+            google_email=self._auth_data.get(CONF_GOOGLE_EMAIL),
         )
-        return api, self._auth_data.get("google_email")
+        return api, self._auth_data.get(CONF_GOOGLE_EMAIL)
 
     # ---------- Device selection ----------
     async def async_step_device_selection(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -194,14 +203,22 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(OPT_TRACKED_DEVICES, default=list(options_map.keys())): vol.All(
                     cv.multi_select(options_map), vol.Length(min=1)
                 ),
-                vol.Optional(OPT_LOCATION_POLL_INTERVAL, default=300): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
-                vol.Optional(OPT_DEVICE_POLL_DELAY, default=5): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
+                vol.Optional(OPT_LOCATION_POLL_INTERVAL, default=DEFAULT_LOCATION_POLL_INTERVAL): vol.All(
+                    vol.Coerce(int), vol.Range(min=60, max=3600)
+                ),
+                vol.Optional(OPT_DEVICE_POLL_DELAY, default=DEFAULT_DEVICE_POLL_DELAY): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=60)
+                ),
                 # Provide a sensible initial set of advanced defaults (hidden in strings for UX)
-                vol.Optional(OPT_MIN_ACCURACY_THRESHOLD, default=100): vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
-                vol.Optional(OPT_MOVEMENT_THRESHOLD, default=50): vol.All(vol.Coerce(int), vol.Range(min=10, max=200)),
+                vol.Optional(OPT_MIN_ACCURACY_THRESHOLD, default=DEFAULT_MIN_ACCURACY_THRESHOLD): vol.All(
+                    vol.Coerce(int), vol.Range(min=25, max=500)
+                ),
+                vol.Optional(OPT_MOVEMENT_THRESHOLD, default=DEFAULT_MOVEMENT_THRESHOLD): vol.All(
+                    vol.Coerce(int), vol.Range(min=10, max=200)
+                ),
                 vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED, default=DEFAULT_GOOGLE_HOME_FILTER_ENABLED): bool,
                 vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS, default=DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS): str,
-                vol.Optional(OPT_ENABLE_STATS_ENTITIES, default=True): bool,
+                vol.Optional(OPT_ENABLE_STATS_ENTITIES, default=DEFAULT_ENABLE_STATS_ENTITIES): bool,
                 vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION, default=DEFAULT_MAP_VIEW_TOKEN_EXPIRATION): bool,
             }
         )
@@ -213,17 +230,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Options (canonical place for non-secrets)
             options_payload: Dict[str, Any] = {
                 OPT_TRACKED_DEVICES: user_input.get(OPT_TRACKED_DEVICES, []),
-                OPT_LOCATION_POLL_INTERVAL: user_input.get(OPT_LOCATION_POLL_INTERVAL, 300),
-                OPT_DEVICE_POLL_DELAY: user_input.get(OPT_DEVICE_POLL_DELAY, 5),
-                OPT_MIN_ACCURACY_THRESHOLD: user_input.get(OPT_MIN_ACCURACY_THRESHOLD, 100),
-                OPT_MOVEMENT_THRESHOLD: user_input.get(OPT_MOVEMENT_THRESHOLD, 50),
+                OPT_LOCATION_POLL_INTERVAL: user_input.get(
+                    OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
+                ),
+                OPT_DEVICE_POLL_DELAY: user_input.get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
+                OPT_MIN_ACCURACY_THRESHOLD: user_input.get(
+                    OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
+                ),
+                OPT_MOVEMENT_THRESHOLD: user_input.get(OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD),
                 OPT_GOOGLE_HOME_FILTER_ENABLED: user_input.get(
                     OPT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_ENABLED
                 ),
                 OPT_GOOGLE_HOME_FILTER_KEYWORDS: user_input.get(
                     OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
                 ),
-                OPT_ENABLE_STATS_ENTITIES: user_input.get(OPT_ENABLE_STATS_ENTITIES, True),
+                OPT_ENABLE_STATS_ENTITIES: user_input.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES),
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: user_input.get(
                     OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
                 ),
@@ -258,20 +279,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Optional("secrets_json"): str,
                 vol.Optional(CONF_OAUTH_TOKEN): str,
-                vol.Optional("google_email"): str,
+                vol.Optional(CONF_GOOGLE_EMAIL): str,
             }
         )
 
         if user_input is not None:
             secrets_json = user_input.get("secrets_json")
             oauth_token = user_input.get(CONF_OAUTH_TOKEN)
-            google_email = user_input.get("google_email")
+            google_email = user_input.get(CONF_GOOGLE_EMAIL)
 
             new_data: Dict[str, Any] = {}
             try:
                 if secrets_json:
                     parsed = json.loads(secrets_json)
-                    new_data = {"auth_method": _AUTH_METHOD_SECRETS, "secrets_data": parsed}
+                    new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, DATA_SECRET_BUNDLE: parsed}
                     api = GoogleFindMyAPI(secrets_data=parsed)
                     # Basic validation: try device list
                     _ = await api.async_get_basic_device_list(
@@ -288,7 +309,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 "reason": "Your credentials are invalid or expired. Provide new ones."
                             },
                         )
-                    new_data = {"auth_method": _AUTH_METHOD_INDIVIDUAL, CONF_OAUTH_TOKEN: oauth_token, "google_email": google_email}
+                    new_data = {
+                        DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                        CONF_OAUTH_TOKEN: oauth_token,
+                        CONF_GOOGLE_EMAIL: google_email,
+                    }
                     api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
                     _ = await api.async_get_basic_device_list(google_email)  # validation
 
@@ -378,17 +403,17 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
 
         # Options-first with safe fallbacks
         current_tracked = opt.get(OPT_TRACKED_DEVICES, dat.get(OPT_TRACKED_DEVICES, []))
-        current_interval = opt.get(OPT_LOCATION_POLL_INTERVAL, dat.get(OPT_LOCATION_POLL_INTERVAL, 300))
-        current_delay = opt.get(OPT_DEVICE_POLL_DELAY, dat.get(OPT_DEVICE_POLL_DELAY, 5))
-        current_min_acc = opt.get(OPT_MIN_ACCURACY_THRESHOLD, dat.get(OPT_MIN_ACCURACY_THRESHOLD, 100))
-        current_move_thr = opt.get(OPT_MOVEMENT_THRESHOLD, dat.get(OPT_MOVEMENT_THRESHOLD, 50))
+        current_interval = opt.get(OPT_LOCATION_POLL_INTERVAL, dat.get(OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL))
+        current_delay = opt.get(OPT_DEVICE_POLL_DELAY, dat.get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY))
+        current_min_acc = opt.get(OPT_MIN_ACCURACY_THRESHOLD, dat.get(OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD))
+        current_move_thr = opt.get(OPT_MOVEMENT_THRESHOLD, dat.get(OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD))
         current_gh_enabled = opt.get(
             OPT_GOOGLE_HOME_FILTER_ENABLED, dat.get(OPT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_ENABLED)
         )
         current_gh_keywords = opt.get(
             OPT_GOOGLE_HOME_FILTER_KEYWORDS, dat.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)
         )
-        current_stats = opt.get(OPT_ENABLE_STATS_ENTITIES, dat.get(OPT_ENABLE_STATS_ENTITIES, True))
+        current_stats = opt.get(OPT_ENABLE_STATS_ENTITIES, dat.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES))
         current_map_token_exp = opt.get(
             OPT_MAP_VIEW_TOKEN_EXPIRATION, dat.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
         )
@@ -397,7 +422,7 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         device_options: Dict[str, str] = {}
         try:
             api = await self._async_build_api_from_entry(entry)
-            devices = await api.async_get_basic_device_list(entry.data.get("google_email"))
+            devices = await api.async_get_basic_device_list(entry.data.get(CONF_GOOGLE_EMAIL))
             device_options = {dev["id"]: dev["name"] for dev in devices}
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to fetch device list for options: %s", err)
@@ -471,26 +496,30 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             {
                 vol.Optional("secrets_json"): str,
                 vol.Optional(CONF_OAUTH_TOKEN): str,
-                vol.Optional("google_email"): str,
+                vol.Optional(CONF_GOOGLE_EMAIL): str,
             }
         )
 
         if user_input is not None:
             secrets_json = user_input.get("secrets_json")
             oauth_token = user_input.get(CONF_OAUTH_TOKEN)
-            google_email = user_input.get("google_email")
+            google_email = user_input.get(CONF_GOOGLE_EMAIL)
 
             new_data: Dict[str, Any] = {}
             try:
                 if secrets_json:
                     parsed = json.loads(secrets_json)
-                    new_data = {"auth_method": _AUTH_METHOD_SECRETS, "secrets_data": parsed}
+                    new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, DATA_SECRET_BUNDLE: parsed}
                     api = GoogleFindMyAPI(secrets_data=parsed)
                     _ = await api.async_get_basic_device_list(
                         parsed.get("googleHomeUsername") or parsed.get("google_email")
                     )  # validation
                 elif oauth_token and google_email:
-                    new_data = {"auth_method": _AUTH_METHOD_INDIVIDUAL, CONF_OAUTH_TOKEN: oauth_token, "google_email": google_email}
+                    new_data = {
+                        DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                        CONF_OAUTH_TOKEN: oauth_token,
+                        CONF_GOOGLE_EMAIL: google_email,
+                    }
                     api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
                     _ = await api.async_get_basic_device_list(google_email)  # validation
                 else:
@@ -518,11 +547,11 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     # ---------- Internal helper ----------
     async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
         """Construct API object from entry data (supports both auth methods)."""
-        if entry.data.get("auth_method") == _AUTH_METHOD_SECRETS:
-            return GoogleFindMyAPI(secrets_data=entry.data.get("secrets_data"))
+        if entry.data.get(DATA_AUTH_METHOD) == _AUTH_METHOD_SECRETS:
+            return GoogleFindMyAPI(secrets_data=entry.data.get(DATA_SECRET_BUNDLE))
         return GoogleFindMyAPI(
             oauth_token=entry.data.get(CONF_OAUTH_TOKEN),
-            google_email=entry.data.get("google_email"),
+            google_email=entry.data.get(CONF_GOOGLE_EMAIL),
         )
 
 
