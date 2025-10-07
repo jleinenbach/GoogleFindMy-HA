@@ -62,7 +62,7 @@ from .const import (
 from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
 # HA-managed aiohttp session for Nova API
-from .NovaApi import nova_request as nova  # Provides register_hass/unregister_session_provider
+from .NovaApi import nova_request as nova  # Provides register_hass/unregister_session_provider (optional)
 
 # NEW: shared FCM provider wiring
 from .Auth.fcm_receiver_ha import FcmReceiverHA
@@ -252,9 +252,20 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration from a config entry (entities-first, options-first)."""
 
-    # Register HA-managed aiohttp session for Nova API
-    nova.register_hass(hass)
-    entry.async_on_unload(nova.unregister_session_provider)
+    # Register HA-managed aiohttp session for Nova API (optional hooks)
+    try:
+        reg = getattr(nova, "register_hass", None)
+        unreg = getattr(nova, "unregister_session_provider", None)
+        if callable(reg):
+            reg(hass)
+            if callable(unreg):
+                entry.async_on_unload(unreg)
+            else:
+                _LOGGER.debug("Nova API unregister hook not present; continuing without unload hook.")
+        else:
+            _LOGGER.debug("Nova API register_hass() not available; continuing with module defaults.")
+    except Exception as err:  # Defensive: Nova module may not expose hooks in some builds
+        _LOGGER.debug("Nova API session provider registration skipped: %s", err)
 
     # Load persisted token cache (best-effort)
     try:
@@ -300,7 +311,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device_poll_delay=_opt(entry, OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
         min_poll_interval=_opt(entry, OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
         min_accuracy_threshold=_opt(entry, OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD),
-        allow_history_fallback=_opt(entry, OPT_ALLOW_HISTORY_FALLBACK, False),
+        allow_history_fallback=_opt(entry, OPT_ALLOW_HISTORY_FALLBACK, DEFAULT_OPTIONS.get(OPT_ALLOW_HISTORY_FALLBACK, False)),
     )
     coordinator.config_entry = entry  # convenience for platforms
 
@@ -511,7 +522,13 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
     async def async_rebuild_registry_service(call: ServiceCall) -> None:
-        """Migrate soft settings or rebuild the registry (optionally scoped to device_ids)."""
+        """Migrate soft settings or rebuild the registry (optionally scoped to device_ids).
+            Logic:
+            1. Determine target devices (all or a subset).
+            2. Remove all entities associated with these devices.
+            3. Remove orphaned devices (those with no entities left).
+            4. Reload the config entries associated with the affected devices.
+        """
         mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
         raw_ids = call.data.get(ATTR_DEVICE_IDS)
 
