@@ -30,7 +30,13 @@
         "data": {
           "tracked_devices": "Dispositivi monitorati",
           "location_poll_interval": "Intervallo di polling posizione (s)",
-          "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)"
+          "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
+          "min_accuracy_threshold": "Accuratezza minima (m)",
+          "movement_threshold": "Soglia di movimento (m)",
+          "google_home_filter_enabled": "Filtra dispositivi Google Home",
+          "google_home_filter_keywords": "Parole chiave del filtro (separate da virgole)",
+          "enable_stats_entities": "Crea entità statistiche",
+          "map_view_token_expiration": "Abilita scadenza dei token della vista mappa"
         }
       },
       "reauth_confirm": {
@@ -67,16 +73,12 @@
       },
       "credentials": {
         "title": "Aggiorna credenziali (opzionale)",
-        "description": "Aggiorna le credenziali senza esporre i valori esistenti. Fornisci esattamente un metodo:\n\n• Incolla il contenuto completo di un nuovo **secrets.json**\n**oppure**\n• Inserisci un nuovo **token OAuth** e (facoltativamente) **email Google**.\n\nSe fornite, le credenziali saranno convalidate e salvate; l’integrazione verrà ricaricata senza cambiare i nomi delle tue entità.",
+        "description": "Aggiorna le credenziali senza esporre i valori esistenti. Fornisci esattamente un metodo:\n\n• Incolla il contenuto completo di un **secrets.json** nuovo\n**oppure**\n• Inserisci un **token OAuth** nuovo e **email Google**.\n\nSe fornite, le credenziali saranno convalidate e salvate; l’integrazione verrà ricaricata senza cambiare i nomi delle tue entità.",
         "data": {
-          "new_secrets_json": "Nuovo secrets.json (contenuto completo)",
-          "new_oauth_token": "Nuovo token OAuth",
-          "new_google_email": "Email Google (facoltativa)"
+          "secrets_json": "Nuovo secrets.json (contenuto completo)",
+          "oauth_token": "Nuovo token OAuth",
+          "google_email": "Email Google"
         }
-      },
-      "finish": {
-        "title": "Azione avviata",
-        "description": "L’operazione “{mode}” è stata avviata. Controlla i log per i dettagli."
       },
       "settings": {
         "title": "Opzioni",
@@ -103,6 +105,9 @@
       "cannot_connect": "Impossibile connettersi all’API di Google.",
       "choose_one": "Fornisci esattamente un metodo di credenziali.",
       "required": "Questo campo è obbligatorio."
+    },
+    "abort": {
+      "reconfigure_successful": "Riconfigurazione riuscita."
     }
   },
   "services": {
@@ -111,8 +116,8 @@
       "description": "Ottieni la posizione attuale di un dispositivo Google Find My.",
       "fields": {
         "device_id": {
-          "name": "ID dispositivo",
-          "description": "L’ID del dispositivo da localizzare."
+          "name": "Dispositivo",
+          "description": "Seleziona un dispositivo Google Find My (oppure passa un ID canonico tramite Strumenti per sviluppatori)."
         }
       }
     },
@@ -121,8 +126,8 @@
       "description": "Riproduce un suono su un dispositivo Google Find My.",
       "fields": {
         "device_id": {
-          "name": "ID dispositivo",
-          "description": "L’ID del dispositivo su cui verrà riprodotto il suono."
+          "name": "Dispositivo",
+          "description": "Seleziona un dispositivo Google Find My (oppure passa un ID canonico tramite Strumenti per sviluppatori)."
         }
       }
     },
@@ -131,17 +136,31 @@
       "description": "Aggiorna gli URL di configurazione dei dispositivi Google Find My per puntare alla vista mappa integrata.",
       "fields": {}
     },
-    "locate_external": {
+    "locate_device_external": {
       "name": "Localizza dispositivo (esterno)",
-      "description": "Localizza un dispositivo usando il servizio esterno (delegato alla localizzazione normale).",
+      "description": "Localizza un dispositivo utilizzando il servizio esterno (delegato alla localizzazione normale).",
       "fields": {
         "device_id": {
-          "name": "ID dispositivo",
-          "description": "L’ID del dispositivo da localizzare."
+          "name": "Dispositivo",
+          "description": "Seleziona un dispositivo Google Find My (oppure passa un ID canonico tramite Strumenti per sviluppatori)."
         },
         "device_name": {
           "name": "Nome dispositivo (facoltativo)",
           "description": "Nome leggibile facoltativo per i log."
+        }
+      }
+    },
+    "rebuild_registry": {
+      "name": "Ricostruisci / Migra registro",
+      "description": "Manutenzione: esegui una migrazione soft dati→opzioni oppure ricostruisci entità/dispositivi per questa integrazione.",
+      "fields": {
+        "mode": {
+          "name": "Modalità",
+          "description": "Scegli «Ricostruisci» per rimuovere entità/dispositivi e ricaricare; «Migra» riapplica solo la migrazione soft dati→opzioni."
+        },
+        "device_ids": {
+          "name": "Dispositivi (facoltativo)",
+          "description": "Limita l’operazione a dispositivi specifici. Lascia vuoto per includere tutti i dispositivi Google Find My."
         }
       }
     }
