@@ -113,7 +113,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
             "skipped_duplicates": 0,
-            "background_updates": 0,
+            "background_updates": 0,  # FCM/push-driven updates
+            "polled_updates": 0,      # sequential poll-driven updates
             "crowd_sourced_updates": 0,
             "history_fallback_used": 0,
             "timeouts": 0,
@@ -255,6 +256,34 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             _LOGGER.warning("No location data returned for %s", dev_name)
                             continue
 
+                        # --- Apply Google Home filter (keep parity with FCM push path) ---
+                        semantic_name = location.get("semantic_name")
+                        if semantic_name and hasattr(self, "google_home_filter"):
+                            try:
+                                should_filter, replacement_location = self.google_home_filter.should_filter_detection(
+                                    dev_id, semantic_name
+                                )
+                            except Exception as gf_err:
+                                _LOGGER.debug(
+                                    "Google Home filter error for %s: %s", dev_name, gf_err
+                                )
+                            else:
+                                if should_filter:
+                                    _LOGGER.debug(
+                                        "Filtering out Google Home spam detection for %s", dev_name
+                                    )
+                                    continue
+                                if replacement_location:
+                                    _LOGGER.info(
+                                        "Google Home filter: %s detected at '%s', using '%s'",
+                                        dev_name,
+                                        semantic_name,
+                                        replacement_location,
+                                    )
+                                    location = dict(location)
+                                    location["semantic_name"] = replacement_location
+                        # ------------------------------------------------------------------
+
                         lat = location.get("latitude")
                         lon = location.get("longitude")
                         acc = location.get("accuracy")
@@ -337,7 +366,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         # Commit to cache and bump statistics
                         location["last_updated"] = wall_now  # wall-clock for UX
                         self._device_location_data[dev_id] = location
-                        self.increment_stat("background_updates")
+                        self.increment_stat("polled_updates")
 
                     except asyncio.TimeoutError:
                         _LOGGER.warning(
@@ -618,8 +647,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def push_updated(self, device_ids: Optional[List[str]] = None) -> None:
         """Publish a fresh snapshot to listeners after push (FCM) cache updates.
 
-        - Avoids triggering a poll; pushes cache state immediately.
-        - Resets the poll baseline to 'now' to prevent immediate re-polling.
+        This **does not** trigger a poll. It:
+        - Immediately pushes cache state to entities via `async_set_updated_data()`.
+        - Resets the internal poll baseline to 'now' to prevent an immediate re-poll.
+        - Optionally limits the snapshot to `device_ids`; otherwise includes all known devices.
         """
         wall_now = time.time()
         self._last_poll_mono = time.monotonic()  # reset poll timer
