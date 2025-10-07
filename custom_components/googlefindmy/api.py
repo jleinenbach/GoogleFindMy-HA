@@ -5,7 +5,7 @@ import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
-from aiohttp import ClientSession
+from aiohttp import ClientError, ClientSession
 
 from .Auth.token_cache import set_memory_cache
 from .Auth.username_provider import username_string
@@ -33,14 +33,13 @@ _LOGGER = logging.getLogger(__name__)
 
 @runtime_checkable
 class FcmReceiverProtocol(Protocol):
-    """Lightweight protocol for the shared FCM receiver used by this module.
+    """Minimal protocol for the shared FCM receiver used by this module.
 
     Notes:
         - Only the minimal surface needed here is declared to keep coupling low.
         - The receiver is expected to be a long-lived, HA-managed singleton registered
           from __init__.py via the register_fcm_receiver_provider() function below.
     """
-
     def get_fcm_token(self) -> Optional[str]:
         ...
 
@@ -111,7 +110,13 @@ def _build_can_ring_index(parsed_device_list: Any) -> Dict[str, bool]:
 
 
 class GoogleFindMyAPI:
-    """API wrapper for Google Find My Device."""
+    """API wrapper for Google Find My Device.
+
+    Notes:
+        - Reads credentials from our in-memory token cache.
+        - Works with a HA-managed aiohttp session for async requests.
+        - Push actions (play/stop sound) depend on the shared FCM receiver.
+    """
 
     def __init__(
         self,
@@ -125,13 +130,13 @@ class GoogleFindMyAPI:
         The API reads credentials from our in-memory token cache. We seed that cache from either:
         - A full secrets bundle (GoogleFindMyTools), or
         - Individual OAuth token + Google email.
-
         Args:
             oauth_token: The OAuth token for authentication.
             google_email: The user's Google email address.
             secrets_data: A dictionary containing the full secrets bundle.
             session: The aiohttp ClientSession to use for requests (HA-managed).
         """
+
         self.secrets_data = secrets_data
         self.oauth_token = oauth_token
         self.google_email = google_email
@@ -184,7 +189,7 @@ class GoogleFindMyAPI:
     # Internal processing helpers (de-duplicate logic)
     # ---------------------------------------------------------------------
     def _process_device_list_response(self, result_hex: str) -> List[Dict[str, Any]]:
-        """Parse the protobuf payload, update capability cache, and build basic device list."""
+        """Parse protobuf, update capability cache, and build basic device list."""
         parsed = parse_device_list_protobuf(result_hex)
         # Update internal capability cache
         cap_index = _build_can_ring_index(parsed)
@@ -228,18 +233,16 @@ class GoogleFindMyAPI:
     def _select_best_location(self, records: list[dict[str, Any]]) -> dict[str, Any]:
         """Select the most relevant location record.
 
-        Rationale:
-            Upstream returns a list; in current practice the first entry is the most recent.
-            To be robust, prefer the entry with the highest 'last_seen' when available.
+        Prefer the entry with the highest 'last_seen' when available; otherwise, the first.
         """
         if not records:
             return {}
-        # Prefer record with max last_seen if present; otherwise keep the first element.
         try:
-            with_ts = [r for r in records if "last_seen" in r and r["last_seen"] is not None]
+            with_ts = [r for r in records if r.get("last_seen") is not None]
             if with_ts:
                 return max(with_ts, key=lambda r: float(r["last_seen"]))
         except Exception:
+            # fall back to first record if anything looks odd
             pass
         return records[0]
 
@@ -253,6 +256,7 @@ class GoogleFindMyAPI:
             - Uses the provider installed by the integration (HA-managed singleton).
             - Returns None if the provider is missing or a token cannot be obtained.
         """
+
         if _FCM_ReceiverGetter is None:
             _LOGGER.error("Cannot obtain FCM token: no provider registered.")
             return None
@@ -282,11 +286,7 @@ class GoogleFindMyAPI:
     # Init helpers
     # ---------------------------------------------------------------------
     def _initialize_from_secrets(self, secrets: dict) -> None:
-        """Initialize from secrets.json (GoogleFindMyTools) into memory cache.
-
-        NOTE: No blocking I/O here; we only seed memory. Persistent storage
-        is handled elsewhere asynchronously by the integration.
-        """
+        """Initialize from secrets.json (GoogleFindMyTools) into memory cache."""
         enhanced = dict(secrets)
         self.google_email = secrets.get("username", secrets.get("Email"))
         if self.google_email:
@@ -303,13 +303,14 @@ class GoogleFindMyAPI:
     def get_basic_device_list(self) -> List[Dict[str, Any]]:
         """Return a lightweight list of devices (id/name) with optional 'can_ring'.
 
-        Error handling:
-            This sync variant mirrors the async variant and returns an EMPTY LIST on errors.
-            Callers should treat an empty list as a transient failure and may retry later.
+        Returns an EMPTY LIST on errors to keep callers robust.
         """
         try:
             result_hex = self._req_device_list()
             return self._process_device_list_response(result_hex)
+        except ClientError as err:
+            _LOGGER.error("Failed to get basic device list (network): %s", err)
+            return []
         except Exception as err:
             _LOGGER.error("Failed to get basic device list (sync): %s", err)
             return []
@@ -317,10 +318,9 @@ class GoogleFindMyAPI:
     async def async_get_basic_device_list(
         self, username: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Async variant of the lightweight device list, used by HA flows and coordinator.
+        """Async variant of the lightweight device list used by HA flows/coordinator.
 
-        Error handling:
-            Returns an EMPTY LIST on errors to keep the UI responsive (graceful degradation).
+        Returns an EMPTY LIST on errors to keep the UI responsive (graceful degradation).
         """
         try:
             if not username and self.secrets_data:
@@ -329,6 +329,9 @@ class GoogleFindMyAPI:
                 )
             result_hex = await self._async_req_device_list(username)
             return self._process_device_list_response(result_hex)
+        except ClientError as err:
+            _LOGGER.error("Failed to get basic device list (async, network): %s", err)
+            return []
         except Exception as err:
             _LOGGER.error("Failed to get basic device list (async): %s", err)
             return []
@@ -340,8 +343,8 @@ class GoogleFindMyAPI:
             Reuses get_basic_device_list() and augments the entries with
             standard location fields set to None (DRY).
         """
+
         base = self.get_basic_device_list()
-        # Keep info-level log identical to former behavior (optional)
         if base:
             _LOGGER.info("API v3.0: Returning %d devices (basic)", len(base))
         return self._extend_with_empty_location_fields(base)
@@ -352,12 +355,17 @@ class GoogleFindMyAPI:
     def get_device_location(self, device_id: str, device_name: str) -> Dict[str, Any]:
         """Thin sync wrapper around async_get_device_location for non-HA contexts."""
         try:
-            return asyncio.run(self.async_get_device_location(device_id, device_name))
+            # Avoid asyncio.run inside running loop (common in HA); guard defensively.
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                _LOGGER.error(
+                    "get_device_location() called inside an active event loop; use async_get_device_location()."
+                )
+                return {}
+            return loop.run_until_complete(self.async_get_device_location(device_id, device_name))
         except RuntimeError as loop_err:
             _LOGGER.error(
-                "get_device_location() was called from an active event loop. "
-                "Use async_get_device_location() instead. Error: %s",
-                loop_err,
+                "get_device_location() could not obtain event loop: %s", loop_err
             )
             return {}
         except Exception as err:
@@ -389,6 +397,14 @@ class GoogleFindMyAPI:
                 )
                 return best
             _LOGGER.warning("API v3.0 Async: No location data for %s", device_name)
+            return {}
+        except ClientError as err:
+            _LOGGER.error(
+                "Network error while getting async location for %s (%s): %s",
+                device_name,
+                device_id,
+                err,
+            )
             return {}
         except Exception as err:
             _LOGGER.error(
@@ -426,7 +442,6 @@ class GoogleFindMyAPI:
 
         Note:
             The capability cache is updated whenever (async_)get_basic_device_list() runs.
-            This avoids triggering a network call from availability checks.
         """
         if not self.is_push_ready():
             return False
@@ -437,17 +452,19 @@ class GoogleFindMyAPI:
         # Unknown -> let Coordinator fall back optimistically without network I/O
         return None
 
-    # ---------- Play/Stop Sound (sync thin wrappers; for CLI/non-HA) ----------
+    # ---------- Play/Stop Sound (sync wrappers; for CLI/non-HA) ----------
     def play_sound(self, device_id: str) -> bool:
         """Thin sync wrapper around async_play_sound for non-HA contexts."""
         try:
-            return asyncio.run(self.async_play_sound(device_id))
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                _LOGGER.error(
+                    "play_sound() called inside an active event loop; use async_play_sound()."
+                )
+                return False
+            return loop.run_until_complete(self.async_play_sound(device_id))
         except RuntimeError as loop_err:
-            _LOGGER.error(
-                "play_sound() was called from an active event loop. "
-                "Use async_play_sound() instead. Error: %s",
-                loop_err,
-            )
+            _LOGGER.error("play_sound() could not obtain event loop: %s", loop_err)
             return False
         except Exception as err:
             _LOGGER.error("Failed to play sound on %s: %s", device_id, err)
@@ -456,13 +473,15 @@ class GoogleFindMyAPI:
     def stop_sound(self, device_id: str) -> bool:
         """Thin sync wrapper around async_stop_sound for non-HA contexts."""
         try:
-            return asyncio.run(self.async_stop_sound(device_id))
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                _LOGGER.error(
+                    "stop_sound() called inside an active event loop; use async_stop_sound()."
+                )
+                return False
+            return loop.run_until_complete(self.async_stop_sound(device_id))
         except RuntimeError as loop_err:
-            _LOGGER.error(
-                "stop_sound() was called from an active event loop. "
-                "Use async_stop_sound() instead. Error: %s",
-                loop_err,
-            )
+            _LOGGER.error("stop_sound() could not obtain event loop: %s", loop_err)
             return False
         except Exception as err:
             _LOGGER.error("Failed to stop sound on %s: %s", device_id, err)
@@ -489,6 +508,9 @@ class GoogleFindMyAPI:
             else:
                 _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
             return bool(ok)
+        except ClientError as err:
+            _LOGGER.error("Network error while playing sound on %s: %s", device_id, err)
+            return False
         except Exception as err:
             _LOGGER.error("Failed to play sound (async) on %s: %s", device_id, err)
             return False
@@ -501,7 +523,6 @@ class GoogleFindMyAPI:
 
         try:
             _LOGGER.info("Submitting Stop Sound (async) for %s", device_id)
-            # NOTE: See comment in async_play_sound() about potential username forwarding.
             result_hex = await async_submit_stop_sound_request(
                 device_id, token, session=self._session
             )
@@ -511,6 +532,9 @@ class GoogleFindMyAPI:
             else:
                 _LOGGER.error("Stop Sound (async) submission failed for %s", device_id)
             return bool(ok)
+        except ClientError as err:
+            _LOGGER.error("Network error while stopping sound on %s: %s", device_id, err)
+            return False
         except Exception as err:
             _LOGGER.error("Failed to stop sound (async) on %s: %s", device_id, err)
             return False
