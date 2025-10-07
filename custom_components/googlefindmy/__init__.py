@@ -1,6 +1,6 @@
 """Google Find My Device integration for Home Assistant.
 
-Version: 2.2 - Finalized architecture with full encapsulation, public APIs, and robust error handling.
+Version: 2.3 - Shared FCM provider, OptionsFlowWithReload compliant, refined lifecycle.
 """
 from __future__ import annotations
 
@@ -35,8 +35,19 @@ from .const import (
 )
 from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
-# --- NEW (HA best practice): register a shared aiohttp session for Nova API ---
+# HA-managed aiohttp session for Nova API
 from .NovaApi import nova_request as nova  # Provides register_hass/unregister_session_provider
+
+# NEW: shared FCM provider wiring
+from .Auth.fcm_receiver_ha import FcmReceiverHA
+from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+    register_fcm_receiver_provider as loc_register_fcm_provider,
+    unregister_fcm_receiver_provider as loc_unregister_fcm_provider,
+)
+from .api import (
+    register_fcm_receiver_provider as api_register_fcm_provider,
+    unregister_fcm_receiver_provider as api_unregister_fcm_provider,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -80,7 +91,6 @@ def _redact_url_token(url: str) -> str:
             (parts.scheme, parts.netloc, parts.path, urlencode(redacted, doseq=True), parts.fragment)
         )
     except Exception:  # pragma: no cover
-        # This is a last resort to prevent logging functions from crashing.
         return url
 
 
@@ -121,49 +131,19 @@ async def _async_save_individual_credentials(oauth_token: str, google_email: str
 
 
 def _opt(entry: ConfigEntry, key: str, default: Any) -> Any:
-    """Read a configuration value, preferring options over data.
-
-    This helper provides a backward-compatible way to access settings,
-    ensuring that user-configured options always take precedence over
-    the initial setup data.
-
-    Args:
-        entry: The config entry to read from.
-        key: The configuration key to look up.
-        default: The default value to return if the key is not found.
-
-    Returns:
-        The configuration value.
-    """
+    """Read a configuration value, preferring options over data."""
     if key in entry.options:
         return entry.options.get(key, default)
     return entry.data.get(key, default)
 
 
 def _effective_config(entry: ConfigEntry) -> dict[str, Any]:
-    """Assemble a dict of non-secret runtime settings (options-first).
-
-    Args:
-        entry: The config entry to build the configuration from.
-
-    Returns:
-        A dictionary containing the merged configuration.
-    """
+    """Assemble a dict of non-secret runtime settings (options-first)."""
     return {k: _opt(entry, k, None) for k in _OPTION_KEYS}
 
 
 async def _async_soft_migrate_data_to_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Idempotently copy known settings from data -> options (never move secrets).
-
-    Rationale:
-        Older versions stored user-tweakable settings in entry.data. Modern HA expects
-        mutable settings in entry.options. This preserves compatibility without
-        breaking existing user setups by migrating them on the fly.
-
-    Args:
-        hass: The Home Assistant instance.
-        entry: The config entry to migrate.
-    """
+    """Idempotently copy known settings from data -> options (never move secrets)."""
     new_options = dict(entry.options)
     changed = False
     for k in _OPTION_KEYS:
@@ -180,14 +160,7 @@ async def _async_soft_migrate_data_to_options(hass: HomeAssistant, entry: Config
 
 
 async def _async_normalize_device_names(hass: HomeAssistant) -> None:
-    """One-time normalization: strip legacy 'Find My - ' prefix from device names.
-
-    Rationale (HA best practice):
-    - Device names must not include integration prefixes; entities will carry context.
-    Safety:
-    - Only touch devices belonging to this integration.
-    - Never overwrite user-provided names (`name_by_user` remains authoritative).
-    """
+    """One-time normalization: strip legacy 'Find My - ' prefix from device names."""
     try:
         dev_reg = dr.async_get(hass)
         updated = 0
@@ -208,15 +181,67 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
 
+# --------------------------- Shared FCM provider ---------------------------
+
+async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
+    """Get or create the shared FCM receiver for this HA instance."""
+    bucket = hass.data.setdefault(DOMAIN, {})
+    refcount = int(bucket.get("fcm_refcount", 0))
+    fcm: FcmReceiverHA | None = bucket.get("fcm_receiver")
+
+    if fcm is None:
+        fcm = FcmReceiverHA()
+        _LOGGER.debug("Initializing shared FCM receiver...")
+        ok = await fcm.async_initialize()
+        if not ok:
+            raise ConfigEntryNotReady("Failed to initialize FCM receiver")
+        bucket["fcm_receiver"] = fcm
+        _LOGGER.info("Shared FCM receiver initialized")
+
+        # Register provider for both consumer modules
+        loc_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
+        api_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
+
+    bucket["fcm_refcount"] = refcount + 1
+    _LOGGER.debug("FCM refcount -> %s", bucket["fcm_refcount"])
+    return fcm
+
+
+async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
+    """Decrease refcount; stop and unregister provider when it reaches zero."""
+    bucket = hass.data.setdefault(DOMAIN, {})
+    refcount = int(bucket.get("fcm_refcount", 0)) - 1
+    refcount = max(refcount, 0)
+    bucket["fcm_refcount"] = refcount
+    _LOGGER.debug("FCM refcount -> %s", refcount)
+
+    if refcount == 0:
+        fcm: FcmReceiverHA | None = bucket.pop("fcm_receiver", None)
+
+        # Unregister providers first (consumers will see provider=None immediately)
+        try:
+            loc_unregister_fcm_provider()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            api_unregister_fcm_provider()
+        except Exception:  # noqa: BLE001
+            pass
+
+        if fcm is not None:
+            try:
+                await fcm.async_stop()
+                _LOGGER.info("Shared FCM receiver stopped")
+            except Exception as err:
+                _LOGGER.warning("Stopping FCM receiver failed: %s", err)
+
+
+# ------------------------------ Setup / Unload -----------------------------
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration from a config entry (entities-first, options-first)."""
 
-    # --- NEW (HA best practice): Register HA-managed aiohttp session for Nova API ---
-    # Why:
-    #   - Reuse HA's shared HTTP session for efficiency and connection pooling.
-    #   - Avoid creating temporary per-request sessions at first boot.
-    #   - Ensure cleanup on unload/reload via entry.async_on_unload.
-    # Priority inside nova: explicit session > registered provider > short-lived fallback (DEBUG only).
+    # Register HA-managed aiohttp session for Nova API
     nova.register_hass(hass)
     entry.async_on_unload(nova.unregister_session_provider)
 
@@ -230,7 +255,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Soft-migrate mutable settings from data -> options (never secrets)
     await _async_soft_migrate_data_to_options(hass, entry)
 
-    # --- Credentials handling (secrets-only in data) ---
+    # Acquire shared FCM and keep it alive while this entry exists
+    fcm = await _async_acquire_shared_fcm(hass)
+    entry.async_on_unload(lambda: hass.async_create_task(_async_release_shared_fcm(hass)))
+
+    # Credentials handling (secrets-only in data)
     secrets_data = entry.data.get("secrets_data")
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
     google_email = entry.data.get("google_email")
@@ -245,7 +274,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("No credentials found in config entry (neither secrets_data nor oauth_token+google_email)")
         raise ConfigEntryNotReady("Credentials missing")
 
-    # --- Build effective runtime settings (options-first) ---
+    # Build effective runtime settings (options-first)
     coordinator = GoogleFindMyCoordinator(
         hass,
         secrets_data=secrets_data,  # may be None with individual-credentials path; token cache is prepped
@@ -264,8 +293,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.google_home_filter = GoogleHomeFilter(hass, _effective_config(entry))
     _LOGGER.debug("Initialized Google Home filter (options-first)")
 
-    # Share coordinator in hass.data (for platforms & restore path)
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    # Share coordinator in hass.data
+    bucket = hass.data.setdefault(DOMAIN, {})
+    bucket[entry.entry_id] = coordinator
 
     # Register map views early
     hass.http.register_view(GoogleFindMyMapView(hass))
@@ -275,7 +305,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register services (available regardless of data freshness)
     await _async_register_services(hass, coordinator)
 
-    # ----- ENTITIES-FIRST: forward platforms now so RestoreEntity can populate immediately -----
+    # Forward platforms so RestoreEntity can populate immediately
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Defer the first refresh until HA is fully started
@@ -289,13 +319,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await coordinator.async_refresh()
             if not coordinator.last_update_success:
                 _LOGGER.warning("Initial refresh failed; entities will recover on subsequent polls.")
-            # Run a one-time normalization after entities/devices exist.
             await _async_normalize_device_names(hass)
         except Exception as err:
             _LOGGER.error("Initial refresh raised an unexpected error: %s", err, exc_info=True)
 
     if hass.state == CoreState.running:
-        hass.async_create_task(_do_first_refresh(None))
+        hass.async_create_task(_do_first_refresh(None), name="googlefindmy.initial_refresh")
     else:
         unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_first_refresh)
         listener_active = True
@@ -306,48 +335,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         entry.async_on_unload(_safe_unsub)
 
-    # React to entry updates (options) and apply changes
-    entry.async_on_unload(entry.add_update_listener(async_update_entry))
+    # IMPORTANT: Do NOT add update listeners when using OptionsFlowWithReload.
+    # Options changes will reload the entry automatically, rebuilding the coordinator.
+
     return True
-
-
-async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle config entry updates. Push new options into the coordinator and refresh."""
-    coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][entry.entry_id]
-
-    # Apply updated settings via public API (no private attribute access)
-    coordinator.update_settings(
-        tracked_devices=_opt(entry, "tracked_devices", []),
-        location_poll_interval=_opt(entry, "location_poll_interval", 300),
-        device_poll_delay=_opt(entry, "device_poll_delay", 5),
-        min_poll_interval=_opt(entry, "min_poll_interval", 120),
-        min_accuracy_threshold=_opt(entry, "min_accuracy_threshold", 100),
-        allow_history_fallback=_opt(entry, "allow_history_fallback", False),
-    )
-
-    # Update Google Home filter configuration with merged options-over-data view
-    if hasattr(coordinator, "google_home_filter"):
-        coordinator.google_home_filter.update_config(_effective_config(entry))
-
-    # Nudge scheduler: make next poll due immediately (no private access)
-    coordinator.force_poll_due()
-
-    _LOGGER.info(
-        "Updated configuration: %d tracked device(s), poll=%ss, delay=%ss",
-        len(coordinator.tracked_devices),
-        coordinator.location_poll_interval,
-        coordinator.device_poll_delay,
-    )
-
-    await coordinator.async_request_refresh()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry and its platforms."""
-    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        # Drop coordinator
+        hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
+        # Release shared FCM (may stop if last entry)
+        await _async_release_shared_fcm(hass)
     return unload_ok
 
+
+# ------------------------------- Services ---------------------------------
 
 def _get_local_ip_sync() -> str:
     """Best-effort local IP discovery via UDP connect (executor-only)."""
@@ -367,18 +372,7 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         return
 
     def _resolve_canonical_from_any(arg: str) -> tuple[str, str]:
-        """Resolve any device identifier to (canonical_id, friendly_name).
-
-        Args:
-            arg: The identifier to resolve.
-
-        Returns:
-            A tuple of (canonical_id, friendly_name).
-
-        Raises:
-            ValueError: If the identifier cannot be resolved to a device
-                        known by this integration.
-        """
+        """Resolve any device identifier to (canonical_id, friendly_name)."""
         # 1) Treat as HA device_id
         dev = dr.async_get(hass).async_get(arg)
         if dev:
@@ -399,15 +393,9 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                             return ident, name
 
         # 3) Fallback: assume arg is the canonical Google ID
-        try:
-            name = coordinator.get_device_display_name(arg) or arg
-            # Verify this is a known device to prevent arbitrary calls
-            if name != arg:
-                return arg, name
-        except (AttributeError, TypeError):
-            # Coordinator or method not ready, or invalid arg type
-            pass
-
+        name = coordinator.get_device_display_name(arg) or arg
+        if name != arg:
+            return arg, name
         raise ValueError(f"Identifier '{arg}' could not be resolved to a known device")
 
     async def async_locate_device_service(call: ServiceCall) -> None:
@@ -497,11 +485,9 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
 
     async def async_rebuild_registry_service(call: ServiceCall) -> None:
         """Migrate soft settings or rebuild the registry (optionally scoped to device_ids)."""
-        # Normalize the 'mode' parameter to lowercase for case-insensitive matching.
         mode: str = str(call.data.get("mode", "rebuild")).lower()
         raw_ids = call.data.get("device_ids")
 
-        # Normalize 'device_ids' to a set, accepting a single string or a list.
         if isinstance(raw_ids, str):
             target_device_ids = {raw_ids}
         elif isinstance(raw_ids, (list, tuple, set)):
@@ -520,11 +506,10 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         )
 
         if mode == "migrate":
-            # Re-run the idempotent soft-migration for all config entries.
             for entry in entries:
                 try:
                     await _async_soft_migrate_data_to_options(hass, entry)
-                except Exception as err:  # keep the service robust
+                except Exception as err:
                     _LOGGER.error("Soft-migrate failed for entry %s: %s", entry.entry_id, err)
             _LOGGER.info(
                 "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
@@ -536,8 +521,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             _LOGGER.error("Unsupported mode '%s' for rebuild_registry; use 'migrate' or 'rebuild'.", mode)
             return
 
-        # --- rebuild mode ---
-        # Determine target devices & which entries are affected.
         affected_entry_ids: set[str] = set()
         if target_device_ids:
             candidate_devices = set()
@@ -560,7 +543,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         removed_entities = 0
         removed_devices = 0
 
-        # Remove all entities bound to the target devices.
         for ent in list(ent_reg.entities.values()):
             if ent.platform == DOMAIN and ent.device_id in candidate_devices:
                 try:
@@ -569,7 +551,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 except Exception as err:
                     _LOGGER.error("Failed to remove entity %s: %s", ent.entity_id, err)
 
-        # Remove orphaned devices (no remaining entities).
         for dev_id in list(candidate_devices):
             dev = dev_reg.async_get(dev_id)
             if dev is None:
@@ -582,7 +563,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 except Exception as err:
                     _LOGGER.error("Failed to remove device %s: %s", dev_id, err)
 
-        # Reload only affected config entries to recreate entities.
         to_reload = [e for e in entries if e.entry_id in affected_entry_ids] or list(entries)
         for entry in to_reload:
             try:
@@ -617,7 +597,6 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         schema=vol.Schema({vol.Required("device_id"): cv.string, vol.Optional("device_name"): cv.string}),
     )
     hass.services.async_register(DOMAIN, SERVICE_REFRESH_URLS, async_refresh_device_urls_service, schema=vol.Schema({}))
-    # Register the new rebuild/migrate service.
     hass.services.async_register(
         DOMAIN,
         SERVICE_REBUILD_REGISTRY,
@@ -625,11 +604,10 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         schema=vol.Schema(
             {
                 vol.Optional("mode", default="rebuild"): vol.In(["migrate", "rebuild"]),
-                # Allow 'device_ids' to be a single string or a list of strings.
                 vol.Optional("device_ids"): vol.Any(cv.string, [cv.string]),
             }
         ),
     )
 
-    # Mark services as registered (prevents duplicate registration on reloads)
+    domain_bucket = hass.data.setdefault(DOMAIN, {})
     domain_bucket["services_registered"] = True
