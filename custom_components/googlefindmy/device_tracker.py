@@ -28,11 +28,15 @@ from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-def _maybe_update_device_registry_name(hass, entity_id: str, new_name: str) -> None:
+
+def _maybe_update_device_registry_name(hass: HomeAssistant, entity_id: str, new_name: str) -> None:
     """Write the real Google device label into the device registry once known.
 
-    Never touch if the user renamed the device (name_by_user is set).
+    We never touch the registry if the user renamed the device (name_by_user set).
     """
     try:
         ent_reg = er.async_get(hass)
@@ -48,10 +52,17 @@ def _maybe_update_device_registry_name(hass, entity_id: str, new_name: str) -> N
             dev_reg.async_update_device(device_id=ent.device_id, name=new_name)
             _LOGGER.debug(
                 "Device registry name updated for %s: '%s' -> '%s'",
-                entity_id, dev.name, new_name
+                entity_id,
+                dev.name,
+                new_name,
             )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - best-effort only
         _LOGGER.debug("Device registry name update failed for %s: %s", entity_id, e)
+
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
 
 
 async def async_setup_entry(
@@ -61,11 +72,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up Google Find My Device tracker entities.
 
-    Design goals:
-    - Follow HA convention: tracker entity represents the device itself.
-    - Create entities from current coordinator snapshot when available.
-    - On cold start, create "skeleton" entities from tracked IDs to enable RestoreEntity.
-    - Dynamically add entities for devices discovered later.
+    Design:
+    - Entities are created from the coordinator snapshot if available.
+    - On cold start, create "skeleton" entities from tracked IDs to enable RestoreEntity,
+      **without** writing any placeholder name to the device registry.
+    - Add entities dynamically for devices discovered later.
     """
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][config_entry.entry_id]
 
@@ -86,11 +97,9 @@ async def async_setup_entry(
         # No live data yet: create skeletons for configured tracked IDs (restore-friendly).
         tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
         for dev_id in tracked_ids:
-            # Avoid writing a placeholder name into the device registry during cold boot.
+            # IMPORTANT: no placeholder name here (avoids polluting the device registry).
             known_ids.add(dev_id)
-            entities.append(
-                GoogleFindMyDeviceTracker(coordinator, {"id": dev_id})
-            )
+            entities.append(GoogleFindMyDeviceTracker(coordinator, {"id": dev_id}))
         if tracked_ids:
             _LOGGER.debug(
                 "Created %d skeleton device_tracker entities for restore (no live data yet)",
@@ -126,6 +135,11 @@ async def async_setup_entry(
     _sync_entities_from_coordinator()  # run once after registration to catch races
 
 
+# ---------------------------------------------------------------------------
+# Entity
+# ---------------------------------------------------------------------------
+
+
 class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity):
     """Representation of a Google Find My Device tracker."""
 
@@ -154,6 +168,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         self._device = device
         self._attr_unique_id = f"{DOMAIN}_{device['id']}"
         # With has_entity_name=False we must set the entity's name ourselves.
+        # If name is missing during cold boot, HA will show the entity_id; that's fine.
         self._attr_name = self._display_name(device.get("name"))
         self._last_good_accuracy_data: dict[str, Any] | None = None  # persisted coordinates for writes
 
@@ -173,9 +188,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         # Standard device_tracker attributes (with safe fallbacks for legacy keys)
         lat = last_state.attributes.get(ATTR_LATITUDE, last_state.attributes.get("latitude"))
         lon = last_state.attributes.get(ATTR_LONGITUDE, last_state.attributes.get("longitude"))
-        acc = last_state.attributes.get(
-            ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy")
-        )
+        acc = last_state.attributes.get(ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy"))
 
         restored: dict[str, Any] = {}
         try:
@@ -201,12 +214,16 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
             self.async_write_ha_state()
 
+    # ---------------- Device Info + Map Link ----------------
     @property
     def device_info(self) -> DeviceInfo:
-        """Return device info, including a configuration_url to the map view."""
-        auth_token = self._get_map_token()
-        path = self._build_map_path(self._device["id"], auth_token, redirect=False)
+        """Return DeviceInfo with a stable configuration_url and safe naming.
 
+        Important for HA 2025.x:
+        - We never pass `default_name` here. `DeviceInfo` must fit the Primary
+          category (`identifiers`, `manufacturer`, `model`, …). Supplying any
+          `default_*` fields would recategorize to Secondary and be rejected.
+        """
         try:
             base_url = get_url(
                 self.hass,
@@ -219,28 +236,29 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             _LOGGER.debug("Could not determine Home Assistant URL, using fallback: %s", e)
             base_url = "http://homeassistant.local:8123"
 
+        auth_token = self._get_map_token()
+        path = self._build_map_path(self._device["id"], auth_token, redirect=False)
+
+        # Avoid overwriting stored device names during cold boot
         raw_name = self._device.get("name")
         display_name = self._display_name(raw_name) if raw_name else None
 
-        # If we only have the bootstrap placeholder, don't override stored registry name
-        use_name = None
-        use_default_name = None
-        if raw_name and display_name != "Google Find My Device":
-            use_name = display_name
-        else:
-            use_default_name = "Google Find My Device"
+        name_kwargs: dict[str, Any] = {}
+        if display_name and display_name != "Google Find My Device":
+            # Only pass a real name; never pass default_name here.
+            name_kwargs["name"] = display_name
 
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
-            name=use_name,
-            default_name=use_default_name,
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}" if base_url else None,
-            serial_number=self._device["id"],
+            serial_number=self._device["id"],  # technical id in the proper field
+            **name_kwargs,
         )
 
-    def _build_map_path(self, device_id: str, token: str, *, redirect: bool = False) -> str:
+    @staticmethod
+    def _build_map_path(device_id: str, token: str, *, redirect: bool = False) -> str:
         """Return the map URL *path* (no scheme/host)."""
         if redirect:
             return f"/api/googlefindmy/redirect_map/{device_id}?token={token}"
