@@ -299,7 +299,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
 
             if not errors:
-                entry = self._get_active_entry()
+                # Use the entry_id from the flow context (HA best practice for reauth).
+                entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
                 assert entry is not None
                 updated_data = dict(entry.data)
                 updated_data.update(new_data)
@@ -320,13 +321,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    def _get_active_entry(self) -> Optional[ConfigEntry]:
-        """Return the single config entry for this domain, if present."""
-        for entry in self._async_current_entries():
-            if entry.domain == DOMAIN:
-                return entry
-        return None
-
 
 class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     """Options flow to (a) update non-secret settings and (b) optionally refresh credentials.
@@ -335,6 +329,7 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         - Do not assign self.config_entry here; the base class provides it.
         - OptionsFlowWithReload will reload the integration when options change
           if the flow ends with async_create_entry(data=...).
+        - Do not update the config entry inside the options flow; the base class handles reloads.
     """
 
     # ---------- Menu entry ----------
@@ -373,8 +368,7 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         Best practice:
             - Return async_create_entry(data=options) to commit options.
             - OptionsFlowWithReload will reload the integration automatically.
-            - If legacy code still reads options from entry.data, mirror non-secret
-              values into data (compat only) before returning the entry.
+            - Do not call hass.config_entries.async_update_entry() from inside the flow.
         """
         errors: Dict[str, str] = {}
 
@@ -408,6 +402,31 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to fetch device list for options: %s", err)
 
+        # Define the base schema without defaults and inject suggested values dynamically.
+        base_schema = vol.Schema(
+            {
+                vol.Optional(OPT_TRACKED_DEVICES): vol.All(
+                    cv.multi_select(device_options), vol.Length(min=0)
+                ),
+                vol.Optional(OPT_LOCATION_POLL_INTERVAL): vol.All(
+                    vol.Coerce(int), vol.Range(min=60, max=3600)
+                ),
+                vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=60)
+                ),
+                vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(
+                    vol.Coerce(int), vol.Range(min=25, max=500)
+                ),
+                vol.Optional(OPT_MOVEMENT_THRESHOLD): vol.All(
+                    vol.Coerce(int), vol.Range(min=10, max=200)
+                ),
+                vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED): bool,
+                vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS): str,
+                vol.Optional(OPT_ENABLE_STATS_ENTITIES): bool,
+                vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION): bool,
+            }
+        )
+
         if user_input is not None:
             new_options = {
                 OPT_TRACKED_DEVICES: user_input.get(OPT_TRACKED_DEVICES, current_tracked),
@@ -421,40 +440,27 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: user_input.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, current_map_token_exp),
             }
 
-            # Mirror non-secrets into data for legacy readers (no options here!).
-            # Options update + reload will be handled by async_create_entry below.
-            shadow_data = dict(entry.data)
-            shadow_data.update(new_options)
-            self.hass.config_entries.async_update_entry(entry, data=shadow_data)
-
             # Commit options and trigger automatic reload via OptionsFlowWithReload.
             return self.async_create_entry(title="", data=new_options)
 
-        schema = vol.Schema(
-            {
-                vol.Optional(OPT_TRACKED_DEVICES, default=current_tracked): vol.All(
-                    cv.multi_select(device_options), vol.Length(min=0)
-                ),
-                vol.Optional(OPT_LOCATION_POLL_INTERVAL, default=current_interval): vol.All(
-                    vol.Coerce(int), vol.Range(min=60, max=3600)
-                ),
-                vol.Optional(OPT_DEVICE_POLL_DELAY, default=current_delay): vol.All(
-                    vol.Coerce(int), vol.Range(min=1, max=60)
-                ),
-                vol.Optional(OPT_MIN_ACCURACY_THRESHOLD, default=current_min_acc): vol.All(
-                    vol.Coerce(int), vol.Range(min=25, max=500)
-                ),
-                vol.Optional(OPT_MOVEMENT_THRESHOLD, default=current_move_thr): vol.All(
-                    vol.Coerce(int), vol.Range(min=10, max=200)
-                ),
-                vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED, default=current_gh_enabled): bool,
-                vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS, default=current_gh_keywords): str,
-                vol.Optional(OPT_ENABLE_STATS_ENTITIES, default=current_stats): bool,
-                vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION, default=current_map_token_exp): bool,
-            }
-        )
+        # Inject suggested/current values for a clean, static schema.
+        suggested_values = {
+            OPT_TRACKED_DEVICES: current_tracked,
+            OPT_LOCATION_POLL_INTERVAL: current_interval,
+            OPT_DEVICE_POLL_DELAY: current_delay,
+            OPT_MIN_ACCURACY_THRESHOLD: current_min_acc,
+            OPT_MOVEMENT_THRESHOLD: current_move_thr,
+            OPT_GOOGLE_HOME_FILTER_ENABLED: current_gh_enabled,
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS: current_gh_keywords,
+            OPT_ENABLE_STATS_ENTITIES: current_stats,
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: current_map_token_exp,
+        }
 
-        return self.async_show_form(step_id="settings", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="settings",
+            data_schema=self.add_suggested_values_to_schema(base_schema, suggested_values),
+            errors=errors,
+        )
 
     # ---------- Credentials update (always-empty fields) ----------
     async def async_step_credentials(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -508,19 +514,6 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                 errors["base"] = "cannot_connect"
 
         return self.async_show_form(step_id="credentials", data_schema=schema, errors=errors)
-
-    # ---------- Finish (UX confirmation) ----------
-    async def async_step_finish(self, user_input: dict[str, Any] | None = None, *, mode: str = "settings") -> FlowResult:
-        """Show a confirmation step and then close the flow."""
-        if user_input is None:
-            # Show a message using translations (options.step.finish.*)
-            return self.async_show_form(
-                step_id="finish",
-                data_schema=vol.Schema({}),
-                description_placeholders={"mode": mode},
-            )
-        # Close flow on submit
-        return self.async_create_entry(title="", data={"result": f"{mode}_saved"})
 
     # ---------- Internal helper ----------
     async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
