@@ -126,8 +126,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._stats_save_task: Optional[asyncio.Task] = None
         self._stats_debounce_seconds: float = 5.0
 
-        # Load persistent statistics asynchronously
-        hass.async_create_task(self._async_load_stats())
+        # Load persistent statistics asynchronously (name the task for better debugging)
+        hass.async_create_task(self._async_load_stats(), name=f"{DOMAIN}.load_stats")
 
         super().__init__(
             hass,
@@ -188,7 +188,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         len(devices),
                         effective_interval,
                     )
-                    self.hass.async_create_task(self._async_start_poll_cycle(devices))
+                    self.hass.async_create_task(
+                        self._async_start_poll_cycle(devices),
+                        name=f"{DOMAIN}.poll_cycle",
+                    )
                 else:
                     _LOGGER.debug(
                         "Poll not due (elapsed=%.1fs/%ss) or already running=%s",
@@ -522,8 +525,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             await asyncio.sleep(self._stats_debounce_seconds)
             await self._async_save_stats()
         except asyncio.CancelledError:
-            # Expected if a new increment arrives before the delay elapses.
-            raise
+            # Expected if a new increment arrives before the delay elapses; do nothing.
+            return
         except Exception as err:
             _LOGGER.debug("Debounced stats save failed: %s", err)
 
@@ -532,7 +535,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Cancel a pending writer, if any, and schedule a fresh one.
         if self._stats_save_task and not self._stats_save_task.done():
             self._stats_save_task.cancel()
-        self._stats_save_task = self.hass.async_create_task(self._debounced_save_stats())
+        self._stats_save_task = self.hass.async_create_task(
+            self._debounced_save_stats(), name=f"{DOMAIN}.save_stats_debounced"
+        )
 
     def increment_stat(self, stat_name: str) -> None:
         """Increment a statistic counter and schedule debounced persistence."""
