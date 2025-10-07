@@ -76,7 +76,10 @@
         "data": {
           "secrets_json": "Nuovo secrets.json (contenuto completo)",
           "oauth_token": "Nuovo token OAuth",
-          "google_email": "Email Google"
+          "google_email": "Email Google",
+          "new_secrets_json": "Nuovo secrets.json (contenuto completo)",
+          "new_oauth_token": "Nuovo token OAuth",
+          "new_google_email": "Email Google"
         }
       },
       "settings": {
@@ -185,8 +188,23 @@
       "stat_background_updates": {
         "name": "Aggiornamenti in background"
       },
+      "stat_polled_updates": {
+        "name": "Aggiornamenti da interrogazione"
+      },
       "stat_crowd_sourced_updates": {
         "name": "Aggiornamenti della comunità"
+      },
+      "stat_history_fallback_used": {
+        "name": "Fallback storico utilizzato"
+      },
+      "stat_timeouts": {
+        "name": "Timeout"
+      },
+      "stat_invalid_coords": {
+        "name": "Coordinate non valide"
+      },
+      "stat_low_quality_dropped": {
+        "name": "Accuratezza insufficiente scartata"
       }
     }
   }
