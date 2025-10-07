@@ -123,6 +123,11 @@ class FcmPushClientConfig:  # pylint:disable=too-many-instance-attributes
     client_heartbeat_interval: int | None = 20
     """Time in seconds to send heartbeats to the server"""
 
+    # NEW: configurable idle-reset window
+    idle_reset_after: float = 90.0
+    """Seconds without any message before the monitor treats the stream as stale.
+    If <= 0, falls back to max(client_heartbeat_interval, server_heartbeat_interval) + 5."""
+
     send_selective_acknowledgements: bool = True
     """True to send selective acknowledgements for each message received.
         Currently if false the client does not send any acknowledgements."""
@@ -263,9 +268,18 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         writer = self.writer
         self.writer = None
         if writer:
-            writer.close()
-            with contextlib.suppress(Exception):
+            try:
+                writer.close()
                 await writer.wait_closed()
+            except TimeoutError:
+                # TLS shutdown timed out: force-close the transport and continue.
+                self.logger.debug("SSL shutdown timed out; force-closing transport")
+                transport = getattr(writer, "transport", None)
+                if transport is not None:
+                    transport.close()
+            except Exception:
+                # Keep old behavior: swallow all errors on close.
+                pass
 
     async def _reset(self) -> None:
         if (
@@ -305,7 +319,11 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         res = 0
         shift = 0
         while True:
-            r = await self.reader.readexactly(1)  # type: ignore[union-attr]
+            try:
+                r = await self.reader.readexactly(1)  # type: ignore[union-attr]
+            except asyncio.TimeoutError:
+                # Treat idle read timeout as a normal, reconnectable condition.
+                raise ConnectionError("FCM read timeout (idle)") from None
             (b,) = struct.unpack("B", r)
             res |= (b & 0x7F) << shift
             if (b & 0x80) == 0:
@@ -342,42 +360,55 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         await self.writer.drain()  # type: ignore[union-attr]
 
     async def _receive_msg(self) -> Message | None:
-        if self.first_message:
-            r = await self.reader.readexactly(2)  # type: ignore[union-attr]
-            version, tag = struct.unpack("BB", r)
-            if version < MCS_VERSION and version != 38:
-                raise RuntimeError(f"protocol version {version} unsupported")
-            self.first_message = False
-        else:
-            r = await self.reader.readexactly(1)  # type: ignore[union-attr]
-            (tag,) = struct.unpack("B", r)
-        size = await self._read_varint32()
+        try:
+            if self.first_message:
+                try:
+                    r = await self.reader.readexactly(2)  # type: ignore[union-attr]
+                except asyncio.TimeoutError:
+                    raise ConnectionError("FCM read timeout (idle)") from None
+                version, tag = struct.unpack("BB", r)
+                if version < MCS_VERSION and version != 38:
+                    raise RuntimeError(f"protocol version {version} unsupported")
+                self.first_message = False
+            else:
+                try:
+                    r = await self.reader.readexactly(1)  # type: ignore[union-attr]
+                except asyncio.TimeoutError:
+                    raise ConnectionError("FCM read timeout (idle)") from None
+                (tag,) = struct.unpack("B", r)
+            size = await self._read_varint32()
 
-        self._log_verbose(
-            "Received message with tag %s and size %s",
-            tag,
-            size,
-        )
+            self._log_verbose(
+                "Received message with tag %s and size %s",
+                tag,
+                size,
+            )
 
-        if not size >= 0:
-            self._log_warn_with_limit("Unexpected message size %s", size)
-            return None
+            if not size >= 0:
+                self._log_warn_with_limit("Unexpected message size %s", size)
+                return None
 
-        buf = await self.reader.readexactly(size)  # type: ignore[union-attr]
+            try:
+                buf = await self.reader.readexactly(size)  # type: ignore[union-attr]
+            except asyncio.TimeoutError:
+                raise ConnectionError("FCM read timeout (idle)") from None
 
-        msg_class = next(iter([c for c, t in MCS_MESSAGE_TAG.items() if t == tag]))
-        if not msg_class:
-            self._log_warn_with_limit("Unexpected message tag %s", tag)
-            return None
-        if isinstance(msg_class, str):
-            self._log_warn_with_limit("Unconfigured message class %s", msg_class)
-            return None
+            msg_class = next(iter([c for c, t in MCS_MESSAGE_TAG.items() if t == tag]))
+            if not msg_class:
+                self._log_warn_with_limit("Unexpected message tag %s", tag)
+                return None
+            if isinstance(msg_class, str):
+                self._log_warn_with_limit("Unconfigured message class %s", msg_class)
+                return None
 
-        payload = msg_class()  # type: ignore[operator]
-        payload.ParseFromString(buf)
-        self._log_verbose("Received payload: %s", self._msg_str(payload))
+            payload = msg_class()  # type: ignore[operator]
+            payload.ParseFromString(buf)
+            self._log_verbose("Received payload: %s", self._msg_str(payload))
 
-        return payload
+            return payload
+        except asyncio.TimeoutError:
+            # Extra guard (should be converted earlier). Treat as normal reconnect.
+            raise ConnectionError("FCM read timeout (idle)") from None
 
     async def _login(self) -> None:
         self.run_state = FcmPushClientRunState.STARTING_LOGIN
@@ -620,10 +651,13 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         Design: sending of heartbeats is handled by a separate periodic task to avoid
         races where HeartbeatAck arrives during a sleep window.
         """
-        # Inactivity timeout = max of both heartbeat intervals + small grace
-        base_client = self.config.client_heartbeat_interval or 0
-        base_server = self.config.server_heartbeat_interval or 0
-        timeout_duration = max(base_client, base_server, 1) + 5.0
+        # Inactivity timeout: prefer explicit setting, else derive from heartbeats (Patch 2)
+        if self.config.idle_reset_after and self.config.idle_reset_after > 0:
+            timeout_duration = float(self.config.idle_reset_after)
+        else:
+            base_client = self.config.client_heartbeat_interval or 0
+            base_server = self.config.server_heartbeat_interval or 0
+            timeout_duration = max(base_client, base_server, 1) + 5.0
 
         while self.do_listen:
             await asyncio.sleep(self.config.monitor_interval)
@@ -632,7 +666,8 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                 now = time.time()
                 last = self.last_message_time or 0.0
                 if last and (now - last > timeout_duration):
-                    self.logger.warning(
+                    # Downgrade to INFO — this is usually a benign idle disconnect (Patch 1).
+                    self.logger.info(
                         "No message received in %.1fs. Connection likely stale, resetting.",
                         timeout_duration,
                     )
@@ -792,12 +827,18 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                     elif msg := await self._receive_msg():
                         await self._handle_message(msg)
 
+                except (ConnectionError, ssl.SSLError) as cex:
+                    # Treat idle timeouts / TLS shutdown quirks as normal reconnects (Patch 1)
+                    self.logger.info("FCM stream ended (%s); reconnecting…", cex)
+                    if self._try_increment_error_count(ErrorType.CONNECTION):
+                        await self._reset()
+
                 except (OSError, EOFError, asyncio.IncompleteReadError) as osex:
-                    # Normal network life-cycle: treat reset by peer as debug, throttled
+                    # Normal network life-cycle: log resets by peer at DEBUG; otherwise INFO.
                     if isinstance(osex, ConnectionResetError):
                         self._log_reset_by_peer(osex)
                     else:
-                        self.logger.exception("Unexpected exception during read\n")
+                        self.logger.info("FCM read ended (%s); reconnecting…", osex)
                     if self._try_increment_error_count(ErrorType.CONNECTION):
                         await self._reset()
 
