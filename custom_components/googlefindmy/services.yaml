@@ -1,6 +1,7 @@
 locate_device:
   name: Locate Device
   description: "Get the current location of a Google Find My device"
+  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
   fields:
     device_id:
       name: Device
@@ -13,6 +14,7 @@ locate_device:
 play_sound:
   name: Play Sound
   description: "Play a sound on a Google Find My device"
+  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
   fields:
     device_id:
       name: Device
@@ -24,7 +26,7 @@ play_sound:
 
 locate_device_external:
   name: Locate Device (External)
-  description: "Get current location using external GoogleFindMyTools process (workaround for FCM issues)"
+  description: "Get current location using an external GoogleFindMyTools helper (workaround for FCM issues)"
   fields:
     device_id:
       name: Device
@@ -36,6 +38,7 @@ locate_device_external:
     device_name:
       name: Device Name
       description: "Optional friendly name used only for logs"
+      example: "Keys Tracker"
       required: false
       selector:
         text:
@@ -51,6 +54,7 @@ rebuild_registry:
     mode:
       name: Mode
       description: "Choose 'Rebuild' to remove entities/devices and reload; 'Migrate' only re-applies the soft data→options migration."
+      advanced: true
       required: false
       default: rebuild
       selector:
@@ -63,6 +67,7 @@ rebuild_registry:
     device_ids:
       name: Devices (optional)
       description: "Limit the operation to specific devices. Leave empty to target all Google Find My devices. (This selector passes HA device IDs.)"
+      advanced: true
       required: false
       selector:
         device:
