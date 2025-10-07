@@ -17,7 +17,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import GoogleFindMyAPI
-from .const import DOMAIN, UPDATE_INTERVAL
+from .const import DOMAIN, UPDATE_INTERVAL, LOCATION_REQUEST_TIMEOUT_S
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -249,7 +249,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         # Protect API awaitable with timeout
                         location = await asyncio.wait_for(
                             self.api.async_get_device_location(dev_id, dev_name),
-                            timeout=30.0,
+                            timeout=LOCATION_REQUEST_TIMEOUT_S,
                         )
 
                         if not location:
@@ -369,9 +369,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         self.increment_stat("polled_updates")
 
                     except asyncio.TimeoutError:
-                        _LOGGER.warning(
-                            "Location request timed out for %s after 30 seconds",
+                        _LOGGER.info(
+                            "Location request timed out for %s after %s seconds",
                             dev_name,
+                            LOCATION_REQUEST_TIMEOUT_S,
                         )
                         self.increment_stat("timeouts")
                     except Exception as err:
