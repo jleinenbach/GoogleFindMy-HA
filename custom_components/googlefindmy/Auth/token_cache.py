@@ -333,6 +333,38 @@ def get_cached_value(name: str) -> Any:
         )
 
 
+def set_cached_value(name: str, value: Optional[Any]) -> None:
+    """Legacy sync facade. Must not be called from the event loop.
+
+    Raises:
+        RuntimeError: If called inside the event loop (use async variant instead).
+    """
+    # Correct event-loop guard: forbid use when a loop is active.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop → OK to proceed synchronously
+        pass
+    else:
+        raise RuntimeError(
+            f"Sync `set_cached_value({name!r})` used inside event loop. "
+            "Use `async_set_cached_value` instead."
+        )
+
+    if not _INSTANCES:
+        _LOGGER.warning("Cache not initialized; cannot set '%s'", name)
+        return
+
+    cache = _get_default_cache()
+    # Direct write to in-memory dict for sync context.
+    # This bypasses the write lock and deferred save, which is acceptable
+    # for the legacy CLI/test use case.
+    if value is None:
+        cache._data.pop(name, None)
+    else:
+        cache._data[name] = value
+
+
 __all__ = [
     "CacheData",
     "TokenCache",
@@ -340,6 +372,8 @@ __all__ = [
     "async_set_cached_value",
     "async_get_cached_value_or_set",
     "async_get_all_cached_values",
+    "get_cached_value",
+    "set_cached_value",
     "_register_instance",
     "_unregister_instance",
     "_set_default_entry_id",
