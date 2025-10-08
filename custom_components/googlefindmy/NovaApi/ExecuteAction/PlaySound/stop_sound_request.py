@@ -17,7 +17,11 @@ from custom_components.googlefindmy.example_data_provider import get_example_dat
 
 
 def stop_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
-    """Build the hex payload for a 'Stop Sound' action (pure builder)."""
+    """Build the hex payload for a 'Stop Sound' action (pure builder).
+
+    Returns:
+        Hex-encoded protobuf payload for Nova transport.
+    """
     return create_sound_request(False, canonic_device_id, gcm_registration_id)
 
 
@@ -27,7 +31,11 @@ async def async_submit_stop_sound_request(
     *,
     session: Optional[ClientSession] = None,
 ) -> Optional[str]:
-    """Submit a 'Stop Sound' action using the shared async Nova client."""
+    """Submit a 'Stop Sound' action using the shared async Nova client.
+
+    Returns:
+        Hex string (possibly empty) on HTTP 200, or None on fatal error.
+    """
     hex_payload = stop_sound_request(canonic_device_id, gcm_registration_id)
     return await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload, session=session)
 
