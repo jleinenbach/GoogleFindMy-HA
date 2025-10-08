@@ -20,8 +20,12 @@ from custom_components.googlefindmy.example_data_provider import get_example_dat
 def start_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
     """Build the hex payload for a 'Play Sound' action (pure builder).
 
-    This function returns the hex-encoded protobuf payload without performing network I/O.
-    It is kept for backwards compatibility with code that wants to submit the payload itself.
+    Returns:
+        Hex-encoded protobuf payload for Nova transport.
+
+    Notes:
+        This function performs no network I/O. It exists for backwards
+        compatibility with code paths that submit the payload themselves.
     """
     request_uuid = generate_random_uuid()
     return create_sound_request(True, canonic_device_id, gcm_registration_id, request_uuid)
@@ -35,9 +39,13 @@ async def async_submit_start_sound_request(
 ) -> Optional[str]:
     """Submit a 'Play Sound' action using the shared async Nova client.
 
-    Priority of session usage:
-        explicit `session` argument > registered provider (inside Nova client) > ephemeral fallback.
-    Returns the hex response (may be empty) or None on fatal error.
+    Session priority:
+        1) Explicit `session` argument (tests/special cases),
+        2) Registered HA session provider (inside Nova client),
+        3) Ephemeral fallback (Nova client, last resort).
+
+    Returns:
+        Hex string (possibly empty) on HTTP 200, or None on fatal error.
     """
     hex_payload = start_sound_request(canonic_device_id, gcm_registration_id)
     return await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload, session=session)
