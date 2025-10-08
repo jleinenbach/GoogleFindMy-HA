@@ -1,38 +1,75 @@
 locate_device:
   name: Locate Device
-  description: Get the current location of a Google Find My device
+  description: "Get the current location of a Google Find My device"
+  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
   fields:
     device_id:
-      name: Device ID
-      description: The ID of the device to locate
+      name: Device
+      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
       required: true
       selector:
-        text:
+        device:
+          integration: googlefindmy
 
 play_sound:
   name: Play Sound
-  description: Play a sound on a Google Find My device
+  description: "Play a sound on a Google Find My device"
+  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
   fields:
     device_id:
-      name: Device ID
-      description: The ID of the device to play sound on
+      name: Device
+      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
       required: true
       selector:
-        text:
+        device:
+          integration: googlefindmy
 
 locate_device_external:
   name: Locate Device (External)
-  description: Get current location using external GoogleFindMyTools process (workaround for FCM issues)
+  description: "Get current location using an external GoogleFindMyTools helper (workaround for FCM issues)"
   fields:
     device_id:
-      name: Device ID
-      description: The canonical device ID to locate
+      name: Device
+      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
       required: true
       selector:
-        text:
+        device:
+          integration: googlefindmy
     device_name:
       name: Device Name
-      description: The friendly name of the device (optional)
+      description: "Optional friendly name used only for logs"
+      example: "Keys Tracker"
       required: false
       selector:
         text:
+
+refresh_device_urls:
+  name: Refresh Device URLs
+  description: "Recompute and update each device's configuration_url to point to the map view (use after base-URL or token policy changes)"
+
+rebuild_registry:
+  name: Rebuild / Migrate Registry
+  description: "Maintenance: run a soft data→options migration or rebuild entities/devices for this integration."
+  fields:
+    mode:
+      name: Mode
+      description: "Choose 'Rebuild' to remove entities/devices and reload; 'Migrate' only re-applies the soft data→options migration."
+      advanced: true
+      required: false
+      default: rebuild
+      selector:
+        select:
+          options:
+            - label: Rebuild (remove + reload)
+              value: rebuild
+            - label: Migrate (data→options only)
+              value: migrate
+    device_ids:
+      name: Devices (optional)
+      description: "Limit the operation to specific devices. Leave empty to target all Google Find My devices. (This selector passes HA device IDs.)"
+      advanced: true
+      required: false
+      selector:
+        device:
+          multiple: true
+          integration: googlefindmy

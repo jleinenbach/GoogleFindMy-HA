@@ -1,220 +1,141 @@
-import asyncio
-import base64
-import binascii
+"""Backward-compatibility shim for legacy FCM receiver.
 
-from custom_components.googlefindmy.Auth.token_cache import set_cached_value, get_cached_value
+This module used to expose a standalone FCM stack via `FcmReceiver`. The integration
+now runs a single, shared HA-managed receiver (`FcmReceiverHA`) that is acquired and
+released in `__init__.py`. To avoid spawning a second stack (and to keep imports from
+older code paths from breaking), this shim provides a minimal, non-invasive surface.
 
-class FcmReceiver:
+Notes
+-----
+- This shim does **not** start or own any FCM client.
+- It reads already-persisted credentials (token cache) for `get_fcm_token()` /
+  `get_android_id()`.
+- `register_for_location_updates()` is accepted for compatibility but is a no-op; the
+  new design routes device-scoped callbacks through the shared receiver only.
+- `stop_listening()` is a no-op (the shared receiver lifecycle is owned by HA).
 
-    _instance = None
-    _listening = False
+If you still call into this file directly, please migrate to the shared receiver:
+`from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA`
+"""
 
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(FcmReceiver, cls).__new__(cls, *args, **kwargs)
-        return cls._instance
+from __future__ import annotations
 
-    def __init__(self):
-        if hasattr(self, '_initialized') and self._initialized:
-            return
-        self._initialized = True
+import logging
+from typing import Any, Callable, Optional
 
-        # Initialize attributes first to prevent attribute errors
-        self.credentials = None
-        self.location_update_callbacks = []
-        self.pc = None
-        self._listening = False
+try:
+    # Primary, explicit import path within the integration
+    from custom_components.googlefindmy.Auth.token_cache import (
+        get_cached_value,
+        set_cached_value,
+    )
+except Exception as err:  # noqa: BLE001 - defensive import for rare packaging layouts
+    raise ImportError(
+        "googlefindmy.Auth.fcm_receiver shim could not import token_cache; "
+        "please ensure the integration is installed correctly."
+    ) from err
 
-        # Define Firebase project configuration
-        project_id = "google.com:api-project-289722593072"
-        app_id = "1:289722593072:android:3cfcf5bc359f0308"
-        api_key = "AIzaSyD_gko3P392v6how2H7UpdeXQ0v2HLettc"
-        message_sender_id = "289722593072"
-
-        try:
-            # Lazy import to avoid protobuf conflicts
-            try:
-                from custom_components.googlefindmy.Auth.firebase_messaging import FcmRegisterConfig, FcmPushClient
-            except ImportError as e:
-                print(f"[FCMReceiver] Import error: {e}")
-                from .firebase_messaging import FcmRegisterConfig, FcmPushClient
-
-            fcm_config = FcmRegisterConfig(
-                project_id=project_id,
-                app_id=app_id,
-                api_key=api_key,
-                messaging_sender_id=message_sender_id,
-                bundle_id="com.google.android.apps.adm",
-            )
-
-            self.credentials = get_cached_value('fcm_credentials')
-            # PATCH: Normalize credentials if stored as JSON string to ensure consistent downstream type.
-            if isinstance(self.credentials, str):
-                try:
-                    import json
-                    self.credentials = json.loads(self.credentials)
-                except Exception:
-                    # Leave as-is; read-path hardening handles non-dict values elsewhere.
-                    pass
-            self.pc = FcmPushClient(self._on_notification, fcm_config, self.credentials, self._on_credentials_updated)
-        except Exception as e:
-            print(f"[FCMReceiver] Initialization error: {e}")
-            # Ensure attributes exist even if initialization fails
-            if not hasattr(self, 'credentials'):
-                self.credentials = None
-            if not hasattr(self, 'pc'):
-                self.pc = None
+_LOGGER = logging.getLogger(__name__)
 
 
-    def register_for_location_updates(self, callback):
-        try:
-            if not hasattr(self, '_listening'):
-                self._listening = False
-                
-            if not self._listening:
-                try:
-                    # Try to use existing event loop
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # If loop is already running, we can't use run_until_complete
-                        raise RuntimeError("Event loop is already running")
-                    loop.run_until_complete(self._register_for_fcm_and_listen())
-                except RuntimeError:
-                    # No event loop or loop is running, create a new one
-                    asyncio.run(self._register_for_fcm_and_listen())
+class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
+    """Legacy class preserved as a thin adapter.
 
-            self.location_update_callbacks.append(callback)
+    Only supports token/ID access; start/stop and registration are no-ops to avoid
+    interfering with the shared, HA-managed FCM lifecycle.
+    """
 
-            if self.credentials and 'fcm' in self.credentials and 'registration' in self.credentials['fcm']:
-                return self.credentials['fcm']['registration']['token']
-            else:
-                raise RuntimeError("FCM credentials not available after registration")
-        except AttributeError as e:
-            raise RuntimeError(f"FcmReceiver not properly initialized: {e}")
-        except Exception as e:
-            raise RuntimeError(f"Failed to register for location updates: {e}")
-
-
-    def get_fcm_token(self):
-        """Get FCM token without registering for callbacks."""
-        try:
-            if self.credentials and 'fcm' in self.credentials and 'registration' in self.credentials['fcm']:
-                return self.credentials['fcm']['registration']['token']
-            else:
-                # Try to initialize credentials if not already done
-                if self.credentials is None:
-                    try:
-                        # Try to use existing event loop
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            # If loop is already running, we can't use run_until_complete
-                            raise RuntimeError("Event loop is already running")
-                        loop.run_until_complete(self._register_for_fcm())
-                    except RuntimeError:
-                        # No event loop or loop is running, create a new one
-                        asyncio.run(self._register_for_fcm())
-                
-                if self.credentials and 'fcm' in self.credentials and 'registration' in self.credentials['fcm']:
-                    return self.credentials['fcm']['registration']['token']
-                else:
-                    raise RuntimeError("FCM credentials not available after registration attempt")
-        except Exception as e:
-            raise RuntimeError(f"Failed to get FCM token: {e}")
-
-    def stop_listening(self):
-        if self.pc:
-            try:
-                # Try to use existing event loop
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If loop is already running, we can't use run_until_complete
-                    raise RuntimeError("Event loop is already running")
-                loop.run_until_complete(self.pc.stop())
-            except RuntimeError:
-                # No event loop or loop is running, create a new one
-                asyncio.run(self.pc.stop())
-        self._listening = False
-
-
-    def get_android_id(self):
-
-        if self.credentials is None:
-            try:
-                # Try to use existing event loop
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If loop is already running, we can't use run_until_complete
-                    raise RuntimeError("Event loop is already running")
-                loop.run_until_complete(self._register_for_fcm_and_listen())
-            except RuntimeError:
-                # No event loop or loop is running, create a new one
-                asyncio.run(self._register_for_fcm_and_listen())
-
-        if self.credentials and 'gcm' in self.credentials and 'android_id' in self.credentials['gcm']:
-            return self.credentials['gcm']['android_id']
-        else:
-            raise RuntimeError("FCM credentials not available or missing android_id")
-
-
-    # Define a callback function for handling notifications
-    def _on_notification(self, obj, notification, data_message):
-
-        # Check if the payload is present
-        if 'data' in obj and 'com.google.android.apps.adm.FCM_PAYLOAD' in obj['data']:
-
-            # Decode the base64 string
-            base64_string = obj['data']['com.google.android.apps.adm.FCM_PAYLOAD']
-            decoded_bytes = base64.b64decode(base64_string)
-
-            # print("[FCMReceiver] Decoded FMDN Message:", decoded_bytes.hex())
-
-            # Convert to hex string
-            hex_string = binascii.hexlify(decoded_bytes).decode('utf-8')
-
-            for callback in self.location_update_callbacks:
-                callback(hex_string)
-        else:
-            print("[FCMReceiver] Payload not found in the notification.")
-
-
-    def _on_credentials_updated(self, creds):
-        # PATCH: Normalize credentials if provided as JSON string; ensures consistent dict type for downstream consumers.
-        creds_to_store = creds
-        if isinstance(creds_to_store, str):
+    def __init__(self) -> None:
+        # Cache a snapshot of persisted credentials to keep legacy callers functional.
+        creds = get_cached_value("fcm_credentials")
+        # Normalize common storage shapes (dict or JSON-serialized dict)
+        if isinstance(creds, str):
             try:
                 import json
-                creds_to_store = json.loads(creds_to_store)
-            except Exception:
-                # If parsing fails, store raw value; read-path hardening must cope with it.
+
+                creds = json.loads(creds)
+            except json.JSONDecodeError:
+                # Keep raw string; accessors will handle missing structure gracefully.
+                pass
+        self._creds: Any = creds
+
+    # ----------------------------
+    # Legacy API (no-op / accessors)
+    # ----------------------------
+    def register_for_location_updates(self, callback: Callable[..., Any]) -> Optional[str]:
+        """Accept legacy registration but do not attach a callback.
+
+        Rationale:
+            The new architecture wires device-scoped callbacks through the shared
+            FcmReceiverHA instance within Home Assistant. Here we simply return the
+            current token (if any) and log a deprecation note.
+
+        Returns:
+            The FCM token if available (str), else None.
+        """
+        _LOGGER.debug(
+            "Legacy FcmReceiver.register_for_location_updates() called. "
+            "This is a no-op in the new architecture; please migrate to FcmReceiverHA."
+        )
+        return self.get_fcm_token()
+
+    def get_fcm_token(self) -> Optional[str]:
+        """Return the current FCM token from the persisted credentials, if available."""
+        creds = self._creds or get_cached_value("fcm_credentials")
+        if isinstance(creds, str):
+            # Late normalization if we were constructed before credentials were JSON.
+            try:
+                import json
+
+                creds = json.loads(creds)
+            except Exception:  # noqa: BLE001 - tolerate non-JSON values
                 pass
 
-        self.credentials = creds_to_store
+        try:
+            token = creds["fcm"]["registration"]["token"]
+            if isinstance(token, str) and token:
+                return token
+        except Exception:  # noqa: BLE001 - tolerate missing keys/shape
+            return None
+        return None
 
-        # Also store to disk
-        set_cached_value('fcm_credentials', self.credentials)
-        print("[FCMReceiver] Credentials updated.")
+    def stop_listening(self) -> None:
+        """Legacy no-op.
 
+        The shared FCM receiver is owned and stopped by the integration lifecycle
+        (via `entry.async_on_unload` in `__init__.py`). Stopping from here could
+        erroneously affect other config entries.
+        """
+        _LOGGER.debug("Legacy FcmReceiver.stop_listening(): no-op in compatibility shim.")
 
-    async def _register_for_fcm(self):
-        fcm_token = None
-
-        # Register or check in with FCM and get the FCM token
-        while fcm_token is None:
+    def get_android_id(self) -> Optional[str]:
+        """Return the Android ID from persisted credentials, if available."""
+        creds = self._creds or get_cached_value("fcm_credentials")
+        if isinstance(creds, str):
             try:
-                fcm_token = await self.pc.checkin_or_register()
-            except Exception as e:
-                await self.pc.stop()
-                print("[FCMReceiver] Failed to register with FCM. Retrying...")
-                await asyncio.sleep(5)
+                import json
 
+                creds = json.loads(creds)
+            except Exception:  # noqa: BLE001
+                pass
 
-    async def _register_for_fcm_and_listen(self):
-        await self._register_for_fcm()
-        await self.pc.start()
-        self._listening = True
-        print("[FCMReceiver] Listening for notifications. This can take a few seconds...")
+        try:
+            aid = creds["gcm"]["android_id"]
+            return str(aid) if aid is not None else None
+        except Exception:  # noqa: BLE001
+            return None
 
+    # ----------------------------
+    # Legacy setter passthrough (rare)
+    # ----------------------------
+    def _on_credentials_updated(self, creds: Any) -> None:
+        """Legacy setter kept for callers that push new credentials.
 
-if __name__ == "__main__":
-    receiver = FcmReceiver()
-    print(receiver.get_android_id())
+        Stores to the shared token cache; does not touch any FCM client here.
+        """
+        try:
+            set_cached_value("fcm_credentials", creds)
+            self._creds = creds
+            _LOGGER.debug("Legacy FcmReceiver: credentials snapshot updated via shim.")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Legacy FcmReceiver: failed to persist credentials: %s", err)

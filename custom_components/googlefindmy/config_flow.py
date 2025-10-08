@@ -1,325 +1,531 @@
-"""Config flow for Google Find My Device integration."""
+"""Config flow for Google Find My Device (custom integration)."""
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
-from .const import DOMAIN, CONF_OAUTH_TOKEN, DEFAULT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+# Import selectors defensively (older HA versions may not have all selectors available)
+try:
+    from homeassistant.helpers.selector import selector
+except Exception:  # noqa: BLE001
+    selector = None  # type: ignore[assignment]
+
 from .api import GoogleFindMyAPI
+from .const import (
+    # Core
+    DOMAIN,
+    # Data (credentials, immutable)
+    CONF_OAUTH_TOKEN,
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+    DATA_AUTH_METHOD,
+    # Options (user-changeable)
+    OPT_TRACKED_DEVICES,
+    OPT_LOCATION_POLL_INTERVAL,
+    OPT_DEVICE_POLL_DELAY,
+    OPT_MIN_ACCURACY_THRESHOLD,
+    OPT_MOVEMENT_THRESHOLD,
+    OPT_GOOGLE_HOME_FILTER_ENABLED,
+    OPT_GOOGLE_HOME_FILTER_KEYWORDS,
+    OPT_ENABLE_STATS_ENTITIES,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    # Defaults (single source of truth)
+    DEFAULT_LOCATION_POLL_INTERVAL,
+    DEFAULT_DEVICE_POLL_DELAY,
+    DEFAULT_MIN_ACCURACY_THRESHOLD,
+    DEFAULT_MOVEMENT_THRESHOLD,
+    DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
+    DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
+    DEFAULT_ENABLE_STATS_ENTITIES,
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-STEP_USER_DATA_SCHEMA = vol.Schema({
-    vol.Required("auth_method"): vol.In({
-        "secrets_json": "GoogleFindMyTools secrets.json"
-    })
-})
+# ---------------------------
+# Auth method list
+# ---------------------------
+_AUTH_METHOD_SECRETS = "secrets_json"
+_AUTH_METHOD_INDIVIDUAL = "individual_tokens"
 
-STEP_SECRETS_DATA_SCHEMA = vol.Schema({
-    vol.Required("secrets_json", description="Paste the complete contents of your secrets.json file"): str
-})
+STEP_USER_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required("auth_method"): vol.In(
+            {
+                _AUTH_METHOD_SECRETS: "GoogleFindMyTools secrets.json",
+                _AUTH_METHOD_INDIVIDUAL: "Manual token + email",
+            }
+        )
+    }
+)
 
-STEP_INDIVIDUAL_DATA_SCHEMA = vol.Schema({
-    vol.Required(CONF_OAUTH_TOKEN, description="OAuth token from authentication script"): str,
-    vol.Required("google_email", description="Your Google email address"): str
-})
+STEP_SECRETS_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required(
+            "secrets_json",
+            description="Paste the complete contents of your secrets.json file",
+        ): str
+    }
+)
 
+STEP_INDIVIDUAL_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_OAUTH_TOKEN, description="OAuth token"): str,
+        vol.Required(CONF_GOOGLE_EMAIL, description="Google email address"): str,
+    }
+)
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Google Find My Device."""
+    """Handle the initial config flow for Google Find My Device."""
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        # Keep transient auth info between steps; never log the values.
+        self._auth_data: Dict[str, Any] = {}
+        self._available_devices: List[Tuple[str, str]] = []
+
     @staticmethod
-    def async_get_options_flow(config_entry):
-        """Create the options flow."""
-        return OptionsFlowHandler(config_entry)
-    
-    def __init__(self):
-        """Initialize the config flow."""
-        self.auth_data = {}
-        self.available_devices = []
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> config_entries.OptionsFlow:
+        """Create the options flow.
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle the initial step - method selection."""
+        Note:
+            Do not pass config_entry into the handler and do not assign
+            self.config_entry manually. The base class provides it.
+        """
+        return OptionsFlowHandler()
+
+    # ---------- User entry point ----------
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Entry step: choose auth method."""
         if user_input is not None:
-            if user_input.get("auth_method") == "secrets_json":
+            method = user_input.get("auth_method")
+            if method == _AUTH_METHOD_SECRETS:
                 return await self.async_step_secrets_json()
+            if method == _AUTH_METHOD_INDIVIDUAL:
+                return await self.async_step_individual_tokens()
 
-        return self.async_show_form(
-            step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
-            description_placeholders={
-                "info": "Authenticate using GoogleFindMyTools secrets.json file. Run GoogleFindMyTools on a machine with Chrome to generate this file."
-            }
-        )
+        return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
 
-    async def async_step_secrets_json(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle secrets.json method."""
-        errors = {}
-        
+    # ---------- Secrets.json path ----------
+    async def async_step_secrets_json(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Collect and validate secrets.json content."""
+        errors: Dict[str, str] = {}
+
         if user_input is not None:
-            secrets_json = user_input.get("secrets_json")
-            
-            if secrets_json:
-                try:
-                    import json
-                    secrets_data = json.loads(secrets_json)
-                    
-                    # Store auth data and move to device selection
-                    self.auth_data = {
-                        "secrets_data": secrets_data,
-                        "auth_method": "secrets_json"
-                    }
-                    
-                    return await self.async_step_device_selection()
-                except json.JSONDecodeError:
-                    errors["base"] = "invalid_json"
-                except Exception:
-                    errors["base"] = "invalid_token"
-            else:
+            raw = user_input.get("secrets_json", "")
+            try:
+                secrets_data = json.loads(raw)
+                # Store raw secrets payload in memory to construct API and fetch devices next
+                self._auth_data = {
+                    DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                    DATA_SECRET_BUNDLE: secrets_data,
+                }
+                return await self.async_step_device_selection()
+            except json.JSONDecodeError:
+                errors["base"] = "invalid_json"
+            except Exception:  # noqa: BLE001
                 errors["base"] = "invalid_token"
-        
-        return self.async_show_form(
-            step_id="secrets_json",
-            data_schema=STEP_SECRETS_DATA_SCHEMA,
-            errors=errors,
-            description_placeholders={
-                "info": "Run GoogleFindMyTools on a machine with Chrome, then paste the contents of the generated Auth/secrets.json file here."
-            }
-        )
 
-    async def async_step_individual_tokens(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle individual tokens method."""
-        errors = {}
-        
+        return self.async_show_form(step_id="secrets_json", data_schema=STEP_SECRETS_DATA_SCHEMA, errors=errors)
+
+    # ---------- Manual tokens path ----------
+    async def async_step_individual_tokens(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Collect manual OAuth token + email."""
+        errors: Dict[str, str] = {}
         if user_input is not None:
             oauth_token = user_input.get(CONF_OAUTH_TOKEN)
-            google_email = user_input.get("google_email")
-            
+            google_email = user_input.get(CONF_GOOGLE_EMAIL)
             if oauth_token and google_email:
-                # Store auth data and move to device selection
-                self.auth_data = {
+                self._auth_data = {
+                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
                     CONF_OAUTH_TOKEN: oauth_token,
-                    "google_email": google_email,
-                    "auth_method": "individual_tokens"
+                    CONF_GOOGLE_EMAIL: google_email,
                 }
-                
                 return await self.async_step_device_selection()
-            else:
-                errors["base"] = "invalid_token"
-        
-        return self.async_show_form(
-            step_id="individual_tokens",
-            data_schema=STEP_INDIVIDUAL_DATA_SCHEMA,
-            errors=errors,
-            description_placeholders={
-                "info": "Enter your OAuth token and Google email address. You can obtain the token by running an authentication script on a machine with Chrome."
-            }
+            errors["base"] = "invalid_token"
+
+        return self.async_show_form(step_id="individual_tokens", data_schema=STEP_INDIVIDUAL_DATA_SCHEMA, errors=errors)
+
+    # ---------- Shared helper to create API from stored auth_data ----------
+    async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, Optional[str]]:
+        """Build API instance and derive a username if available (async-safe)."""
+        if self._auth_data.get(DATA_AUTH_METHOD) == _AUTH_METHOD_SECRETS:
+            secrets_data = self._auth_data.get(DATA_SECRET_BUNDLE) or {}
+            api = GoogleFindMyAPI(secrets_data=secrets_data)
+            username = secrets_data.get("googleHomeUsername") or secrets_data.get(CONF_GOOGLE_EMAIL) or secrets_data.get("google_email")
+            return api, username
+        # Manual path
+        api = GoogleFindMyAPI(
+            oauth_token=self._auth_data.get(CONF_OAUTH_TOKEN),
+            google_email=self._auth_data.get(CONF_GOOGLE_EMAIL),
         )
+        return api, self._auth_data.get(CONF_GOOGLE_EMAIL)
 
-    async def async_step_device_selection(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle device selection step."""
-        errors = {}
-        
-        if user_input is not None:
-            selected_devices = user_input.get("tracked_devices", [])
-            location_poll_interval = user_input.get("location_poll_interval", 300)
-            device_poll_delay = user_input.get("device_poll_delay", 5)
-            
-            # Create config entry with selected devices and polling settings
-            final_data = self.auth_data.copy()
-            final_data["tracked_devices"] = selected_devices
-            final_data["location_poll_interval"] = location_poll_interval
-            final_data["device_poll_delay"] = device_poll_delay
-            
-            return self.async_create_entry(
-                title="Google Find My Device",
-                data=final_data,
-            )
-        
-        # Get available devices for selection
-        if not self.available_devices:
+    # ---------- Device selection ----------
+    async def async_step_device_selection(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Select tracked devices and set poll intervals (initial create)."""
+        errors: Dict[str, str] = {}
+
+        # Populate device choices once
+        if not self._available_devices:
             try:
-                if self.auth_data.get("auth_method") == "secrets_json":
-                    api = GoogleFindMyAPI(secrets_data=self.auth_data.get("secrets_data"))
-                    # Extract username from secrets for async call
-                    username = self.auth_data.get("secrets_data", {}).get("googleHomeUsername",
-                                                                         self.auth_data.get("secrets_data", {}).get("google_email"))
-                else:
-                    api = GoogleFindMyAPI(
-                        oauth_token=self.auth_data.get(CONF_OAUTH_TOKEN),
-                        google_email=self.auth_data.get("google_email")
-                    )
-                    username = self.auth_data.get("google_email")
-
-                # Use async version directly - no executor needed
+                api, username = await self._async_build_api_and_username()
                 devices = await api.async_get_basic_device_list(username)
-
                 if not devices:
-                    _LOGGER.warning("No devices found or API returned empty list")
                     errors["base"] = "no_devices"
                 else:
-                    self.available_devices = [(dev["name"], dev["id"]) for dev in devices]
-
-            except Exception as e:
-                _LOGGER.error("Failed to get device list: %s", e)
+                    # store as (name, id)
+                    self._available_devices = [(d["name"], d["id"]) for d in devices]
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.error("Failed to fetch devices during setup: %s", err)
                 errors["base"] = "cannot_connect"
-        
+
+        # If we could not fetch anything, show a form with just the error.
         if errors:
-            return self.async_show_form(
-                step_id="device_selection",
-                data_schema=vol.Schema({}),
-                errors=errors,
-            )
-        
-        # Create multi-select for devices
-        device_options = {dev_id: dev_name for dev_name, dev_id in self.available_devices}
-        
-        device_schema = vol.Schema({
-            vol.Optional("tracked_devices", default=list(device_options.keys())): vol.All(
-                cv.multi_select(device_options),
-                vol.Length(min=1)
-            ),
-            vol.Optional("location_poll_interval", default=300): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=60, max=3600)
-            ),
-            vol.Optional("device_poll_delay", default=5): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=1, max=60)
-            )
-        })
-        
-        return self.async_show_form(
-            step_id="device_selection",
-            data_schema=device_schema,
-            description_placeholders={
-                "info": "Select devices to track and configure polling settings:\n• Location poll interval: How often to start a new polling cycle (30-3600 seconds)\n• Device poll delay: Delay between individual device polls within a cycle (1-60 seconds)\n\nThe integration cycles through devices sequentially, requesting location data with the specified delay between each device."
+            return self.async_show_form(step_id="device_selection", data_schema=vol.Schema({}), errors=errors)
+
+        # Build a multi-select; keep cv.multi_select for universal compatibility
+        options_map = {dev_id: dev_name for (dev_name, dev_id) in self._available_devices}
+        schema = vol.Schema(
+            {
+                vol.Optional(OPT_TRACKED_DEVICES, default=list(options_map.keys())): vol.All(
+                    cv.multi_select(options_map), vol.Length(min=1)
+                ),
+                vol.Optional(OPT_LOCATION_POLL_INTERVAL, default=DEFAULT_LOCATION_POLL_INTERVAL): vol.All(
+                    vol.Coerce(int), vol.Range(min=60, max=3600)
+                ),
+                vol.Optional(OPT_DEVICE_POLL_DELAY, default=DEFAULT_DEVICE_POLL_DELAY): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=60)
+                ),
+                # Provide a sensible initial set of advanced defaults (hidden in strings for UX)
+                vol.Optional(OPT_MIN_ACCURACY_THRESHOLD, default=DEFAULT_MIN_ACCURACY_THRESHOLD): vol.All(
+                    vol.Coerce(int), vol.Range(min=25, max=500)
+                ),
+                vol.Optional(OPT_MOVEMENT_THRESHOLD, default=DEFAULT_MOVEMENT_THRESHOLD): vol.All(
+                    vol.Coerce(int), vol.Range(min=10, max=200)
+                ),
+                vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED, default=DEFAULT_GOOGLE_HOME_FILTER_ENABLED): bool,
+                vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS, default=DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS): str,
+                vol.Optional(OPT_ENABLE_STATS_ENTITIES, default=DEFAULT_ENABLE_STATS_ENTITIES): bool,
+                vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION, default=DEFAULT_MAP_VIEW_TOKEN_EXPIRATION): bool,
             }
         )
 
-
-
-class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for Google Find My Device."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        super().__init__()
-
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Manage the options."""
-        errors = {}
-        
         if user_input is not None:
-            # Update the config entry with new values
-            new_data = self.config_entry.data.copy()
-            new_data.update({
-                "tracked_devices": user_input.get("tracked_devices", []),
-                "location_poll_interval": user_input.get("location_poll_interval", 300),
-                "device_poll_delay": user_input.get("device_poll_delay", 5),
-                "min_accuracy_threshold": user_input.get("min_accuracy_threshold", 100),
-                "movement_threshold": user_input.get("movement_threshold", 50),
-                "google_home_filter_enabled": user_input.get("google_home_filter_enabled", DEFAULT_GOOGLE_HOME_FILTER_ENABLED),
-                "google_home_filter_keywords": user_input.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS),
-                "enable_stats_entities": user_input.get("enable_stats_entities", True),
-                "map_view_token_expiration": user_input.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
-            })
-            
-            self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data=new_data
-            )
-            
-            return self.async_create_entry(title="", data={})
+            # Create credentials payload for entry.data only
+            data_payload: Dict[str, Any] = dict(self._auth_data)
 
-        # Get current settings
-        current_tracked = self.config_entry.data.get("tracked_devices", [])
-        current_interval = self.config_entry.data.get("location_poll_interval", 300)
-        
-        # Get available devices
-        try:
-            auth_method = self.config_entry.data.get("auth_method", "individual_tokens")
-            if auth_method == "secrets_json":
-                api = GoogleFindMyAPI(secrets_data=self.config_entry.data.get("secrets_data"))
-            else:
-                api = GoogleFindMyAPI(
-                    oauth_token=self.config_entry.data.get(CONF_OAUTH_TOKEN),
-                    google_email=self.config_entry.data.get("google_email")
+            # Options (canonical place for non-secrets)
+            options_payload: Dict[str, Any] = {
+                OPT_TRACKED_DEVICES: user_input.get(OPT_TRACKED_DEVICES, []),
+                OPT_LOCATION_POLL_INTERVAL: user_input.get(
+                    OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
+                ),
+                OPT_DEVICE_POLL_DELAY: user_input.get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
+                OPT_MIN_ACCURACY_THRESHOLD: user_input.get(
+                    OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
+                ),
+                OPT_MOVEMENT_THRESHOLD: user_input.get(OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD),
+                OPT_GOOGLE_HOME_FILTER_ENABLED: user_input.get(
+                    OPT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_ENABLED
+                ),
+                OPT_GOOGLE_HOME_FILTER_KEYWORDS: user_input.get(
+                    OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
+                ),
+                OPT_ENABLE_STATS_ENTITIES: user_input.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES),
+                OPT_MAP_VIEW_TOKEN_EXPIRATION: user_input.get(
+                    OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+                ),
+            }
+
+            # Prefer modern HA that supports options at create time; fallback to data-only + migration.
+            try:
+                return self.async_create_entry(
+                    title="Google Find My Device",
+                    data=data_payload,
+                    options=options_payload,  # type: ignore[call-arg]
                 )
-            
-            devices = await self.hass.async_add_executor_job(api.get_basic_device_list)
-            device_options = {dev["id"]: dev["name"] for dev in devices}
-            
-        except Exception as e:
-            _LOGGER.error("Failed to get device list for options: %s", e)
-            errors["base"] = "cannot_connect"
-            device_options = {}
+            except TypeError:
+                # Older HA: shadow-copy options into data for backward compatibility.
+                shadow = dict(data_payload)
+                shadow.update(options_payload)
+                return self.async_create_entry(title="Google Find My Device", data=shadow)
 
-        if errors:
-            return self.async_show_form(
-                step_id="init",
-                data_schema=vol.Schema({}),
-                errors=errors,
-            )
+        return self.async_show_form(step_id="device_selection", data_schema=schema)
 
-        options_schema = vol.Schema({
-            vol.Optional("tracked_devices", default=current_tracked): vol.All(
-                cv.multi_select(device_options),
-                vol.Length(min=1)
-            ),
-            vol.Optional("location_poll_interval", default=current_interval): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=60, max=3600)
-            ),
-            vol.Optional("device_poll_delay", default=self.config_entry.data.get("device_poll_delay", 5)): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=1, max=60)
-            ),
-            vol.Optional("min_accuracy_threshold", default=self.config_entry.data.get("min_accuracy_threshold", 100)): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=25, max=500)
-            ),
-            vol.Optional("movement_threshold", default=self.config_entry.data.get("movement_threshold", 50)): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=10, max=200)
-            ),
-            vol.Optional("google_home_filter_enabled", default=self.config_entry.data.get("google_home_filter_enabled", DEFAULT_GOOGLE_HOME_FILTER_ENABLED)): bool,
-            vol.Optional("google_home_filter_keywords", default=self.config_entry.data.get("google_home_filter_keywords", DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)): str,
-            vol.Optional("enable_stats_entities", default=self.config_entry.data.get("enable_stats_entities", True)): bool,
-            vol.Optional("map_view_token_expiration", default=self.config_entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)): bool
-        })
+    # ---------- Reauth (triggered by HA when credentials invalid) ----------
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
+        """Start reauthentication flow with context."""
+        return await self.async_step_reauth_confirm()
 
-        return self.async_show_form(
-            step_id="init",
-            data_schema=options_schema,
-            description_placeholders={
-                "info": "Modify tracking settings:\n• Location poll interval: How often to poll for locations (60-3600 seconds)\n• Device poll delay: Delay between device polls (1-60 seconds)\n• Min accuracy threshold: Ignore locations worse than this (25-500 meters)\n• Movement threshold: Minimum movement to trigger location update (10-200 meters)\n\nGoogle Home Filter:\n• Enable to filter Google Home device detections into Home zone\n• Keywords support partial matching (comma-separated)\n• Example: 'nest' matches 'Kitchen Nest Mini'"
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Collect new credentials for reauth and validate them."""
+        errors: Dict[str, str] = {}
+
+        # Always-empty optional fields (never reveal existing data)
+        schema = vol.Schema(
+            {
+                vol.Optional("secrets_json"): str,
+                vol.Optional(CONF_OAUTH_TOKEN): str,
+                vol.Optional(CONF_GOOGLE_EMAIL): str,
             }
         )
 
+        if user_input is not None:
+            secrets_json = user_input.get("secrets_json")
+            oauth_token = user_input.get(CONF_OAUTH_TOKEN)
+            google_email = user_input.get(CONF_GOOGLE_EMAIL)
 
+            new_data: Dict[str, Any] = {}
+            try:
+                if secrets_json:
+                    parsed = json.loads(secrets_json)
+                    new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, DATA_SECRET_BUNDLE: parsed}
+                    api = GoogleFindMyAPI(secrets_data=parsed)
+                    # Basic validation: try device list
+                    _ = await api.async_get_basic_device_list(
+                        parsed.get("googleHomeUsername") or parsed.get(CONF_GOOGLE_EMAIL) or parsed.get("google_email")
+                    )
+                else:
+                    if not (oauth_token and google_email):
+                        errors["base"] = "invalid_token"
+                        return self.async_show_form(
+                            step_id="reauth_confirm",
+                            data_schema=schema,
+                            errors=errors,
+                            description_placeholders={
+                                "reason": "Your credentials are invalid or expired. Provide new ones."
+                            },
+                        )
+                    new_data = {
+                        DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                        CONF_OAUTH_TOKEN: oauth_token,
+                        CONF_GOOGLE_EMAIL: google_email,
+                    }
+                    api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
+                    _ = await api.async_get_basic_device_list(google_email)  # validation
+
+            except json.JSONDecodeError:
+                errors["base"] = "invalid_json"
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.error("Reauth validation failed: %s", err)
+                errors["base"] = "cannot_connect"
+
+            if not errors:
+                # Use the entry_id from the flow context (HA best practice for reauth).
+                entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+                assert entry is not None
+                updated_data = dict(entry.data)
+                updated_data.update(new_data)
+
+                # Update credentials (data only), reload, and abort with success reason.
+                return self.async_update_reload_and_abort(
+                    entry=entry,
+                    data=updated_data,
+                    reason="reauth_successful",
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "reason": "Your credentials are invalid or expired. Please provide new ones.",
+            },
+        )
+
+
+class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
+    """Options flow to (a) update non-secret settings and (b) optionally refresh credentials.
+
+    Notes:
+        - Do not assign self.config_entry here; the base class provides it.
+        - OptionsFlowWithReload will reload the integration when options change
+          if the flow ends with async_create_entry(data=...).
+        - Do not update the config entry inside the options flow except in the
+          credentials step where we intentionally update entry.data and reload.
+    """
+
+    # ---------- Menu entry ----------
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Show a small menu: edit settings vs. update credentials (uses translations)."""
+        # With async_show_menu we don't build a schema; HA renders translated menu options:
+        # translations: options.step.init.menu_options.settings / credentials
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["settings", "credentials"],
+        )
+
+    # ---------- Settings (non-secret) ----------
+    async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Update non-secret options.
+
+        Best practice:
+            - Return async_create_entry(data=options) to commit options.
+            - OptionsFlowWithReload will reload the integration automatically.
+            - Do not call hass.config_entries.async_update_entry() from inside the flow.
+        """
+        errors: Dict[str, str] = {}
+
+        entry = self.config_entry
+        opt = entry.options
+        dat = entry.data
+
+        # Options-first with safe fallbacks (all defaults from const.py)
+        current_tracked = opt.get(OPT_TRACKED_DEVICES, dat.get(OPT_TRACKED_DEVICES, []))
+        current_interval = opt.get(OPT_LOCATION_POLL_INTERVAL, dat.get(OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL))
+        current_delay = opt.get(OPT_DEVICE_POLL_DELAY, dat.get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY))
+        current_min_acc = opt.get(OPT_MIN_ACCURACY_THRESHOLD, dat.get(OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD))
+        current_move_thr = opt.get(OPT_MOVEMENT_THRESHOLD, dat.get(OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD))
+        current_gh_enabled = opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, dat.get(OPT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_ENABLED))
+        current_gh_keywords = opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, dat.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS))
+        current_stats = opt.get(OPT_ENABLE_STATS_ENTITIES, dat.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES))
+        current_map_token_exp = opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, dat.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION))
+
+        # Build device list (best-effort; do not fail the form)
+        device_options: Dict[str, str] = {}
+        try:
+            api = await self._async_build_api_from_entry(entry)
+            devices = await api.async_get_basic_device_list(entry.data.get(CONF_GOOGLE_EMAIL))
+            device_options = {dev["id"]: dev["name"] for dev in devices}
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("Failed to fetch device list for options: %s", err)
+
+        # Define the base schema without defaults and inject suggested values dynamically.
+        base_schema = vol.Schema(
+            {
+                vol.Optional(OPT_TRACKED_DEVICES): vol.All(cv.multi_select(device_options), vol.Length(min=0)),
+                vol.Optional(OPT_LOCATION_POLL_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
+                vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
+                vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
+                vol.Optional(OPT_MOVEMENT_THRESHOLD): vol.All(vol.Coerce(int), vol.Range(min=10, max=200)),
+                vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED): bool,
+                vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS): str,
+                vol.Optional(OPT_ENABLE_STATS_ENTITIES): bool,
+                vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION): bool,
+            }
+        )
+
+        if user_input is not None:
+            new_options = {
+                OPT_TRACKED_DEVICES: user_input.get(OPT_TRACKED_DEVICES, current_tracked),
+                OPT_LOCATION_POLL_INTERVAL: user_input.get(OPT_LOCATION_POLL_INTERVAL, current_interval),
+                OPT_DEVICE_POLL_DELAY: user_input.get(OPT_DEVICE_POLL_DELAY, current_delay),
+                OPT_MIN_ACCURACY_THRESHOLD: user_input.get(OPT_MIN_ACCURACY_THRESHOLD, current_min_acc),
+                OPT_MOVEMENT_THRESHOLD: user_input.get(OPT_MOVEMENT_THRESHOLD, current_move_thr),
+                OPT_GOOGLE_HOME_FILTER_ENABLED: user_input.get(OPT_GOOGLE_HOME_FILTER_ENABLED, current_gh_enabled),
+                OPT_GOOGLE_HOME_FILTER_KEYWORDS: user_input.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, current_gh_keywords),
+                OPT_ENABLE_STATS_ENTITIES: user_input.get(OPT_ENABLE_STATS_ENTITIES, current_stats),
+                OPT_MAP_VIEW_TOKEN_EXPIRATION: user_input.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, current_map_token_exp),
+            }
+
+            # Commit options and trigger automatic reload via OptionsFlowWithReload.
+            return self.async_create_entry(title="", data=new_options)
+
+        # Inject suggested/current values for a clean, static schema.
+        suggested_values = {
+            OPT_TRACKED_DEVICES: current_tracked,
+            OPT_LOCATION_POLL_INTERVAL: current_interval,
+            OPT_DEVICE_POLL_DELAY: current_delay,
+            OPT_MIN_ACCURACY_THRESHOLD: current_min_acc,
+            OPT_MOVEMENT_THRESHOLD: current_move_thr,
+            OPT_GOOGLE_HOME_FILTER_ENABLED: current_gh_enabled,
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS: current_gh_keywords,
+            OPT_ENABLE_STATS_ENTITIES: current_stats,
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: current_map_token_exp,
+        }
+
+        return self.async_show_form(
+            step_id="settings",
+            data_schema=self.add_suggested_values_to_schema(base_schema, suggested_values),
+            errors=errors,
+        )
+
+    # ---------- Credentials update (always-empty fields) ----------
+    async def async_step_credentials(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Allow refreshing credentials without exposing current values."""
+        errors: Dict[str, str] = {}
+
+        # Keep in sync with translations (options.step.credentials.data.*)
+        schema = vol.Schema(
+            {
+                vol.Optional("new_secrets_json"): str,
+                vol.Optional("new_oauth_token"): str,
+                vol.Optional("new_google_email"): str,
+            }
+        )
+
+        if user_input is not None:
+            secrets_json = user_input.get("new_secrets_json")
+            oauth_token = user_input.get("new_oauth_token")
+            google_email = user_input.get("new_google_email")
+
+            new_data: Dict[str, Any] = {}
+            try:
+                if secrets_json:
+                    parsed = json.loads(secrets_json)
+                    new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, DATA_SECRET_BUNDLE: parsed}
+                    api = GoogleFindMyAPI(secrets_data=parsed)
+                    _ = await api.async_get_basic_device_list(
+                        parsed.get("googleHomeUsername") or parsed.get(CONF_GOOGLE_EMAIL) or parsed.get("google_email")
+                    )  # validation
+                elif oauth_token and google_email:
+                    new_data = {
+                        DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                        CONF_OAUTH_TOKEN: oauth_token,
+                        CONF_GOOGLE_EMAIL: google_email,
+                    }
+                    api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
+                    _ = await api.async_get_basic_device_list(google_email)  # validation
+                else:
+                    errors["base"] = "choose_one"
+
+                if not errors:
+                    entry = self.config_entry
+                    updated_data = dict(entry.data)
+                    updated_data.update(new_data)
+
+                    # Update credentials in data only (never in options)
+                    self.hass.config_entries.async_update_entry(entry, data=updated_data)
+
+                    # Trigger a reload so new credentials are applied immediately
+                    self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+
+                    # Abort with success message (matches translations)
+                    return self.async_abort(reason="reconfigure_successful")
+            except json.JSONDecodeError:
+                errors["base"] = "invalid_json"
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.error("Credentials update failed: %s", err)
+                errors["base"] = "cannot_connect"
+
+        return self.async_show_form(step_id="credentials", data_schema=schema, errors=errors)
+
+    # ---------- Internal helper ----------
+    async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
+        """Construct API object from entry data (supports both auth methods)."""
+        if entry.data.get(DATA_AUTH_METHOD) == _AUTH_METHOD_SECRETS:
+            return GoogleFindMyAPI(secrets_data=entry.data.get(DATA_SECRET_BUNDLE))
+        return GoogleFindMyAPI(
+            oauth_token=entry.data.get(CONF_OAUTH_TOKEN),
+            google_email=entry.data.get(CONF_GOOGLE_EMAIL),
+        )
+
+
+# ---------- Custom exceptions ----------
 class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot connect."""
 

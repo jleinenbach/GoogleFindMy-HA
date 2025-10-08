@@ -1,0 +1,211 @@
+{
+  "title": "Google Find My Device",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Autenticazione Google Find My Device",
+        "description": "Scegli il metodo di autenticazione. Il Metodo 1 è consigliato se puoi eseguire GoogleFindMyTools su un computer con Chrome.",
+        "data": {
+          "auth_method": "Metodo di autenticazione"
+        }
+      },
+      "secrets_json": {
+        "title": "Metodo 1: GoogleFindMyTools secrets.json",
+        "description": "Esegui GoogleFindMyTools (Chrome) per generare i token di autenticazione, quindi incolla qui sotto il contenuto completo del file Auth/secrets.json.",
+        "data": {
+          "secrets_json": "Contenuto del file secrets.json"
+        }
+      },
+      "individual_tokens": {
+        "title": "Metodo 2: Token OAuth individuale",
+        "description": "Inserisci il token OAuth e l’indirizzo email Google ottenuti tramite il processo di autenticazione manuale.",
+        "data": {
+          "oauth_token": "Token OAuth",
+          "google_email": "Indirizzo email Google"
+        }
+      },
+      "device_selection": {
+        "title": "Selezione dispositivi e polling",
+        "description": "Seleziona i dispositivi da monitorare e configura i parametri di polling:\n• Intervallo di polling posizione: frequenza di avvio di un nuovo ciclo (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per ciascun dispositivo all’interno di un ciclo (1–60 secondi)\n\nL’integrazione scorre i dispositivi in sequenza e richiede i dati di posizione per ciascuno con il ritardo specificato.",
+        "data": {
+          "tracked_devices": "Dispositivi monitorati",
+          "location_poll_interval": "Intervallo di polling posizione (s)",
+          "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
+          "min_accuracy_threshold": "Accuratezza minima (m)",
+          "movement_threshold": "Soglia di movimento (m)",
+          "google_home_filter_enabled": "Filtra dispositivi Google Home",
+          "google_home_filter_keywords": "Parole chiave del filtro (separate da virgole)",
+          "enable_stats_entities": "Crea entità statistiche",
+          "map_view_token_expiration": "Abilita scadenza dei token della vista mappa"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Ri-autenticazione",
+        "description": "Le tue credenziali sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email."
+      }
+    },
+    "error": {
+      "auth_failed": "Autenticazione non riuscita. Riprova.",
+      "invalid_token": "Token non valido o campi obbligatori mancanti.",
+      "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
+      "no_devices": "Nessun dispositivo trovato. Assicurati che «Trova il mio dispositivo» sia attivato nel tuo account Google.",
+      "cannot_connect": "Impossibile connettersi all’API di Google. Potrebbe trattarsi di un problema temporaneo — riprova più tardi.",
+      "choose_one": "Fornisci esattamente un metodo di credenziali.",
+      "required": "Questo campo è obbligatorio.",
+      "unknown": "Errore imprevisto."
+    },
+    "abort": {
+      "already_configured": "Google Find My Device è già configurato.",
+      "cannot_connect": "Impossibile connettersi a Google Find My Device.",
+      "reauth_successful": "Ri-autenticazione riuscita."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configurazione",
+        "description": "Cosa desideri configurare?",
+        "menu_options": {
+          "credentials": "Aggiorna credenziali",
+          "settings": "Modifica impostazioni"
+        }
+      },
+      "credentials": {
+        "title": "Aggiorna credenziali (opzionale)",
+        "description": "Aggiorna le credenziali senza esporre i valori esistenti. Fornisci esattamente un metodo:\n\n• Incolla il contenuto completo di un **secrets.json** nuovo\n**oppure**\n• Inserisci un **token OAuth** nuovo e **email Google**.\n\nSe fornite, le credenziali saranno convalidate e salvate; l’integrazione verrà ricaricata senza cambiare i nomi delle tue entità.",
+        "data": {
+          "secrets_json": "Nuovo secrets.json (contenuto completo)",
+          "oauth_token": "Nuovo token OAuth",
+          "google_email": "Email Google",
+          "new_secrets_json": "Nuovo secrets.json (contenuto completo)",
+          "new_oauth_token": "Nuovo token OAuth",
+          "new_google_email": "Email Google"
+        }
+      },
+      "settings": {
+        "title": "Opzioni",
+        "description": "Modifica le impostazioni di monitoraggio:\n• Intervallo di polling posizione: frequenza di interrogazione delle posizioni (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Accuratezza minima: ignora posizioni peggiori di questo valore (25–500 metri)\n• Soglia di movimento: movimento minimo per generare un aggiornamento di posizione (10–200 metri)\n\nFiltro Google Home:\n• Abilita per raggruppare i rilevamenti Google Home nella zona «Casa»\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: «nest» corrisponde a «Kitchen Nest Mini»",
+        "data": {
+          "tracked_devices": "Dispositivi monitorati",
+          "location_poll_interval": "Intervallo di polling posizione (s)",
+          "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
+          "min_accuracy_threshold": "Accuratezza minima (m)",
+          "movement_threshold": "Soglia di movimento (m)",
+          "google_home_filter_enabled": "Filtra dispositivi Google Home",
+          "google_home_filter_keywords": "Parole chiave del filtro (separate da virgole)",
+          "enable_stats_entities": "Crea entità statistiche",
+          "map_view_token_expiration": "Abilita scadenza dei token della vista mappa"
+        },
+        "data_description": {
+          "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono."
+        }
+      }
+    },
+    "error": {
+      "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
+      "invalid": "Convalida non riuscita. Controlla i tuoi dati.",
+      "cannot_connect": "Impossibile connettersi all’API di Google.",
+      "choose_one": "Fornisci esattamente un metodo di credenziali.",
+      "required": "Questo campo è obbligatorio."
+    },
+    "abort": {
+      "reconfigure_successful": "Riconfigurazione riuscita."
+    }
+  },
+  "services": {
+    "locate_device": {
+      "name": "Localizza dispositivo",
+      "description": "Ottieni la posizione attuale di un dispositivo Google Find My.",
+      "fields": {
+        "device_id": {
+          "name": "Dispositivo",
+          "description": "Seleziona un dispositivo Google Find My (oppure passa un ID canonico tramite Strumenti per sviluppatori)."
+        }
+      }
+    },
+    "play_sound": {
+      "name": "Riproduci suono",
+      "description": "Riproduce un suono su un dispositivo Google Find My.",
+      "fields": {
+        "device_id": {
+          "name": "Dispositivo",
+          "description": "Seleziona un dispositivo Google Find My (oppure passa un ID canonico tramite Strumenti per sviluppatori)."
+        }
+      }
+    },
+    "refresh_device_urls": {
+      "name": "Aggiorna URL dei dispositivi",
+      "description": "Aggiorna gli URL di configurazione dei dispositivi Google Find My per puntare alla vista mappa integrata.",
+      "fields": {}
+    },
+    "locate_external": {
+      "name": "Localizza dispositivo (esterno)",
+      "description": "Localizza un dispositivo utilizzando il servizio esterno (delegato alla localizzazione normale).",
+      "fields": {
+        "device_id": {
+          "name": "Dispositivo",
+          "description": "Seleziona un dispositivo Google Find My (oppure passa un ID canonico tramite Strumenti per sviluppatori)."
+        },
+        "device_name": {
+          "name": "Nome dispositivo (facoltativo)",
+          "description": "Nome leggibile facoltativo per i log."
+        }
+      }
+    },
+    "rebuild_registry": {
+      "name": "Ricostruisci / Migra registro",
+      "description": "Manutenzione: esegui una migrazione soft dati→opzioni oppure ricostruisci entità/dispositivi per questa integrazione.",
+      "fields": {
+        "mode": {
+          "name": "Modalità",
+          "description": "Scegli «Ricostruisci» per rimuovere entità/dispositivi e ricaricare; «Migra» riapplica solo la migrazione soft dati→opzioni."
+        },
+        "device_ids": {
+          "name": "Dispositivi (facoltativo)",
+          "description": "Limita l’operazione a dispositivi specifici. Lascia vuoto per includere tutti i dispositivi Google Find My."
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "play_sound": {
+        "name": "Riproduci suono"
+      }
+    },
+    "binary_sensor": {
+      "polling": {
+        "name": "Interrogazione"
+      }
+    },
+    "sensor": {
+      "last_seen": {
+        "name": "Ultima volta visto"
+      },
+      "stat_skipped_duplicates": {
+        "name": "Duplicati ignorati"
+      },
+      "stat_background_updates": {
+        "name": "Aggiornamenti in background"
+      },
+      "stat_polled_updates": {
+        "name": "Aggiornamenti da interrogazione"
+      },
+      "stat_crowd_sourced_updates": {
+        "name": "Aggiornamenti della comunità"
+      },
+      "stat_history_fallback_used": {
+        "name": "Fallback storico utilizzato"
+      },
+      "stat_timeouts": {
+        "name": "Timeout"
+      },
+      "stat_invalid_coords": {
+        "name": "Coordinate non valide"
+      },
+      "stat_low_quality_dropped": {
+        "name": "Accuratezza insufficiente scartata"
+      }
+    }
+  }
+}

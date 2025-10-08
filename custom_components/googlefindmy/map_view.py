@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 from homeassistant.util import dt as dt_util
 
@@ -16,6 +17,26 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+
+# ------------------------------- HTML Helpers -------------------------------
+
+def _html_response(title: str, body: str, status: int = 200) -> web.Response:
+    """Return a minimal HTML response (no secrets, no stacktraces)."""
+    return web.Response(
+        text=f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>{title}</title></head>
+<body>
+  <h1>{title}</h1>
+  <p>{body}</p>
+</body>
+</html>""",
+        content_type="text/html",
+        status=status,
+    )
+
+
+# ------------------------------- Map View -----------------------------------
 
 class GoogleFindMyMapView(HomeAssistantView):
     """View to serve device location maps."""
@@ -29,80 +50,73 @@ class GoogleFindMyMapView(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request: web.Request, device_id: str) -> web.Response:
-        """Generate and serve a map for the device."""
-        # Simple authentication check via query parameter (unchanged behavior)
+        """Generate and serve a map for the device.
+
+        Security notes:
+        - We use a short-lived/static token conveyed via query param. This is a UX helper
+          for opening the map from the device page. Do not use it for sensitive data.
+        - We never log tokens or full URLs that include tokens.
+        """
+        # ---- 1) Token check (options-first; 401 on missing/invalid) ----
         auth_token = request.query.get("token")
-        if not auth_token or auth_token != self._get_simple_token():
-            return web.Response(
-                text="""
-                <html>
-                <head><title>Access Denied</title></head>
-                <body>
-                    <h1>Access Denied</h1>
-                    <p>This map requires proper authentication.</p>
-                    <p>Please access the map through the Home Assistant device page.</p>
-                </body>
-                </html>
-                """,
-                content_type="text/html",
-                status=403,
-            )
+        if not auth_token:
+            return _html_response("Unauthorized", "Missing authentication token.", status=401)
+
+        if auth_token != self._get_simple_token():
+            # No token echo in logs; keep message generic.
+            _LOGGER.debug("Map token mismatch for device_id=%s", device_id)
+            return _html_response("Unauthorized", "Invalid authentication token.", status=401)
 
         try:
-            # Get device name from coordinator
+            # ---- 2) Validate device_id against Device Registry; 404 if unknown ----
+            dev_reg = dr.async_get(self.hass)
+            device_known = False
+            for dev in list(dev_reg.devices.values()):
+                if any(ident[0] == DOMAIN and ident[1] == device_id for ident in dev.identifiers):
+                    device_known = True
+                    break
+
+            if not device_known:
+                _LOGGER.debug("Map requested for unknown device_id=%s", device_id)
+                return _html_response("Not Found", "Device not found.", status=404)
+
+            # ---- 3) Resolve a human-readable device name from coordinator snapshot (best effort) ----
             coordinator_data = self.hass.data.get(DOMAIN, {})
             device_name = "Unknown Device"
-            _LOGGER.debug("Looking for device_id '%s' in coordinator data", device_id)
-
             for entry_id, coordinator in coordinator_data.items():
                 if entry_id == "config_data":
                     continue
-                if hasattr(coordinator, "data") and coordinator.data:
-                    _LOGGER.debug("Coordinator %s has %d devices", entry_id, len(coordinator.data))
-                    for device in coordinator.data:
-                        device_id_in_data = device.get("id")
-                        device_name_in_data = device.get("name")
-                        _LOGGER.debug("Found device id='%s' name='%s'", device_id_in_data, device_name_in_data)
-                        if device_id_in_data == device_id:
-                            device_name = device.get("name", "Unknown Device")
-                            _LOGGER.debug("Matched device '%s' for id '%s'", device_name, device_id)
-                            break
-                else:
-                    _LOGGER.debug("Coordinator %s has no data", entry_id)
+                data_list = getattr(coordinator, "data", None) or []
+                for device in data_list:
+                    if device.get("id") == device_id:
+                        device_name = device.get("name", device_name)
+                        break
 
-            # Get location history from Home Assistant
-            entity_id = f"device_tracker.{device_id.replace('-', '_').lower()}"
-
-            # Try to find the actual entity ID
+            # ---- 4) Find the device_tracker entity (entity registry) ----
+            # Prefer the actual entity id over a guess.
+            entity_id_guess = f"device_tracker.{device_id.replace('-', '_').lower()}"
             entity_registry = async_get_entity_registry(self.hass)
-            _LOGGER.debug("Looking for device_tracker entity for device %s", device_id)
-            _LOGGER.debug("Initial entity_id guess: %s", entity_id)
+            entity_id: Optional[str] = None
 
-            found_entity = False
             for entity in entity_registry.entities.values():
                 if (
                     entity.unique_id
                     and device_id in entity.unique_id
-                    and entity.platform == "googlefindmy"
+                    and entity.platform == DOMAIN
                     and entity.entity_id.startswith("device_tracker.")
                 ):
-                    _LOGGER.debug(
-                        "Found matching entity: %s with unique_id: %s", entity.entity_id, entity.unique_id
-                    )
                     entity_id = entity.entity_id
-                    found_entity = True
                     break
 
-            if not found_entity:
-                _LOGGER.warning("No GoogleFindMy device_tracker entity found for device %s", device_id)
-            else:
-                _LOGGER.debug("Using entity_id: %s", entity_id)
+            if not entity_id:
+                # Fall back to the guess; the page will render "no history", which is acceptable UX.
+                entity_id = entity_id_guess
+                _LOGGER.debug("No explicit tracker entity found for %s, using guess %s", device_id, entity_id)
 
-            # Get time range from URL parameters
+            # ---- 5) Parse time range and accuracy filter from query ----
             end_time = dt_util.utcnow()
-            start_time = end_time - timedelta(days=7)  # default 7 days
+            start_time = end_time - timedelta(days=7)  # default: 7 days
 
-            # Parse custom start/end times if provided
             start_param = request.query.get("start")
             end_param = request.query.get("end")
             accuracy_param = request.query.get("accuracy", "0")
@@ -113,7 +127,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                     if start_time.tzinfo is None:
                         start_time = start_time.replace(tzinfo=dt_util.UTC)
                 except ValueError:
-                    pass  # Use default if invalid
+                    pass  # keep default
 
             if end_param:
                 try:
@@ -121,15 +135,14 @@ class GoogleFindMyMapView(HomeAssistantView):
                     if end_time.tzinfo is None:
                         end_time = end_time.replace(tzinfo=dt_util.UTC)
                 except ValueError:
-                    pass  # Use default if invalid
+                    pass  # keep default
 
-            # Parse accuracy filter
             try:
                 accuracy_filter = max(0, min(300, int(accuracy_param)))
             except (ValueError, TypeError):
                 accuracy_filter = 0
 
-            # Query state history
+            # ---- 6) Query Recorder history for location points (single entity) ----
             from homeassistant.components.recorder.history import get_significant_states
 
             history = await self.hass.async_add_executor_job(
@@ -140,40 +153,42 @@ class GoogleFindMyMapView(HomeAssistantView):
             if entity_id in history:
                 last_seen = None
                 for state in history[entity_id]:
-                    if (
-                        state.attributes.get("latitude") is not None
-                        and state.attributes.get("longitude") is not None
-                    ):
-                        # Skip duplicates based on last_seen attribute
-                        current_last_seen = state.attributes.get("last_seen")
-                        if current_last_seen and current_last_seen == last_seen:
-                            continue
-                        last_seen = current_last_seen
+                    lat = state.attributes.get("latitude")
+                    lon = state.attributes.get("longitude")
+                    if lat is None or lon is None:
+                        continue
 
-                        locations.append(
-                            {
-                                "lat": state.attributes["latitude"],
-                                "lon": state.attributes["longitude"],
-                                "accuracy": state.attributes.get("gps_accuracy", 0),
-                                "timestamp": state.last_updated.isoformat(),
-                                "last_seen": current_last_seen,
-                                "entity_id": entity_id,
-                                "state": state.state,
-                                "is_own_report": state.attributes.get("is_own_report"),
-                                "semantic_location": state.attributes.get("semantic_location"),
-                            }
-                        )
+                    current_last_seen = state.attributes.get("last_seen")
+                    if current_last_seen and current_last_seen == last_seen:
+                        # de-dupe by identical last_seen
+                        continue
+                    last_seen = current_last_seen
 
-            # Generate HTML map
+                    locations.append(
+                        {
+                            "lat": lat,
+                            "lon": lon,
+                            "accuracy": state.attributes.get("gps_accuracy", 0),
+                            "timestamp": state.last_updated.isoformat(),
+                            "last_seen": current_last_seen,
+                            "entity_id": entity_id,
+                            "state": state.state,
+                            "is_own_report": state.attributes.get("is_own_report"),
+                            "semantic_location": state.attributes.get("semantic_location"),
+                        }
+                    )
+
+            # ---- 7) Render HTML (no secrets) ----
             html_content = self._generate_map_html(
                 device_name, locations, device_id, start_time, end_time, accuracy_filter
             )
-
             return web.Response(text=html_content, content_type="text/html", charset="utf-8")
 
-        except Exception as e:  # noqa: BLE001 - broad except to ensure HTML error response
-            _LOGGER.error("Error generating map for device %s: %s", device_id, e)
-            return web.Response(text=f"Error generating map: {e}", status=500)
+        except Exception as err:  # defensive: HTML error page instead of raw tracebacks
+            _LOGGER.error("Error generating map for device %s: %s", device_id, err)
+            return _html_response("Server Error", "Error generating map.", status=500)
+
+    # ---------------------------- HTML builder ----------------------------
 
     def _generate_map_html(
         self,
@@ -192,11 +207,13 @@ class GoogleFindMyMapView(HomeAssistantView):
         end_local = end_local_tz.strftime("%Y-%m-%dT%H:%M")
 
         if not locations:
+            # Empty state page with controls for time range selection
             return f"""
             <!DOCTYPE html>
             <html>
             <head>
                 <title>{device_name} - Location Map</title>
+                <meta charset="utf-8" />
                 <style>
                     body {{ font-family: Arial, sans-serif; margin: 20px; }}
                     .controls {{ background: #f5f5f5; padding: 15px; border-radius: 8px; margin-bottom: 20px; }}
@@ -288,7 +305,6 @@ class GoogleFindMyMapView(HomeAssistantView):
 
             # Convert UTC timestamp to Home Assistant timezone
             timestamp_utc = datetime.fromisoformat(loc["timestamp"].replace("Z", "+00:00"))
-            # Convert to Home Assistant's configured timezone
             timestamp_local = dt_util.as_local(timestamp_utc)
 
             # Determine report source
@@ -303,7 +319,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                 report_source = "❓ Unknown"
                 report_color = "#6c757d"  # Gray
 
-            # Add semantic location if available
+            # Semantic location if available
             semantic_info = ""
             semantic_location = loc.get("semantic_location")
             if semantic_location:
@@ -351,28 +367,17 @@ class GoogleFindMyMapView(HomeAssistantView):
             <style>
                 body {{ margin: 0; padding: 0; font-family: Arial, sans-serif; }}
                 #map {{ height: 100vh; width: 100%; }}
-
-                /* Filter panel - positioned to not conflict with zoom buttons */
                 .filter-panel {{
                     position: absolute; top: 10px; right: 10px; z-index: 1000;
                     background: white; padding: 15px; border-radius: 8px;
                     box-shadow: 0 4px 15px rgba(0,0,0,0.4);
                     max-width: 380px; font-size: 13px;
                 }}
-
-                /* Collapsed state - just show toggle button */
-                .filter-panel.collapsed {{
-                    padding: 8px 12px;
-                    max-width: 120px;
-                }}
+                .filter-panel.collapsed {{ padding: 8px 12px; max-width: 120px; }}
                 .filter-panel.collapsed .filter-content {{ display: none; }}
-
-                /* Filter content */
                 .filter-content {{ margin-top: 10px; }}
                 .filter-section {{ margin: 12px 0; padding: 8px 0; border-bottom: 1px solid #eee; }}
                 .filter-section:last-child {{ border-bottom: none; }}
-
-                /* Controls styling */
                 .filter-control {{ margin: 8px 0; display: flex; align-items: center; }}
                 .filter-control label {{
                     display: inline-block; width: 70px; font-size: 12px;
@@ -382,8 +387,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                     padding: 4px; border: 1px solid #ccc; border-radius: 3px;
                     width: 150px; font-size: 11px;
                 }}
-
-                /* Accuracy slider */
                 .accuracy-control {{ margin: 10px 0; }}
                 .accuracy-control label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
                 .slider-container {{ display: flex; align-items: center; gap: 8px; }}
@@ -395,8 +398,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                     min-width: 60px; font-size: 11px; font-weight: bold;
                     color: #007cba;
                 }}
-
-                /* Buttons */
                 .filter-panel button {{
                     padding: 6px 12px; background: #007cba; color: white;
                     border: none; border-radius: 4px; cursor: pointer;
@@ -405,11 +406,8 @@ class GoogleFindMyMapView(HomeAssistantView):
                 .filter-panel button:hover {{ background: #005a8b; }}
                 .toggle-btn {{ background: #28a745 !important; }}
                 .toggle-btn:hover {{ background: #218838 !important; }}
-
-
                 .update-btn {{ background: #dc3545 !important; width: 100%; margin-top: 8px; }}
                 .update-btn:hover {{ background: #c82333 !important; }}
-
                 h2 {{ margin: 0 0 8px 0; font-size: 16px; }}
                 .info {{ margin: 5px 0; font-size: 12px; color: #666; }}
                 .current-time {{
@@ -418,8 +416,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                     background: #f8f9fa; border-radius: 4px;
                     border-left: 3px solid #007cba;
                 }}
-
-                /* Ensure zoom controls don't conflict */
                 .leaflet-control-zoom {{ z-index: 1500 !important; }}
             </style>
         </head>
@@ -432,7 +428,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                     <div class="info">{len(locations)} locations shown</div>
                     <div class="current-time" id="currentTime">🕐 Loading current time...</div>
 
-                    <!-- Time Range Section -->
                     <div class="filter-section">
                         <div class="filter-control">
                             <label for="startTime">Start:</label>
@@ -444,7 +439,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                         </div>
                     </div>
 
-                    <!-- Accuracy Filter Section -->
                     <div class="filter-section">
                         <div class="accuracy-control">
                             <label for="accuracySlider">Accuracy Filter:</label>
@@ -469,13 +463,11 @@ class GoogleFindMyMapView(HomeAssistantView):
                     attribution: '© OpenStreetMap contributors'
                 }}).addTo(map);
 
-                // Store all markers and circles globally for filtering
                 var allMarkers = [];
                 var allCircles = [];
 
                 {markers_code}
 
-                // Collect all markers and circles
                 map.eachLayer(function(layer) {{
                     if (layer instanceof L.Marker && layer.accuracy !== undefined) {{
                         allMarkers.push(layer);
@@ -484,7 +476,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                     }}
                 }});
 
-                // Fit map to show all markers
                 var group = new L.featureGroup();
                 allMarkers.forEach(function(marker) {{
                     if (map.hasLayer(marker)) {{
@@ -495,7 +486,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                     map.fitBounds(group.getBounds().pad(0.1));
                 }}
 
-                // Filter panel functions
                 function toggleFilters() {{
                     const panel = document.getElementById('filterPanel');
                     panel.classList.toggle('collapsed');
@@ -514,14 +504,10 @@ class GoogleFindMyMapView(HomeAssistantView):
                         valueSpan.style.color = '#007cba';
                     }}
 
-                    // Apply real-time accuracy filtering to existing markers
                     filterMarkersByAccuracy(value);
                 }}
 
                 function filterMarkersByAccuracy(maxAccuracy) {{
-                    console.log('Filtering by accuracy:', maxAccuracy);
-
-                    // Collect all markers and circles on first run
                     if (allMarkers.length === 0 || allCircles.length === 0) {{
                         map.eachLayer(function(layer) {{
                             if (layer instanceof L.Marker && layer.accuracy !== undefined) {{
@@ -530,57 +516,37 @@ class GoogleFindMyMapView(HomeAssistantView):
                                 allCircles.push(layer);
                             }}
                         }});
-                        console.log('Found', allMarkers.length, 'markers and', allCircles.length, 'circles');
                     }}
 
-                    // Show/hide markers based on accuracy
                     allMarkers.forEach(function(marker) {{
                         if (maxAccuracy === 0 || marker.accuracy <= maxAccuracy) {{
-                            if (!map.hasLayer(marker)) {{
-                                marker.addTo(map);
-                            }}
+                            if (!map.hasLayer(marker)) {{ marker.addTo(map); }}
                         }} else {{
-                            if (map.hasLayer(marker)) {{
-                                map.removeLayer(marker);
-                            }}
+                            if (map.hasLayer(marker)) {{ map.removeLayer(marker); }}
                         }}
                     }});
 
-                    // Show/hide circles based on accuracy
                     allCircles.forEach(function(circle) {{
                         if (maxAccuracy === 0 || circle.accuracy <= maxAccuracy) {{
-                            if (!map.hasLayer(circle)) {{
-                                circle.addTo(map);
-                            }}
+                            if (!map.hasLayer(circle)) {{ circle.addTo(map); }}
                         }} else {{
-                            if (map.hasLayer(circle)) {{
-                                map.removeLayer(circle);
-                            }}
+                            if (map.hasLayer(circle)) {{ map.removeLayer(circle); }}
                         }}
                     }});
 
-                    // Update location count
-                    var visibleCount = allMarkers.filter(function(m) {{
-                        return map.hasLayer(m);
-                    }}).length;
-
+                    var visibleCount = allMarkers.filter(function(m) {{ return map.hasLayer(m); }}).length;
                     var infoElement = document.querySelector('.info');
-                    if (infoElement) {{
-                        infoElement.textContent = visibleCount + ' locations shown';
-                    }}
+                    if (infoElement) {{ infoElement.textContent = visibleCount + ' locations shown'; }}
                 }}
 
                 function setQuickRange(days) {{
                     const end = new Date();
                     const start = new Date(end.getTime() - (days * 24 * 60 * 60 * 1000));
-
                     document.getElementById('endTime').value = formatDateTime(end);
                     document.getElementById('startTime').value = formatDateTime(start);
                 }}
 
-                function formatDateTime(date) {{
-                    return date.toISOString().slice(0, 16);
-                }}
+                function formatDateTime(date) {{ return date.toISOString().slice(0, 16); }}
 
                 function updateMap() {{
                     const startTime = document.getElementById('startTime').value;
@@ -603,53 +569,41 @@ class GoogleFindMyMapView(HomeAssistantView):
                     window.location.href = url.toString();
                 }}
 
-                // Update current time display
-                function updateCurrentTime() {{
-                    const now = new Date();
-                    const options = {{
-                        year: 'numeric',
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit',
-                        timeZoneName: 'short'
-                    }};
-                    const timeString = now.toLocaleString('en-US', options);
-                    document.getElementById('currentTime').textContent = '🕐 ' + timeString;
-                }}
-
-                // Initialize on page load
                 document.addEventListener('DOMContentLoaded', function() {{
-                    updateAccuracyFilter(); // Set initial display value
+                    updateAccuracyFilter();
                     const initialFilter = {accuracy_filter};
-                    if (initialFilter > 0) {{
-                        filterMarkersByAccuracy(initialFilter); // Apply initial filter
-                    }}
+                    if (initialFilter > 0) {{ filterMarkersByAccuracy(initialFilter); }}
 
-                    // Start current time updates
+                    function updateCurrentTime() {{
+                        const now = new Date();
+                        const options = {{
+                            year: 'numeric', month: 'short', day: 'numeric',
+                            hour: '2-digit', minute: '2-digit', second: '2-digit',
+                            timeZoneName: 'short'
+                        }};
+                        document.getElementById('currentTime').textContent = '🕐 ' + now.toLocaleString('en-US', options);
+                    }}
                     updateCurrentTime();
-                    setInterval(updateCurrentTime, 1000); // Update every second
+                    setInterval(updateCurrentTime, 1000);
                 }});
             </script>
         </body>
         </html>
         """
 
+    # ---------------------------- Token helper ----------------------------
+
     def _get_simple_token(self) -> str:
         """Generate a simple token for basic authentication.
 
         Notes:
-        - This token is intentionally simple (short hash) and checked via query param.
-        - It is a UX helper for opening the map from a device page; do not use for sensitive data.
+        - Options-first harmony with other platforms (weekly/static).
+        - No logging of the token value here or elsewhere.
         """
         import hashlib
         import time
-        from .const import DOMAIN, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+        from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
-        # Check if token expiration is enabled — **options-first** for consistency
-        # with sensor.py/device_tracker.py/button.py. This ensures the View
-        # generates the same token as the entities when the option is toggled.
         config_entries = self.hass.config_entries.async_entries(DOMAIN)
         token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
         if config_entries:
@@ -662,13 +616,12 @@ class GoogleFindMyMapView(HomeAssistantView):
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
 
         if token_expiration_enabled:
-            # Use weekly expiration when enabled
-            week = str(int(time.time() // 604800))  # Current week since epoch (7 days)
+            week = str(int(time.time() // 604800))  # 7-day bucket
             return hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
-        else:
-            # No expiration - use static token based on HA UUID only
-            return hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
+        return hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
 
+
+# ------------------------------ Redirect View -------------------------------
 
 class GoogleFindMyMapRedirectView(HomeAssistantView):
     """View to redirect to appropriate map URL based on request origin."""
@@ -685,24 +638,21 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         """Redirect to the map path using a **relative** Location header.
 
         Why relative?
-        - A relative `Location` makes the browser resolve against the **current origin**
-          (scheme/host/port) automatically — ideal behind reverse proxies or when
-          accessing HA via different base URLs (local / external / cloud).
-        - Avoids persisting or computing absolute base URLs on the server side.
-        - RFC 9110 allows a URI **reference** in `Location` (relative is valid).
+        - Browser resolves against the current origin (proxy/cloud friendly).
+        - Avoids computing or persisting absolute base URLs.
+        - RFC 9110 allows a URI reference in Location (relative is valid).
         """
+        # Require token but do not echo it back in logs.
         auth_token = request.query.get("token")
         if not auth_token:
-            return web.Response(text="Missing authentication token", status=400)
+            return _html_response("Bad Request", "Missing authentication token.", status=400)
 
-        # Build redirect target (encode query properly) as a **relative** path.
-        # This keeps the redirect origin-agnostic and lets the browser pick the
-        # exact scheme/host/port the user currently uses to access HA.
+        # Preserve all query parameters (incl. start/end/accuracy/token) in the redirect.
+        # Build a relative URL so the browser keeps the current origin automatically.
         from urllib.parse import urlencode
 
-        query = urlencode({"token": auth_token})
-        redirect_url = f"/api/googlefindmy/map/{device_id}?{query}"
-        _LOGGER.debug("Redirecting (relative) to: %s", redirect_url)
+        query_dict = dict(request.query.items())
+        redirect_url = f"/api/googlefindmy/map/{device_id}?{urlencode(query_dict)}"
+        _LOGGER.debug("Relative redirect prepared for device_id=%s", device_id)
 
-        # Use an explicit 302 redirect helper from aiohttp with a **relative** Location.
         raise web.HTTPFound(location=redirect_url)
