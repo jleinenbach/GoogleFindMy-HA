@@ -23,6 +23,7 @@ from .ProtoDecoders.decoder import (
     get_devices_with_location,
     parse_device_list_protobuf,
 )
+from .const import CONF_OAUTH_TOKEN  # used by the ephemeral flow cache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ def unregister_fcm_receiver_provider() -> None:
 # ----------------------------- Small helpers --------------------------------
 def _infer_can_ring_slot(device: Dict[str, Any]) -> Optional[bool]:
     """Normalize a 'can ring' capability from various shapes; return None if unknown.
-    
+
     We try multiple layouts because upstream protobuf decoders may evolve:
     - device["can_ring"] -> bool
     - device["canRing"] -> bool
@@ -104,29 +105,77 @@ def _build_can_ring_index(parsed_device_list: Any) -> Dict[str, bool]:
     return index
 
 
+# ---------------------- Ephemeral flow cache for Config Flow -----------------
+class _EphemeralCache:
+    """Tiny in-memory cache used only for short-lived validation in flows.
+
+    It implements the CacheProtocol subset that the API needs. Values are kept
+    in-memory only and never persisted to disk.
+    """
+
+    def __init__(self, *, oauth_token: Optional[str], email: Optional[str]) -> None:
+        self._data: Dict[str, Any] = {}
+        if isinstance(email, str) and email:
+            self._data[username_string] = email
+        if isinstance(oauth_token, str) and oauth_token:
+            self._data[CONF_OAUTH_TOKEN] = oauth_token
+
+    async def async_get_cached_value(self, key: str) -> Any:
+        return self._data.get(key)
+
+    async def async_set_cached_value(self, key: str, value: Any) -> None:
+        if value is None:
+            self._data.pop(key, None)
+        else:
+            self._data[key] = value
+
+
 # ----------------------------- API class ------------------------------------
 class GoogleFindMyAPI:
     """Async-first API wrapper for Google Find My Device.
 
     Notes:
-        - Reads credentials/metadata via the injected entry-scoped cache (TokenCache).
-        - Reuses a HA-managed aiohttp session when provided.
+        - For runtime use, credentials/metadata come from the entry-scoped cache (TokenCache).
+        - For short-lived Config/Options flows, minimal credentials may be provided directly.
+        - A HA-managed aiohttp session can be reused for all network calls.
         - Push actions depend on the shared FCM receiver provider.
     """
 
     def __init__(
         self,
-        cache: CacheProtocol,
+        cache: Optional[CacheProtocol] = None,
         *,
         session: Optional[ClientSession] = None,
+        oauth_token: Optional[str] = None,
+        google_email: Optional[str] = None,
     ) -> None:
         """Initialize the API wrapper.
 
+        Preferred:
+            Pass a TokenCache-like object via `cache`.
+
+        Flow-friendly:
+            If `cache` is not provided, you may pass `oauth_token` and/or
+            `google_email`. The API will construct an ephemeral in-memory cache
+            that satisfies the lookups it performs (primarily the username).
+
         Args:
-            cache: Entry-scoped TokenCache instance (DI).
+            cache: Entry-scoped TokenCache instance (recommended for runtime).
             session: HA-managed aiohttp ClientSession to reuse for network calls.
+            oauth_token: Optional OAuth token (flow validation only).
+            google_email: Optional Google account e-mail (flow validation only).
         """
-        self._cache = cache
+        if cache is None and (oauth_token or google_email):
+            cache = _EphemeralCache(oauth_token=oauth_token, email=google_email)
+        if cache is None:
+            # Runtime misuse: the coordinator should always pass a cache; flows should
+            # at least pass email/token. Fail early to surface programming errors.
+            raise TypeError(
+                "GoogleFindMyAPI requires either `cache=` or minimal flow credentials "
+                "(`oauth_token`/`google_email`)."
+            )
+
+        self._cache: CacheProtocol = cache
         self._session = session
 
         # Capability cache to avoid repeated network calls in capability checks.
@@ -261,7 +310,6 @@ class GoogleFindMyAPI:
             If called inside a running event loop (e.g., HA), logs and returns [].
         """
         try:
-            # Avoid asyncio.run inside running loop (common in HA); guard defensively.
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 _LOGGER.error(
