@@ -1,12 +1,15 @@
+# custom_components/googlefindmy/NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
+from __future__ import annotations
 
+import asyncio
 import datetime
 import hashlib
 import logging
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from google.protobuf.message import DecodeError
 
@@ -20,10 +23,12 @@ from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_up
 from custom_components.googlefindmy.SpotApi.CreateBleDevice.config import mcu_fast_pair_model_id
 from custom_components.googlefindmy.SpotApi.CreateBleDevice.util import flip_bits
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
-    get_eid_info,
+    async_get_eid_info,
     SpotApiEmptyResponseError,
 )
-from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import get_owner_key
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+    async_get_owner_key,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,8 +47,8 @@ def create_google_maps_link(latitude: float, longitude: float) -> Optional[str]:
     Create a standard Google Maps link for given coordinates.
 
     Contract:
-    - Returns a valid URL string, or None if coordinates are invalid.
-    - Using None avoids mixing error strings with URLs.
+        Returns a valid URL string, or None if coordinates are invalid.
+        Using None avoids mixing error strings with URLs.
 
     This preserves call sites that only log the link; they can handle None safely.
     """
@@ -66,11 +71,13 @@ def is_mcu_tracker(device_registration: DeviceRegistration) -> bool:
     return device_registration.fastPairModelId == mcu_fast_pair_model_id
 
 
-def retrieve_identity_key(device_registration: DeviceRegistration) -> bytes:
+async def async_retrieve_identity_key(device_registration: DeviceRegistration) -> bytes:
     """
-    Derive the device identity key:
-    - Flip bits (MCU quirk) and decrypt the Encrypted Identity Key (EIK) with the owner key.
-    - On failure, raise a specific exception (no prints/exits).
+    Derive the device identity key (async):
+      - Flip bits (MCU quirk) and decrypt the Encrypted Identity Key (EIK) with the owner key.
+      - On failure, raise a specific exception (no prints/exits).
+
+    Heavy crypto operations are offloaded to a worker thread.
     """
     is_mcu = is_mcu_tracker(device_registration)
     encrypted_user_secrets = device_registration.encryptedUserSecrets
@@ -80,17 +87,19 @@ def retrieve_identity_key(device_registration: DeviceRegistration) -> bytes:
         is_mcu
     )
 
-    owner_key = get_owner_key()
+    owner_key = await async_get_owner_key()
 
     try:
-        identity_key = decrypt_eik(owner_key, encrypted_identity_key)
+        # decrypt_eik may be CPU-bound → offload to thread
+        identity_key = await asyncio.to_thread(decrypt_eik, owner_key, encrypted_identity_key)
         return identity_key
     except Exception as e:
         # Try to fetch E2EE metadata to explain likely cause (key-version mismatch vs. auth issues)
         current_owner_key_version = None
         try:
-            e2eeData = get_eid_info()
+            e2eeData = await async_get_eid_info()
             current_owner_key_version = e2eeData.encryptedOwnerKeyAndMetadata.ownerKeyVersion
+            _LOGGER.debug("E2EE metadata: current ownerKeyVersion=%s", current_owner_key_version)
         except SpotApiEmptyResponseError:
             # Auth/session issue upstream (trailers-only). Propagate with context.
             _LOGGER.error(
@@ -121,11 +130,12 @@ def retrieve_identity_key(device_registration: DeviceRegistration) -> bytes:
         raise DecryptionError("Identity key decryption failed.") from e
 
 
-def decrypt_location_response_locations(device_update_protobuf):
+async def async_decrypt_location_response_locations(device_update_protobuf) -> List[Dict[str, Any]]:
     """
-    Decrypt and normalize location reports into structured dicts for Home Assistant.
+    Decrypt and normalize location reports into structured dicts for Home Assistant (async).
     - Robust against partial/invalid reports: logs and continues.
     - No prints and no process termination; all errors bubble up or are logged.
+    - CPU-bound crypto (AES/GCM, ECC) is offloaded to worker threads.
     """
     # Defensive guards on presence of required metadata
     try:
@@ -134,7 +144,7 @@ def decrypt_location_response_locations(device_update_protobuf):
         _LOGGER.error("Device registration metadata missing or invalid: %s", exc)
         raise
 
-    identity_key = retrieve_identity_key(device_registration)
+    identity_key = await async_retrieve_identity_key(device_registration)
 
     try:
         locations_proto = device_update_protobuf.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
@@ -156,7 +166,7 @@ def decrypt_location_response_locations(device_update_protobuf):
         network_locations.append(recent_location)
         network_locations_time.append(recent_location_time)
 
-    location_time_array = []
+    location_time_array: List[WrappedLocation] = []
     for loc, time_ts in zip(network_locations, network_locations_time):
         try:
             if loc.status == Common_pb2.Status.SEMANTIC:
@@ -176,11 +186,14 @@ def decrypt_location_response_locations(device_update_protobuf):
                 public_key_random = loc.geoLocation.encryptedReport.publicKeyRandom
 
                 if public_key_random == b"":  # Own Report
+                    # Hash is cheap; ok on event loop
                     identity_key_hash = hashlib.sha256(identity_key).digest()
-                    decrypted_location = decrypt_aes_gcm(identity_key_hash, encrypted_location)
+                    # AES/GCM decryption can be CPU-bound → offload
+                    decrypted_location = await asyncio.to_thread(decrypt_aes_gcm, identity_key_hash, encrypted_location)
                 else:
                     time_offset = 0 if is_mcu else loc.geoLocation.deviceTimeOffset
-                    decrypted_location = decrypt(identity_key, encrypted_location, public_key_random, time_offset)
+                    # ECC-based decrypt can be CPU-bound → offload
+                    decrypted_location = await asyncio.to_thread(decrypt, identity_key, encrypted_location, public_key_random, time_offset)
 
                 wrapped_location = WrappedLocation(
                     decrypted_location=decrypted_location,
@@ -203,14 +216,14 @@ def decrypt_location_response_locations(device_update_protobuf):
         return []
 
     # Convert to structured data for Home Assistant
-    structured_locations = []
+    structured_locations: List[Dict[str, Any]] = []
 
     for loc in location_time_array:
         try:
             if loc.status == Common_pb2.Status.SEMANTIC:
                 _LOGGER.debug("Semantic Location: %s", loc.name)
 
-                location_data = {
+                location_data: Dict[str, Any] = {
                     "latitude": None,
                     "longitude": None,
                     "altitude": None,
@@ -224,6 +237,7 @@ def decrypt_location_response_locations(device_update_protobuf):
             else:
                 proto_loc = DeviceUpdate_pb2.Location()
                 try:
+                    # Protobuf parse is relatively fast; do inline
                     proto_loc.ParseFromString(loc.decrypted_location)
                 except DecodeError as de:
                     _LOGGER.warning("Failed to parse Location protobuf: %s", de)
@@ -266,6 +280,33 @@ def decrypt_location_response_locations(device_update_protobuf):
     return structured_locations
 
 
+def decrypt_location_response_locations(device_update_protobuf) -> List[Dict[str, Any]]:
+    """
+    Legacy synchronous facade for environments without asyncio.
+
+    IMPORTANT:
+        Do NOT call this from within Home Assistant's event loop.
+        Use:  `await async_decrypt_location_response_locations(...)` instead.
+
+    Implementation detail:
+        Runs the async implementation in a fresh event loop in this thread.
+    """
+    # Fail-fast when called from a running loop in the current thread
+    try:
+        loop = asyncio.get_running_loop()
+        if loop.is_running():
+            raise RuntimeError(
+                "Sync decrypt_location_response_locations() used inside event loop. "
+                "Use `await async_decrypt_location_response_locations(...)` instead."
+            )
+    except RuntimeError:
+        # No running loop in this thread → safe to use asyncio.run
+        pass
+
+    return asyncio.run(async_decrypt_location_response_locations(device_update_protobuf))
+
+
 if __name__ == '__main__':
+    # Developer self-check (runs sync facade in a standalone interpreter)
     res = parse_device_update_protobuf("")
     decrypt_location_response_locations(res)
