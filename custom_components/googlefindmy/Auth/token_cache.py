@@ -3,210 +3,344 @@
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
+"""
+Async, in-memory cache with an HA-native Store backend, scoped per config entry.
 
-import json
-import os
+This module provides a TokenCache class that encapsulates all state (Store, data, locks)
+and offers a purely asynchronous API for safe use within the Home Assistant event loop.
+It includes a backward-compatibility facade for legacy modules, designed for a phased
+deprecation. The facade ensures single-entry setups continue to work while providing
+hard failures for ambiguous multi-entry scenarios.
+
+Key properties:
+- Entry-scoped storage file: each ConfigEntry uses its own Store key.
+- Deferred, atomic writes using Home Assistant's `Store` helper.
+- JSON snapshot validation before persisting to disk.
+- Merge migration from legacy Auth/secrets.json (best-effort, once per process).
+- Flush on HA STOP and on config entry unload; `close()` prevents further writes.
+"""
+from __future__ import annotations
+
 import asyncio
-import threading
-from typing import Dict, Optional, Any
+import json
+import logging
+import os
+from typing import Any, Awaitable, Callable, Optional, TypedDict
 
-try:
-    import aiofiles  # optional; kept for compatibility, not required by the locked path
-except ImportError:
-    aiofiles = None
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 
-SECRETS_FILE = "secrets.json"
+from ..const import STORAGE_KEY, STORAGE_VERSION
 
-# --- Helper: normalize FCM credentials (stringified JSON -> dict) ----------------
-def _normalize_fcm_credentials(value: Any) -> Any:
-    """Normalize 'fcm_credentials' to a dict if it's a JSON string."""
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except Exception:
-            return value
-    return value
+_LOGGER = logging.getLogger(__name__)
 
-# --- Concurrency primitives ------------------------------------------------------
-# 1) Per-process write lock for file + memory updates (also safe from sync paths).
-_write_lock = threading.RLock()
-# 2) Per-key async locks to deduplicate generator work (avoid thundering herd).
-_async_key_locks: Dict[str, asyncio.Lock] = {}
 
-def _get_async_key_lock(name: str) -> asyncio.Lock:
-    """Return a stable per-key asyncio.Lock (created lazily)."""
-    lock = _async_key_locks.get(name)
-    if lock is None:
-        lock = asyncio.Lock()
-        _async_key_locks[name] = lock
-    return lock
+class CacheData(TypedDict, total=False):
+    """Type-safe, JSON-serializable structure for data persisted in the Store.
 
-# --- Internal helpers (single source of truth = in-memory cache) -----------------
-def _get_secrets_file() -> str:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, SECRETS_FILE)
+    `total=False` allows sparse dictionaries where some keys may not be present.
+    """
+    oauth_token: str
+    username: str
+    fcm_credentials: dict | str | None
+    # Other keys historically stored in secrets.json are implicitly allowed.
 
-def _read_secrets_file_sync() -> Dict[str, Any]:
-    """Read file contents atomically under the write lock and return a dict."""
-    with _write_lock:
-        secrets_file = _get_secrets_file()
-        if not os.path.exists(secrets_file):
-            return {}
-        try:
-            with open(secrets_file, "r") as f:
-                data = json.load(f)
-                return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {}
 
-def _set_cached_value_sync(name: str, value: Optional[Any]) -> None:
-    """Update memory and write the full cache to disk atomically."""
-    with _write_lock:
-        # Update memory first
-        if value is None:
-            _memory_cache.pop(name, None)
+class TokenCache:
+    """Async in-memory cache backed by HA Store, scoped per config entry.
+
+    The cache delays disk writes via `Store.async_delay_save` to minimize I/O on
+    flash storage while guaranteeing atomic persistence. Use `flush()` on shutdown.
+    """
+
+    def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
+        """Initialize a TokenCache for a specific config entry.
+
+        Args:
+            hass: The Home Assistant instance.
+            entry_id: The unique ID of the ConfigEntry.
+        """
+        self._hass = hass
+        # Each entry gets its own storage file: f"{STORAGE_KEY}_{entry_id}"
+        self._store: Store[CacheData] = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry_id}")
+        self._data: CacheData = {}
+        self._write_lock = asyncio.Lock()
+        self._per_key_locks: dict[str, asyncio.Lock] = {}
+        self._closed = False
+
+    # ------------------------------- Factory ---------------------------------
+
+    @classmethod
+    async def create(cls, hass: HomeAssistant, entry_id: str, legacy_path: str | None = None) -> "TokenCache":
+        """Create a TokenCache, load Store data, and (optionally) migrate legacy file.
+
+        Args:
+            hass: The Home Assistant instance.
+            entry_id: The ConfigEntry ID used for scoping the Store file.
+            legacy_path: Optional path to an old `secrets.json` for a one-time migration.
+
+        Returns:
+            An initialized TokenCache instance.
+        """
+        instance = cls(hass, entry_id)
+
+        data = await instance._store.async_load()
+        if isinstance(data, dict):
+            instance._data = data
+            if "fcm_credentials" in instance._data:
+                instance._data["fcm_credentials"] = instance._normalize_fcm(instance._data["fcm_credentials"])
+            _LOGGER.debug("googlefindmy: Cache loaded from Store for entry '%s' (%d keys).", entry_id, len(instance._data))
+
+        if legacy_path:
+            await instance._migrate_legacy_file(legacy_path)
+
+        return instance
+
+    # ------------------------------ Migration --------------------------------
+
+    async def _migrate_legacy_file(self, legacy_path: str) -> None:
+        """Migrate an old JSON file to the Store (merge) and remove it once, process-wide."""
+        global _LEGACY_MIGRATION_DONE
+        if _LEGACY_MIGRATION_DONE:
+            return
+        _LEGACY_MIGRATION_DONE = True
+
+        def _read_legacy() -> CacheData | None:
+            if not os.path.exists(legacy_path):
+                return None
+            try:
+                with open(legacy_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else None
+            except Exception:
+                _LOGGER.exception("Failed to read legacy cache file at %s", legacy_path)
+                return None
+
+        legacy_data = await self._hass.async_add_executor_job(_read_legacy)
+        if not isinstance(legacy_data, dict):
+            return
+
+        async with self._write_lock:
+            # Merge strategy: keys already in Store override legacy keys.
+            merged = {**legacy_data, **self._data}
+            if "fcm_credentials" in merged:
+                merged["fcm_credentials"] = self._normalize_fcm(merged["fcm_credentials"])
+
+            if merged != self._data:
+                self._data = merged
+                if self._is_valid_snapshot():
+                    self._store.async_delay_save(lambda: dict(self._data), 1.0)
+                _LOGGER.info("googlefindmy: Merged legacy cache into the Store.")
+
+        def _remove_legacy() -> None:
+            try:
+                os.remove(legacy_path)
+            except OSError:
+                _LOGGER.warning("Failed to remove legacy cache file after migration: %s", legacy_path)
+
+        await self._hass.async_add_executor_job(_remove_legacy)
+
+    # ------------------------------- Get/Set ---------------------------------
+
+    async def get(self, name: str) -> Any:
+        """Return a value from the in-memory cache (non-blocking)."""
+        return self._data.get(name)
+
+    async def set(self, name: str, value: Optional[Any]) -> None:
+        """Set a value, normalize it, validate snapshot, and schedule a deferred save.
+
+        Raises:
+            RuntimeError: If called after `close()`.
+        """
+        if self._closed:
+            raise RuntimeError("TokenCache is closed; writes are disallowed.")
+
+        normalized = self._normalize_on_write(name, value)
+
+        async with self._write_lock:
+            if self._data.get(name) == normalized:
+                return  # No change, no I/O
+
+            if normalized is None:
+                if self._data.pop(name, None) is not None:
+                    # Clean up per-key lock on removal to avoid unbounded growth.
+                    self._per_key_locks.pop(name, None)
+            else:
+                if not self._is_jsonable(normalized):
+                    _LOGGER.error("Value for key '%s' is not JSON-serializable; skipping save.", name)
+                    return
+                self._data[name] = normalized
+
+        # Only schedule a save if the snapshot is valid JSON.
+        if self._is_valid_snapshot():
+            self._store.async_delay_save(lambda: dict(self._data), 1.2)
         else:
-            _memory_cache[name] = value
+            _LOGGER.error("Aborting deferred save due to non-JSON-serializable snapshot.")
 
-        # Persist entire memory snapshot to avoid overwriting concurrent keys
-        secrets_file = _get_secrets_file()
-        with open(secrets_file, "w") as f:
-            json.dump(_memory_cache, f)
+    async def get_or_set(self, name: str, generator: Callable[[], Awaitable[Any] | Any]) -> Any:
+        """Return existing value or compute/store it, avoiding thundering herds via per-key lock."""
+        if (existing := self._data.get(name)) is not None:
+            return existing
 
-# --- Public API (sync) -----------------------------------------------------------
-def get_cached_value_or_set(name: str, generator) -> Any:
-    """Return cached value or compute+store synchronously."""
-    existing_value = get_cached_value(name)
-    if existing_value is not None:
-        return existing_value
+        lock = self._per_key_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            if (existing := self._data.get(name)) is not None:
+                return existing
 
-    value = generator() if callable(generator) else generator
-    set_cached_value(name, value)
-    return value
+            new_value = generator()
+            if asyncio.iscoroutine(new_value):
+                new_value = await new_value
 
-def get_cached_value(name: str) -> Any:
-    """Sync getter with memory fast-path and atomic file backfill."""
-    # Memory fast path
-    val = get_from_memory_cache(name)
-    if val is not None:
+            await self.set(name, new_value)
+            return new_value
+
+    async def all(self) -> CacheData:
+        """Return a shallow copy of the entire cache snapshot."""
+        return dict(self._data)
+
+    # ------------------------------ Persistence ------------------------------
+
+    async def flush(self) -> None:
+        """Force an immediate save of any pending changes to disk."""
+        if not self._closed and self._is_valid_snapshot():
+            await self._store.async_save(dict(self._data))
+
+    async def close(self) -> None:
+        """Mark the cache as closed and perform a final flush; block further writes."""
+        if self._closed:
+            return
+        self._closed = True
+        await self.flush()
+
+    # ------------------------------ Utilities --------------------------------
+
+    @staticmethod
+    def _is_jsonable(value: Any) -> bool:
+        try:
+            json.dumps(value)
+            return True
+        except TypeError:
+            return False
+
+    def _is_valid_snapshot(self) -> bool:
+        for key, val in self._data.items():
+            if not self._is_jsonable(val):
+                _LOGGER.error("Snapshot contains non-JSON-serializable value for key '%s'", key)
+                return False
+        return True
+
+    @staticmethod
+    def _normalize_on_write(name: str, value: Any) -> Any:
         if name == "fcm_credentials":
-            val = _normalize_fcm_credentials(val)
-            _memory_cache[name] = val
-        return val
-
-    # Read from disk (under lock), then backfill memory
-    data = _read_secrets_file_sync()
-    if data:
-        # Normalize FCM creds in the loaded snapshot
-        if "fcm_credentials" in data:
-            data["fcm_credentials"] = _normalize_fcm_credentials(data["fcm_credentials"])
-        set_memory_cache(data)
-        return data.get(name)
-    return None
-
-def set_cached_value(name: str, value: Optional[Any]) -> None:
-    """Sync setter (atomic write via process-wide lock)."""
-    _set_cached_value_sync(name, value)
-
-# --- Public API (async) ----------------------------------------------------------
-async def async_get_cached_value_or_set(name: str, generator):
-    """Return cached value or compute+store with per-key async lock."""
-    existing_value = await async_get_cached_value(name)
-    if existing_value is not None:
-        return existing_value
-
-    lock = _get_async_key_lock(name)
-    async with lock:
-        # Re-check after acquiring the lock
-        existing_value = await async_get_cached_value(name)
-        if existing_value is not None:
-            return existing_value
-
-        value = await generator() if asyncio.iscoroutinefunction(generator) else generator()
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _set_cached_value_sync, name, value)
+            return TokenCache._normalize_fcm(value)
         return value
 
-async def async_get_cached_value(name: str):
-    """Async getter with memory fast-path and executor-backed file read."""
-    # Memory fast path
-    val = get_from_memory_cache(name)
-    if val is not None:
-        if name == "fcm_credentials":
-            val = _normalize_fcm_credentials(val)
-            _memory_cache[name] = val
-        return val
+    @staticmethod
+    def _normalize_fcm(value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                return value
+        return value
 
-    # Consistent read via the same sync helper (under lock) in executor
-    loop = asyncio.get_running_loop()
-    data = await loop.run_in_executor(None, _read_secrets_file_sync)
-    if data:
-        if "fcm_credentials" in data:
-            data["fcm_credentials"] = _normalize_fcm_credentials(data["fcm_credentials"])
-        set_memory_cache(data)
-        return data.get(name)
-    return None
 
-async def async_set_cached_value(name: str, value: Optional[Any]):
-    """Async setter using the sync writer under executor (atomic write)."""
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _set_cached_value_sync, name, value)
+# -------------------------- Global registry & facade --------------------------
 
-# --- Bulk helpers / diagnostics --------------------------------------------------
-def save_oauth_token(token: str):
-    """Save OAuth token to cache."""
-    set_cached_value("oauth_token", token)
+_INSTANCES: dict[str, TokenCache] = {}
+_DEFAULT_ENTRY_ID: str | None = None
+_LEGACY_MIGRATION_DONE: bool = False
 
-async def async_save_oauth_token(token: str):
-    """Save OAuth token to cache (async version)."""
-    await async_set_cached_value("oauth_token", token)
 
-def load_oauth_token():
-    """Load OAuth token from cache."""
-    return get_cached_value("oauth_token")
+def _register_instance(entry_id: str, instance: TokenCache) -> None:
+    """Register a TokenCache instance for a config entry ID (internal)."""
+    _INSTANCES[entry_id] = instance
 
-async def async_load_oauth_token():
-    """Load OAuth token from cache (async version)."""
-    return await async_get_cached_value("oauth_token")
 
-def get_all_cached_values() -> Dict[str, Any]:
+def _unregister_instance(entry_id: str) -> Optional[TokenCache]:
+    """Unregister and return the TokenCache instance for a config entry ID (internal)."""
+    global _DEFAULT_ENTRY_ID
+    if _DEFAULT_ENTRY_ID == entry_id:
+        _DEFAULT_ENTRY_ID = None
+    return _INSTANCES.pop(entry_id, None)
+
+
+def _set_default_entry_id(entry_id: str) -> None:
+    """Set the default entry for facade calls (only for single-entry scenarios)."""
+    global _DEFAULT_ENTRY_ID
+    if len(_INSTANCES) > 1 and _DEFAULT_ENTRY_ID != entry_id:
+        # Immediately disallow ambiguous facade usage in multi-entry setups.
+        _DEFAULT_ENTRY_ID = None
+        _LOGGER.warning("Multiple config entries are active. Global cache calls are ambiguous and will fail.")
+    else:
+        _DEFAULT_ENTRY_ID = entry_id
+
+
+def _get_default_cache() -> TokenCache:
+    """Return the default cache instance or raise if ambiguous."""
+    if _DEFAULT_ENTRY_ID and (cache := _INSTANCES.get(_DEFAULT_ENTRY_ID)):
+        return cache
+    if len(_INSTANCES) == 1:
+        return next(iter(_INSTANCES.values()))
+    raise RuntimeError(
+        "Multiple config entries active. Use an entry-id-specific cache or pass `entry.runtime_data`."
+    )
+
+
+# ------------------------------- Public facade --------------------------------
+
+async def async_get_cached_value(name: str) -> Any:
+    """Facade: return a value from the default cache."""
+    cache = _get_default_cache()
+    return await cache.get(name)
+
+
+async def async_set_cached_value(name: str, value: Optional[Any]) -> None:
+    """Facade: set a value in the default cache."""
+    cache = _get_default_cache()
+    await cache.set(name, value)
+
+
+async def async_get_cached_value_or_set(name: str, generator: Callable[[], Awaitable[Any] | Any]) -> Any:
+    """Facade: return a value or generate/store it."""
+    cache = _get_default_cache()
+    return await cache.get_or_set(name, generator)
+
+
+async def async_get_all_cached_values() -> CacheData:
+    """Facade: return a full snapshot from the default cache."""
+    cache = _get_default_cache()
+    return await cache.all()
+
+
+def get_cached_value(name: str) -> Any:
+    """Legacy sync facade. Must not be called from the event loop.
+
+    Raises:
+        RuntimeError: If called inside the event loop (use async variant instead).
     """
-    Return a full snapshot from disk (source of truth) and refresh memory.
-    This avoids returning a partial in-memory view.
-    """
-    data = _read_secrets_file_sync()
-    if data and "fcm_credentials" in data:
-        data["fcm_credentials"] = _normalize_fcm_credentials(data["fcm_credentials"])
-    set_memory_cache(data)
-    return data
+    try:
+        asyncio.get_running_loop()  # raises if no running loop
+    except RuntimeError:
+        if not _INSTANCES:
+            return None
+        cache = _get_default_cache()
+        return cache._data.get(name)
+    else:
+        raise RuntimeError(
+            f"Sync `get_cached_value({name!r})` used inside event loop. "
+            "Use `async_get_cached_value` instead."
+        )
 
-async def async_get_all_cached_values() -> Dict[str, Any]:
-    """Async variant of get_all_cached_values()."""
-    loop = asyncio.get_running_loop()
-    data = await loop.run_in_executor(None, _read_secrets_file_sync)
-    if data and "fcm_credentials" in data:
-        data["fcm_credentials"] = _normalize_fcm_credentials(data["fcm_credentials"])
-    set_memory_cache(data)
-    return data
 
-# --- Global in-memory cache (single source of truth for this process) -----------
-_memory_cache: Dict[str, Any] = {}
-
-def set_memory_cache(data: dict):
-    """Set the in-memory cache for Home Assistant (avoids file I/O in event loop)."""
-    global _memory_cache
-    with _write_lock:
-        _memory_cache = data.copy()
-
-def get_from_memory_cache(key: str):
-    """Get a value from the in-memory cache."""
-    return _memory_cache.get(key)
-
-async def async_load_cache_from_file():
-    """Load the entire cache from file into memory (async)."""
-    loop = asyncio.get_running_loop()
-    data = await loop.run_in_executor(None, _read_secrets_file_sync)
-    if data and "fcm_credentials" in data:
-        data["fcm_credentials"] = _normalize_fcm_credentials(data["fcm_credentials"])
-    set_memory_cache(data)
-    return data
+__all__ = [
+    "CacheData",
+    "TokenCache",
+    "async_get_cached_value",
+    "async_set_cached_value",
+    "async_get_cached_value_or_set",
+    "async_get_all_cached_values",
+    "_register_instance",
+    "_unregister_instance",
+    "_set_default_entry_id",
+]
