@@ -326,6 +326,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Ensure deregistration on unload (simple synchronous callback, per HA best practices).
     entry.async_on_unload(lambda: fcm.unregister_coordinator(coordinator))
 
+    # Ensure FCM supervisor is running for background push updates (idempotent).
+    try:
+        await fcm._start_listening()  # noqa: SLF001
+    except AttributeError:
+        _LOGGER.debug(
+            "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
+        )
+
     # Expose runtime object on the entry for modern consumers (diagnostics, repair, etc.).
     # This contains no secrets; coordinator already keeps sensitive data out of public attrs.
     entry.runtime_data = coordinator
