@@ -6,6 +6,7 @@ import base64
 import binascii
 import json
 import logging
+import random
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -15,6 +16,32 @@ from custom_components.googlefindmy.Auth.token_cache import (
     async_set_cached_value,
     get_cached_value,  # sync fallback for early boot
 )
+
+# Integration-level tunables (safe fallbacks if missing)
+try:
+    from custom_components.googlefindmy.const import (  # type: ignore
+        FCM_CLIENT_HEARTBEAT_INTERVAL_S,
+        FCM_SERVER_HEARTBEAT_INTERVAL_S,
+        FCM_IDLE_RESET_AFTER_S,
+        FCM_CONNECTION_RETRY_COUNT,
+        FCM_MONITOR_INTERVAL_S,
+        FCM_ABORT_ON_SEQ_ERROR_COUNT,
+    )
+except Exception:  # pragma: no cover
+    FCM_CLIENT_HEARTBEAT_INTERVAL_S = 20
+    FCM_SERVER_HEARTBEAT_INTERVAL_S = 10
+    FCM_IDLE_RESET_AFTER_S = 90.0
+    FCM_CONNECTION_RETRY_COUNT = 5
+    FCM_MONITOR_INTERVAL_S = 1.0
+    FCM_ABORT_ON_SEQ_ERROR_COUNT = 3
+
+# Optional import of worker run-state enum (for robust state checks)
+try:
+    from custom_components.googlefindmy.Auth.firebase_messaging import (  # type: ignore
+        FcmPushClientRunState,
+    )
+except Exception:  # pragma: no cover
+    FcmPushClientRunState = None  # type: ignore[misc,assignment]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +54,8 @@ class FcmReceiverHA:
       - Synchronous register/unregister methods to match async_on_unload contract.
       - Push-to-entities: prefer coordinator.push_updated() (if present) over refresh.
       - Encapsulation: never mutate coordinator private attrs when a public API exists.
+      - Supervision: runs a supervisor loop that (re)creates/starts the FcmPushClient,
+        monitors it, and restarts on stop/crash with exponential backoff + jitter.
     """
 
     def __init__(self) -> None:
@@ -49,7 +78,7 @@ class FcmReceiverHA:
     # -------------------- Lifecycle --------------------
 
     async def async_initialize(self) -> bool:
-        """Initialize receiver and underlying push client."""
+        """Initialize receiver and underlying push client (idempotent)."""
         try:
             await async_load_cache_from_file()
         except OSError as err:
@@ -69,6 +98,7 @@ class FcmReceiverHA:
             from custom_components.googlefindmy.Auth.firebase_messaging import (  # type: ignore
                 FcmPushClient,
                 FcmRegisterConfig,
+                FcmPushClientConfig,
             )
         except ImportError as err:
             _LOGGER.error("Failed to import FCM client support: %s", err)
@@ -82,18 +112,35 @@ class FcmReceiverHA:
             bundle_id="com.google.android.apps.adm",
         )
 
+        # Wire integration-level tunables into the client config
+        client_cfg = FcmPushClientConfig(
+            client_heartbeat_interval=int(FCM_CLIENT_HEARTBEAT_INTERVAL_S),
+            server_heartbeat_interval=int(FCM_SERVER_HEARTBEAT_INTERVAL_S),
+            idle_reset_after=float(FCM_IDLE_RESET_AFTER_S),
+            connection_retry_count=int(FCM_CONNECTION_RETRY_COUNT),
+            monitor_interval=float(FCM_MONITOR_INTERVAL_S),  # accepted by worker config
+            abort_on_sequential_error_count=int(FCM_ABORT_ON_SEQ_ERROR_COUNT),
+        )
+
         try:
             self.pc = FcmPushClient(
                 self._on_notification,
                 fcm_config,
                 self.credentials,
                 self._on_credentials_updated,
+                config=client_cfg,
             )
         except Exception as err:
             _LOGGER.error("Failed to construct FCM push client: %s", err)
             return False
 
-        _LOGGER.info("FCM receiver initialized")
+        _LOGGER.info(
+            "FCM receiver initialized (client_hb=%ss, server_hb=%ss, idle_reset=%ss, retries=%d)",
+            client_cfg.client_heartbeat_interval,
+            client_cfg.server_heartbeat_interval,
+            client_cfg.idle_reset_after,
+            client_cfg.connection_retry_count,
+        )
         return True
 
     async def async_register_for_location_updates(
@@ -132,49 +179,118 @@ class FcmReceiverHA:
         except ValueError:
             pass  # already removed
 
-    # -------------------- Internal listening --------------------
+    # -------------------- Internal listening & supervision --------------------
 
     async def _start_listening(self) -> None:
-        if not self.pc:
-            ok = await self.async_initialize()
-            if not ok:
-                return
-
-        await self._register_for_fcm()
-
-        # Start background listener task
-        self._listen_task = asyncio.create_task(self._listen_for_messages(), name="googlefindmy.fcm_listener")
-        self._listening = True
-        _LOGGER.info("Started listening for FCM notifications")
-
-    async def _register_for_fcm(self) -> None:
-        if not self.pc:
+        """Start supervisor loop if not already running."""
+        if self._listening:
             return
+        self._listening = True
+        # Start background supervisor task
+        self._listen_task = asyncio.create_task(
+            self._supervisor_loop(), name="googlefindmy.fcm_supervisor"
+        )
+        _LOGGER.info("Started FCM supervisor")
 
-        for attempt in range(1, 4):
-            try:
-                token = await self.pc.checkin_or_register()
-                if token:
-                    _LOGGER.info("FCM registered (attempt %d), token: %s…", attempt, token[:20])
-                    return
-                _LOGGER.warning("FCM registration returned no token (attempt %d)", attempt)
-            except (ConnectionError, TimeoutError) as err:
-                _LOGGER.error("FCM registration network error (attempt %d): %s", attempt, err)
-            except Exception as err:  # final guard
-                _LOGGER.error("FCM registration unexpected error (attempt %d): %s", attempt, err)
-            await asyncio.sleep(5)
-
-    async def _listen_for_messages(self) -> None:
+    async def _register_for_fcm(self) -> bool:
+        """Single registration attempt; let the supervisor handle retries/backoff."""
+        if not self.pc:
+            return False
         try:
-            if self.pc:
-                await self.pc.start()
-                _LOGGER.debug("FCM message listener started")
-        except (ConnectionError, TimeoutError) as err:
-            _LOGGER.error("FCM listen network error: %s", err)
+            token = await self.pc.checkin_or_register()
+            if token:
+                _LOGGER.info("FCM registered, token: %s…", str(token)[:20])
+                return True
+            _LOGGER.warning("FCM registration returned no token")
+            return False
         except Exception as err:
-            _LOGGER.error("FCM listen unexpected error: %s", err)
+            _LOGGER.error("FCM registration error: %s", err)
+            return False
+
+    async def _supervisor_loop(self) -> None:
+        """Supervise FCM client: start, monitor, restart on fatal stop."""
+        backoff = 1.0  # seconds, exponential with cap
+        try:
+            while self._listening:
+                # (Re)initialize client if needed
+                if not self.pc:
+                    ok = await self.async_initialize()
+                    if not ok:
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, 60.0)
+                        continue
+
+                # Ensure we have credentials/token (single attempt)
+                ok_reg = await self._register_for_fcm()
+                if not ok_reg:
+                    # Cleanup before retrying
+                    if self.pc:
+                        try:
+                            await self.pc.stop()
+                        except Exception:
+                            pass
+                        finally:
+                            self.pc = None
+                    delay = backoff + random.uniform(0.1, 0.3) * backoff
+                    _LOGGER.info("Re-trying FCM registration in %.1fs", delay)
+                    await asyncio.sleep(delay)
+                    backoff = min(backoff * 2, 60.0)
+                    continue
+
+                # Start client (non-blocking; it launches internal tasks) and monitor
+                try:
+                    await self.pc.start()
+                    _LOGGER.debug("FCM client started; entering monitor loop")
+                except Exception as err:
+                    _LOGGER.info("FCM client failed to start: %s", err)
+
+                # Reset backoff after a successful start
+                backoff = 1.0
+
+                # Monitor until client stops or supervisor asked to stop
+                while self._listening and self.pc:
+                    await asyncio.sleep(max(FCM_MONITOR_INTERVAL_S, 0.5))
+                    # Check run_state/do_listen heuristics
+                    state = getattr(self.pc, "run_state", None)
+                    do_listen = getattr(self.pc, "do_listen", False)
+
+                    if state is None:
+                        _LOGGER.info("FCM client state unknown; scheduling restart")
+                        break
+
+                    # Robust enum-based check (fallback to do_listen if enum absent)
+                    if (
+                        (FcmPushClientRunState is not None and state in (FcmPushClientRunState.STOPPING, FcmPushClientRunState.STOPPED))
+                        or not do_listen
+                    ):
+                        _LOGGER.info("FCM client stopped; scheduling restart")
+                        break
+
+                # Cleanup before restart
+                if self.pc:
+                    try:
+                        await self.pc.stop()
+                    except Exception:
+                        pass
+                    finally:
+                        # Recreate the client on next loop to clear any bad state
+                        self.pc = None
+
+                if self._listening:
+                    # Backoff with light jitter
+                    delay = backoff + random.uniform(0.1, 0.3) * backoff
+                    _LOGGER.info("Restarting FCM client in %.1fs", delay)
+                    await asyncio.sleep(delay)
+                    backoff = min(backoff * 2, 60.0)
+
+        except asyncio.CancelledError:
+            _LOGGER.debug("FCM supervisor cancelled")
+            raise
+        except Exception as err:
+            _LOGGER.error("FCM supervisor crashed: %s", err)
         finally:
             self._listening = False
+            _LOGGER.info("FCM supervisor stopped")
 
     # -------------------- Incoming notifications --------------------
 
@@ -265,7 +381,9 @@ class FcmReceiverHA:
             _LOGGER.debug("Failed to extract canonical id from FCM response: %s", err)
         return None
 
-    async def _run_callback_async(self, callback: Callable[[str, str], None], canonic_id: str, hex_string: str) -> None:
+    async def _run_callback_async(
+        self, callback: Callable[[str, str], None], canonic_id: str, hex_string: str
+    ) -> None:
         """Run potentially blocking callback in a thread."""
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, callback, canonic_id, hex_string)
@@ -378,8 +496,12 @@ class FcmReceiverHA:
             _LOGGER.error("Failed to save FCM credentials: %s", err)
 
     async def async_stop(self) -> None:
-        """Stop the background listener and push client."""
-        # Stop listener task
+        """Stop the supervisor and push client (graceful)."""
+        # Stop supervisor loop
+        if self._listening:
+            self._listening = False
+
+        # Stop background supervisor task
         if self._listen_task:
             self._listen_task.cancel()
             try:
@@ -388,9 +510,8 @@ class FcmReceiverHA:
                 pass
             finally:
                 self._listen_task = None
-        self._listening = False
 
-        # Stop push client
+        # Stop push client (if still present)
         if self.pc:
             try:
                 await self.pc.stop()
