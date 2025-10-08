@@ -339,30 +339,63 @@ def set_cached_value(name: str, value: Optional[Any]) -> None:
     Raises:
         RuntimeError: If called inside the event loop (use async variant instead).
     """
-    # Correct event-loop guard: forbid use when a loop is active.
     try:
-        asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
+        if loop.is_running():
+            raise RuntimeError(
+                f"Sync `set_cached_value({name!r})` used inside event loop. "
+                "Use `async_set_cached_value` instead."
+            )
     except RuntimeError:
-        # No running loop → OK to proceed synchronously
+        # No running loop; proceed synchronously
         pass
-    else:
-        raise RuntimeError(
-            f"Sync `set_cached_value({name!r})` used inside event loop. "
-            "Use `async_set_cached_value` instead."
-        )
 
     if not _INSTANCES:
         _LOGGER.warning("Cache not initialized; cannot set '%s'", name)
         return
 
     cache = _get_default_cache()
-    # Direct write to in-memory dict for sync context.
-    # This bypasses the write lock and deferred save, which is acceptable
-    # for the legacy CLI/test use case.
+    # Direct write to in-memory dict for sync context (CLI/tests). No disk write here.
     if value is None:
         cache._data.pop(name, None)
     else:
         cache._data[name] = value
+
+
+def get_cached_value_or_set(name: str, generator: Callable[[], Any]) -> Any:
+    """Legacy sync 'get or set' facade (CLI/tests only).
+
+    IMPORTANT:
+        - Must NOT be called from inside the Home Assistant event loop.
+        - Avoids I/O; writes only to in-memory cache for the current process.
+
+    Behavior:
+        If the key exists, returns it.
+        Otherwise, computes value via `generator()`, stores it in-memory, and returns it.
+    """
+    # Prevent usage in the event loop
+    try:
+        loop = asyncio.get_running_loop()
+        if loop.is_running():
+            raise RuntimeError(
+                f"Sync `get_cached_value_or_set({name!r})` used inside event loop. "
+                "Use `async_get_cached_value_or_set` instead."
+            )
+    except RuntimeError:
+        # No running loop -> safe to proceed
+        pass
+
+    if not _INSTANCES:
+        _LOGGER.warning("Cache not initialized; computing '%s' without storing persistently", name)
+        return generator()
+
+    cache = _get_default_cache()
+    if name in cache._data:
+        return cache._data[name]
+
+    value = generator()
+    cache._data[name] = value
+    return value
 
 
 __all__ = [
@@ -374,6 +407,7 @@ __all__ = [
     "async_get_all_cached_values",
     "get_cached_value",
     "set_cached_value",
+    "get_cached_value_or_set",
     "_register_instance",
     "_unregister_instance",
     "_set_default_entry_id",
