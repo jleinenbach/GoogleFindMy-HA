@@ -29,14 +29,12 @@ from __future__ import annotations
 
 import asyncio
 import binascii
+import time
 import random
 import threading
-import time
 from typing import Callable, Optional
 
 import aiohttp
-import requests
-from bs4 import BeautifulSoup
 
 from custom_components.googlefindmy.Auth.adm_token_retrieval import get_adm_token  # CLI/sync only
 from custom_components.googlefindmy.Auth.username_provider import get_username
@@ -60,7 +58,7 @@ def unregister_session_provider() -> None:
     _HASS_REF = None
 
 
-# ------------------------ TTL policy helper (shared by sync/async) ------------------------
+# ------------------------ TTL policy (shared core) ------------------------
 class TTLPolicy:
     """Token TTL/probe policy (synchronous I/O).
 
@@ -200,7 +198,7 @@ class TTLPolicy:
 
         if planned_probe:
             self.log.info(f"Got 401 (forced probe) – measured TTL: {age_min:.1f} min.")
-            self._set(self.k_bestttl, age_sec)   # always accept probe (up or down)
+            self._set(self.k_bestttl, age_sec)  # always accept probe (up or down)
             self._set(self.k_armed, 0)          # coalesce multiple 401 in same probe window
             left = self._get(self.k_startleft)
             if left and int(left) > 0:
@@ -258,7 +256,6 @@ class AsyncTTLPolicy(TTLPolicy):
         return bool(await self._get(self.k_armed))
 
     async def _do_refresh_async(self, now: float) -> Optional[str]:
-        """Refresh token, update header and issuance timestamp (async)."""
         try:
             await self._set(f"adm_token_{self.username}", None)
         except Exception:
@@ -275,9 +272,7 @@ class AsyncTTLPolicy(TTLPolicy):
         now = time.time()
         issued_at = await self._get(self.k_issued)
         best_ttl = await self._get(self.k_bestttl)
-
         armed = await self._arm_probe_if_due_async(now)
-
         if (not armed) and issued_at and best_ttl:
             try:
                 age = now - float(issued_at)
@@ -327,19 +322,17 @@ class AsyncTTLPolicy(TTLPolicy):
 
 # Locks for policy sections
 _TOKEN_POLICY_LOCK_SYNC = threading.Lock()
-_token_policy_lock_async: Optional[asyncio.Lock] = None  # created lazily in async_nova_request()
+_token_policy_lock_async: Optional[asyncio.Lock] = None  # lazily created
 
 
-# ------------------------ Small helpers to reduce duplication ------------------------
 def _get_initial_token_sync(username: str, _logger) -> str:
     """Get or create the initial ADM token in sync path and ensure TTL metadata is recorded."""
-    # Local import to keep external dependencies unchanged in module scope.
     from custom_components.googlefindmy.Auth.token_cache import get_cached_value, set_cached_value
 
     token = get_cached_value(f"adm_token_{username}")
     _logger.debug(f"ADM token for {username}: {'Found' if token else 'Not found'}")
     if not token:
-        # Try alternative token name (kept for backward-compat)
+        # Local import to keep external dependencies unchanged in module scope.
         token = get_cached_value("adm_token")
         _logger.debug(f"Generic ADM token: {'Found' if token else 'Not found'}")
 
@@ -388,7 +381,6 @@ async def _get_initial_token_async(username: str, _logger) -> str:
     return token
 
 
-# -----------------------------------------------------------------------------------------
 def nova_request(api_scope: str, hex_payload: str, session: aiohttp.ClientSession | None = None) -> str:
     """
     Synchronous Nova API request (CLI/testing only).
@@ -405,7 +397,6 @@ def nova_request(api_scope: str, hex_payload: str, session: aiohttp.ClientSessio
 
     Returns:
         Hex-encoded response body.
-
     Raises:
         RuntimeError: if called from a running event loop, or after unrecoverable failures.
     """
@@ -422,25 +413,15 @@ def nova_request(api_scope: str, hex_payload: str, session: aiohttp.ClientSessio
         pass
 
     import logging
-    from custom_components.googlefindmy.Auth.token_cache import (
-        get_all_cached_values,
-        get_cached_value,
-        set_cached_value,
-    )
+    import requests  # moved local
+    from bs4 import BeautifulSoup  # moved local
+    from custom_components.googlefindmy.Auth.token_cache import get_cached_value, set_cached_value
 
     _logger = logging.getLogger(__name__)
     url = "https://android.googleapis.com/nova/" + api_scope
 
     # Resolve username via sync provider (guarded inside provider)
     username = get_username()
-
-    # Optional debug
-    try:
-        all_cached = get_all_cached_values()
-        _logger.debug(f"Available cached tokens: {list(all_cached.keys())}")
-    except Exception:
-        pass
-    _logger.debug(f"Username: {username}")
 
     # Initial token retrieval (centralized helper)
     android_device_manager_oauth_token = _get_initial_token_sync(username, _logger)
@@ -455,7 +436,6 @@ def nova_request(api_scope: str, hex_payload: str, session: aiohttp.ClientSessio
     payload = binascii.unhexlify(hex_payload)
 
     _logger.debug(f"Making Nova API request to: {url}")
-    _logger.debug(f"Request headers: {headers}")
     _logger.debug(f"Payload length: {len(payload)} bytes")
 
     # --- Create and reuse a single policy instance per request ---
@@ -482,15 +462,12 @@ def nova_request(api_scope: str, hex_payload: str, session: aiohttp.ClientSessio
     for attempt in range(max_retries):
         try:
             response = requests.post(url, headers=headers, data=payload, timeout=30)
-
             _logger.debug(f"Nova API response status: {response.status_code} (attempt {attempt + 1}/{max_retries})")
             _logger.debug(f"Response content length: {len(response.content)} bytes")
 
             if response.status_code == 200:
-                result_hex = response.content.hex()
-                _logger.debug(f"Nova API success - returning {len(result_hex)} characters of hex data")
-                return result_hex
-            elif response.status_code == 401:
+                return response.content.hex()
+            if response.status_code == 401:
                 # Centralized 401 handling: refresh via policy and retry.
                 try:
                     with _TOKEN_POLICY_LOCK_SYNC:
@@ -503,7 +480,7 @@ def nova_request(api_scope: str, hex_payload: str, session: aiohttp.ClientSessio
                     continue
                 _logger.error("Token refreshed, but subsequent request is out of retries.")
                 raise RuntimeError("Failed to get a valid response even after token refresh.")
-            elif response.status_code in [500, 502, 503, 504]:
+            if response.status_code in [500, 502, 503, 504]:
                 # Server errors - retry with exponential backoff
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (2 ** attempt)
@@ -512,10 +489,13 @@ def nova_request(api_scope: str, hex_payload: str, session: aiohttp.ClientSessio
                     continue
                 _logger.error(f"Nova API failed with {response.status_code} after {max_retries} attempts")
             else:
-                # Other client errors – surface error body for diagnostics
-                soup = BeautifulSoup(response.text, "html.parser")
-                error_message = soup.get_text() if soup else response.text
-                _logger.debug(f"Nova API failed: status={response.status_code}, error='{error_message[:200]}...'")
+                # Surface just enough error text
+                try:
+                    from bs4 import BeautifulSoup  # local import only when needed
+                    soup = BeautifulSoup(response.text, "html.parser")
+                    error_message = soup.get_text() if soup else response.text
+                except Exception:
+                    error_message = response.text
                 raise RuntimeError(f"Nova API request failed with status {response.status_code}: {error_message}")
         except requests.Timeout:
             if attempt < max_retries - 1:
@@ -553,10 +533,8 @@ async def async_nova_request(
         hex_payload: Hex string body.
         username: Optional username. If omitted, read from async cache.
         session: Optional aiohttp session to reuse.
-
     Returns:
         Hex-encoded response body.
-
     Raises:
         RuntimeError: on client/server errors after retries, or when username is unavailable.
     """
@@ -571,13 +549,12 @@ async def async_nova_request(
     _logger = logging.getLogger(__name__)
     url = "https://android.googleapis.com/nova/" + api_scope
 
-    # Resolve username via param or async cache
     if not username:
         username = await async_get_cached_value(username_string)
     if not username:
         raise ValueError("Username is not available - cannot proceed with async_nova_request.")
 
-    # Initial token retrieval (centralized helper)
+    # Resolve username via param or async cache
     android_device_manager_oauth_token = await _get_initial_token_async(username, _logger)
 
     headers = {
@@ -588,9 +565,6 @@ async def async_nova_request(
     }
 
     payload = binascii.unhexlify(hex_payload)
-
-    _logger.debug(f"Making async Nova API request to: {url}")
-    _logger.debug(f"Payload length: {len(payload)} bytes")
 
     # Lazily create async policy lock
     global _token_policy_lock_async
@@ -614,7 +588,6 @@ async def async_nova_request(
         except Exception as _policy_e:
             _logger.debug(f"Pre-request policy (async) skipped due to: {_policy_e}")
 
-    # Add retry logic for transient failures (401 path re-enters the loop)
     max_retries = 3
     retry_delay = 1
 
@@ -626,7 +599,6 @@ async def async_nova_request(
             try:
                 # Use HA-managed shared session
                 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-
                 session = async_get_clientsession(hass)
             except Exception as e:
                 _logger.debug(f"HA session provider not available: {e}; creating a temporary session.")
@@ -653,9 +625,7 @@ async def async_nova_request(
                     _logger.debug(f"Response content length: {len(content)} bytes")
 
                     if status == 200:
-                        result_hex = content.hex()
-                        _logger.debug(f"Nova API success - returning {len(result_hex)} characters of hex data")
-                        return result_hex
+                        return content.hex()
                     if status == 401:
                         # Centralized 401 handling: refresh via policy and re-enter retry loop.
                         async with _token_policy_lock_async:
@@ -665,7 +635,6 @@ async def async_nova_request(
                                 _logger.warning(
                                     "Got 401 Unauthorized - ADM token likely expired, attempting recovery (async)..."
                                 )
-
                         if attempt < max_retries - 1:
                             _logger.info("Token refreshed after 401, re-entering retry loop.")
                             continue
@@ -680,15 +649,14 @@ async def async_nova_request(
                             continue
                         _logger.error(f"Nova API failed with {status} after {max_retries} attempts")
                     else:
-                        # Other client errors – surface error body for diagnostics
                         error_text = content.decode("utf-8", errors="ignore") if content else ""
-                        soup = BeautifulSoup(error_text, "html.parser")
-                        error_message = soup.get_text() if soup else error_text
-                        _logger.debug(
-                            f"Nova API failed: status={status}, error='{error_message[:200]}...'"
-                        )
+                        try:
+                            from bs4 import BeautifulSoup  # local import only when needed
+                            soup = BeautifulSoup(error_text, "html.parser")
+                            error_message = soup.get_text() if soup else error_text
+                        except Exception:
+                            error_message = error_text
                         raise RuntimeError(f"Nova API request failed with status {status}: {error_message}")
-
             except asyncio.TimeoutError:
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (2 ** attempt)
