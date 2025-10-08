@@ -198,6 +198,20 @@ class TokenCache:
         """Return a shallow copy of the entire cache snapshot."""
         return dict(self._data)
 
+    # ---------- Coordinator/API compatibility aliases (Protocol-friendly) ----------
+
+    async def async_get_cached_value(self, name: str) -> Any:
+        """Alias for compatibility with CacheProtocol used by coordinator/api."""
+        return await self.get(name)
+
+    async def async_set_cached_value(self, name: str, value: Optional[Any]) -> None:
+        """Alias for compatibility with CacheProtocol used by coordinator/api."""
+        await self.set(name, value)
+
+    async def async_get_cached_value_or_set(self, name: str, generator: Callable[[], Awaitable[Any] | Any]) -> Any:
+        """Alias for compatibility with potential CacheProtocol callers."""
+        return await self.get_or_set(name, generator)
+
     # ------------------------------ Persistence ------------------------------
 
     async def flush(self) -> None:
