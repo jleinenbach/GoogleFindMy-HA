@@ -239,7 +239,13 @@ class GoogleFindMyAPI:
                 except Exception:
                     username = None
 
-            result_hex = await async_request_device_list(username, session=self._session)
+            # Compatibility: older nbe_list_devices versions may not accept 'session='
+            try:
+                result_hex = await async_request_device_list(username, session=self._session)
+            except TypeError:
+                _LOGGER.debug("Falling back to async_request_device_list without session kwarg")
+                result_hex = await async_request_device_list(username)
+
             return self._process_device_list_response(result_hex)
         except ClientError as err:
             _LOGGER.error("Failed to get basic device list (async, network): %s", err)
