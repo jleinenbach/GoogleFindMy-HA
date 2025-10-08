@@ -5,10 +5,10 @@
 """
 ADM (Android Device Manager) token retrieval for the Google Find My Device integration.
 
-This module exposes an async-first API to obtain (and cache) ADM tokens per user.
-It uses the integration's TokenCache (HA Store-backed) for persistence and avoids
-blocking the Home Assistant event loop by offloading any synchronous library calls
-to an executor.
+Async-first implementation:
+- Uses async AAS token retrieval to avoid event-loop blocking.
+- Runs gpsoauth.perform_oauth (blocking) inside an executor.
+- Persists TTL metadata in the token cache (used by Nova TTL policies).
 
 Key points
 ----------
@@ -16,7 +16,6 @@ Key points
 - Async-first: `async_get_adm_token()` is the primary API.
 - Legacy sync facade: `get_adm_token()` is provided for CLI/offline usage only
   and will raise a RuntimeError if called from within the HA event loop.
-
 Cache keys
 ----------
 - adm_token_<email>                  -> str : the ADM token
@@ -32,7 +31,9 @@ import logging
 import time
 from typing import Optional
 
-from custom_components.googlefindmy.Auth.token_retrieval import request_token
+import gpsoauth
+
+from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
 from custom_components.googlefindmy.Auth.username_provider import (
     async_get_username,
     username_string,
@@ -43,6 +44,11 @@ from custom_components.googlefindmy.Auth.token_cache import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Constants for gpsoauth
+_ANDROID_ID: int = 0x38918A453D071993
+_CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
+_APP_ID: str = "com.google.android.apps.adm"
 
 
 async def _seed_username_in_cache(username: str) -> None:
@@ -56,26 +62,27 @@ async def _seed_username_in_cache(username: str) -> None:
         _LOGGER.debug("Username cache seeding skipped: %s", exc)
 
 
-async def _generate_adm_token(username: str) -> str:
-    """Generate a new ADM token for the given user using the sync helper in an executor.
+async def _perform_oauth_with_aas(username: str) -> str:
+    """Exchange AAS -> scope token (ADM) using gpsoauth in a thread executor."""
+    # Get AAS token asynchronously (it handles its own blocking via executor)
+    aas_token = await async_get_aas_token()
 
-    The underlying `request_token(...)` is synchronous; we run it in a thread
-    to avoid blocking the HA event loop.
-
-    Raises:
-        RuntimeError: If the token exchange returns an empty/invalid result.
-    """
-    await _seed_username_in_cache(username)
+    def _run() -> str:
+        """Synchronous part to be run in an executor."""
+        resp = gpsoauth.perform_oauth(
+            username,
+            aas_token,
+            _ANDROID_ID,
+            service="oauth2:https://www.googleapis.com/auth/android_device_manager",
+            app=_APP_ID,
+            client_sig=_CLIENT_SIG,
+        )
+        if not resp or "Auth" not in resp:
+            raise RuntimeError(f"gpsoauth.perform_oauth returned invalid response: {resp}")
+        return resp["Auth"]
 
     loop = asyncio.get_running_loop()
-
-    def _blocking_exchange() -> str:
-        return request_token(username, "android_device_manager")
-
-    token: str = await loop.run_in_executor(None, _blocking_exchange)
-    if not token:
-        raise RuntimeError("request_token() returned an empty ADM token")
-    return token
+    return await loop.run_in_executor(None, _run)
 
 
 async def async_get_adm_token(
@@ -84,52 +91,45 @@ async def async_get_adm_token(
     retries: int = 2,
     backoff: float = 1.0,
 ) -> str:
-    """Return a cached ADM token or generate a new one (async-first API).
+    """
+    Return a cached ADM token or generate a new one (async-first API).
 
     Args:
-        username: Optional explicit username (email). If not provided, the value
-            is resolved from the username cache via `async_get_username()`.
-        retries: Number of retry attempts after the initial try (total = retries + 1).
-        backoff: Initial backoff in seconds; doubled for each retry (exponential).
+        username: Optional explicit username. If None, it's resolved from cache.
+        retries: Number of retry attempts on failure.
+        backoff: Initial backoff delay in seconds for retries.
 
     Returns:
-        The ADM token as a string.
+        The ADM token string.
 
     Raises:
-        RuntimeError: If username is missing/invalid or token generation ultimately fails.
-        Exception: Propagates unexpected exceptions from the underlying token flow.
+        RuntimeError: If the username is invalid or token generation fails after all retries.
     """
-    # Resolve username first
     user = username or await async_get_username()
     if not isinstance(user, str) or not user:
         raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token.")
 
     cache_key = f"adm_token_{user}"
 
-    # 1) Fast path: cache hit
+    # Cache fast-path
     token = await async_get_cached_value(cache_key)
     if isinstance(token, str) and token:
         return token
 
-    # 2) Miss -> bounded retries with async backoff
+    # Generate with bounded retries
     last_exc: Optional[Exception] = None
     attempts = retries + 1
     for attempt in range(attempts):
         try:
-            tok = await _generate_adm_token(user)
+            await _seed_username_in_cache(user)
+            tok = await _perform_oauth_with_aas(user)
 
-            # Persist token & issued-at metadata for TTL policy users
+            # Persist token & issued-at metadata
             await async_set_cached_value(cache_key, tok)
             await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
-
-            # Bootstrap probe counter for TTL calibration on fresh installs (best-effort)
-            probe_key = f"adm_probe_startup_left_{user}"
-            current_probe = await async_get_cached_value(probe_key)
-            if current_probe is None:
-                await async_set_cached_value(probe_key, 3)
-
+            if not await async_get_cached_value(f"adm_probe_startup_left_{user}"):
+                await async_set_cached_value(f"adm_probe_startup_left_{user}", 3)
             return tok
-
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < attempts - 1:
@@ -145,13 +145,11 @@ async def async_get_adm_token(
                 continue
             _LOGGER.error("ADM token generation failed after %s attempts: %s", attempts, exc)
 
-    # If we reach here, all attempts failed
     assert last_exc is not None
     raise last_exc
 
 
 # --------------------- Legacy sync facade (CLI/offline only) ---------------------
-
 
 def get_adm_token(
     username: Optional[str] = None,
@@ -159,23 +157,11 @@ def get_adm_token(
     retries: int = 2,
     backoff: float = 1.0,
 ) -> str:
-    """Legacy synchronous facade for CLI/offline contexts.
-
-    IMPORTANT:
-        Do NOT call this from within the Home Assistant event loop. It will raise
-        a RuntimeError to prevent deadlocks. Within HA, always use `async_get_adm_token()`.
-
-    Args:
-        username: Optional explicit username/email.
-        retries: Number of retry attempts after the initial try (total = retries + 1).
-        backoff: Initial backoff in seconds; doubled for each retry.
-
-    Returns:
-        The ADM token as a string.
-
+    """
+    Synchronous facade for CLI/offline usage; not allowed in the HA event loop.
+    
     Raises:
         RuntimeError: If called from within a running event loop.
-        Exception: Any error propagated from the async implementation.
     """
     try:
         loop = asyncio.get_running_loop()
