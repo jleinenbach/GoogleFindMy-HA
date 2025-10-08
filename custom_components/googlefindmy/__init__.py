@@ -1,14 +1,16 @@
 """Google Find My Device integration for Home Assistant.
 
-Version: 2.4 — Fix: avoid double FCM release (use unload hook only).
-Shared FCM provider (single instance), clear sync unload contract,
-coordinator↔FCM wiring, OptionsFlowWithReload compliant, refined lifecycle.
+Version: 2.5 — Storage refactor & lifecycle hardening
+- Use entry-scoped TokenCache (HA Store backend) with migration from legacy secrets.json.
+- Enforce multi-entry safety via registry; flush/close guarantees on stop/unload.
+- Preserve existing services, views, FCM supervisor wiring, and coordinator lifecycle.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import os
 import socket
 import time
 from typing import Any
@@ -16,15 +18,25 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import CoreState, HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.network import get_url
 
-from .Auth.token_cache import async_load_cache_from_file
+# Token cache (new: entry-scoped HA Store-backed cache + registry/facade)
+from .Auth.token_cache import (
+    TokenCache,
+    async_set_cached_value,
+    _register_instance,
+    _unregister_instance,
+    _set_default_entry_id,
+)
+
+# Username key normalization
 from .Auth.username_provider import username_string
+
 from .const import (
     # Core
     DOMAIN,
@@ -63,6 +75,7 @@ from .const import (
 )
 from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
+
 # HA-managed aiohttp session for Nova API
 from .NovaApi import nova_request as nova  # Provides register_hass/unregister_session_provider (optional)
 
@@ -93,7 +106,7 @@ def _redact_url_token(url: str) -> str:
     try:
         parts = urlsplit(url)
         q = parse_qsl(parts.query, keep_blank_values=True)
-        redacted = []
+        redacted: list[tuple[str, str]] = []
         for k, v in q:
             if k.lower() == "token" and v:
                 red_v = (v[:2] + "…" + v[-2:]) if len(v) > 4 else "****"
@@ -108,13 +121,12 @@ def _redact_url_token(url: str) -> str:
 
 
 async def _async_save_secrets_data(secrets_data: dict) -> None:
-    """Persist secrets to the integration's async token cache.
+    """Persist a legacy secrets.json bundle into the async token cache.
 
-    Note:
-        Only called for the secrets.json path. Complex values are serialized to JSON strings.
+    Notes:
+        - Only called for the legacy secrets.json path.
+        - Complex values are serialized to JSON strings for cache fanout.
     """
-    from .Auth.token_cache import async_set_cached_value
-
     enhanced_data = secrets_data.copy()
 
     # Normalize username key across old/new secrets variants
@@ -134,8 +146,6 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
 
 async def _async_save_individual_credentials(oauth_token: str, google_email: str) -> None:
     """Persist individual credentials (oauth_token + email) to the token cache."""
-    from .Auth.token_cache import async_set_cached_value
-
     try:
         await async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
         await async_set_cached_value(username_string, google_email)
@@ -252,9 +262,32 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
 # ------------------------------ Setup / Unload -----------------------------
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up the integration from a config entry (entities-first, options-first)."""
+    """Set up the integration from a config entry.
 
-    # Register HA-managed aiohttp session for Nova API (optional hooks)
+    Order of operations (important):
+      1) Initialize and register TokenCache (includes legacy migration).
+      2) Soft-migrate options, then acquire and wire the shared FCM provider.
+      3) Seed token cache from entry data (secrets bundle or individual tokens).
+      4) Build coordinator, register views/services, forward platforms.
+      5) Schedule initial refresh after HA is fully started.
+    """
+    # 1) Token cache: create/register early (fail-fast if ambiguous multi-entry usage occurs later)
+    legacy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json")
+    cache = await TokenCache.create(hass, entry.entry_id, legacy_path=legacy_path)
+    _register_instance(entry.entry_id, cache)
+    _set_default_entry_id(entry.entry_id)
+
+    # Ensure deferred writes are flushed on HA shutdown
+    async def _flush_on_stop(event) -> None:
+        """Flush deferred saves on Home Assistant stop."""
+        try:
+            await cache.flush()
+        except Exception as err:
+            _LOGGER.debug("Cache flush on stop raised: %s", err)
+
+    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop))
+
+    # 2) Optional: register HA-managed aiohttp session for Nova API
     try:
         reg = getattr(nova, "register_hass", None)
         unreg = getattr(nova, "unregister_session_provider", None)
@@ -269,17 +302,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:  # Defensive: Nova module may not expose hooks in some builds
         _LOGGER.debug("Nova API session provider registration skipped: %s", err)
 
-    # Load persisted token cache (best-effort)
-    try:
-        await async_load_cache_from_file()
-        _LOGGER.debug("Token cache preloaded successfully")
-    except OSError as err:
-        _LOGGER.warning("Failed to preload token cache: %s", err)
-
-    # Soft-migrate mutable settings from data -> options (never secrets)
+    # 3) Soft-migrate mutable settings from data -> options (never secrets)
     await _async_soft_migrate_data_to_options(hass, entry)
 
-    # Acquire shared FCM and keep it alive while this entry exists
+    # 4) Acquire shared FCM and keep it alive while this entry exists
     fcm = await _async_acquire_shared_fcm(hass)
 
     async def _on_unload_release_fcm() -> None:
@@ -291,7 +317,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(_on_unload_release_fcm)
 
-    # Credentials handling (secrets-only in data)
+    # 5) Seed the token cache from entry data (one of the two paths must be present)
     secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
@@ -308,7 +334,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         raise ConfigEntryNotReady("Credentials missing")
 
-    # Build effective runtime settings (options-first)
+    # 6) Build effective runtime settings (options-first)
     coordinator = GoogleFindMyCoordinator(
         hass,
         secrets_data=secrets_data,  # may be None with individual-credentials path; token cache is prepped
@@ -317,13 +343,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device_poll_delay=_opt(entry, OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
         min_poll_interval=_opt(entry, OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
         min_accuracy_threshold=_opt(entry, OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD),
-        allow_history_fallback=_opt(entry, OPT_ALLOW_HISTORY_FALLBACK, DEFAULT_OPTIONS.get(OPT_ALLOW_HISTORY_FALLBACK, False)),
+        allow_history_fallback=_opt(
+            entry, OPT_ALLOW_HISTORY_FALLBACK, DEFAULT_OPTIONS.get(OPT_ALLOW_HISTORY_FALLBACK, False)
+        ),
     )
     coordinator.config_entry = entry  # convenience for platforms
 
     # Register the coordinator with the shared FCM receiver (clear synchronous contract).
     fcm.register_coordinator(coordinator)
-    # Ensure deregistration on unload (simple synchronous callback, per HA best practices).
     entry.async_on_unload(lambda: fcm.unregister_coordinator(coordinator))
 
     # Ensure FCM supervisor is running for background push updates (idempotent).
@@ -334,8 +361,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
         )
 
-    # Expose runtime object on the entry for modern consumers (diagnostics, repair, etc.).
-    # This contains no secrets; coordinator already keeps sensitive data out of public attrs.
+    # Expose runtime object for modern consumers (diagnostics, repair, etc.). No secrets.
     entry.runtime_data = coordinator
 
     # Optional: attach Google Home filter (options-first configuration)
@@ -395,11 +421,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry and its platforms.
 
-    Note: FCM release is handled exclusively by the unload hook registered in setup.
+    Notes:
+        - FCM release is handled by the unload hook registered during setup.
+        - TokenCache is explicitly closed here to flush and mark the cache closed.
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    # Unregister and close the TokenCache instance
+    cache = _unregister_instance(entry.entry_id)
+    if cache:
+        try:
+            await cache.close()
+            _LOGGER.debug("TokenCache for entry '%s' has been flushed and closed.", entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning("Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err)
+
     if unload_ok:
-        # Drop coordinator
+        # Drop coordinator from hass.data
         hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
         # Clear runtime_data to avoid holding references after unload.
         try:
@@ -407,6 +445,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception:
             # Defensive: older cores may not expose runtime_data; ignore cleanly.
             pass
+
     return unload_ok
 
 
@@ -423,7 +462,7 @@ def _get_local_ip_sync() -> str:
 
 
 async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindMyCoordinator) -> None:
-    """Register services for the integration."""
+    """Register services for the integration (idempotent per-HA instance)."""
     # Guard: register services only once per HA instance
     domain_bucket = hass.data.setdefault(DOMAIN, {})
     if domain_bucket.get("services_registered"):
@@ -476,7 +515,9 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             _LOGGER.info("Play Sound request for %s (%s)", friendly, canonical_id)
             ok = await coordinator.async_play_sound(canonical_id)
             if not ok:
-                _LOGGER.warning("Failed to play sound on %s (request may have been rejected by API)", friendly)
+                _LOGGER.warning(
+                    "Failed to play sound on %s (request may have been rejected by API)", friendly
+                )
         except ValueError as err:
             _LOGGER.error("Failed to play sound: %s", err)
         except Exception as err:
@@ -516,7 +557,9 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
         if config_entries:
             e0 = config_entries[0]
-            token_expiration_enabled = _opt(e0, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+            token_expiration_enabled = _opt(
+                e0, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            )
 
         if token_expiration_enabled:
             week = str(int(time.time() // 604800))  # weekly rotation bucket
@@ -543,7 +586,8 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
 
     async def async_rebuild_registry_service(call: ServiceCall) -> None:
         """Migrate soft settings or rebuild the registry (optionally scoped to device_ids).
-            Logic:
+
+        Logic:
             1. Determine target devices (all or a subset).
             2. Remove all entities associated with these devices.
             3. Remove orphaned devices (those with no entities left).
