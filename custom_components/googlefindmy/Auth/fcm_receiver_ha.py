@@ -1,4 +1,20 @@
-"""Home Assistant compatible FCM receiver for Google Find My Device."""
+"""Home Assistant compatible FCM receiver for Google Find My Device.
+
+This module provides an HA-integrated Firebase Cloud Messaging (FCM) receiver that:
+- Runs fully async with a supervised background loop (start/monitor/restart).
+- Persists credentials via the integration's TokenCache (HA Store-backed).
+- Notifies registered request callbacks or pushes background updates to the coordinator.
+- Avoids any synchronous cache access in the event loop.
+
+Design notes
+------------
+* Lifecycle: A single shared receiver instance is managed in `hass.data[DOMAIN]`.
+* No global singletons in this module; Home Assistant orchestrates creation/cleanup.
+* The receiver never triggers UI or ChromeDriver flows; it only consumes credentials
+  from the cache and updates them when the server requests re-registration.
+* All potentially blocking work (protobuf decoding, user callbacks) runs in executors.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,13 +24,11 @@ import json
 import logging
 import random
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 from custom_components.googlefindmy.Auth.token_cache import (
     async_get_cached_value,
-    async_load_cache_from_file,
     async_set_cached_value,
-    get_cached_value,  # sync fallback for early boot
 )
 
 # Integration-level tunables (safe fallbacks if missing)
@@ -26,6 +40,7 @@ try:
         FCM_CONNECTION_RETRY_COUNT,
         FCM_MONITOR_INTERVAL_S,
         FCM_ABORT_ON_SEQ_ERROR_COUNT,
+        DOMAIN,
     )
 except Exception:  # pragma: no cover
     FCM_CLIENT_HEARTBEAT_INTERVAL_S = 20
@@ -34,6 +49,7 @@ except Exception:  # pragma: no cover
     FCM_CONNECTION_RETRY_COUNT = 5
     FCM_MONITOR_INTERVAL_S = 1.0
     FCM_ABORT_ON_SEQ_ERROR_COUNT = 3
+    DOMAIN = "googlefindmy"
 
 # Optional import of worker run-state enum (for robust state checks)
 try:
@@ -47,23 +63,27 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class FcmReceiverHA:
-    """FCM Receiver integrated with Home Assistant's async lifecycle.
+    """FCM receiver integrated with Home Assistant's async lifecycle.
 
-    Design:
-      - No internal singleton: HA manages a single shared instance in hass.data.
-      - Synchronous register/unregister methods to match async_on_unload contract.
-      - Push-to-entities: prefer coordinator.push_updated() (if present) over refresh.
-      - Encapsulation: never mutate coordinator private attrs when a public API exists.
-      - Supervision: runs a supervisor loop that (re)creates/starts the FcmPushClient,
-        monitors it, and restarts on stop/crash with exponential backoff + jitter.
+    Key responsibilities:
+        * Initialize and supervise the FCM push client.
+        * Handle per-request callbacks for specific devices.
+        * Fan out background updates to a coordinator.
+        * Persist credential updates to the TokenCache.
+
+    Contract:
+        * `async_initialize()` must be called before use.
+        * `register_coordinator()` / `unregister_coordinator()` are synchronous by design
+          to match HA's `async_on_unload` contract.
+        * `async_stop()` gracefully shuts down the supervisor and client.
     """
 
     def __init__(self) -> None:
         self.credentials: Optional[dict] = None
         # Per-request callbacks waiting for a specific device response
-        self.location_update_callbacks: Dict[str, Callable[[str, str], None]] = {}
+        self.location_update_callbacks: dict[str, Callable[[str, str], None]] = {}
         # Coordinators eligible to receive background updates
-        self.coordinators: List[Any] = []
+        self.coordinators: list[Any] = []
 
         self.pc = None  # FcmPushClient instance
         self._listening: bool = False
@@ -78,18 +98,18 @@ class FcmReceiverHA:
     # -------------------- Lifecycle --------------------
 
     async def async_initialize(self) -> bool:
-        """Initialize receiver and underlying push client (idempotent)."""
-        try:
-            await async_load_cache_from_file()
-        except OSError as err:
-            _LOGGER.debug("Token cache preload failed (continuing): %s", err)
+        """Initialize receiver and underlying push client (idempotent).
 
+        Returns:
+            True if the receiver is ready to start; False on a non-fatal failure.
+        """
+        # Load FCM credentials from the async TokenCache (string or dict supported).
         creds: Any = await async_get_cached_value("fcm_credentials")
         if isinstance(creds, str):
             try:
                 creds = json.loads(creds)
-            except json.JSONDecodeError as e:
-                _LOGGER.error("Failed to parse FCM credentials JSON: %s", e)
+            except json.JSONDecodeError as exc:
+                _LOGGER.error("Failed to parse FCM credentials JSON: %s", exc)
                 return False
         self.credentials = creds if isinstance(creds, dict) else None
 
@@ -130,7 +150,7 @@ class FcmReceiverHA:
                 self._on_credentials_updated,
                 config=client_cfg,
             )
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to construct FCM push client: %s", err)
             return False
 
@@ -146,7 +166,15 @@ class FcmReceiverHA:
     async def async_register_for_location_updates(
         self, device_id: str, callback: Callable[[str, str], None]
     ) -> Optional[str]:
-        """Register a per-request callback for a device and ensure listener is running."""
+        """Register a per-request callback for a device and ensure listener is running.
+
+        Args:
+            device_id: Canonical device identifier.
+            callback: Sync callback to invoke with (canonic_id, hex_payload).
+
+        Returns:
+            The current FCM registration token if available, otherwise None.
+        """
         self.location_update_callbacks[device_id] = callback
         _LOGGER.debug("Registered FCM callback for device: %s", device_id)
 
@@ -203,7 +231,7 @@ class FcmReceiverHA:
                 return True
             _LOGGER.warning("FCM registration returned no token")
             return False
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.error("FCM registration error: %s", err)
             return False
 
@@ -286,7 +314,7 @@ class FcmReceiverHA:
         except asyncio.CancelledError:
             _LOGGER.debug("FCM supervisor cancelled")
             raise
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.error("FCM supervisor crashed: %s", err)
         finally:
             self._listening = False
@@ -294,8 +322,14 @@ class FcmReceiverHA:
 
     # -------------------- Incoming notifications --------------------
 
-    def _on_notification(self, obj: Dict[str, Any], notification, data_message) -> None:
-        """Handle incoming FCM notification (sync callback from client)."""
+    def _on_notification(self, obj: dict[str, Any], notification, data_message) -> None:
+        """Handle incoming FCM notification (sync callback from client).
+
+        Args:
+            obj: Envelope object from the FCM client (expected to hold the data dict).
+            notification: Unused; provided by the client.
+            data_message: Unused; provided by the client.
+        """
         try:
             payload = (obj.get("data") or {}).get("com.google.android.apps.adm.FCM_PAYLOAD")
             if not payload:
@@ -346,7 +380,7 @@ class FcmReceiverHA:
             else:
                 _LOGGER.debug("FCM response for %s… (no registered coordinators or callbacks)", canonic_id[:8])
 
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             # Final guard to avoid crashing the receiver callback
             _LOGGER.error("Error processing FCM notification: %s", err)
 
@@ -354,10 +388,11 @@ class FcmReceiverHA:
 
     @staticmethod
     def _norm(dev_id: str) -> str:
+        """Normalize a device id for equality checks."""
         return (dev_id or "").replace("-", "").lower()
 
     def _is_tracked(self, coordinator: Any, canonic_id: str) -> bool:
-        """True if device is tracked by coordinator.
+        """Return True if device is tracked by the coordinator.
 
         Semantics: empty tracked_devices => track ALL devices.
         """
@@ -368,7 +403,14 @@ class FcmReceiverHA:
         return any(self._norm(did) == nid for did in tracked)
 
     def _extract_canonic_id_from_response(self, hex_response: str) -> Optional[str]:
-        """Extract canonical id via the decoder."""
+        """Extract canonical id via the decoder.
+
+        Args:
+            hex_response: Hex-encoded protobuf payload.
+
+        Returns:
+            Canonical device id, or None if not present.
+        """
         try:
             from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf  # type: ignore
 
@@ -377,14 +419,14 @@ class FcmReceiverHA:
                 ids = device_update.deviceMetadata.identifierInformation.canonicIds.canonicId
                 if ids:
                     return ids[0].id
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Failed to extract canonical id from FCM response: %s", err)
         return None
 
     async def _run_callback_async(
         self, callback: Callable[[str, str], None], canonic_id: str, hex_string: str
     ) -> None:
-        """Run potentially blocking callback in a thread."""
+        """Run a potentially blocking callback in a thread."""
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, callback, canonic_id, hex_string)
 
@@ -439,7 +481,7 @@ class FcmReceiverHA:
                     _LOGGER.debug(
                         "Fallback: wrote to coordinator._device_location_data directly (consider upgrading coordinator)"
                     )
-                except Exception as err:
+                except Exception as err:  # noqa: BLE001
                     _LOGGER.error("Coordinator cache update failed for %s: %s", canonic_id, err)
                     return
 
@@ -457,7 +499,7 @@ class FcmReceiverHA:
             else:
                 await coordinator.async_request_refresh()
 
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.error("Error processing background update for %s: %s", canonic_id, err)
 
     def _decode_background_location(self, hex_string: str) -> dict:
@@ -471,14 +513,18 @@ class FcmReceiverHA:
             device_update = parse_device_update_protobuf(hex_string)
             locations = decrypt_location_response_locations(device_update) or []
             return locations[0] if locations else {}
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to decode background location data: %s", err)
             return {}
 
     # -------------------- Credentials & stop --------------------
 
     def _on_credentials_updated(self, creds: Any) -> None:
-        """Update in-memory creds and persist asynchronously."""
+        """Update in-memory creds and persist asynchronously.
+
+        The FCM library calls this when registration produces new credentials or
+        when the server demands re-registration.
+        """
         normalized: Any = creds
         if isinstance(normalized, str):
             try:
@@ -490,9 +536,10 @@ class FcmReceiverHA:
         _LOGGER.info("FCM credentials updated")
 
     async def _async_save_credentials(self) -> None:
+        """Persist current credentials to the async TokenCache."""
         try:
             await async_set_cached_value("fcm_credentials", self.credentials)
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to save FCM credentials: %s", err)
 
     async def async_stop(self) -> None:
@@ -517,7 +564,7 @@ class FcmReceiverHA:
                 await self.pc.stop()
             except (ConnectionError, TimeoutError) as err:
                 _LOGGER.debug("FCM push client stop network error: %s", err)
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("FCM push client stop unexpected error: %s", err)
             finally:
                 self.pc = None
@@ -527,26 +574,16 @@ class FcmReceiverHA:
     # -------------------- Public token accessor --------------------
 
     def get_fcm_token(self) -> Optional[str]:
-        """Return current FCM token if available (best-effort)."""
+        """Return current FCM token if available (best-effort).
+
+        Notes:
+            This accessor is synchronous by contract (used in mixed sync/async call sites).
+            It does NOT read from the TokenCache synchronously to avoid event-loop deadlocks.
+            Callers should rely on `async_initialize()` having loaded credentials from the cache.
+        """
         creds = self.credentials
         if isinstance(creds, dict):
             token = (creds.get("fcm") or {}).get("registration", {}).get("token")
             if token:
                 return token
-
-        # Early-boot fallback: try sync cache
-        try:
-            cached: Any = get_cached_value("fcm_credentials")
-            if isinstance(cached, str):
-                cached = json.loads(cached)
-            if isinstance(cached, dict):
-                token = (cached.get("fcm") or {}).get("registration", {}).get("token")
-                if token:
-                    return token
-        except json.JSONDecodeError:
-            _LOGGER.debug("Cached FCM credentials are not valid JSON")
-        except Exception:
-            # final guard
-            pass
-
         return None
