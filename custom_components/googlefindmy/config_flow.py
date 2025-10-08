@@ -86,6 +86,40 @@ STEP_INDIVIDUAL_DATA_SCHEMA = vol.Schema(
 )
 
 
+def _extract_email_from_secrets(data: Dict[str, Any]) -> Optional[str]:
+    """Best-effort extractor for the Google account email from secrets.json."""
+    candidates = [
+        "googleHomeUsername",
+        CONF_GOOGLE_EMAIL,
+        "google_email",
+        "email",
+        "username",
+        "user",
+    ]
+    for key in candidates:
+        val = data.get(key)
+        if isinstance(val, str) and "@" in val:
+            return val
+    return None
+
+
+def _extract_oauth_from_secrets(data: Dict[str, Any]) -> Optional[str]:
+    """Best-effort extractor for an OAuth token from secrets.json."""
+    candidates = [
+        CONF_OAUTH_TOKEN,
+        "oauth_token",
+        "oauthToken",
+        "OAuthToken",
+        "token",
+        "Auth",  # sometimes present in gpsoauth responses
+    ]
+    for key in candidates:
+        val = data.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return None
+
+
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle the initial config flow for Google Find My Device."""
 
@@ -128,7 +162,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raw = user_input.get("secrets_json", "")
             try:
                 secrets_data = json.loads(raw)
-                # Store raw secrets payload in memory to construct API and fetch devices next
+                # Store parsed secrets only transiently; at creation we persist only minimal fields.
                 self._auth_data = {
                     DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
                     DATA_SECRET_BUNDLE: secrets_data,
@@ -163,10 +197,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, Optional[str]]:
         """Build API instance and derive a username if available (async-safe)."""
         if self._auth_data.get(DATA_AUTH_METHOD) == _AUTH_METHOD_SECRETS:
-            secrets_data = self._auth_data.get(DATA_SECRET_BUNDLE) or {}
-            api = GoogleFindMyAPI(secrets_data=secrets_data)
-            username = secrets_data.get("googleHomeUsername") or secrets_data.get(CONF_GOOGLE_EMAIL) or secrets_data.get("google_email")
-            return api, username
+            secrets_data: Dict[str, Any] = self._auth_data.get(DATA_SECRET_BUNDLE) or {}
+            email = _extract_email_from_secrets(secrets_data)
+            oauth = _extract_oauth_from_secrets(secrets_data)
+            # Construct the API WITHOUT 'secrets_data', using extracted fields instead.
+            api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
+            return api, email
         # Manual path
         api = GoogleFindMyAPI(
             oauth_token=self._auth_data.get(CONF_OAUTH_TOKEN),
@@ -294,11 +330,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if secrets_json:
                     parsed = json.loads(secrets_json)
                     new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, DATA_SECRET_BUNDLE: parsed}
-                    api = GoogleFindMyAPI(secrets_data=parsed)
+                    email = _extract_email_from_secrets(parsed)
+                    oauth = _extract_oauth_from_secrets(parsed)
+                    api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
                     # Basic validation: try device list
-                    _ = await api.async_get_basic_device_list(
-                        parsed.get("googleHomeUsername") or parsed.get(CONF_GOOGLE_EMAIL) or parsed.get("google_email")
-                    )
+                    _ = await api.async_get_basic_device_list(email)
                 else:
                     if not (oauth_token and google_email):
                         errors["base"] = "invalid_token"
@@ -404,6 +440,10 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to fetch device list for options: %s", err)
 
+        # IMPORTANT: ensure all currently tracked IDs are valid options to avoid validation errors.
+        for dev_id in current_tracked or []:
+            device_options.setdefault(dev_id, dev_id)
+
         # Define the base schema without defaults and inject suggested values dynamically.
         base_schema = vol.Schema(
             {
@@ -478,10 +518,10 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                 if secrets_json:
                     parsed = json.loads(secrets_json)
                     new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, DATA_SECRET_BUNDLE: parsed}
-                    api = GoogleFindMyAPI(secrets_data=parsed)
-                    _ = await api.async_get_basic_device_list(
-                        parsed.get("googleHomeUsername") or parsed.get(CONF_GOOGLE_EMAIL) or parsed.get("google_email")
-                    )  # validation
+                    email = _extract_email_from_secrets(parsed)
+                    oauth = _extract_oauth_from_secrets(parsed)
+                    api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
+                    _ = await api.async_get_basic_device_list(email)  # validation
                 elif oauth_token and google_email:
                     new_data = {
                         DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
@@ -518,7 +558,10 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
         """Construct API object from entry data (supports both auth methods)."""
         if entry.data.get(DATA_AUTH_METHOD) == _AUTH_METHOD_SECRETS:
-            return GoogleFindMyAPI(secrets_data=entry.data.get(DATA_SECRET_BUNDLE))
+            secrets_data: Dict[str, Any] = entry.data.get(DATA_SECRET_BUNDLE) or {}
+            email = _extract_email_from_secrets(secrets_data) or entry.data.get(CONF_GOOGLE_EMAIL)
+            oauth = _extract_oauth_from_secrets(secrets_data) or entry.data.get(CONF_OAUTH_TOKEN)
+            return GoogleFindMyAPI(oauth_token=oauth, google_email=email)
         return GoogleFindMyAPI(
             oauth_token=entry.data.get(CONF_OAUTH_TOKEN),
             google_email=entry.data.get(CONF_GOOGLE_EMAIL),
