@@ -79,15 +79,15 @@ def get_username() -> str:
     """
     # Prevent deadlocks: disallow sync access from the HA event loop.
     try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            raise RuntimeError(
-                "Sync get_username() called from within the event loop. "
-                "Use `await async_get_username()` instead."
-            )
+        asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop => we're safe to proceed with legacy sync facade.
+        # No running loop => safe to proceed with legacy sync facade.
         pass
+    else:
+        raise RuntimeError(
+            "Sync get_username() called from within the event loop. "
+            "Use `await async_get_username()` instead."
+        )
 
     username = _legacy_get_cached_value(username_string)
     if isinstance(username, str) and username:
@@ -121,14 +121,23 @@ def set_username(username: str) -> None:
         raise ValueError("Username must be a non-empty string.")
 
     try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            raise RuntimeError(
-                "Sync set_username() called from within the event loop. "
-                "Use `await async_set_username(...)` instead."
-            )
+        asyncio.get_running_loop()
     except RuntimeError:
         # No running loop => safe to proceed with legacy sync facade.
         pass
+    else:
+        raise RuntimeError(
+            "Sync set_username() called from within the event loop. "
+            "Use `await async_set_username(...)` instead."
+        )
 
     _legacy_set_cached_value(username_string, username)
+
+
+__all__ = [
+    "username_string",
+    "async_get_username",
+    "async_set_username",
+    "get_username",
+    "set_username",
+]
