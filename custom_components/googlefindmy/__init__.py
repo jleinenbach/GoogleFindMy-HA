@@ -24,6 +24,7 @@ from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.network import get_url
+# from homeassistant.helpers.instance_id import async_get as async_get_instance_id  # optional
 
 # Token cache (new: entry-scoped HA Store-backed cache + registry/facade)
 from .Auth.token_cache import (
@@ -44,6 +45,7 @@ from .const import (
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
     DATA_SECRET_BUNDLE,
+    DATA_AUTH_METHOD,
     # Options keys & canonical list
     OPTION_KEYS,
     OPT_TRACKED_DEVICES,
@@ -75,9 +77,6 @@ from .const import (
 )
 from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
-
-# HA-managed aiohttp session for Nova API
-from .NovaApi import nova_request as nova  # Provides register_hass/unregister_session_provider (optional)
 
 # Shared FCM provider (HA-managed singleton)
 from .Auth.fcm_receiver_ha import FcmReceiverHA
@@ -125,9 +124,9 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
 
     Notes:
         - Only called for the legacy secrets.json path.
-        - Complex values are serialized to JSON strings for cache fanout.
+        - Store JSON-serializable values *as-is*. TokenCache validates and normalizes.
     """
-    enhanced_data = secrets_data.copy()
+    enhanced_data = dict(secrets_data)
 
     # Normalize username key across old/new secrets variants
     google_email = secrets_data.get("username", secrets_data.get("Email"))
@@ -136,9 +135,11 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
 
     for key, value in enhanced_data.items():
         try:
-            if isinstance(value, (str, int, float)):
-                await async_set_cached_value(key, str(value))
+            # Store primitives and JSON-safe structures directly
+            if isinstance(value, (str, int, float, bool)) or isinstance(value, (dict, list)):
+                await async_set_cached_value(key, value)
             else:
+                # Last-resort: try to JSON-encode unknown objects
                 await async_set_cached_value(key, json.dumps(value))
         except (OSError, TypeError) as err:
             _LOGGER.warning("Failed to save '%s' to persistent cache: %s", key, err)
@@ -287,8 +288,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop))
 
-    # 2) Optional: register HA-managed aiohttp session for Nova API
+    # 2) Optional: register HA-managed aiohttp session for Nova API (defer import)
     try:
+        from .NovaApi import nova_request as nova  # defer heavy import to setup
         reg = getattr(nova, "register_hass", None)
         unreg = getattr(nova, "unregister_session_provider", None)
         if callable(reg):
@@ -334,10 +336,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         raise ConfigEntryNotReady("Credentials missing")
 
+    # Optional: official instance ID (kept disabled for now)
+    # instance_id = await async_get_instance_id(hass)
+
     # 6) Build effective runtime settings (options-first)
     coordinator = GoogleFindMyCoordinator(
         hass,
-        secrets_data=secrets_data,  # may be None with individual-credentials path; token cache is prepped
+        cache=cache,
         tracked_devices=_opt(entry, OPT_TRACKED_DEVICES, DEFAULT_OPTIONS.get(OPT_TRACKED_DEVICES, [])),
         location_poll_interval=_opt(entry, OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL),
         device_poll_delay=_opt(entry, OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
@@ -374,12 +379,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     bucket = hass.data.setdefault(DOMAIN, {})
     bucket[entry.entry_id] = coordinator
 
-    # Register map views early
-    hass.http.register_view(GoogleFindMyMapView(hass))
-    hass.http.register_view(GoogleFindMyMapRedirectView(hass))
-    _LOGGER.debug("Registered map views")
+    # Register map views (idempotent across multi-entry)
+    if not bucket.get("views_registered"):
+        hass.http.register_view(GoogleFindMyMapView(hass))
+        hass.http.register_view(GoogleFindMyMapRedirectView(hass))
+        bucket["views_registered"] = True
+        _LOGGER.debug("Registered map views")
 
-    # Register services (available regardless of data freshness)
+    # Register services (available regardless of data freshness; idempotent)
     await _async_register_services(hass, coordinator)
 
     # Forward platforms so RestoreEntity can populate immediately
