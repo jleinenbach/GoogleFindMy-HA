@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/NovaApi/ExecuteAction/LocateTracker/location_request.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
@@ -13,13 +14,17 @@ from typing import Optional, Callable, Protocol, runtime_checkable
 import aiohttp
 
 # Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
-from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import create_action_request, serialize_action_request
+from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
+    create_action_request,
+    serialize_action_request,
+)
 from custom_components.googlefindmy.NovaApi.nova_request import async_nova_request
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
 _LOGGER = logging.getLogger(__name__)
+
 
 # -----------------------------------------------------------------------------
 # FCM receiver provider (registered by integration setup; unloaded on teardown)
@@ -52,7 +57,7 @@ def unregister_fcm_receiver_provider() -> None:
     _FCM_ReceiverGetter = None
 
 
-def create_location_request(canonic_device_id, fcm_registration_id, request_uuid):
+def create_location_request(canonic_device_id: str, fcm_registration_id: str, request_uuid: str) -> str:
     """Build and serialize a LocateTracker action request.
 
     DeviceUpdate_pb2 is imported lazily here to avoid protobuf side effects
@@ -60,11 +65,15 @@ def create_location_request(canonic_device_id, fcm_registration_id, request_uuid
     """
     from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2  # lazy import
 
-    action_request = create_action_request(canonic_device_id, fcm_registration_id, request_uuid=request_uuid)
+    action_request = create_action_request(
+        canonic_device_id, fcm_registration_id, request_uuid=request_uuid
+    )
 
     # Use a current timestamp; server treats this as an arbitrary marker.
     action_request.action.locateTracker.lastHighTrafficEnablingTime.seconds = int(time.time())
-    action_request.action.locateTracker.contributorType = DeviceUpdate_pb2.SpotContributorType.FMDN_ALL_LOCATIONS
+    action_request.action.locateTracker.contributorType = (
+        DeviceUpdate_pb2.SpotContributorType.FMDN_ALL_LOCATIONS
+    )
 
     # Convert to hex string
     hex_payload = serialize_action_request(action_request)
@@ -92,14 +101,15 @@ def _make_location_callback(
     name: str,
     canonic_device_id: str,
     ctx: _CallbackContext,
+    loop: asyncio.AbstractEventLoop,
 ) -> Callable[[str, str], None]:
     """Factory that creates an FCM callback bound to a context object.
 
-    NOTE:
-    - We keep imports inside the callback to avoid heavy protobuf work at HA import/startup time.
-      This pattern keeps the event loop responsive (see HA dev docs on avoiding blocking the loop).
-    - TODO (future): If FcmReceiverHA's interface ever allows passing contextual args to callbacks,
-      switch to a typed callable that accepts the context explicitly, removing the need for closures.
+    Design:
+      - The receiver triggers this callback in a worker thread.
+      - We parse in this thread and then hand off CPU-heavy/async work
+        (decryption & normalization) to the main HA loop with
+        `asyncio.run_coroutine_threadsafe(...)`.
     """
 
     def location_callback(response_canonic_id: str, hex_response: str) -> None:
@@ -111,7 +121,7 @@ def _make_location_callback(
             try:
                 from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
                 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
-                    decrypt_location_response_locations,
+                    async_decrypt_location_response_locations,
                     DecryptionError,
                     StaleOwnerKeyError,
                 )
@@ -119,12 +129,12 @@ def _make_location_callback(
                     SpotApiEmptyResponseError,
                 )
             except ImportError as import_error:
-                _LOGGER.error("Failed to import decoder functions in callback for %s: %s", name, import_error)
+                _LOGGER.error("Failed to import decoder/decrypt functions in callback for %s: %s", name, import_error)
                 ctx.data = []
                 ctx.event.set()
                 return
 
-            # Parse the hex response
+            # Parse the hex response in this worker thread
             try:
                 device_update = parse_device_update_protobuf(hex_response)
             except Exception as parse_exc:
@@ -142,25 +152,33 @@ def _make_location_callback(
                 )
                 return
 
-            # Decrypt the location data (consolidated error handling)
-            try:
-                location_data = decrypt_location_response_locations(device_update)
-            except (StaleOwnerKeyError, DecryptionError, SpotApiEmptyResponseError, Exception) as err:
-                _LOGGER.error("Failed to process location data for %s: %s", name, err)
-                ctx.data = []
-                ctx.event.set()
-                return
+            async def _decrypt_and_store():
+                try:
+                    location_data = await async_decrypt_location_response_locations(device_update)
+                except (StaleOwnerKeyError, DecryptionError, SpotApiEmptyResponseError) as err:
+                    _LOGGER.error("Failed to process location data for %s: %s", name, err)
+                    ctx.data = []
+                    ctx.event.set()
+                    return
+                except Exception as err:
+                    _LOGGER.error("Unexpected error during async decryption for %s: %s", name, err)
+                    _LOGGER.debug("Traceback: %s", traceback.format_exc())
+                    ctx.data = []
+                    ctx.event.set()
+                    return
 
-            if location_data:
-                _LOGGER.info("Successfully decrypted %d location record(s) for %s", len(location_data), name)
-                # Attach canonic_id for validation after wait
-                location_data[0]["canonic_id"] = response_canonic_id
-                ctx.data = location_data
+                if location_data:
+                    _LOGGER.info("Successfully decrypted %d location record(s) for %s", len(location_data), name)
+                    # Attach canonic_id for validation after wait
+                    location_data[0]["canonic_id"] = response_canonic_id
+                    ctx.data = location_data
+                else:
+                    _LOGGER.warning("No location data found after decryption for %s", name)
+                    ctx.data = []
                 ctx.event.set()
-            else:
-                _LOGGER.warning("No location data found after decryption for %s", name)
-                ctx.data = []
-                ctx.event.set()
+
+            # Hand off to the HA event loop; do not block this worker thread.
+            asyncio.run_coroutine_threadsafe(_decrypt_and_store(), loop)
 
         except Exception as callback_error:
             _LOGGER.error("Error processing FCM callback for %s: %s", name, callback_error)
@@ -181,7 +199,7 @@ async def get_location_data_for_device(
     *,
     username: Optional[str] = None,
 ):
-    """Get location data for device - HA-compatible async version.
+    """Get location data for a device (async, HA-compatible).
 
     Notes
     -----
@@ -200,6 +218,7 @@ async def get_location_data_for_device(
 
     registered = False
     ctx = _CallbackContext()
+    loop = asyncio.get_running_loop()
 
     try:
         # Generate request UUID
@@ -209,7 +228,7 @@ async def get_location_data_for_device(
         try:
             _LOGGER.debug("Registering FCM location updates for %s...", name)
             callback = _make_location_callback(
-                name=name, canonic_device_id=canonic_device_id, ctx=ctx
+                name=name, canonic_device_id=canonic_device_id, ctx=ctx, loop=loop
             )
             fcm_token = await fcm_receiver.async_register_for_location_updates(
                 canonic_device_id, callback
