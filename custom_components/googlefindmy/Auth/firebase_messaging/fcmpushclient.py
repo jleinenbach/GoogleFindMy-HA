@@ -34,7 +34,7 @@ import ssl
 import struct
 import time
 import traceback
-import random  # jitter for backoff
+import random
 from base64 import urlsafe_b64decode
 from dataclasses import dataclass
 from enum import Enum
@@ -105,54 +105,47 @@ class FcmPushClientRunState(Enum):
     STARTING_CONNECTION = (3,)
     STARTING_LOGIN = (4,)
     STARTED = (5,)
-    STOPPING = (7,)
-    STOPPED = (8,)
+    STOPPING = (6,)
+    STOPPED = (7,)
 
 
 @dataclass
 class FcmPushClientConfig:  # pylint:disable=too-many-instance-attributes
-    """Configuration for FcmPushClient."""
+    """Configuration for FcmPushClient (worker-only; supervisor handles restarts)."""
 
     server_heartbeat_interval: int | None = 10
-    """Seconds to request server heartbeats."""
+    """Time in seconds to request the server to send heartbeats"""
 
     client_heartbeat_interval: int | None = 20
-    """Seconds to send client heartbeats."""
+    """Time in seconds to send heartbeats to the server"""
 
-    idle_reset_after: float = 90.0
-    """Seconds without any message before the worker ends itself to be restarted by a supervisor.
-    If <= 0, fallback is max(client_heartbeat_interval, server_heartbeat_interval) + 5."""
-
-    send_selective_acknowledgements: bool = True
-    """Send selective acknowledgements for each message received."""
-
+    # Kept for compatibility; used only on initial connect
     connection_retry_count: int = 5
-    """Retries for initial TCP connect before giving up."""
+    """Number of times to retry the initial connection before giving up."""
 
+    # Not used by the worker anymore but kept for signature compatibility
+    idle_reset_after: float = 90.0
     reset_interval: float = 3
-    """Legacy param (ignored in worker mode)."""
-
     heartbeat_ack_timeout: float = 5
-    """Time to wait for heartbeat ack before considering the connection unhealthy (not enforced here)."""
+    monitor_interval: float = 1
 
     abort_on_sequential_error_count: int | None = 3
-    """If set, consecutive errors of the same type cause worker to stop."""
-
-    monitor_interval: float = 1
-    """Legacy param (unused in worker mode)."""
+    """Number of sequential errors of the same type to wait before aborting.
+       If set to None the client will not abort."""
 
     log_warn_limit: int | None = 5
-    """Limit for repeating warning logs."""
+    """Number of times to log specific warning messages before going silent for
+       a specific warning type."""
 
     log_debug_verbose: bool = False
-    """Verbose debug logs including payloads."""
+    """Set to True to log all message info including tokens."""
 
 
 class FcmPushClient:  # pylint:disable=too-many-instance-attributes
-    """FCM MCS worker: connects, logs in, reads messages, sends heartbeats.
-
-    Important: This worker **does not self-reset**. On errors or idle timeouts it
-    ends its loop and lets an external supervisor (e.g., HA wrapper) restart it.
+    """Worker-only FCM client.
+       - Establishes a single connection with initial retry.
+       - Listens for messages until an error occurs or stop() is called.
+       - No internal reset/monitor loops; outer supervisor restarts the client.
     """
 
     def __init__(
@@ -167,7 +160,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         config: FcmPushClientConfig | None = None,
         http_client_session: ClientSession | None = None,
     ):
-        """Initializes the worker."""
+        """Initializes the receiver."""
         self.callback = callback
         self.callback_context = callback_context
         self.fcm_config = fcm_config
@@ -223,7 +216,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self.log_warn_counters[msg] += 1
             self.logger.warning(msg, *args)
 
-    # ---- Helpers ----
+    # ---- Connection helpers ----
 
     async def _do_writer_close(self) -> None:
         writer = self.writer
@@ -239,24 +232,8 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                 if transport is not None:
                     transport.close()
             except Exception:
+                # Keep old behavior: swallow all errors on close.
                 pass
-
-    def _idle_timeout(self) -> float:
-        if self.config.idle_reset_after and self.config.idle_reset_after > 0:
-            return float(self.config.idle_reset_after)
-        base_client = self.config.client_heartbeat_interval or 0
-        base_server = self.config.server_heartbeat_interval or 0
-        return max(base_client, base_server, 1) + 5.0
-
-    async def _cancel_and_gather(self) -> None:
-        """Cancel all running internal tasks and await their completion."""
-        if not self.tasks:
-            return
-        for t in self.tasks:
-            if t and not t.done():
-                t.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
-        self.tasks = []
 
     # protobuf varint32 helpers
     async def _read_varint32(self) -> int:
@@ -311,7 +288,11 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             (tag,) = struct.unpack("B", r)
         size = await self._read_varint32()
 
-        self._log_verbose("Received message with tag %s and size %s", tag, size)
+        self._log_verbose(
+            "Received message with tag %s and size %s",
+            tag,
+            size,
+        )
 
         if not size >= 0:
             self._log_warn_with_limit("Unexpected message size %s", size)
@@ -330,6 +311,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         payload = msg_class()  # type: ignore[operator]
         payload.ParseFromString(buf)
         self._log_verbose("Received payload: %s", self._msg_str(payload))
+
         return payload
 
     async def _login(self) -> None:
@@ -342,6 +324,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         self.last_login_time = now
 
         try:
+            # Defensive access to credentials to avoid KeyError crashes
             if not isinstance(self.credentials, dict):
                 raise ValueError("Missing credentials dictionary for FCM login")
 
@@ -373,16 +356,17 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             ):
                 req.heartbeat_stat.ip = ""
                 req.heartbeat_stat.timeout = True
-                req.heartbeat_stat.interval_ms = 1000 * self.config.server_heartbeat_interval
+                req.heartbeat_stat.interval_ms = (
+                    1000 * self.config.server_heartbeat_interval
+                )
 
             await self._send_msg(req)
             self.logger.debug("Sent login request")
         except Exception as ex:
             self.logger.error("Received an exception logging in: %s", ex)
-            # escalate to worker stop by bumping error count
             if self._try_increment_error_count(ErrorType.LOGIN):
-                # let _listen loop handle termination
-                raise
+                # On worker, treat as fatal: stop listening and let supervisor restart
+                self.do_listen = False
 
     @staticmethod
     def _decrypt_raw_data(
@@ -397,7 +381,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         der_data = urlsafe_b64decode(der_data_str.encode("ascii") + b"========")
         secret_str = credentials["keys"]["secret"]
         secret = urlsafe_b64decode(secret_str.encode("ascii") + b"========")
-        privkey = load_der_private_key(der_data, password=None, backend=default_backend())
+        privkey = load_der_private_key(
+            der_data, password=None, backend=default_backend()
+        )
         decrypted = http_decrypt(
             raw_data,
             salt=salt,
@@ -408,7 +394,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         )
         return decrypted
 
-    def _app_data_by_key(self, p: DataMessageStanza, key: str, do_not_raise: bool = False) -> str:
+    def _app_data_by_key(
+        self, p: DataMessageStanza, key: str, do_not_raise: bool = False
+    ) -> str:
         for x in p.app_data:
             if x.key == key:
                 return x.value
@@ -417,7 +405,10 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             return ""
         raise RuntimeError(f"couldn't find in app_data {key}")
 
-    def _handle_data_message(self, msg: DataMessageStanza) -> None:
+    def _handle_data_message(
+        self,
+        msg: DataMessageStanza,
+    ) -> None:
         self.logger.debug(
             "Received data message Stream ID: %s, Last: %s, Status: %s",
             msg.stream_id,
@@ -425,26 +416,32 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             msg.status,
         )
 
-        if self._app_data_by_key(msg, "message_type", do_not_raise=True) == "deleted_messages":
+        if (
+            self._app_data_by_key(msg, "message_type", do_not_raise=True)
+            == "deleted_messages"
+        ):
+            # The deleted_messages message does not contain data.
             return
-
         crypto_key = self._app_data_by_key(msg, "crypto-key")[3:]  # strip dh=
         salt = self._app_data_by_key(msg, "encryption")[5:]  # strip salt=
         subtype = self._app_data_by_key(msg, "subtype")
         if TYPE_CHECKING:
             assert self.credentials
-        if self.credentials and subtype != self.credentials["gcm"]["app_id"]:
+        if subtype != self.credentials["gcm"]["app_id"]:
             self._log_warn_with_limit(
-                "Subtype %s in data message does not match app id client was registered with %s",
+                "Subtype %s in data message does not match"
+                + "app id client was registered with %s",
                 subtype,
                 self.credentials["gcm"]["app_id"],
             )
         if not self.credentials:
             return
 
-        decrypted = self._decrypt_raw_data(self.credentials, crypto_key, salt, msg.raw_data)
+        decrypted = self._decrypt_raw_data(
+            self.credentials, crypto_key, salt, msg.raw_data
+        )
 
-        # Normalize decrypted payload to a dict for downstream consumers
+        # Normalize decrypted payload to a dict (defensive against non-object JSON)
         decrypted_json: Any | None = None
         text: str | None = None
         try:
@@ -461,12 +458,18 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         if isinstance(decrypted_json, dict):
             ret_val: dict[str, Any] = decrypted_json
         elif decrypted_json is not None:
-            self._log_warn_with_limit("FCM payload JSON is not an object (%s); wrapping", type(decrypted_json).__name__)
+            self._log_warn_with_limit(
+                "FCM payload JSON is not an object (%s); wrapping",
+                type(decrypted_json).__name__,
+            )
             ret_val = {"_raw_json": decrypted_json}
         else:
+            # Not JSON → provide a stable mapping for consumers
             ret_val = {"_raw_text": text} if text is not None else {"_raw_bytes": decrypted.hex()}
 
-        self._log_verbose("Decrypted data for message %s is: %s", msg.persistent_id, ret_val)
+        self._log_verbose(
+            "Decrypted data for message %s is: %s", msg.persistent_id, ret_val
+        )
         try:
             self.callback(ret_val, msg.persistent_id, self.callback_context)
             self._reset_error_count(ErrorType.NOTIFY)
@@ -489,16 +492,22 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             p.status,
         )
         req = HeartbeatAck()
+
         if self._new_input_stream_id_available():
             req.last_stream_id_received = self._get_input_stream_id()
+
         await self._send_msg(req)
 
     async def _handle_iq(self, p: IqStanza) -> None:
         if not p.extension:
-            self._log_warn_with_limit("Unexpected IqStanza id received with no extension", str(p))
+            self._log_warn_with_limit(
+                "Unexpected IqStanza id received with no extension", str(p)
+            )
             return
         if p.extension.id not in (12, 13):
-            self._log_warn_with_limit("Unexpected extension id received: %s", p.extension.id)
+            self._log_warn_with_limit(
+                "Unexpected extension id received: %s", p.extension.id
+            )
             return
 
     async def _send_selective_ack(self, persistent_id: str) -> None:
@@ -514,8 +523,10 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     async def _send_heartbeat(self) -> None:
         req = HeartbeatPing()
+
         if self._new_input_stream_id_available():
             req.last_stream_id_received = self._get_input_stream_id()
+
         await self._send_msg(req)
         self.logger.debug("Sent heartbeat ping")
 
@@ -525,6 +536,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
     def _try_increment_error_count(self, error_type: ErrorType) -> bool:
         if error_type not in self.sequential_error_counters:
             self.sequential_error_counters[error_type] = 0
+
         self.sequential_error_counters[error_type] += 1
 
         if (
@@ -533,11 +545,10 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             >= self.config.abort_on_sequential_error_count
         ):
             self.logger.debug(
-                "Stopping push worker due to %d sequential errors of type %s",
+                "Stopping push receiver due to %d sequential errors of type %s (FCM connectivity issue)",
                 self.sequential_error_counters[error_type],
                 error_type,
             )
-            # signal to end loop
             self.do_listen = False
             return False
         return True
@@ -547,28 +558,29 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         self.input_stream_id += 1
 
         if isinstance(msg, Close):
-            self._log_warn_with_limit("Server sent Close message; ending worker")
+            self._log_warn_with_limit("Server sent Close message; worker stopping")
             self.do_listen = False
             return
 
         if isinstance(msg, LoginResponse):
             if str(msg.error):
                 self.logger.error("Received login error response: %s", msg)
-                self._try_increment_error_count(ErrorType.LOGIN)
-                self.do_listen = False
+                if self._try_increment_error_count(ErrorType.LOGIN):
+                    self.do_listen = False
             else:
                 self.logger.info("Successfully logged in to MCS endpoint")
                 self._reset_error_count(ErrorType.LOGIN)
                 self.run_state = FcmPushClientRunState.STARTED
                 self.persistent_ids = []
+                # Refresh activity timestamp
                 self.last_message_time = time.time()
             return
 
         if isinstance(msg, DataMessageStanza):
             self._handle_data_message(msg)
             self.persistent_ids.append(msg.persistent_id)
-            if self.config.send_selective_acknowledgements:
-                await self._send_selective_ack(msg.persistent_id)
+            # Acking is cheap; keep it to avoid server redelivery
+            await self._send_selective_ack(msg.persistent_id)
         elif isinstance(msg, HeartbeatPing):
             await self._handle_ping(msg)
         elif isinstance(msg, HeartbeatAck):
@@ -577,7 +589,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             pass
         else:
             self._log_warn_with_limit("Unexpected message type %s.", type(msg).__name__)
-
+        # Reset error count if a read has been successful
         self._reset_error_count(ErrorType.READ)
         self._reset_error_count(ErrorType.CONNECTION)
 
@@ -590,6 +602,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
     async def _connect(self) -> bool:
         try:
             loop = asyncio.get_running_loop()
+            # create_default_context() blocks the event loop
             ssl_context = await loop.run_in_executor(None, ssl.create_default_context)
             self.reader, self.writer = await self._open_connection(
                 host=MCS_HOST, port=MCS_PORT, ssl_context=ssl_context
@@ -598,7 +611,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             return True
         except OSError as oex:
             self.logger.error(
-                "Could not connect to MCS endpoint (%s,%s): %s",
+                "Could not connected to MCS endpoint (%s,%s): %s",
                 MCS_HOST,
                 MCS_PORT,
                 oex,
@@ -613,9 +626,14 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     async def _connect_with_retry(self) -> bool:
         self.run_state = FcmPushClientRunState.STARTING_CONNECTION
+
         trycount = 0
         connected = False
-        while trycount < self.config.connection_retry_count and not connected and self.do_listen:
+        while (
+            trycount < self.config.connection_retry_count
+            and not connected
+            and self.do_listen
+        ):
             trycount += 1
             connected = await self._connect()
             if not connected:
@@ -627,49 +645,63 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                 )
                 await asyncio.sleep(sleep_time)
         if not connected:
-            self.logger.error("Unable to connect to MCS endpoint after %s tries, aborting", trycount)
+            self.logger.error(
+                "Unable to connect to MCS endpoint after %s tries", trycount
+            )
         return connected
 
     async def _listen(self) -> None:
-        """Main listen loop. Ends on error/idle; supervisor should restart us."""
+        """Listens for push notifications until an error or stop() occurs."""
         try:
             if not await self._connect_with_retry():
+                self.run_state = FcmPushClientRunState.STOPPED
+                self.do_listen = False
                 return
 
-            await self._login()
+            try:
+                await self._login()
+            except Exception as ex:
+                self.logger.info("Login failed: %s", ex)
+                self.do_listen = False
+                return
 
             while self.do_listen:
                 try:
-                    # Idle timeout guard: stop worker to allow clean restart
-                    timeout = max(1.0, float(self._idle_timeout()))
-                    msg = await asyncio.wait_for(self._receive_msg(), timeout=timeout)
-                    if msg:
+                    if msg := await self._receive_msg():
                         await self._handle_message(msg)
 
-                except asyncio.TimeoutError:
-                    self.logger.info("No message received in %.1fs; ending worker for restart.", timeout)
+                except (ConnectionError, ssl.SSLError) as cex:
+                    # Treat stream end/TLS quirks as normal stop; supervisor will restart
+                    self.logger.info("FCM stream ended (%s); worker stopping.", cex)
+                    self.do_listen = False
                     break
-                except (OSError, EOFError, asyncio.IncompleteReadError, ssl.SSLError, ConnectionError) as ex:
-                    # Normal network lifecycle. Do not reset here; let supervisor restart.
-                    if isinstance(ex, ConnectionResetError):
-                        self.logger.debug("FCM connection reset by peer (normal): %s", ex)
-                    else:
-                        self.logger.info("FCM read ended (%s); ending worker for restart.", ex)
+
+                except (OSError, EOFError, asyncio.IncompleteReadError) as osex:
+                    # Normal network life-cycle: log and stop; supervisor will restart
+                    self.logger.info("FCM read ended (%s); worker stopping.", osex)
+                    self.do_listen = False
                     break
 
         except asyncio.CancelledError:
-            self.logger.debug("Listen task cancelled")
+            self.logger.debug("Listener task cancelled")
             raise
         except Exception as ex:
-            self.logger.error("Unknown error in worker: %s\n%s", ex, traceback.format_exc())
+            self.logger.error(
+                "Unknown error in listener: %s\n%s",
+                ex,
+                traceback.format_exc(),
+            )
         finally:
-            await self._do_writer_close()
             self.run_state = FcmPushClientRunState.STOPPING
-            self.do_listen = False
+            await self._do_writer_close()
             self.run_state = FcmPushClientRunState.STOPPED
 
     async def checkin_or_register(self) -> str:
-        """Check in if you have credentials otherwise register as a new client."""
+        """Check in if you have credentials otherwise register as a new client.
+
+        :return: The FCM token which is used to identify you with the push end
+            point application.
+        """
         self.register = FcmRegister(
             self.fcm_config,
             self.credentials,
@@ -677,23 +709,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             http_client_session=self._http_client_session,
         )
         self.credentials = await self.register.checkin_or_register()
+        # await self.register.fcm_refresh_install()
         await self.register.close()
         return self.credentials["fcm"]["registration"]["token"]
-
-    async def start(self) -> None:
-        """Connect to FCM and start listening for push notifications."""
-        if self.do_listen:
-            return
-        self.do_listen = True
-        self.run_state = FcmPushClientRunState.STARTING_TASKS
-        try:
-            self.last_message_time = time.time()
-            self.tasks = [
-                asyncio.create_task(self._listen(), name="googlefindmy.fcm._listen"),
-                asyncio.create_task(self._start_heartbeat_sender(), name="googlefindmy.fcm._heartbeat"),
-            ]
-        except Exception as ex:
-            self.logger.error("Unexpected error starting FcmPushClient: %s", ex)
 
     async def _start_heartbeat_sender(self) -> None:
         """Send client heartbeats at a fixed interval while started."""
@@ -713,11 +731,40 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self.logger.debug("Heartbeat task cancelled")
             raise
 
+    async def _cancel_and_gather(self) -> None:
+        """Cancel all running internal tasks and await their completion."""
+        if not self.tasks:
+            return
+        for t in self.tasks:
+            if t and not t.done():
+                t.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.tasks = []
+
+    async def start(self) -> None:
+        """Connect to FCM and start listening for push notifications."""
+        self.do_listen = True
+        self.run_state = FcmPushClientRunState.STARTING_TASKS
+        try:
+            # Initialize activity clock to "now" so potential monitors (if any) don't reset
+            self.last_message_time = time.time()
+            self.tasks = [
+                asyncio.create_task(self._listen(), name="googlefindmy.fcm_listen"),
+                asyncio.create_task(self._start_heartbeat_sender(), name="googlefindmy.fcm_heartbeat"),
+            ]
+        except Exception as ex:
+            self.logger.error("Unexpected error running FcmPushClient: %s", ex)
+
     async def stop(self) -> None:
         """Graceful stop: cancel tasks, close writer, mark stopped."""
-        if (self.stopping_lock and self.stopping_lock.locked()) or self.run_state in (
-            FcmPushClientRunState.STOPPING,
-            FcmPushClientRunState.STOPPED,
+        if (
+            self.stopping_lock
+            and self.stopping_lock.locked()
+            or self.run_state
+            in (
+                FcmPushClientRunState.STOPPING,
+                FcmPushClientRunState.STOPPED,
+            )
         ):
             return
 
