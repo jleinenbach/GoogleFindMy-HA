@@ -10,10 +10,6 @@ from typing import Optional
 
 from aiohttp import ClientSession
 
-from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
-    get_location_data_for_device,
-    register_fcm_receiver_provider,
-)
 from custom_components.googlefindmy.NovaApi.nova_request import async_nova_request
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_LIST_DEVICES_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
@@ -21,12 +17,6 @@ from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
     parse_device_list_protobuf,
     get_canonic_ids,
-)
-from custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device import (
-    register_esp32,
-)
-from custom_components.googlefindmy.SpotApi.UploadPrecomputedPublicKeyIds.upload_precomputed_public_key_ids import (
-    refresh_custom_trackers,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,10 +45,10 @@ async def async_request_device_list(
 ) -> str:
     """Asynchronously request the device list via Nova.
 
-    Session priority:
-        1) Explicit `session` argument,
-        2) HA-managed session registered in Nova client,
-        3) Ephemeral fallback created by Nova client.
+    Priority of HTTP session (HA best practice):
+    1) Explicit `session` argument (tests/special cases),
+    2) Registered provider from nova_request (uses HA's async_get_clientsession),
+    3) Short-lived fallback session managed by nova_request (DEBUG only).
 
     Returns:
         Hex-encoded Nova response payload.
@@ -67,6 +57,7 @@ async def async_request_device_list(
         RuntimeError / aiohttp.ClientError on transport failures.
     """
     hex_payload = create_device_list_request()
+    # Delegate HTTP to Nova client (handles session provider & timeouts).
     return await async_nova_request(
         NOVA_LIST_DEVICES_API_SCOPE,
         hex_payload,
@@ -79,13 +70,14 @@ def request_device_list() -> str:
     """Synchronous convenience wrapper for CLI/legacy callers.
 
     NOTE:
-        - Spins a private event loop via `asyncio.run(...)`.
-        - Must NOT be called from inside an active event loop.
-        - In Home Assistant, prefer `async_request_device_list(...)` and await it.
+    - This wrapper spins a private event loop via `asyncio.run(...)`.
+    - Do NOT call from inside an active event loop (will raise RuntimeError).
+    - In Home Assistant, prefer `async_request_device_list(...)` and await it.
     """
     try:
         return asyncio.run(async_request_device_list())
     except RuntimeError as err:
+        # This indicates incorrect usage (called from within a running loop).
         _LOGGER.error(
             "request_device_list() must not be called inside an active event loop. "
             "Use async_request_device_list(...) instead. Error: %s",
@@ -103,6 +95,11 @@ async def _async_cli_main() -> None:
     device_list = parse_device_list_protobuf(result_hex)
 
     # Maintain side-effect helpers for Spot custom trackers.
+    # NOTE: These imports are CLI-only to avoid heavy HA startup imports.
+    from custom_components.googlefindmy.SpotApi.UploadPrecomputedPublicKeyIds.upload_precomputed_public_key_ids import (  # noqa: E501
+        refresh_custom_trackers,
+    )
+
     refresh_custom_trackers(device_list)
     canonic_ids = get_canonic_ids(device_list)
 
@@ -123,25 +120,28 @@ async def _async_cli_main() -> None:
 
     if selected_value == "r":
         print("Loading...")
+
+        def _register_esp32_cli() -> None:
+            # Lazy import to avoid touching spot token logic at HA startup
+            from custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device import (
+                register_esp32,
+            )
+            register_esp32()
+
         # Run potential blocking/IO work in a worker thread to avoid blocking the loop.
-        await asyncio.to_thread(register_esp32)
+        await asyncio.to_thread(_register_esp32_cli)
     else:
         selected_idx = int(selected_value) - 1
         selected_device_name = canonic_ids[selected_idx][0]
         selected_canonic_id = canonic_ids[selected_idx][1]
 
-        # Ensure a provider for the FCM-based location flow in CLI context.
-        try:
-            from custom_components.googlefindmy.Auth.fcm_receiver import FcmReceiver  # sync CLI variant
-            # Provide a getter that returns a long-lived instance for the callback flow.
-            _fcm = FcmReceiver()
-            register_fcm_receiver_provider(lambda: _fcm)
-        except Exception as e:
-            print(f"Warning: could not initialize FCM receiver for CLI: {e}")
-
         print("Fetching location...")
-        # Request location (Nova push + FCM callback internally); we ignore the return here
-        # because the location flow reports via logs/prints in CLI.
+
+        # Lazy import: only needed for the CLI branch
+        from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (  # noqa: E501
+            get_location_data_for_device,
+        )
+
         await get_location_data_for_device(selected_canonic_id, selected_device_name)
 
 
