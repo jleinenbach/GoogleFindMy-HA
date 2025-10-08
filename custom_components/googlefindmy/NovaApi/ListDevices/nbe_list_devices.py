@@ -12,6 +12,7 @@ from aiohttp import ClientSession
 
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
     get_location_data_for_device,
+    register_fcm_receiver_provider,
 )
 from custom_components.googlefindmy.NovaApi.nova_request import async_nova_request
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_LIST_DEVICES_API_SCOPE
@@ -54,10 +55,10 @@ async def async_request_device_list(
 ) -> str:
     """Asynchronously request the device list via Nova.
 
-    Priority of HTTP session (HA best practice):
-    1) Explicit `session` argument (tests/special cases),
-    2) Registered provider from nova_request (uses HA's async_get_clientsession),
-    3) Short-lived fallback session managed by nova_request (DEBUG only).
+    Session priority:
+        1) Explicit `session` argument,
+        2) HA-managed session registered in Nova client,
+        3) Ephemeral fallback created by Nova client.
 
     Returns:
         Hex-encoded Nova response payload.
@@ -66,7 +67,6 @@ async def async_request_device_list(
         RuntimeError / aiohttp.ClientError on transport failures.
     """
     hex_payload = create_device_list_request()
-    # Delegate HTTP to Nova client (handles session provider & timeouts).
     return await async_nova_request(
         NOVA_LIST_DEVICES_API_SCOPE,
         hex_payload,
@@ -79,14 +79,13 @@ def request_device_list() -> str:
     """Synchronous convenience wrapper for CLI/legacy callers.
 
     NOTE:
-    - This wrapper spins a private event loop via `asyncio.run(...)`.
-    - Do NOT call from inside an active event loop (will raise RuntimeError).
-    - In Home Assistant, prefer `async_request_device_list(...)` and await it.
+        - Spins a private event loop via `asyncio.run(...)`.
+        - Must NOT be called from inside an active event loop.
+        - In Home Assistant, prefer `async_request_device_list(...)` and await it.
     """
     try:
         return asyncio.run(async_request_device_list())
     except RuntimeError as err:
-        # This indicates incorrect usage (called from within a running loop).
         _LOGGER.error(
             "request_device_list() must not be called inside an active event loop. "
             "Use async_request_device_list(...) instead. Error: %s",
@@ -131,7 +130,18 @@ async def _async_cli_main() -> None:
         selected_device_name = canonic_ids[selected_idx][0]
         selected_canonic_id = canonic_ids[selected_idx][1]
 
+        # Ensure a provider for the FCM-based location flow in CLI context.
+        try:
+            from custom_components.googlefindmy.Auth.fcm_receiver import FcmReceiver  # sync CLI variant
+            # Provide a getter that returns a long-lived instance for the callback flow.
+            _fcm = FcmReceiver()
+            register_fcm_receiver_provider(lambda: _fcm)
+        except Exception as e:
+            print(f"Warning: could not initialize FCM receiver for CLI: {e}")
+
         print("Fetching location...")
+        # Request location (Nova push + FCM callback internally); we ignore the return here
+        # because the location flow reports via logs/prints in CLI.
         await get_location_data_for_device(selected_canonic_id, selected_device_name)
 
 
