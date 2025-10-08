@@ -1,11 +1,11 @@
-"""Data coordinator for Google Find My Device."""
+"""Data coordinator for Google Find My Device (async-first, HA-friendly)."""
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -13,6 +13,7 @@ from homeassistant.components.recorder import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+    # HA session is provided by the integration and reused across I/O
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -20,6 +21,12 @@ from .api import GoogleFindMyAPI
 from .const import DOMAIN, UPDATE_INTERVAL, LOCATION_REQUEST_TIMEOUT_S
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class CacheProtocol(Protocol):
+    """Entry-scoped cache protocol (TokenCache instance)."""
+    async def async_get_cached_value(self, key: str) -> Any: ...
+    async def async_set_cached_value(self, key: str, value: Any) -> None: ...
 
 
 # -------------------------------------------------------------------------
@@ -67,7 +74,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def __init__(
         self,
         hass: HomeAssistant,
-        secrets_data: Optional[dict],
+        cache: CacheProtocol,
         tracked_devices: Optional[List[str]] = None,
         location_poll_interval: int = 300,
         device_poll_delay: int = 5,
@@ -77,15 +84,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     ) -> None:
         """Initialize the coordinator.
 
-        Note: The API reads credentials from the token_cache. `secrets_data` may be None
-        when the integration was configured with individual credentials; in that case
-        `__init__.py` already primed the token cache prior to constructing the API here.
+        Notes:
+            - Credentials and related metadata are provided via the entry-scoped TokenCache.
+            - The HA-managed aiohttp ClientSession is reused to avoid per-call pools.
         """
         self.hass = hass
-        # Get the singleton aiohttp.ClientSession from Home Assistant.
+        self._cache = cache
+
+        # Get the singleton aiohttp.ClientSession from Home Assistant and reuse it.
         self._session = async_get_clientsession(hass)
-        # Pass the session to the API to avoid creating temporary sessions.
-        self.api = GoogleFindMyAPI(secrets_data=secrets_data, session=self._session)
+        self.api = GoogleFindMyAPI(cache=self._cache, session=self._session)
 
         # Configuration (user options; updated via update_settings())
         self.tracked_devices = list(tracked_devices or [])
@@ -95,7 +103,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._min_accuracy_threshold = int(min_accuracy_threshold)  # quality filter (meters)
         self.allow_history_fallback = bool(allow_history_fallback)
 
-        # Internal cache & bookkeeping
+        # Internal caches & bookkeeping
         self._device_location_data: Dict[str, Dict[str, Any]] = {}  # device_id -> location dict
         self._device_names: Dict[str, str] = {}  # device_id -> human name
         self._device_caps: Dict[str, Dict[str, Any]] = {}  # device_id -> caps (e.g., {"can_ring": True})
@@ -527,11 +535,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     # ---------------------------- Stats persistence -------------------------
     async def _async_load_stats(self) -> None:
-        """Load statistics from cache."""
+        """Load statistics from entry-scoped cache."""
         try:
-            from .Auth.token_cache import async_get_cached_value
-
-            cached = await async_get_cached_value("integration_stats")
+            cached = await self._cache.async_get_cached_value("integration_stats")
             if cached and isinstance(cached, dict):
                 for key in self.stats.keys():
                     if key in cached:
@@ -541,11 +547,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug("Failed to load statistics from cache: %s", err)
 
     async def _async_save_stats(self) -> None:
-        """Persist statistics to cache."""
+        """Persist statistics to entry-scoped cache."""
         try:
-            from .Auth.token_cache import async_set_cached_value
-
-            await async_set_cached_value("integration_stats", self.stats.copy())
+            await self._cache.async_set_cached_value("integration_stats", self.stats.copy())
         except Exception as err:
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
 
