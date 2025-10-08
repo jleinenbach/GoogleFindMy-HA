@@ -1,119 +1,303 @@
+# custom_components/googlefindmy/KeyBackup/shared_key_retrieval.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
-from binascii import unhexlify
-import base64
-import re
-import logging
+"""
+Shared key retrieval for Google Find My Device (async-first).
 
-from custom_components.googlefindmy.Auth.token_cache import get_cached_value_or_set
-from custom_components.googlefindmy.KeyBackup.shared_key_flow import request_shared_key_flow
+This module provides an asynchronous API to obtain the 32-byte *shared key*
+used to decrypt E2EE payloads. The value is cached (per config entry via the
+integration's async token cache) as a **hex string** under the key "shared_key".
+
+Key properties:
+- **Async-first**: `async_get_shared_key()` is the primary API.
+- **Executor offloading**: any blocking/interactive flows are executed in a thread.
+- **Normalization**: the cached value is normalized to a lowercase hex string.
+- **Validation**: decoded key must be exactly 32 bytes (256 bit).
+- **Fallbacks**:
+  1) Read from cache (hex expected, base64 accepted once and auto-normalized).
+  2) Derive from FCM credentials (private key), if available (non-interactive).
+  3) As a last resort (CLI only), run the interactive shared-key flow.
+
+The legacy sync facade `get_shared_key()` is kept for import compatibility for
+CLI scripts, but it is **not** safe to call from the Home Assistant event loop.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+import re
+from binascii import Error as BinasciiError, unhexlify
+from typing import Any, Optional
+
+from custom_components.googlefindmy.Auth.token_cache import (
+    async_get_cached_value,
+    async_get_cached_value_or_set,
+    async_set_cached_value,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
+_CACHE_KEY = "shared_key"  # stored as lowercase hex string
 
-def _retrieve_shared_key():
-    """Attempt to retrieve the shared key, interactively or via FCM fallback."""
-    print(
-        """[SharedKeyRetrieval] You need to log in again to access end-to-end encrypted keys to decrypt location reports.
-> This script will now open Google Chrome on your device. 
-> Make that you allow Python (or PyCharm) to control Chrome (macOS only).
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+
+def _decode_hex_32(s: str) -> bytes:
+    """Decode a string as hex and ensure it is exactly 32 bytes.
+
+    Accepts optional "0x" prefix and ignores whitespace. Pads odd lengths.
+
+    Raises:
+        ValueError: if decoding fails or the length is not 32 bytes.
     """
-    )
+    t = (s or "").strip().lower()
+    if t.startswith("0x"):
+        t = t[2:]
+    t = re.sub(r"\s+", "", t)
+    # quick sanity
+    if not re.fullmatch(r"[0-9a-f]*", t):
+        raise ValueError("shared_key contains non-hex characters")
+    if len(t) % 2:
+        t = "0" + t
+    try:
+        b = unhexlify(t)
+    except (BinasciiError, TypeError) as exc:
+        raise ValueError("shared_key is not valid hex") from exc
+    if len(b) != 32:
+        raise ValueError(f"shared_key has invalid length {len(b)} bytes (expected 32)")
+    return b
 
-    # Check if we're running in a non-interactive environment (like Home Assistant)
-    import sys
+
+def _decode_base64_like_32(s: str) -> bytes:
+    """Decode a base64/base64url/PEM-like string and ensure length 32 bytes.
+
+    - Removes PEM-style headers/footers and whitespace
+    - Adds padding as required
+    - Tries urlsafe base64 first, then standard base64
+
+    Raises:
+        ValueError: if decoding fails or length != 32 bytes.
+    """
+    v = re.sub(r"-{5}BEGIN[^-]+-{5}|-{5}END[^-]+-{5}", "", s or "")
+    v = re.sub(r"\s+", "", v)
+    pad = (-len(v)) % 4
+    v_padded = v + ("=" * pad)
+    try:
+        b = base64.urlsafe_b64decode(v_padded)
+    except (ValueError, TypeError):
+        try:
+            b = base64.b64decode(v_padded)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("shared_key is not valid base64/base64url") from exc
+    if len(b) != 32:
+        raise ValueError(f"shared_key (base64) has invalid length {len(b)} bytes (expected 32)")
+    return b
+
+
+async def _run_in_executor(func, *args):
+    """Run a blocking callable in a thread pool."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, func, *args)
+
+
+# -----------------------------------------------------------------------------
+# Retrieval strategies
+# -----------------------------------------------------------------------------
+
+
+async def _derive_from_fcm_credentials() -> str:
+    """Try deriving the shared key from FCM credentials (non-interactive path).
+
+    The FCM credential layout typically contains a private key in base64/base64url form.
+    We derive deterministic 32-byte material by using the **last 32 bytes** of the DER
+    payload, preserving the original behavior while avoiding interactive flows.
+
+    Returns:
+        str: lowercase hex string of 32 bytes.
+
+    Raises:
+        RuntimeError: if credentials are not present/invalid or too short.
+    """
+    creds: Any = await async_get_cached_value("fcm_credentials")
+    if isinstance(creds, str):
+        try:
+            creds = json.loads(creds)
+        except (json.JSONDecodeError, TypeError):
+            creds = {}
+    if not isinstance(creds, dict):
+        raise RuntimeError("No FCM credentials available in cache")
+
+    private_b64: Optional[str] = None
+    keys_obj = creds.get("keys")
+    if isinstance(keys_obj, dict):
+        priv = keys_obj.get("private")
+        if isinstance(priv, str) and priv.strip():
+            private_b64 = priv.strip()
+
+    if not private_b64:
+        raise RuntimeError("FCM credentials have no private key to derive from")
+
+    # Normalize PEM-ish inputs and whitespace; add padding
+    v = re.sub(r"-{5}BEGIN[^-]+-{5}|-{5}END[^-]+-{5}", "", private_b64)
+    v = re.sub(r"\s+", "", v)
+    v_padded = v + ("=" * ((-len(v)) % 4))
 
     try:
-        if not sys.stdin.isatty():
-            raise EOFError("Non-interactive environment detected")
-        # Press enter to continue
-        input("[SharedKeyRetrieval] Press 'Enter' to continue...")
-    except EOFError:
-        # Running in non-interactive mode, look for alternative keys
-        from custom_components.googlefindmy.Auth.token_cache import get_all_cached_values
+        der = base64.urlsafe_b64decode(v_padded)
+    except (ValueError, TypeError):
+        try:
+            der = base64.b64decode(v_padded)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(f"FCM private key is not valid base64/base64url: {exc}") from exc
 
-        all_cached = get_all_cached_values()
-        _LOGGER.debug(f"[SharedKeyRetrieval] Available cached keys: {list(all_cached.keys())}")
+    if len(der) < 32:
+        raise RuntimeError(f"FCM private key too short ({len(der)} bytes); cannot derive shared key")
 
-        # Try to find any key that might work as a shared key
-        # Look for keys in FCM credentials that might serve as shared keys
-        fcm_creds = all_cached.get("fcm_credentials", {})
-        if isinstance(fcm_creds, str):
-            import json
-
-            try:
-                fcm_creds = json.loads(fcm_creds)
-            except (json.JSONDecodeError, TypeError):
-                fcm_creds = {}
-
-        if "keys" in fcm_creds and "private" in fcm_creds["keys"]:
-            print("[SharedKeyRetrieval] Using FCM private key as shared key fallback")
-            private_key_b64 = str(fcm_creds["keys"]["private"]).strip()
-
-            # Remove accidental PEM headers/whitespace and normalize padding
-            private_key_b64 = re.sub(r"-{5}BEGIN[^-]+-{5}|-{5}END[^-]+-{5}", "", private_key_b64)
-            private_key_b64 = re.sub(r"\s+", "", private_key_b64)
-            pad = (-len(private_key_b64)) % 4
-            private_key_b64_padded = private_key_b64 + ("=" * pad)
-
-            # IMPORTANT: FCM keys are often base64url ('-' and '_'); use urlsafe decode first
-            try:
-                private_key_der = base64.urlsafe_b64decode(private_key_b64_padded)
-            except (ValueError, TypeError):
-                # fallback to standard base64 if needed
-                try:
-                    private_key_der = base64.b64decode(private_key_b64_padded)
-                except (ValueError, TypeError) as decode_error:
-                    print(
-                        f"[SharedKeyRetrieval] Failed to decode FCM private key (base64/url): {decode_error}"
-                    )
-                    raise RuntimeError(
-                        f"Failed to decode FCM private key for shared key fallback: {decode_error}"
-                    )
-
-            if len(private_key_der) < 32:
-                raise RuntimeError(
-                    f"Decoded FCM private key is too short ({len(private_key_der)} bytes); "
-                    "cannot derive 32-byte shared key."
-                )
-            # Deterministic 32-byte material: keep the original "last 32 bytes" approach
-            return private_key_der[-32:].hex()
-
-        raise RuntimeError("No suitable shared key found in cache")
-
-    shared_key = request_shared_key_flow()
-    return shared_key
+    shared = der[-32:]
+    return shared.hex()
 
 
-def get_shared_key() -> bytes:
-    """Get the shared key, from cache or by generating it."""
-    # First try to get the cached shared key directly
-    from custom_components.googlefindmy.Auth.token_cache import get_cached_value, get_all_cached_values
+async def _interactive_flow_hex() -> str:
+    """Run the interactive shared-key flow (CLI only) and return a hex string.
 
-    shared_key_hex = get_cached_value("shared_key")
-    if shared_key_hex:
-        print(f"[SharedKeyRetrieval] Found cached shared key: {len(shared_key_hex)} chars")
-        return unhexlify(shared_key_hex)
+    This opens a browser and requires a TTY; **not suitable for Home Assistant**.
+    We keep it as a last-resort fallback for developer CLI usage.
+    """
+    from custom_components.googlefindmy.KeyBackup.shared_key_flow import (  # lazy import
+        request_shared_key_flow,
+    )
 
-    print("[SharedKeyRetrieval] No shared_key found in cache, debugging...")
+    # Run potentially interactive/GUI logic in executor
+    result = await _run_in_executor(request_shared_key_flow)
 
-    # Debug: check what keys are actually available
-    all_cached = get_all_cached_values()
-    available_keys = list(all_cached.keys())
-    print(f"[SharedKeyRetrieval] Available keys in cache: {available_keys}")
+    # Normalize the result to hex
+    if isinstance(result, (bytes, bytearray)):
+        b = bytes(result)
+        if len(b) != 32:
+            raise RuntimeError(f"Interactive shared key has invalid length {len(b)} (expected 32)")
+        return b.hex()
 
-    if "shared_key" in all_cached:
-        shared_key_hex = all_cached["shared_key"]
-        print(
-            f"[SharedKeyRetrieval] Found shared_key via get_all_cached_values: {len(shared_key_hex)} chars"
-        )
-        return unhexlify(shared_key_hex)
+    if not isinstance(result, str) or not result.strip():
+        raise RuntimeError("Interactive shared key flow returned empty/invalid result")
 
-    print("[SharedKeyRetrieval] shared_key definitely not found, trying to generate...")
-    return unhexlify(get_cached_value_or_set("shared_key", _retrieve_shared_key))
+    s = result.strip()
+    # Try hex first, then base64-like
+    try:
+        return _decode_hex_32(s).hex()
+    except ValueError:
+        return _decode_base64_like_32(s).hex()
 
 
-if __name__ == "__main__":
-    print(get_shared_key())
+async def _retrieve_shared_key_hex() -> str:
+    """Strategy chain to obtain a hex-encoded shared key (32 bytes).
+
+    Order:
+        1) Try deriving from FCM credentials (non-interactive, HA-friendly).
+        2) If allowed (CLI/TTY), run the interactive flow in an executor.
+
+    Returns:
+        str: lowercase hex string of the 32-byte key.
+
+    Raises:
+        RuntimeError: if neither strategy can provide a valid key.
+    """
+    # 1) Non-interactive derivation (preferred for HA)
+    try:
+        return await _derive_from_fcm_credentials()
+    except Exception as err:
+        _LOGGER.debug("FCM-derivation for shared key not available: %s", err)
+
+    # 2) Interactive flow (only if we seem to be in a CLI/TTY)
+    try:
+        import sys
+
+        if sys.stdin and sys.stdin.isatty():
+            _LOGGER.info("Falling back to interactive shared key flow (CLI mode detected)")
+            return await _interactive_flow_hex()
+        raise RuntimeError("Interactive flow not available in non-interactive environment")
+    except Exception as err:
+        raise RuntimeError(f"Failed to retrieve shared key: {err}") from err
+
+
+# -----------------------------------------------------------------------------
+# Public API (async-first)
+# -----------------------------------------------------------------------------
+
+
+async def async_get_shared_key() -> bytes:
+    """Return the 32-byte shared key.
+
+    Behavior:
+        - Reads from the async token cache key "shared_key" (hex).
+        - If absent, derives it (prefer FCM credentials) or runs the interactive flow
+          when a TTY is detected (CLI only), then stores a normalized hex string.
+        - Normalizes base64/base64url or PEM-like stored values to hex on first read.
+        - Enforces a strict 32-byte length.
+
+    Returns:
+        bytes: a 32-byte key.
+
+    Raises:
+        RuntimeError: if a valid key cannot be obtained or normalized.
+    """
+    raw = await async_get_cached_value(_CACHE_KEY)
+    if isinstance(raw, str) and raw.strip():
+        s = raw.strip()
+        # Try hex fast-path
+        try:
+            return _decode_hex_32(s)
+        except ValueError:
+            # Accept base64/base64url, then self-heal to hex
+            b = _decode_base64_like_32(s)
+            await async_set_cached_value(_CACHE_KEY, b.hex())
+            _LOGGER.info("Normalized cached shared_key (base64) to hex")
+            return b
+
+    # Cache miss -> compute via strategy chain, then persist
+    hex_value = await async_get_cached_value_or_set(_CACHE_KEY, _retrieve_shared_key_hex)
+
+    # Validate persisted value and return as bytes
+    try:
+        return _decode_hex_32(hex_value)
+    except ValueError as exc:
+        # Clear invalid cache to avoid repeated failures
+        await async_set_cached_value(_CACHE_KEY, None)
+        raise RuntimeError(f"Persisted shared_key is invalid: {exc}") from exc
+
+
+# -----------------------------------------------------------------------------
+# Legacy sync facade (CLI compatibility)
+# -----------------------------------------------------------------------------
+
+
+def get_shared_key() -> bytes:  # pragma: no cover
+    """Sync facade for CLI tools (NOT for Home Assistant event loop).
+
+    - If called from within a running event loop, raises RuntimeError immediately.
+    - Otherwise, runs the async API via `asyncio.run()` and returns the bytes.
+
+    Returns:
+        bytes: a 32-byte shared key.
+
+    Raises:
+        RuntimeError: if called inside an event loop.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        if loop.is_running():
+            raise RuntimeError(
+                "Sync get_shared_key() called from within the event loop. "
+                "Use `await async_get_shared_key()` instead."
+            )
+    except RuntimeError:
+        # No running loop -> OK for CLI usage
+        pass
+    return asyncio.run(async_get_shared_key())
