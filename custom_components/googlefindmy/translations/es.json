@@ -48,7 +48,7 @@
       "auth_failed": "Error de autenticación. Vuelve a intentarlo.",
       "invalid_token": "Token no válido o faltan campos obligatorios.",
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
-      "no_devices": "No se han encontrado dispositivos. Asegúrate de que «Encontrar mi dispositivo» esté activado en tu cuenta de Google.",
+      "no_devices": "No se han encontrado dispositivos. Asegúrate de que ‘Encontrar mi dispositivo’ esté activado en tu cuenta de Google.",
       "cannot_connect": "No se pudo conectar con la API de Google. Puede ser un problema temporal: inténtalo de nuevo más tarde.",
       "choose_one": "Proporciona exactamente un método de credenciales.",
       "required": "Este campo es obligatorio.",
@@ -84,7 +84,7 @@
       },
       "settings": {
         "title": "Opciones",
-        "description": "Modificar la configuración de seguimiento:\n• Intervalo de sondeo de ubicación: frecuencia de consulta de ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Precisión mínima: ignorar ubicaciones peores que este valor (25–500 metros)\n• Umbral de movimiento: movimiento mínimo que desencadena una actualización de ubicación (10–200 metros)\n\nFiltro de Google Home:\n• Activar para agrupar las detecciones de Google Home en la zona «Hogar»\n• Las palabras clave aceptan coincidencias parciales (separadas por comas)\n• Ejemplo: «nest» coincide con «Kitchen Nest Mini»",
+        "description": "Modificar la configuración de seguimiento:\n• Intervalo de sondeo de ubicación: frecuencia de consulta de ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Precisión mínima: ignorar ubicaciones peores que este valor (25–500 metros)\n• Umbral de movimiento: movimiento mínimo que desencadena una actualización de ubicación (10–200 metros)\n\nFiltro de Google Home:\n• Activar para agrupar las detecciones de Google Home en la zona ‘Hogar’\n• Las palabras clave aceptan coincidencias parciales (separadas por comas)\n• Ejemplo: ‘nest’ coincide con ‘Kitchen Nest Mini’",
         "data": {
           "tracked_devices": "Dispositivos seguidos",
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
@@ -158,7 +158,7 @@
       "fields": {
         "mode": {
           "name": "Modo",
-          "description": "Elige «Reconstruir» para eliminar entidades/dispositivos y recargar; «Migrar» solo vuelve a aplicar la migración suave datos→opciones."
+          "description": "Elige ‘Reconstruir’ para eliminar entidades/dispositivos y recargar; ‘Migrar’ solo vuelve a aplicar la migración suave datos→opciones."
         },
         "device_ids": {
           "name": "Dispositivos (opcional)",
@@ -171,6 +171,9 @@
     "button": {
       "play_sound": {
         "name": "Reproducir sonido"
+      },
+      "locate_device": {
+        "name": "Localizar ahora"
       }
     },
     "binary_sensor": {
@@ -204,7 +207,7 @@
         "name": "Coordenadas no válidas"
       },
       "stat_low_quality_dropped": {
-        "name": "Baja precisión descartadas"
+        "name": "Lecturas de baja precisión descartadas"
       }
     }
   }
