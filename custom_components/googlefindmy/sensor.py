@@ -221,6 +221,9 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
             manufacturer="BSkando",
             model="Find My Device Integration",
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
+            # Mark as a service device to hide the "Delete device" action in HA UI.
+            # (Still allows showing diagnostic entities on this device.)
+            entry_type=dr.DeviceEntryType.SERVICE,
         )
 
 
