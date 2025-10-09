@@ -6,6 +6,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 from aiohttp import ClientError, ClientSession
+from homeassistant.exceptions import ConfigEntryAuthFailed, UpdateFailed
 
 from .Auth.username_provider import username_string
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -18,6 +19,7 @@ from .NovaApi.ExecuteAction.PlaySound.stop_sound_request import (
     async_submit_stop_sound_request,
 )
 from .NovaApi.ListDevices.nbe_list_devices import async_request_device_list
+from .NovaApi.nova_request import NovaAuthError, NovaHTTPError, NovaRateLimitError
 from .ProtoDecoders.decoder import (
     get_canonic_ids,
     get_devices_with_location,
@@ -47,7 +49,11 @@ _FCM_ReceiverGetter: Optional[Callable[[], FcmReceiverProtocol]] = None
 
 
 def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
-    """Register a getter that returns the shared FCM receiver (HA-managed)."""
+    """Register a getter that returns the shared FCM receiver (HA-managed).
+
+    Args:
+        getter: A callable that returns the singleton FcmReceiverProtocol instance.
+    """
     global _FCM_ReceiverGetter
     _FCM_ReceiverGetter = getter
 
@@ -88,7 +94,14 @@ def _infer_can_ring_slot(device: Dict[str, Any]) -> Optional[bool]:
 
 
 def _build_can_ring_index(parsed_device_list: Any) -> Dict[str, bool]:
-    """Build a mapping canonical_id -> can_ring (where determinable)."""
+    """Build a mapping canonical_id -> can_ring (where determinable).
+
+    Args:
+        parsed_device_list: The parsed protobuf message from the device list response.
+
+    Returns:
+        A dictionary mapping canonical device IDs to a boolean indicating if they can ring.
+    """
     index: Dict[str, bool] = {}
     try:
         devices = get_devices_with_location(parsed_device_list)
@@ -114,6 +127,12 @@ class _EphemeralCache:
     """
 
     def __init__(self, *, oauth_token: Optional[str], email: Optional[str]) -> None:
+        """Initialize the ephemeral cache with credentials.
+
+        Args:
+            oauth_token: The OAuth token.
+            email: The user's Google email address.
+        """
         self._data: Dict[str, Any] = {}
         if isinstance(email, str) and email:
             self._data[username_string] = email
@@ -121,9 +140,23 @@ class _EphemeralCache:
             self._data[CONF_OAUTH_TOKEN] = oauth_token
 
     async def async_get_cached_value(self, key: str) -> Any:
+        """Get a value from the in-memory cache.
+
+        Args:
+            key: The key of the value to retrieve.
+
+        Returns:
+            The cached value, or None if not found.
+        """
         return self._data.get(key)
 
     async def async_set_cached_value(self, key: str, value: Any) -> None:
+        """Set a value in the in-memory cache.
+
+        Args:
+            key: The key of the value to set.
+            value: The value to store. If None, the key is removed.
+        """
         if value is None:
             self._data.pop(key, None)
         else:
@@ -133,6 +166,11 @@ class _EphemeralCache:
 # ----------------------------- API class ------------------------------------
 class GoogleFindMyAPI:
     """Async-first API wrapper for Google Find My Device.
+
+    This class provides a high-level interface to the underlying Google Find My
+    Device services. It handles authentication, data parsing, and action execution
+    (like locating a device or playing a sound) in an asynchronous manner suitable
+    for Home Assistant.
 
     Notes:
         - For runtime use, credentials/metadata come from the entry-scoped cache (TokenCache).
@@ -184,7 +222,14 @@ class GoogleFindMyAPI:
 
     # ------------------------ Internal processing helpers ------------------------
     def _process_device_list_response(self, result_hex: str) -> List[Dict[str, Any]]:
-        """Parse protobuf, update capability cache, and build basic device list."""
+        """Parse protobuf, update capability cache, and build basic device list.
+
+        Args:
+            result_hex: The hexadecimal string of the protobuf response.
+
+        Returns:
+            A list of dictionaries, each representing a device with its basic info.
+        """
         parsed = parse_device_list_protobuf(result_hex)
         cap_index = _build_can_ring_index(parsed)
         if cap_index:
@@ -205,7 +250,14 @@ class GoogleFindMyAPI:
     def _extend_with_empty_location_fields(
         self, items: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Augment basic device entries with common location fields set to None."""
+        """Augment basic device entries with common location fields set to None.
+
+        Args:
+            items: A list of basic device dictionaries.
+
+        Returns:
+            A new list of device dictionaries with added placeholder location fields.
+        """
         extended: List[Dict[str, Any]] = []
         for base in items:
             dev = {
@@ -227,6 +279,12 @@ class GoogleFindMyAPI:
         """Pick the most relevant location record (latest last_seen if present).
 
         Prefer the entry with the highest 'last_seen' when available; otherwise, the first.
+
+        Args:
+            records: A list of location data dictionaries for a device.
+
+        Returns:
+            The single best location record dictionary.
         """
         if not records:
             return {}
@@ -245,6 +303,9 @@ class GoogleFindMyAPI:
         Notes:
             - Uses the provider installed by the integration (HA-managed singleton).
             - Returns None if the provider is missing or a token cannot be obtained.
+
+        Returns:
+            The FCM token as a string, or None if unavailable.
         """
         if _FCM_ReceiverGetter is None:
             _LOGGER.error("Cannot obtain FCM token: no provider registered.")
@@ -273,13 +334,19 @@ class GoogleFindMyAPI:
     ) -> List[Dict[str, Any]]:
         """Async variant of the lightweight device list used by HA flows/coordinator.
 
+        This method fetches a list of devices associated with the Google account,
+        including their names, IDs, and ringing capability.
+
+        Args:
+            username: The Google account email. If None, it will be retrieved from the cache.
+
         Returns:
             A list of minimal device dicts (id, name, optional can_ring).
             Returns an empty list on errors (graceful degradation).
 
-        Behavior:
-            - Resolves username from the entry-scoped cache if not provided.
-            - Reuses the injected aiohttp session if supported by the caller.
+        Raises:
+            ConfigEntryAuthFailed: If authentication fails.
+            UpdateFailed: If the API is rate-limited or returns a server error.
         """
         try:
             if not username:
@@ -288,14 +355,20 @@ class GoogleFindMyAPI:
                 except Exception:
                     username = None
 
-            # Compatibility: older nbe_list_devices versions may not accept 'session='
-            try:
-                result_hex = await async_request_device_list(username, session=self._session)
-            except TypeError:
-                _LOGGER.debug("Falling back to async_request_device_list without session kwarg")
-                result_hex = await async_request_device_list(username)
+            result_hex = await async_request_device_list(username)
 
             return self._process_device_list_response(result_hex)
+        except asyncio.CancelledError:
+            raise
+        except NovaRateLimitError as err:
+            _LOGGER.warning("Device list temporarily rate-limited: %s", err)
+            raise UpdateFailed(str(err)) from err
+        except NovaHTTPError as err:
+            _LOGGER.warning("Device list temporarily unavailable (server error %s): %s", err.status, err)
+            raise UpdateFailed(str(err)) from err
+        except NovaAuthError as err:
+            _LOGGER.error("Authentication failed while listing devices: %s", err)
+            raise ConfigEntryAuthFailed(str(err)) from err
         except ClientError as err:
             _LOGGER.error("Failed to get basic device list (async, network): %s", err)
             return []
@@ -308,6 +381,9 @@ class GoogleFindMyAPI:
 
         Guard:
             If called inside a running event loop (e.g., HA), logs and returns [].
+
+        Returns:
+            A list of device dictionaries.
         """
         try:
             loop = asyncio.get_event_loop()
@@ -322,7 +398,11 @@ class GoogleFindMyAPI:
             return []
 
     def get_devices(self) -> List[Dict[str, Any]]:
-        """Return devices with basic info only; no up-front location fetch (sync wrapper)."""
+        """Return devices with basic info only; no up-front location fetch (sync wrapper).
+
+        Returns:
+            A list of device dictionaries augmented with empty location fields.
+        """
         base = self.get_basic_device_list()
         if base:
             _LOGGER.info("API v3.0: Returning %d devices (basic)", len(base))
@@ -334,9 +414,16 @@ class GoogleFindMyAPI:
     ) -> Dict[str, Any]:
         """Async, HA-compatible location request for a single device.
 
-        Selection policy:
-            Upstream returns a list of location records. We choose the record
-            with the highest 'last_seen' if present; otherwise we use the first record.
+        This function requests the location for a specific device and selects the most
+        relevant location record from the response.
+
+        Args:
+            device_id: The canonical ID of the device.
+            device_name: The human-readable name of the device for logging.
+
+        Returns:
+            A dictionary containing the best available location data for the device.
+            Returns an empty dictionary on failure.
         """
         try:
             _LOGGER.info(
@@ -373,7 +460,15 @@ class GoogleFindMyAPI:
             return {}
 
     def get_device_location(self, device_id: str, device_name: str) -> Dict[str, Any]:
-        """Thin sync wrapper around async_get_device_location for non-HA contexts."""
+        """Thin sync wrapper around async_get_device_location for non-HA contexts.
+
+        Args:
+            device_id: The canonical ID of the device.
+            device_name: The human-readable name of the device.
+
+        Returns:
+            A dictionary containing location data, or an empty dictionary on failure.
+        """
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -389,7 +484,14 @@ class GoogleFindMyAPI:
             return {}
 
     def locate_device(self, device_id: str) -> Dict[str, Any]:
-        """Compatibility sync entrypoint for location (uses sync wrapper)."""
+        """Compatibility sync entrypoint for location (uses sync wrapper).
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            A dictionary containing location data.
+        """
         return self.get_device_location(device_id, device_id)
 
     # ------------------------ Play/Stop Sound / Push readiness -------------------
@@ -409,6 +511,12 @@ class GoogleFindMyAPI:
             - If push is not ready -> False.
             - Check internal capability cache first (no network).
             - If capability is unknown -> return None (let the caller decide optimistically).
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            True if the device can play sound, False if not, or None if unknown.
         """
         if not self.is_push_ready():
             return False
@@ -418,7 +526,14 @@ class GoogleFindMyAPI:
 
     # ---------- Play/Stop Sound (sync wrappers; for CLI/non-HA) ----------
     def play_sound(self, device_id: str) -> bool:
-        """Thin sync wrapper around async_play_sound for non-HA contexts."""
+        """Thin sync wrapper around async_play_sound for non-HA contexts.
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            True if the command was sent successfully, False otherwise.
+        """
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -432,7 +547,14 @@ class GoogleFindMyAPI:
             return False
 
     def stop_sound(self, device_id: str) -> bool:
-        """Thin sync wrapper around async_stop_sound for non-HA contexts."""
+        """Thin sync wrapper around async_stop_sound for non-HA contexts.
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            True if the command was sent successfully, False otherwise.
+        """
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -447,7 +569,14 @@ class GoogleFindMyAPI:
 
     # ---------- Play/Stop Sound (async; HA-first) ----------
     async def async_play_sound(self, device_id: str) -> bool:
-        """Send a 'Play Sound' command to a device (async path for HA)."""
+        """Send a 'Play Sound' command to a device (async path for HA).
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            True if the command was submitted successfully, False otherwise.
+        """
         token = self._get_fcm_token_for_action()
         if not token:
             return False
@@ -473,7 +602,14 @@ class GoogleFindMyAPI:
             return False
 
     async def async_stop_sound(self, device_id: str) -> bool:
-        """Send a 'Stop Sound' command to a device (async path for HA)."""
+        """Send a 'Stop Sound' command to a device (async path for HA).
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            True if the command was submitted successfully, False otherwise.
+        """
         token = self._get_fcm_token_for_action()
         if not token:
             return False
