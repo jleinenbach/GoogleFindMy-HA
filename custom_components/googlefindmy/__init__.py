@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/__init__.py
 """Google Find My Device integration for Home Assistant.
 
 Version: 2.5 — Storage refactor & lifecycle hardening
@@ -524,6 +525,14 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         raw = call.data["device_id"]
         try:
             canonical_id, friendly = _resolve_canonical_from_any(str(raw))
+            # Early gating for better UX/logging (mirrors button/coordinator checks)
+            if not coordinator.can_request_location(canonical_id):
+                _LOGGER.warning(
+                    "Locate request for %s (%s) ignored: not allowed right now (in-flight, cooldown, push not ready, or polling).",
+                    friendly,
+                    canonical_id,
+                )
+                return
             _LOGGER.info("Locate request for %s (%s)", friendly, canonical_id)
             await coordinator.async_locate_device(canonical_id)
         except ValueError as err:
@@ -554,6 +563,14 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         try:
             canonical_id, friendly = _resolve_canonical_from_any(str(raw))
             device_name = provided_name or friendly or canonical_id
+            # Early gating for better UX/logging (mirrors button/coordinator checks)
+            if not coordinator.can_request_location(canonical_id):
+                _LOGGER.warning(
+                    "External locate request for %s (%s) ignored: not allowed right now (in-flight, cooldown, push not ready, or polling).",
+                    device_name,
+                    canonical_id,
+                )
+                return
             _LOGGER.info(
                 "External location request for %s (%s) - delegating to normal locate",
                 device_name,
