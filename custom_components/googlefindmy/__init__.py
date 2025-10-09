@@ -321,14 +321,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 4) Acquire shared FCM and keep it alive while this entry exists
     fcm = await _async_acquire_shared_fcm(hass)
 
-    async def _on_unload_release_fcm() -> None:
-        """Release the shared FCM receiver when this config entry unloads."""
+    # NOTE (lifecycle): Do not await long-running shutdowns inside async_on_unload.
+    # We only *signal* the FCM receiver to stop here (non-blocking). The awaited
+    # stop and refcount release are handled in `async_unload_entry`.
+    def _on_unload_signal_fcm() -> None:
+        """Signal FCM receiver to stop without awaiting (safe for async_on_unload)."""
         try:
-            await _async_release_shared_fcm(hass)
+            fcm.request_stop()
         except Exception as err:  # Defensive: never break unload pipeline
-            _LOGGER.debug("FCM release during unload raised: %s", err)
+            _LOGGER.debug("FCM stop signal during unload raised: %s", err)
 
-    entry.async_on_unload(_on_unload_release_fcm)
+    entry.async_on_unload(_on_unload_signal_fcm)
 
     # 5) Seed the token cache from entry data (one of the two paths must be present)
     secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
@@ -440,7 +443,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry and its platforms.
 
     Notes:
-        - FCM release is handled by the unload hook registered during setup.
+        - FCM stop is *signaled* via the unload hook registered during setup.
+          The awaited stop and refcount release are handled here to avoid long
+          awaits inside `async_on_unload`.
         - TokenCache is explicitly closed here to flush and mark the cache closed.
 
     Args:
@@ -451,6 +456,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         True if the unload was successful.
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    # Release shared FCM (decrement refcount and await bounded shutdown if it reaches zero)
+    try:
+        await _async_release_shared_fcm(hass)
+    except Exception as err:
+        _LOGGER.debug("FCM release during async_unload_entry raised: %s", err)
 
     # Unregister and close the TokenCache instance
     cache = _unregister_instance(entry.entry_id)
