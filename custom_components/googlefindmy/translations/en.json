@@ -171,6 +171,9 @@
     "button": {
       "play_sound": {
         "name": "Play sound"
+      },
+      "locate_device": {
+        "name": "Locate now"
       }
     },
     "binary_sensor": {
