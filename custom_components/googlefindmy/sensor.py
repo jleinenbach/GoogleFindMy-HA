@@ -249,6 +249,21 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         self._attr_unique_id = f"{DOMAIN}_{safe_id}_last_seen"
         self._attr_native_value: datetime | None = None
 
+    @property
+    def available(self) -> bool:
+        """Mirror device presence in availability."""
+        dev_id = self._device_id
+        if not dev_id:
+            return False
+        try:
+            if hasattr(self.coordinator, "is_device_present"):
+                return self.coordinator.is_device_present(dev_id)
+        except Exception:
+            # Be tolerant if a different coordinator build is used.
+            pass
+        # Fallback: consider available if we have any known last_seen value
+        return self._attr_native_value is not None
+
     @callback
     def _handle_coordinator_update(self) -> None:
         """Update native timestamp and keep the device label in sync."""
