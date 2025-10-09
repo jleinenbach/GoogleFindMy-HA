@@ -109,10 +109,14 @@ def _extract_oauth_from_secrets(data: Dict[str, Any]) -> Optional[str]:
     candidates = [
         CONF_OAUTH_TOKEN,
         "oauthToken",
+        "oauth_token",
+        "OAuthToken",
         "oauth",
         "token",
+        "access_token",
         "adm_token",
         "admToken",
+        "Auth",  # sometimes present in gpsoauth responses
     ]
     for key in candidates:
         val = data.get(key)
