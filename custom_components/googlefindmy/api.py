@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/api.py
 """API wrapper for Google Find My Device (async-first, HA-friendly)."""
 from __future__ import annotations
 
@@ -6,7 +7,8 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 from aiohttp import ClientError, ClientSession
-from homeassistant.exceptions import ConfigEntryAuthFailed, UpdateFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .Auth.username_provider import username_string
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
