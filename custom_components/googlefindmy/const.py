@@ -1,3 +1,4 @@
+# /custom_components/googlefindmy/const.py
 """Constants for Google Find My Device integration.
 
 All constants defined here are intended to be import-safe across the integration.
@@ -62,6 +63,10 @@ UPDATE_INTERVAL: int = 60  # seconds; DataUpdateCoordinator "tick" (lightweight)
 DEFAULT_LOCATION_POLL_INTERVAL: int = 300  # seconds; start a new polling cycle
 DEFAULT_DEVICE_POLL_DELAY: int = 5         # seconds; inter-device delay within one cycle
 DEFAULT_MIN_POLL_INTERVAL: int = 60        # seconds; hard lower bound between cycles
+
+# Manual locate policy (button/service)
+LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
+"""Cooldown window (seconds) applied after a manual locate trigger."""
 
 # Quality/logic thresholds
 DEFAULT_MIN_ACCURACY_THRESHOLD: int = 100  # meters; drop worse fixes (0 => disabled)
@@ -171,6 +176,7 @@ __all__ = [
     "DEFAULT_LOCATION_POLL_INTERVAL",
     "DEFAULT_DEVICE_POLL_DELAY",
     "DEFAULT_MIN_POLL_INTERVAL",
+    "LOCATE_COOLDOWN_S",
     "DEFAULT_MIN_ACCURACY_THRESHOLD",
     "DEFAULT_MOVEMENT_THRESHOLD",
     "DEFAULT_ALLOW_HISTORY_FALLBACK",
