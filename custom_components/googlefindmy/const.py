@@ -121,6 +121,17 @@ REBUILD_REGISTRY_MODES: tuple[str, str] = (MODE_REBUILD, MODE_MIGRATE)
 LOCATION_REQUEST_TIMEOUT_S: int = 30
 
 # --------------------------------------------------------------------------------------
+# HTTP headers / User-Agent (Nova API)
+# --------------------------------------------------------------------------------------
+NOVA_API_USER_AGENT: str = "fmd/20006320; gzip"
+"""Canonical User-Agent for Nova API calls.
+
+Used by `NovaApi/nova_request.py` for all upstream requests. Keep stable unless
+there is a server-side change in expectations. Includes `gzip` to advertise
+support for compressed responses.
+"""
+
+# --------------------------------------------------------------------------------------
 # FCM socket tuning (used by Auth.firebase_messaging client)
 # --------------------------------------------------------------------------------------
 FCM_CLIENT_HEARTBEAT_INTERVAL_S: int = 20
@@ -181,6 +192,7 @@ __all__ = [
     "MODE_MIGRATE",
     "REBUILD_REGISTRY_MODES",
     "LOCATION_REQUEST_TIMEOUT_S",
+    "NOVA_API_USER_AGENT",
     "FCM_CLIENT_HEARTBEAT_INTERVAL_S",
     "FCM_SERVER_HEARTBEAT_INTERVAL_S",
     "FCM_IDLE_RESET_AFTER_S",
