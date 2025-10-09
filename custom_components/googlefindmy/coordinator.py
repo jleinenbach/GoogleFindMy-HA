@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/coordinator.py
 """Data coordinator for Google Find My Device (async-first, HA-friendly)."""
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from homeassistant.helpers import entity_registry as er
     # HA session is provided by the integration and reused across I/O
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import GoogleFindMyAPI
 from .const import DOMAIN, UPDATE_INTERVAL, LOCATION_REQUEST_TIMEOUT_S
@@ -24,7 +26,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class CacheProtocol(Protocol):
-    """Entry-scoped cache protocol (TokenCache instance)."""
+    """Defines the interface for a cache that the coordinator can use.
+
+    This protocol ensures that any cache object passed to the coordinator
+    provides the necessary asynchronous methods for getting and setting values.
+    """
     async def async_get_cached_value(self, key: str) -> Any: ...
     async def async_set_cached_value(self, key: str, value: Any) -> None: ...
 
@@ -37,9 +43,20 @@ def _sync_get_last_gps_from_history(
 ) -> Optional[Dict[str, Any]]:
     """Fetch last state change with GPS coordinates via Recorder History (sync).
 
+    This function is designed to be run in a worker thread (specifically the
+    Home Assistant Recorder's executor) to avoid blocking the event loop with
+    database queries.
+
     IMPORTANT:
     - Must run in a worker (Recorder executor). Do not call asyncio APIs here.
     - Keep queries minimal to avoid heavy DB load.
+
+    Args:
+        hass: The Home Assistant instance.
+        entity_id: The entity ID of the device_tracker to query.
+
+    Returns:
+        A dictionary containing the last known location data, or None if not found.
     """
     try:
         # Minimal query: the last single change for this entity_id
@@ -84,9 +101,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     ) -> None:
         """Initialize the coordinator.
 
+        This sets up the central data management for the integration, including
+        API communication, state caching, and polling logic.
+
         Notes:
             - Credentials and related metadata are provided via the entry-scoped TokenCache.
             - The HA-managed aiohttp ClientSession is reused to avoid per-call pools.
+
+        Args:
+            hass: The Home Assistant instance.
+            cache: An object implementing the CacheProtocol for persistent storage.
+            tracked_devices: A list of device IDs to be tracked.
+            location_poll_interval: The interval in seconds between polling cycles.
+            device_poll_delay: The delay in seconds between polling individual devices.
+            min_poll_interval: The minimum allowed interval between polling cycles.
+            min_accuracy_threshold: The minimum GPS accuracy in meters to accept a location.
+            allow_history_fallback: Whether to fall back to recorder history for location.
         """
         self.hass = hass
         self._cache = cache
@@ -148,7 +178,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     # Public read-only state for diagnostics/UI
     @property
     def is_polling(self) -> bool:
-        """Expose current polling state (public read-only API)."""
+        """Expose current polling state (public read-only API).
+
+        Returns:
+            True if a polling cycle is currently in progress.
+        """
         return self._is_polling
 
     # ---------------------------- HA Coordinator ----------------------------
@@ -158,6 +192,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         This method must be quick and non-blocking: it snapshots current cache,
         updates device metadata from the lightweight device list, and schedules
         a background poll cycle when the interval has elapsed.
+
+        Returns:
+            A list of dictionaries, where each dictionary represents a device's state.
+
+        Raises:
+            ConfigEntryAuthFailed: If authentication fails during device list fetching.
+            UpdateFailed: For other transient or unexpected errors.
         """
         try:
             # 1) Always fetch the lightweight device list using native async API (no executor)
@@ -218,6 +259,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             )
             return snapshot
 
+        except asyncio.CancelledError:
+            raise
+        except ConfigEntryAuthFailed:
+            # Surface up to HA to trigger re-auth flow; do not wrap into UpdateFailed
+            raise
+        except UpdateFailed:
+            # Let pre-wrapped UpdateFailed bubble as-is
+            raise
         except Exception as exc:
             # Coordinator contract: raise UpdateFailed on unexpected errors
             raise UpdateFailed(exc) from exc
@@ -228,6 +277,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         This runs with a lock to avoid overlapping cycles, updates the
         internal cache, and pushes snapshots at start and end.
+
+        Args:
+            devices: A list of device dictionaries to poll.
         """
         if not devices:
             return
@@ -405,6 +457,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """Create the base snapshot entry for a device (no cache lookups here).
 
         This centralizes the common fields to keep snapshot builders DRY.
+
+        Args:
+            device_dict: A dictionary containing basic device info (id, name).
+
+        Returns:
+            A dictionary with default fields for a device snapshot.
         """
         dev_id = device_dict["id"]
         dev_name = device_dict.get("name", dev_id)
@@ -425,6 +483,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     def _update_entry_from_cache(self, entry: Dict[str, Any], wall_now: float) -> bool:
         """Update the given snapshot entry in place from the in-memory cache.
+
+        Args:
+            entry: The device snapshot entry to update.
+            wall_now: The current wall-clock time as a float timestamp.
 
         Returns:
             True if the cache contained data for this device and the entry was updated, else False.
@@ -451,6 +513,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """Build a lightweight snapshot using only the in-memory cache.
 
         This never touches HA state or the database; it is safe in background tasks.
+
+        Args:
+            devices: A list of device dictionaries to include in the snapshot.
+            wall_now: The current wall-clock time as a float timestamp.
+
+        Returns:
+            A list of device state dictionaries built from the cache.
         """
         snapshot: List[Dict[str, Any]] = []
         for dev in devices:
@@ -463,7 +532,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     async def _async_build_device_snapshot_with_fallbacks(
         self, devices: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Build a snapshot using cache, HA state and (optionally) loud history fallback."""
+        """Build a snapshot using cache, HA state and (optionally) loud history fallback.
+
+        Args:
+            devices: A list of device dictionaries to build the snapshot for.
+
+        Returns:
+            A complete list of device state dictionaries with fallbacks applied.
+        """
         snapshot: List[Dict[str, Any]] = []
         wall_now = time.time()
         ent_reg = er.async_get(self.hass)
@@ -574,7 +650,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         )
 
     def increment_stat(self, stat_name: str) -> None:
-        """Increment a statistic counter and schedule debounced persistence."""
+        """Increment a statistic counter and schedule debounced persistence.
+
+        Args:
+            stat_name: The name of the statistic to increment.
+        """
         if stat_name in self.stats:
             before = self.stats[stat_name]
             self.stats[stat_name] = before + 1
@@ -591,11 +671,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     # ---------------------------- Public platform API -----------------------
     def get_device_location_data(self, device_id: str) -> Optional[Dict[str, Any]]:
-        """Return current cached location dict for a device (or None)."""
+        """Return current cached location dict for a device (or None).
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            A dictionary of location data or None if not found.
+        """
         return self._device_location_data.get(device_id)
 
     def prime_device_location_cache(self, device_id: str, data: Dict[str, Any]) -> None:
-        """Seed/update the location cache for a device with (lat/lon/accuracy)."""
+        """Seed/update the location cache for a device with (lat/lon/accuracy).
+
+        Args:
+            device_id: The canonical ID of the device.
+            data: A dictionary containing latitude, longitude, and accuracy.
+        """
         slot = self._device_location_data.get(device_id, {})
         slot.update(
             {k: v for k, v in data.items() if k in ("latitude", "longitude", "accuracy")}
@@ -604,7 +696,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_location_data[device_id] = slot
 
     def seed_device_last_seen(self, device_id: str, ts_epoch: float) -> None:
-        """Seed last_seen (epoch seconds) without overriding fresh data."""
+        """Seed last_seen (epoch seconds) without overriding fresh data.
+
+        Args:
+            device_id: The canonical ID of the device.
+            ts_epoch: The timestamp in epoch seconds.
+        """
         slot = self._device_location_data.setdefault(device_id, {})
         slot.setdefault("last_seen", float(ts_epoch))
 
@@ -612,6 +709,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """Public, encapsulated update of the internal location cache for one device.
 
         Used by the FCM receiver (push path). Expects validated fields.
+
+        Args:
+            device_id: The canonical ID of the device.
+            location_data: The new location data dictionary.
         """
         if not isinstance(location_data, dict):
             _LOGGER.debug("Ignored cache update for %s: payload is not a dict", device_id)
@@ -631,7 +732,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_location_data[device_id] = slot
 
     def get_device_last_seen(self, device_id: str) -> Optional[datetime]:
-        """Return last_seen as timezone-aware datetime (UTC) if cached."""
+        """Return last_seen as timezone-aware datetime (UTC) if cached.
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            A timezone-aware datetime object or None.
+        """
         ts = self._device_location_data.get(device_id, {}).get("last_seen")
         if ts is None:
             return None
@@ -641,11 +749,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             return None
 
     def get_device_display_name(self, device_id: str) -> Optional[str]:
-        """Return the human-readable device name if known."""
+        """Return the human-readable device name if known.
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            The display name as a string, or None.
+        """
         return self._device_names.get(device_id)
 
     def get_device_name_map(self) -> Dict[str, str]:
-        """Return a shallow copy of the internal device-id -> name mapping."""
+        """Return a shallow copy of the internal device-id -> name mapping.
+
+        Returns:
+            A dictionary mapping device IDs to their names.
+        """
         return dict(self._device_names)
 
     # ---------------------------- Push updates ------------------------------
@@ -656,6 +775,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         - Immediately pushes cache state to entities via `async_set_updated_data()`.
         - Resets the internal poll baseline to 'now' to prevent an immediate re-poll.
         - Optionally limits the snapshot to `device_ids`; otherwise includes all known devices.
+
+        Args:
+            device_ids: An optional list of device IDs to include in the update.
         """
         wall_now = time.time()
         self._last_poll_mono = time.monotonic()  # reset poll timer
@@ -686,6 +808,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         Optimistic default: if we cannot determine readiness explicitly,
         return True so the UI stays usable; the API call will enforce reality.
+
+        Returns:
+            True if the push mechanism is believed to be ready.
         """
         # Short-circuit via cooldown window after a transport failure.
         now = time.monotonic()
@@ -730,7 +855,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         return ready
 
     def _note_push_transport_problem(self, cooldown_s: int = 90) -> None:
-        """Enter a temporary cooldown after a push transport failure to avoid spamming."""
+        """Enter a temporary cooldown after a push transport failure to avoid spamming.
+
+        Args:
+            cooldown_s: The duration of the cooldown in seconds.
+        """
         self._push_cooldown_until = time.monotonic() + cooldown_s
         self._push_ready_memo = False
         _LOGGER.debug("Entering push cooldown for %ss after transport failure", cooldown_s)
@@ -744,6 +873,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         - If push readiness is explicitly False -> disable.
         - Otherwise -> optimistic True (known devices) to keep the UI usable.
           The actual action enforces reality and will start a cooldown on failure.
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            True if playing a sound is likely possible.
         """
         # 1) Use cached capability when available (fast path, no network).
         caps = self._device_caps.get(device_id)
@@ -788,6 +923,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         This method deliberately enforces basic typing/limits to keep the coordinator sane
         regardless of where the values came from.
+
+        Args:
+            tracked_devices: A list of device IDs to track.
+            location_poll_interval: The interval in seconds for location polling.
+            device_poll_delay: The delay in seconds between polling devices.
+            min_poll_interval: The minimum polling interval in seconds.
+            min_accuracy_threshold: The minimum accuracy in meters.
+            allow_history_fallback: Whether to allow falling back to recorder history.
         """
         if tracked_devices is not None:
             self.tracked_devices = list(tracked_devices)
@@ -831,7 +974,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     # ---------------------------- Passthrough API ---------------------------
     async def async_locate_device(self, device_id: str) -> Dict[str, Any]:
-        """Locate a device using the native async API (no executor)."""
+        """Locate a device using the native async API (no executor).
+
+        Args:
+            device_id: The canonical ID of the device to locate.
+
+        Returns:
+            A dictionary containing the location data.
+        """
         name = self.get_device_display_name(device_id) or device_id
         return await self.api.async_get_device_location(device_id, name)
 
@@ -839,6 +989,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """Play sound on a device using the native async API (no executor).
 
         Guard with can_play_sound(); on failure, start a short cooldown to avoid repeated errors.
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            True if the command was submitted successfully, False otherwise.
         """
         if not self.can_play_sound(device_id):
             _LOGGER.debug(
