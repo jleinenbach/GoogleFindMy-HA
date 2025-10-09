@@ -822,6 +822,9 @@ async def async_remove_config_entry_device(
     dev_id = next((ident for (domain, ident) in device_entry.identifiers if domain == DOMAIN), None)
     if not dev_id:
         return False
+    # Never allow removing the integration "service" device.
+    if dev_id == "integration":
+        return False
 
     # Purge coordinator caches (best-effort; does not trigger polling)
     try:
