@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Set
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -20,7 +20,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import GoogleFindMyAPI
-from .const import DOMAIN, UPDATE_INTERVAL, LOCATION_REQUEST_TIMEOUT_S
+from .const import DOMAIN, UPDATE_INTERVAL, LOCATION_REQUEST_TIMEOUT_S, LOCATE_COOLDOWN_S
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -147,6 +147,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Push readiness memoization and cooldown after transport errors
         self._push_ready_memo: Optional[bool] = None
         self._push_cooldown_until: float = 0.0
+
+        # Manual locate tracking (UI button/service)
+        self._locate_inflight: Set[str] = set()
+        self._locate_cooldown_until: Dict[str, float] = {}
 
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
@@ -666,7 +670,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
                 stat_name,
-                list(self.stats.keys()),
+                list(self.stats.keys()]),
             )
 
     # ---------------------------- Public platform API -----------------------
@@ -730,6 +734,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self._device_names[device_id] = name
 
         self._device_location_data[device_id] = slot
+
+        # If a manual locate was in-flight for this device, clear that flag on fresh data.
+        self._locate_inflight.discard(device_id)
 
     def get_device_last_seen(self, device_id: str) -> Optional[datetime]:
         """Return last_seen as timezone-aware datetime (UTC) if cached.
@@ -972,18 +979,77 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Move the baseline back so that (now - _last_poll_mono) >= effective_interval
         self._last_poll_mono = time.monotonic() - float(effective_interval)
 
+    # ---------------------------- Manual locate helpers --------------------
+    def can_request_location(self, device_id: str) -> bool:
+        """Return True if a manual locate request is currently allowed.
+
+        Conditions (no network calls here):
+        - Push transport must be ready (Locate flows rely on FCM to deliver results).
+        - No in-flight locate for the same device.
+        - Device-specific cooldown must be expired.
+        - Do not allow while a background polling cycle is running (keeps load bounded).
+
+        Args:
+            device_id: The canonical device id.
+
+        Returns:
+            True if a manual locate can be triggered now.
+        """
+        if not self._api_push_ready():
+            return False
+        if device_id in self._locate_inflight:
+            return False
+        until = self._locate_cooldown_until.get(device_id, 0.0)
+        if time.monotonic() < until:
+            return False
+        if self._is_polling:
+            return False
+        return True
+
     # ---------------------------- Passthrough API ---------------------------
     async def async_locate_device(self, device_id: str) -> Dict[str, Any]:
         """Locate a device using the native async API (no executor).
+
+        This method manages in-flight and cooldown semantics for the manual
+        locate trigger and resets the polling baseline on success.
 
         Args:
             device_id: The canonical ID of the device to locate.
 
         Returns:
             A dictionary containing the location data.
+
+        Raises:
+            Exception: Propagates underlying API errors to the caller.
         """
         name = self.get_device_display_name(device_id) or device_id
-        return await self.api.async_get_device_location(device_id, name)
+
+        if not self.can_request_location(device_id):
+            _LOGGER.warning(
+                "Manual locate for %s is currently disabled (in-flight, cooldown, push not ready, or polling).",
+                name,
+            )
+            return {}
+
+        # Mark in-flight and apply device-specific cooldown immediately
+        self._locate_inflight.add(device_id)
+        self._locate_cooldown_until[device_id] = time.monotonic() + float(LOCATE_COOLDOWN_S)
+        self.async_update_listeners()  # allow UI to gray out the button
+
+        try:
+            location_data = await self.api.async_get_device_location(device_id, name)
+
+            # Reset the scheduling baseline so the next automatic poll starts fresh.
+            self._last_poll_mono = time.monotonic()
+
+            return location_data
+        except Exception as err:
+            _LOGGER.error("Manual locate for %s failed: %s", name, err)
+            raise
+        finally:
+            # Always clear in-flight; cooldown expiry governs next manual request.
+            self._locate_inflight.discard(device_id)
+            self.async_update_listeners()
 
     async def async_play_sound(self, device_id: str) -> bool:
         """Play sound on a device using the native async API (no executor).
