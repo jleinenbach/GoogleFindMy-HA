@@ -283,6 +283,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Raises:
         ConfigEntryNotReady: If a required setup step fails.
     """
+    # Detect cold start vs. reload (survives reloads within the same HA runtime)
+    domain_bucket = hass.data.setdefault(DOMAIN, {})
+    is_reload = bool(domain_bucket.get("initial_setup_complete", False))
+
     # 1) Token cache: create/register early (fail-fast if ambiguous multi-entry usage occurs later)
     legacy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json")
     cache = await TokenCache.create(hass, entry.entry_id, legacy_path=legacy_path)
@@ -410,10 +414,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     listener_active = False
 
     async def _do_first_refresh(_: Any) -> None:
-        """Perform the initial coordinator refresh after HA has started."""
+        """Perform the initial coordinator refresh after HA has started.
+
+        On reloads (warm start), we force the next poll to be due immediately
+        to pick up newly added devices without waiting a full interval. Cold
+        starts keep the deferred baseline to reduce startup load.
+        """
         nonlocal listener_active
         listener_active = False
         try:
+            if is_reload:
+                _LOGGER.info("Integration reloaded: forcing an immediate device scan window.")
+                coordinator.force_poll_due()
+
             await coordinator.async_refresh()
             if not coordinator.last_update_success:
                 _LOGGER.warning("Initial refresh failed; entities will recover on subsequent polls.")
@@ -432,6 +445,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 unsub()
 
         entry.async_on_unload(_safe_unsub)
+
+    # Mark initial setup complete (used to distinguish cold start vs. reload)
+    domain_bucket["initial_setup_complete"] = True
 
     # IMPORTANT: Do NOT add update listeners when using OptionsFlowWithReload.
     # Options changes will reload the entry automatically, rebuilding the coordinator.
