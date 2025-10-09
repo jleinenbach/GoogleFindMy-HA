@@ -1,5 +1,12 @@
 # custom_components/googlefindmy/coordinator.py
-"""Data coordinator for Google Find My Device (async-first, HA-friendly)."""
+"""Data coordinator for Google Find My Device (async-first, HA-friendly).
+
+Discovery vs. polling semantics:
+- Every coordinator tick fetches the lightweight **full** Google device list.
+- Presence and name/capability caches are updated for all devices.
+- The published snapshot (`self.data`) contains **all** devices (for dynamic entity creation).
+- The sequential **polling cycle** still respects `tracked_devices` (if non-empty).
+"""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +21,7 @@ from homeassistant.components.recorder import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
-# HA session is provided by the integration and reused across I/O
+    # HA session is provided by the integration and reused across I/O
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -142,7 +149,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_location_data: Dict[str, Dict[str, Any]] = {}  # device_id -> location dict
         self._device_names: Dict[str, str] = {}  # device_id -> human name
         self._device_caps: Dict[str, Dict[str, Any]] = {}  # device_id -> caps (e.g., {"can_ring": True})
-        self._present_device_ids: Set[str] = set()  # ids from latest post-filter device list
+        self._present_device_ids: Set[str] = set()  # ids from latest full device list (unfiltered)
 
         # Polling state
         self._poll_lock = asyncio.Lock()
@@ -199,9 +206,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     async def _async_update_data(self) -> List[Dict[str, Any]]:
         """Provide cached device data; trigger background poll if due.
 
-        This method must be quick and non-blocking: it snapshots current cache,
-        updates device metadata from the lightweight device list, and schedules
-        a background poll cycle when the interval has elapsed.
+        Discovery semantics:
+        - Always fetch the **full** lightweight device list (no executor).
+        - Update presence and metadata caches for **all** devices.
+        - Publish a snapshot for **all** devices so platforms can add entities dynamically.
+        - Limit the sequential poll to `tracked_devices` if the user configured a subset.
 
         Returns:
             A list of dictionaries, where each dictionary represents a device's state.
@@ -211,20 +220,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             UpdateFailed: For other transient or unexpected errors.
         """
         try:
-            # 1) Always fetch the lightweight device list using native async API (no executor)
+            # 1) Always fetch the lightweight FULL device list using native async API
             all_devices = await self.api.async_get_basic_device_list()
+            all_devices = all_devices or []
 
-            # 2) Filter to tracked devices if explicitly configured
-            if self.tracked_devices:
-                devices = [d for d in all_devices if d["id"] in self.tracked_devices]
-            else:
-                devices = all_devices or []
+            # Record presence from the full list (no tracking filter here).
+            self._present_device_ids = {
+                d["id"] for d in all_devices if isinstance(d.get("id"), str)
+            }
 
-            # Record presence set from the latest list (post-filter).
-            self._present_device_ids = {d["id"] for d in devices if isinstance(d.get("id"), str)}
-
-            # 3) Update internal device name and capability caches
-            for dev in devices:
+            # 2) Update internal name/capability caches for ALL devices
+            for dev in all_devices:
                 dev_id = dev["id"]
                 self._device_names[dev_id] = dev.get("name", dev_id)
 
@@ -234,9 +240,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     slot = self._device_caps.setdefault(dev_id, {})
                     slot["can_ring"] = can_ring
 
-            # 4) Decide whether to trigger a poll cycle (monotonic clock)
+            # 3) Decide whether to trigger a poll cycle (monotonic clock)
             now_mono = time.monotonic()
             effective_interval = max(self.location_poll_interval, self.min_poll_interval)
+
+            # Devices to POLL: respect tracked_devices if explicitly set, else poll all
+            if self.tracked_devices:
+                devices_to_poll = [d for d in all_devices if d["id"] in self.tracked_devices]
+            else:
+                devices_to_poll = list(all_devices)
 
             if not self._startup_complete:
                 # Defer the first poll to avoid startup load; it will run after the first interval.
@@ -245,14 +257,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 _LOGGER.debug("First startup - set poll baseline; next poll follows normal schedule")
             else:
                 due = (now_mono - self._last_poll_mono) >= effective_interval
-                if due and not self._is_polling and devices:
+                if due and not self._is_polling and devices_to_poll:
                     _LOGGER.debug(
                         "Scheduling background polling cycle (devices=%d, interval=%ds)",
-                        len(devices),
+                        len(devices_to_poll),
                         effective_interval,
                     )
                     self.hass.async_create_task(
-                        self._async_start_poll_cycle(devices),
+                        self._async_start_poll_cycle(devices_to_poll),
                         name=f"{DOMAIN}.poll_cycle",
                     )
                 else:
@@ -263,8 +275,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         self._is_polling,
                     )
 
-            # 5) Build data snapshot from cache and (optionally) minimal fallbacks
-            snapshot = await self._async_build_device_snapshot_with_fallbacks(devices)
+            # 4) Build data snapshot for ALL devices (enables dynamic entity creation)
+            snapshot = await self._async_build_device_snapshot_with_fallbacks(all_devices)
             _LOGGER.debug(
                 "Returning %d device entries; next poll in ~%ds",
                 len(snapshot),
@@ -785,7 +797,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """Return True if the given device_id is present in the latest device list.
 
         Presence is derived from the most recent lightweight list returned by the API
-        (post filtering via `tracked_devices`). Entities should consult this in their
+        (no filtering by `tracked_devices`). Entities should consult this in their
         `available` property to reflect removal from the Google network.
         """
         return device_id in self._present_device_ids
@@ -835,9 +847,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # union of all known names and cached locations
             ids = list({*self._device_names.keys(), *self._device_location_data.keys()})
 
-        # Respect tracked_devices semantics: empty list => include all
-        if self.tracked_devices:
-            ids = [d for d in ids if d in self.tracked_devices]
+        # Respect tracked_devices semantics only for POLLING, not for discovery/snapshot
+        # (we still filter here if a user explicitly configured a subset for visibility).
+        # If you want snapshots to always include all, comment out the block below.
+        # if self.tracked_devices:
+        #     ids = [d for d in ids if d in self.tracked_devices]
 
         # Build "devices" stubs from id->name mapping
         devices_stub: List[Dict[str, Any]] = [
