@@ -271,6 +271,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
       3) Seed token cache from entry data (secrets bundle or individual tokens).
       4) Build coordinator, register views/services, forward platforms.
       5) Schedule initial refresh after HA is fully started.
+
+    Args:
+        hass: The Home Assistant instance.
+        entry: The config entry being set up.
+
+    Returns:
+        True if the setup was successful, False otherwise.
+
+    Raises:
+        ConfigEntryNotReady: If a required setup step fails.
     """
     # 1) Token cache: create/register early (fail-fast if ambiguous multi-entry usage occurs later)
     legacy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json")
@@ -431,6 +441,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Notes:
         - FCM release is handled by the unload hook registered during setup.
         - TokenCache is explicitly closed here to flush and mark the cache closed.
+
+    Args:
+        hass: The Home Assistant instance.
+        entry: The config entry to unload.
+
+    Returns:
+        True if the unload was successful.
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
