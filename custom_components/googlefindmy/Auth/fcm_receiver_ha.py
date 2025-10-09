@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/Auth/fcm_receiver_ha.py
 """Home Assistant compatible FCM receiver for Google Find My Device.
 
 This module provides an HA-integrated Firebase Cloud Messaging (FCM) receiver that:
@@ -75,7 +76,8 @@ class FcmReceiverHA:
         * `async_initialize()` must be called before use.
         * `register_coordinator()` / `unregister_coordinator()` are synchronous by design
           to match HA's `async_on_unload` contract.
-        * `async_stop()` gracefully shuts down the supervisor and client.
+        * `async_stop()` gracefully shuts down the supervisor and client with a bounded timeout.
+        * `request_stop()` can be used to signal stop without awaiting (safe for `async_on_unload`).
     """
 
     def __init__(self) -> None:
@@ -88,6 +90,9 @@ class FcmReceiverHA:
         self.pc = None  # FcmPushClient instance
         self._listening: bool = False
         self._listen_task: Optional[asyncio.Task] = None
+
+        # Cooperative stop signal for bounded shutdown
+        self._stop_evt: asyncio.Event = asyncio.Event()
 
         # Firebase project configuration for Google Find My Device
         self.project_id = "google.com:api-project-289722593072"
@@ -214,6 +219,7 @@ class FcmReceiverHA:
         if self._listening:
             return
         self._listening = True
+        self._stop_evt.clear()
         # Start background supervisor task
         self._listen_task = asyncio.create_task(
             self._supervisor_loop(), name="googlefindmy.fcm_supervisor"
@@ -239,7 +245,7 @@ class FcmReceiverHA:
         """Supervise FCM client: start, monitor, restart on fatal stop."""
         backoff = 1.0  # seconds, exponential with cap
         try:
-            while self._listening:
+            while self._listening and not self._stop_evt.is_set():
                 # (Re)initialize client if needed
                 if not self.pc:
                     ok = await self.async_initialize()
@@ -276,7 +282,7 @@ class FcmReceiverHA:
                 backoff = 1.0
 
                 # Monitor until client stops or supervisor asked to stop
-                while self._listening and self.pc:
+                while self._listening and not self._stop_evt.is_set() and self.pc:
                     await asyncio.sleep(max(FCM_MONITOR_INTERVAL_S, 0.5))
                     # Check run_state/do_listen heuristics
                     state = getattr(self.pc, "run_state", None)
@@ -304,7 +310,7 @@ class FcmReceiverHA:
                         # Recreate the client on next loop to clear any bad state
                         self.pc = None
 
-                if self._listening:
+                if self._listening and not self._stop_evt.is_set():
                     # Backoff with light jitter
                     delay = backoff + random.uniform(0.1, 0.3) * backoff
                     _LOGGER.info("Restarting FCM client in %.1fs", delay)
@@ -542,26 +548,45 @@ class FcmReceiverHA:
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to save FCM credentials: %s", err)
 
-    async def async_stop(self) -> None:
-        """Stop the supervisor and push client (graceful)."""
+    def request_stop(self) -> None:
+        """Signal a cooperative stop without awaiting.
+
+        Notes:
+            This is safe to call from `ConfigEntry.async_on_unload(...)` because it does
+            not block. It merely flips internal flags and cancels the supervisor task;
+            the caller can later await `async_stop()` during `async_unload_entry`.
+        """
+        if self._listening:
+            self._listening = False
+        self._stop_evt.set()
+        if self._listen_task:
+            self._listen_task.cancel()
+
+    async def async_stop(self, timeout: float = 5.0) -> None:
+        """Stop the supervisor and push client (graceful, bounded by `timeout` seconds)."""
         # Stop supervisor loop
         if self._listening:
             self._listening = False
+        self._stop_evt.set()
 
-        # Stop background supervisor task
+        # Stop background supervisor task (bounded wait)
         if self._listen_task:
             self._listen_task.cancel()
             try:
-                await self._listen_task
+                await asyncio.wait_for(self._listen_task, timeout=timeout)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("FCM supervisor did not stop within %.1fs; detaching", timeout)
             except asyncio.CancelledError:
                 pass
             finally:
                 self._listen_task = None
 
-        # Stop push client (if still present)
+        # Stop push client (if still present) with bounded wait
         if self.pc:
             try:
-                await self.pc.stop()
+                await asyncio.wait_for(self.pc.stop(), timeout=timeout)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("FCM push client did not stop within %.1fs; detaching", timeout)
             except (ConnectionError, TimeoutError) as err:
                 _LOGGER.debug("FCM push client stop network error: %s", err)
             except Exception as err:  # noqa: BLE001
