@@ -592,7 +592,7 @@ async def async_nova_request(
     policy = AsyncTTLPolicy(
         username=user, logger=_LOGGER,
         get_value=async_get_cached_value, set_value=async_set_cached_value,
-        async_refresh_fn=lambda: async_get_adm_token_api(user),
+        refresh_fn=lambda: async_get_adm_token_api(user),
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
     )
     await policy.pre_request()
