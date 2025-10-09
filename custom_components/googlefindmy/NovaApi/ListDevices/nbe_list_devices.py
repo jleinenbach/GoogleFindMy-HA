@@ -1,6 +1,9 @@
+# custom_components/googlefindmy/NovaApi/ListDevices/nbe_list_devices.py
+#
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
-
+#
+"""Handles fetching the list of Find My devices from the Nova API."""
 from __future__ import annotations
 
 import asyncio
@@ -23,7 +26,14 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def create_device_list_request() -> str:
-    """Build the protobuf request and return it as a hex string (transport payload)."""
+    """Build the protobuf request and return it as a hex string (transport payload).
+
+    This function creates the serialized message needed to request a list of all
+    Spot-enabled devices from the Nova API. It does not perform any network I/O.
+
+    Returns:
+        A hex-encoded string representing the serialized protobuf message.
+    """
     wrapper = DeviceUpdate_pb2.DevicesListRequest()
 
     # Query for Spot devices only (keeps payload lean).
@@ -45,10 +55,19 @@ async def async_request_device_list(
 ) -> str:
     """Asynchronously request the device list via Nova.
 
+    This is the primary function for fetching the device list within Home Assistant,
+    as it is non-blocking.
+
     Priority of HTTP session (HA best practice):
     1) Explicit `session` argument (tests/special cases),
     2) Registered provider from nova_request (uses HA's async_get_clientsession),
     3) Short-lived fallback session managed by nova_request (DEBUG only).
+
+    Args:
+        username: The Google account username. If None, it will be retrieved
+                  from the cache.
+        session: (Deprecated) The aiohttp ClientSession. This is no longer
+                 forwarded as nova_request handles session management.
 
     Returns:
         Hex-encoded Nova response payload.
@@ -62,7 +81,7 @@ async def async_request_device_list(
         NOVA_LIST_DEVICES_API_SCOPE,
         hex_payload,
         username=username,
-        session=session,
+        # session intentionally not forwarded anymore; nova_request manages reuse/fallback
     )
 
 
@@ -72,7 +91,13 @@ def request_device_list() -> str:
     NOTE:
     - This wrapper spins a private event loop via `asyncio.run(...)`.
     - Do NOT call from inside an active event loop (will raise RuntimeError).
-    - In Home Assistant, prefer `async_request_device_list(...)` and await it.
+    - In Home Assistant, prefer `await async_request_device_list(...)` and await it.
+
+    Returns:
+        The hex-encoded response from the Nova API.
+
+    Raises:
+        RuntimeError: If called from within a running asyncio event loop.
     """
     try:
         return asyncio.run(async_request_device_list())
@@ -88,7 +113,12 @@ def request_device_list() -> str:
 
 # ------------------------------ CLI helper ---------------------------------
 async def _async_cli_main() -> None:
-    """Asynchronous main function for the CLI experience (single event loop)."""
+    """Asynchronous main function for the CLI experience (single event loop).
+
+    This function provides an interactive command-line interface for fetching
+    device locations or registering new microcontroller-based trackers.
+    It is intended for development and testing purposes.
+    """
     print("Loading...")
     result_hex = await async_request_device_list()
 
@@ -122,6 +152,7 @@ async def _async_cli_main() -> None:
         print("Loading...")
 
         def _register_esp32_cli() -> None:
+            """Synchronous helper to register a new ESP32 device."""
             # Lazy import to avoid touching spot token logic at HA startup
             from custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device import (
                 register_esp32,
@@ -146,6 +177,8 @@ async def _async_cli_main() -> None:
 
 
 if __name__ == "__main__":
+    # This block allows the script to be run directly from the command line
+    # for testing or manual device registration.
     try:
         asyncio.run(_async_cli_main())
     except KeyboardInterrupt:
