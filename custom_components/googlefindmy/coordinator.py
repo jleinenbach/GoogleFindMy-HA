@@ -142,6 +142,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_location_data: Dict[str, Dict[str, Any]] = {}  # device_id -> location dict
         self._device_names: Dict[str, str] = {}  # device_id -> human name
         self._device_caps: Dict[str, Dict[str, Any]] = {}  # device_id -> caps (e.g., {"can_ring": True})
+        self._present_device_ids: Set[str] = set()  # ids from latest post-filter device list
 
         # Polling state
         self._poll_lock = asyncio.Lock()
@@ -218,6 +219,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 devices = [d for d in all_devices if d["id"] in self.tracked_devices]
             else:
                 devices = all_devices or []
+
+            # Record presence set from the latest list (post-filter).
+            self._present_device_ids = {d["id"] for d in devices if isinstance(d.get("id"), str)}
 
             # 3) Update internal device name and capability caches
             for dev in devices:
@@ -775,6 +779,39 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             A dictionary mapping device IDs to their names.
         """
         return dict(self._device_names)
+
+    # ---------------------------- Presence & Purge API ----------------------------
+    def is_device_present(self, device_id: str) -> bool:
+        """Return True if the given device_id is present in the latest device list.
+
+        Presence is derived from the most recent lightweight list returned by the API
+        (post filtering via `tracked_devices`). Entities should consult this in their
+        `available` property to reflect removal from the Google network.
+        """
+        return device_id in self._present_device_ids
+
+    def get_absent_device_ids(self) -> List[str]:
+        """Return ids known by name/cache that are NOT present in the latest device list.
+
+        Useful for diagnostics. This does not imply automatic removal.
+        """
+        known = set(self._device_names) | set(self._device_location_data)
+        return sorted(list(known - set(self._present_device_ids)))
+
+    def purge_device(self, device_id: str) -> None:
+        """Remove all cached data and cooldown state for a device.
+
+        Called from the config-entry device deletion flow. This does not trigger a poll,
+        but it immediately publishes an updated snapshot so UI can refresh.
+        """
+        self._device_location_data.pop(device_id, None)
+        self._device_names.pop(device_id, None)
+        self._device_caps.pop(device_id, None)
+        self._locate_inflight.discard(device_id)
+        self._locate_cooldown_until.pop(device_id, None)
+        self._present_device_ids.discard(device_id)
+        # Push a minimal update so listeners can refresh availability quickly
+        self.async_set_updated_data(self.data)
 
     # ---------------------------- Push updates ------------------------------
     def push_updated(self, device_ids: Optional[List[str]] = None) -> None:
