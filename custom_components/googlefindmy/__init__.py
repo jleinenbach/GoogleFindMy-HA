@@ -796,3 +796,50 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
 
     domain_bucket = hass.data.setdefault(DOMAIN, {})
     domain_bucket["services_registered"] = True
+
+
+# ------------------- Device removal (HA "Delete device" hook) -------------------
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    device_entry: dr.DeviceEntry,
+) -> bool:
+    """Handle 'Delete device' requests from Home Assistant.
+
+    Semantics:
+    - Only act on devices owned by this integration/entry (identifier domain matches and
+      the device is linked to this config entry).
+    - Purge all in-memory caches for the device via the coordinator to keep UI/state clean.
+    - Remove the id from `tracked_devices` options if present (user chose to delete).
+    - Return True to allow HA to remove the device record and its entities.
+    """
+    # Ensure the device belongs to this config entry
+    if entry.entry_id not in device_entry.config_entries:
+        return False
+
+    # Resolve the canonical Google device id from identifiers
+    dev_id = next((ident for (domain, ident) in device_entry.identifiers if domain == DOMAIN), None)
+    if not dev_id:
+        return False
+
+    # Purge coordinator caches (best-effort; does not trigger polling)
+    try:
+        coordinator: GoogleFindMyCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if coordinator is not None:
+            coordinator.purge_device(dev_id)
+    except Exception as err:
+        _LOGGER.debug("Coordinator purge failed for %s: %s", dev_id, err)
+
+    # Remove from tracked_devices options if present
+    try:
+        opts = dict(entry.options)
+        tracked_opt = opts.get(OPT_TRACKED_DEVICES)
+        if isinstance(tracked_opt, list) and dev_id in tracked_opt:
+            opts[OPT_TRACKED_DEVICES] = [x for x in tracked_opt if x != dev_id]
+            hass.config_entries.async_update_entry(entry, options=opts)
+    except Exception as err:
+        _LOGGER.debug("Updating tracked_devices during device delete failed for %s: %s", dev_id, err)
+
+    # Allow HA to delete the device + its entities (including user-given names).
+    return True
