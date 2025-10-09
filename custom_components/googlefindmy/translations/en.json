@@ -25,7 +25,7 @@
         }
       },
       "device_selection": {
-        "title": "Select devices and polling",
+        "title": "Select Devices and Polling",
         "description": "Select the devices to track and configure the polling parameters:\n• Location poll interval: How often to start a new polling cycle (60–3600 seconds)\n• Device poll delay: Delay between individual device polls within a cycle (1–60 seconds)\n\nThe integration cycles through devices sequentially, requesting location data for each device with the specified delay.",
         "data": {
           "tracked_devices": "Tracked devices",
@@ -71,7 +71,7 @@
         }
       },
       "credentials": {
-        "title": "Update credentials (optional)",
+        "title": "Update Credentials (optional)",
         "description": "Update credentials without exposing existing values. Provide exactly one method:\n\n• Paste full contents of a new **secrets.json**\n**or**\n• Enter a new **OAuth token** and **Google email**.\n\nIf provided, credentials will be validated and stored; the integration will reload without changing your entity names.",
         "data": {
           "secrets_json": "New secrets.json (full contents)",
