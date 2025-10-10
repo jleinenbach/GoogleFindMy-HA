@@ -839,19 +839,37 @@ async def async_remove_config_entry_device(
     except Exception as err:
         _LOGGER.debug("Coordinator purge failed for %s: %s", dev_id, err)
 
-    # Remove from tracked_devices options if present
+    # Persist user's delete decision:
+    #  - Remove from tracked_devices (polling) if present.
+    #  - Add to ignored_devices (visibility) to prevent automatic re-creation.
     try:
+        # Late import to avoid hard dependency before Step 2 introduces this constant in const.py.
+        try:
+            from .const import OPT_IGNORED_DEVICES  # type: ignore
+        except Exception:  # pragma: no cover - temporary compatibility shim
+            OPT_IGNORED_DEVICES = "ignored_devices"  # noqa: N816
+
         opts = dict(entry.options)
+
+        # 1) Remove from tracked_devices if present
         tracked = opts.get(OPT_TRACKED_DEVICES)
         if isinstance(tracked, list) and dev_id in tracked:
             opts[OPT_TRACKED_DEVICES] = [x for x in tracked if x != dev_id]
+
+        # 2) Add to ignored_devices (idempotent)
+        ignored = opts.get(OPT_IGNORED_DEVICES)
+        if not isinstance(ignored, list):
+            ignored = []
+        if dev_id not in ignored:
+            ignored.append(dev_id)
+            opts[OPT_IGNORED_DEVICES] = ignored
+
+        # Commit options if anything changed
+        if opts != entry.options:
             hass.config_entries.async_update_entry(entry, options=opts)
+            _LOGGER.info("Marked device %s as ignored for entry '%s'", dev_id, entry.title)
     except Exception as err:
-        _LOGGER.debug(
-            "Updating tracked_devices during device delete failed for %s: %s",
-            dev_id,
-            err,
-        )
+        _LOGGER.debug("Persisting delete decision failed for %s: %s", dev_id, err)
 
     # Allow HA to delete the device (and its entities) if no other entry still references it
     return True
