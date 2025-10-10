@@ -67,6 +67,7 @@ from .const import (
     # Services
     SERVICE_LOCATE_DEVICE,
     SERVICE_PLAY_SOUND,
+    SERVICE_STOP_SOUND,  # <-- added
     SERVICE_LOCATE_EXTERNAL,
     SERVICE_REFRESH_DEVICE_URLS,
     SERVICE_REBUILD_REGISTRY,
@@ -584,6 +585,22 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         except Exception as err:
             _LOGGER.error("Failed to play sound on '%s': %s", raw, err)
 
+    async def async_stop_sound_service(call: ServiceCall) -> None:
+        """Handle stop sound service call."""
+        raw = call.data["device_id"]
+        try:
+            canonical_id, friendly = _resolve_canonical_from_any(str(raw))
+            _LOGGER.info("Stop Sound request for %s (%s)", friendly, canonical_id)
+            ok = await coordinator.async_stop_sound(canonical_id)
+            if not ok:
+                _LOGGER.warning(
+                    "Failed to stop sound on %s (request may have been rejected by API)", friendly
+                )
+        except ValueError as err:
+            _LOGGER.error("Failed to stop sound: %s", err)
+        except Exception as err:
+            _LOGGER.error("Failed to stop sound on '%s': %s", raw, err)
+
     async def async_locate_external_service(call: ServiceCall) -> None:
         """External locate device service (delegates to locate)."""
         raw = call.data["device_id"]
@@ -769,6 +786,12 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
         DOMAIN,
         SERVICE_PLAY_SOUND,
         async_play_sound_service,
+        schema=vol.Schema({vol.Required("device_id"): cv.string}),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_STOP_SOUND,
+        async_stop_sound_service,
         schema=vol.Schema({vol.Required("device_id"): cv.string}),
     )
     hass.services.async_register(
