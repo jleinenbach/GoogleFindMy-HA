@@ -398,15 +398,15 @@ class FcmReceiverHA:
         return (dev_id or "").replace("-", "").lower()
 
     def _is_tracked(self, coordinator: Any, canonic_id: str) -> bool:
-        """Return True if device is tracked by the coordinator.
+        """Return True if device is eligible for push processing.
 
-        Semantics: empty tracked_devices => track ALL devices.
+        Semantics: `tracked_devices` **only limits polling**, not push/discovery.
+        This ensures newly discovered devices (which might not yet be in options)
+        still receive live updates via FCM and can quickly surface in the UI.
         """
-        tracked = getattr(coordinator, "tracked_devices", []) or []
-        if not tracked:
-            return True
-        nid = self._norm(canonic_id)
-        return any(self._norm(did) == nid for did in tracked)
+        # NOTE: Intentionally return True to process *all* push updates.
+        # Polling will continue to respect `tracked_devices`.
+        return True
 
     def _extract_canonic_id_from_response(self, hex_response: str) -> Optional[str]:
         """Extract canonical id via the decoder.
@@ -468,7 +468,7 @@ class FcmReceiverHA:
             # De-duplicate by last_seen
             current_last_seen = location_data.get("last_seen")
             existing = getattr(coordinator, "_device_location_data", {}).get(canonic_id, {})
-            if existing.get("last_seen") == current_last_seen:
+            if existing.get("last_seen") == current_last_seen and current_last_seen:
                 _LOGGER.debug("Duplicate background update for %s (last_seen=%s)", device_name, current_last_seen)
                 coordinator.increment_stat("skipped_duplicates")
                 return
@@ -493,7 +493,8 @@ class FcmReceiverHA:
 
             _LOGGER.info("Stored NEW background location update for %s (last_seen=%s)", device_name, current_last_seen)
 
-            coordinator.increment_stat("background_updates")
+            # Avoid double-counting if coordinator.update_device_cache() already increments stats.
+            # Crowd-sourced classification is still useful to track here.
             if location_data.get("is_own_report") is False:
                 coordinator.increment_stat("crowd_sourced_updates")
                 _LOGGER.info("Crowd-sourced update detected for %s via FCM", device_name)
@@ -501,7 +502,8 @@ class FcmReceiverHA:
             # Push entities immediately (no poll). Prefer dedicated push method if available.
             push = getattr(coordinator, "push_updated", None)
             if callable(push):
-                push()
+                # Push a minimal snapshot to reduce UI churn and work.
+                push([canonic_id])
             else:
                 await coordinator.async_request_refresh()
 
