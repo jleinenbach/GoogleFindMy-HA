@@ -109,7 +109,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         tracked_devices: Optional[List[str]] = None,
         location_poll_interval: int = 300,
         device_poll_delay: int = 5,
-        min_poll_interval: int = 1,
+        min_poll_interval: int = DEFAULT_MIN_POLL_INTERVAL,
         min_accuracy_threshold: int = 100,
         allow_history_fallback: bool = False,
     ) -> None:
@@ -255,9 +255,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             all_devices = all_devices or []
             ignored = self._get_ignored_set()
 
-            # Record presence from the full list (ignore-filter applied).
+            # Record presence from the full list (unfiltered by ignore for accuracy).
             self._present_device_ids = {
-                d["id"] for d in all_devices if isinstance(d.get("id"), str) and d["id"] not in ignored
+                d["id"] for d in all_devices if isinstance(d.get("id"), str)
             }
 
             # 2) Update internal name/capability caches for ALL devices
@@ -1245,3 +1245,4 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             )
             self._note_push_transport_problem()
             return False
+
