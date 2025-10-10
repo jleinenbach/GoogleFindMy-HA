@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/config_flow.py
 """Config flow for Google Find My Device (custom integration)."""
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers import device_registry as dr
 
 # Defensive import of selector (older HA versions may not expose it)
 try:
@@ -40,6 +42,7 @@ from .const import (
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_ENABLE_STATS_ENTITIES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_IGNORED_DEVICES,  # NEW: visibility management
     # Defaults
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_DEVICE_POLL_DELAY,
@@ -389,20 +392,35 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
 
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Show a small menu: edit settings vs. update credentials."""
+        """Show a small menu: edit settings vs. update credentials vs. visibility."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["settings", "credentials"],
+            menu_options=["settings", "credentials", "visibility"],
         )
 
     # ---------- Helpers to access live cache/API ----------
     def _get_entry_cache(self, entry: ConfigEntry):
         """Return the TokenCache for this entry if available."""
+        # Prefer the coordinator stored in hass.data and read its private _cache.
         data = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        # Coordinator instance has the cache at attribute `_cache`
+        if data is not None and hasattr(data, "_cache"):
+            try:
+                return getattr(data, "_cache")
+            except Exception:  # pragma: no cover
+                pass
+        # Some deployments might have stored a wrapper dict with 'cache'
         if isinstance(data, dict) and "cache" in data:
             return data["cache"]
-        # Fallback: runtime_data may carry the cache
-        return getattr(entry, "runtime_data", None)
+        # Fallback: runtime_data may be the coordinator; try to read its _cache too
+        rd = getattr(entry, "runtime_data", None)
+        if rd is not None and hasattr(rd, "_cache"):
+            try:
+                return getattr(rd, "_cache")
+            except Exception:  # pragma: no cover
+                pass
+        # Nothing usable
+        return None
 
     async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
         """Construct API object from the live entry context (cache-first)."""
@@ -506,6 +524,56 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             data_schema=self.add_suggested_values_to_schema(base_schema, suggested_values),
             errors=errors,
         )
+
+    # ---------- Device visibility (restore ignored devices) ----------
+    async def async_step_visibility(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Show and restore ignored devices by removing them from OPT_IGNORED_DEVICES."""
+        entry = self.config_entry
+        options = dict(entry.options)
+        ignored = options.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or []
+        if not isinstance(ignored, list):
+            ignored = []
+
+        # Abort early if nothing to restore
+        if not ignored:
+            return self.async_abort(reason="no_ignored_devices")
+
+        # Build display map: "<friendly> (<id>)"
+        dev_reg = dr.async_get(self.hass)
+        choices: Dict[str, str] = {}
+        for dev_id in ignored:
+            friendly = dev_id
+            try:
+                # Try to resolve a device by identifier (DOMAIN, dev_id)
+                device = next(
+                    (d for d in dev_reg.devices.values() if any(ident for ident in d.identifiers if ident == (DOMAIN, dev_id))),
+                    None,
+                )
+                if device:
+                    friendly = device.name_by_user or device.name or dev_id
+            except Exception:  # pragma: no cover
+                pass
+            choices[dev_id] = f"{friendly} ({dev_id})"
+
+        schema = vol.Schema(
+            {
+                vol.Optional("unignore_devices", default=[]): cv.multi_select(choices),
+            }
+        )
+
+        if user_input is not None:
+            to_restore = user_input.get("unignore_devices") or []
+            if not isinstance(to_restore, list):
+                to_restore = list(to_restore)  # in case of set/tuple
+
+            new_ignored = [x for x in ignored if x not in to_restore]
+            new_options = dict(entry.options)
+            new_options[OPT_IGNORED_DEVICES] = new_ignored
+
+            # Trigger automatic reload via OptionsFlowWithReload
+            return self.async_create_entry(title="", data=new_options)
+
+        return self.async_show_form(step_id="visibility", data_schema=schema)
 
     # ---------- Credentials update (always-empty fields) ----------
     async def async_step_credentials(self, user_input: dict[str, Any] | None = None) -> FlowResult:
