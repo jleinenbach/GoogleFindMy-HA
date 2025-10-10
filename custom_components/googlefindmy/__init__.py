@@ -810,23 +810,28 @@ async def async_remove_config_entry_device(
     Semantics:
     - Only act on devices owned by this integration/entry (identifier domain matches and
       the device is linked to this config entry).
-    - Purge all in-memory caches for the device via the coordinator to keep UI/state clean.
+    - Purge in-memory caches for the device via the coordinator (keeps UI/state clean).
     - Remove the id from `tracked_devices` options if present (user chose to delete).
     - Return True to allow HA to remove the device record and its entities.
+    - Never allow removing the integration's own "service" device (ident = 'integration').
     """
-    # Ensure the device belongs to this config entry
+    # Only handle devices that belong to this config entry
     if entry.entry_id not in device_entry.config_entries:
         return False
 
-    # Resolve the canonical Google device id from identifiers
-    dev_id = next((ident for (domain, ident) in device_entry.identifiers if domain == DOMAIN), None)
+    # Resolve our canonical device id from identifiers
+    dev_id = next(
+        (ident for (domain, ident) in device_entry.identifiers if domain == DOMAIN),
+        None,
+    )
     if not dev_id:
         return False
-    # Never allow removing the integration "service" device.
+
+    # Block deletion of the integration "service" device
     if dev_id == "integration":
         return False
 
-    # Purge coordinator caches (best-effort; does not trigger polling)
+    # Purge coordinator caches (best effort; does not trigger polling)
     try:
         coordinator: GoogleFindMyCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
         if coordinator is not None:
@@ -837,12 +842,16 @@ async def async_remove_config_entry_device(
     # Remove from tracked_devices options if present
     try:
         opts = dict(entry.options)
-        tracked_opt = opts.get(OPT_TRACKED_DEVICES)
-        if isinstance(tracked_opt, list) and dev_id in tracked_opt:
-            opts[OPT_TRACKED_DEVICES] = [x for x in tracked_opt if x != dev_id]
+        tracked = opts.get(OPT_TRACKED_DEVICES)
+        if isinstance(tracked, list) and dev_id in tracked:
+            opts[OPT_TRACKED_DEVICES] = [x for x in tracked if x != dev_id]
             hass.config_entries.async_update_entry(entry, options=opts)
     except Exception as err:
-        _LOGGER.debug("Updating tracked_devices during device delete failed for %s: %s", dev_id, err)
+        _LOGGER.debug(
+            "Updating tracked_devices during device delete failed for %s: %s",
+            dev_id,
+            err,
+        )
 
-    # Allow HA to delete the device + its entities (including user-given names).
+    # Allow HA to delete the device (and its entities) if no other entry still references it
     return True
