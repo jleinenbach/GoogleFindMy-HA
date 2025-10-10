@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/device_tracker.py
 """Device tracker platform for Google Find My Device."""
 from __future__ import annotations
 
@@ -97,7 +98,13 @@ async def async_setup_entry(
         # No live data yet: create skeletons for configured tracked IDs (restore-friendly).
         tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
         for dev_id in tracked_ids:
-            # IMPORTANT: no placeholder name here (avoids polluting the device registry).
+            # Do not create skeletons for ignored devices (cold boot case).
+            try:
+                if hasattr(coordinator, "is_ignored") and coordinator.is_ignored(dev_id):
+                    _LOGGER.debug("Skipping ignored device skeleton: %s", dev_id)
+                    continue
+            except Exception:
+                pass
             known_ids.add(dev_id)
             entities.append(GoogleFindMyDeviceTracker(coordinator, {"id": dev_id}))
         if tracked_ids:
