@@ -283,7 +283,22 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
     @property
     def available(self) -> bool:
-        """Return True if the entity has valid location data (or restored data)."""
+        """Return True if the device is currently present according to coordinator.
+
+        Presence check has priority over restored coordinates: if the device is no
+        longer present in the Google list, the entity should become unavailable
+        (user can then delete the device via HA's Delete button).
+        """
+        dev_id = self._device["id"]
+        # Prefer coordinator presence; fall back to previous behavior if API missing.
+        try:
+            if hasattr(self.coordinator, "is_device_present"):
+                if not self.coordinator.is_device_present(dev_id):
+                    return False
+        except Exception:
+            # Be tolerant in case of older coordinator builds
+            pass
+
         device_data = self._current_device_data
         if device_data:
             if (

@@ -1,4 +1,15 @@
-"""Sensor entities for Google Find My Device integration."""
+# custom_components/googlefindmy/sensor.py
+"""Sensor entities for Google Find My Device integration.
+
+Exposes:
+- Per-device `last_seen` timestamp sensors (restore-friendly).
+- Optional integration diagnostic counters (stats), toggled via options.
+
+Best practices:
+- Device names are synced from the coordinator once known; user-assigned names are never overwritten.
+- No placeholder names are written to the device registry on cold boot.
+- DeviceInfo uses Primary fields only; never sets default_* keys to avoid misclassification.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -166,7 +177,10 @@ async def async_setup_entry(
 
 
 class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
-    """Diagnostic counters for the integration."""
+    """Diagnostic counters for the integration.
+
+    Values are provided by coordinator.stats and persisted debounced by the coordinator.
+    """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_has_entity_name = False  # standalone (not per-device)
@@ -207,6 +221,9 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
             manufacturer="BSkando",
             model="Find My Device Integration",
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
+            # Mark as a service device to hide the "Delete device" action in HA UI.
+            # (Still allows showing diagnostic entities on this device.)
+            entry_type=dr.DeviceEntryType.SERVICE,
         )
 
 
@@ -214,7 +231,13 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
 
 
 class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
-    """Per-device sensor exposing the last_seen timestamp."""
+    """Per-device sensor exposing the last_seen timestamp.
+
+    Behavior:
+    - Restores the last native value on startup and seeds the coordinator cache.
+    - Updates on coordinator ticks and keeps the registry name aligned with Google's label.
+    - Never writes a placeholder name to the device registry.
+    """
 
     # Best practice: let HA compose "<Device Name> <translated entity name>"
     _attr_has_entity_name = True
@@ -228,6 +251,21 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         safe_id = self._device_id if self._device_id is not None else "unknown"
         self._attr_unique_id = f"{DOMAIN}_{safe_id}_last_seen"
         self._attr_native_value: datetime | None = None
+
+    @property
+    def available(self) -> bool:
+        """Mirror device presence in availability."""
+        dev_id = self._device_id
+        if not dev_id:
+            return False
+        try:
+            if hasattr(self.coordinator, "is_device_present"):
+                return self.coordinator.is_device_present(dev_id)
+        except Exception:
+            # Be tolerant if a different coordinator build is used.
+            pass
+        # Fallback: consider available if we have any known last_seen value
+        return self._attr_native_value is not None
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -340,7 +378,12 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return per-device info without writing placeholders to the registry."""
+        """Return per-device info without writing placeholders to the registry.
+
+        Notes:
+            - Only provide `name` when we have a real Google label; otherwise omit it.
+            - Include a stable configuration_url pointing to the per-device map.
+        """
         auth_token = self._get_map_token()
         path = self._build_map_path(self._device["id"], auth_token, redirect=False)
 

@@ -171,6 +171,9 @@
     "button": {
       "play_sound": {
         "name": "Odtwórz dźwięk"
+      },
+      "locate_device": {
+        "name": "Zlokalizuj teraz"
       }
     },
     "binary_sensor": {

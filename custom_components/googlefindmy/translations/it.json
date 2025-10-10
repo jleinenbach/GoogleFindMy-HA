@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Autenticazione Google Find My Device",
-        "description": "Scegli il metodo di autenticazione. Il Metodo 1 è consigliato se puoi eseguire GoogleFindMyTools su un computer con Chrome.",
+        "description": "Scegli il metodo di autenticazione. Il metodo 1 è consigliato se puoi eseguire GoogleFindMyTools su un computer con Chrome.",
         "data": {
           "auth_method": "Metodo di autenticazione"
         }
@@ -40,7 +40,7 @@
         }
       },
       "reauth_confirm": {
-        "title": "Ri-autenticazione",
+        "title": "Riautenticazione",
         "description": "Le tue credenziali sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email."
       }
     },
@@ -48,7 +48,7 @@
       "auth_failed": "Autenticazione non riuscita. Riprova.",
       "invalid_token": "Token non valido o campi obbligatori mancanti.",
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
-      "no_devices": "Nessun dispositivo trovato. Assicurati che «Trova il mio dispositivo» sia attivato nel tuo account Google.",
+      "no_devices": "Nessun dispositivo trovato. Assicurati che ‘Trova il mio dispositivo’ sia attivato nel tuo account Google.",
       "cannot_connect": "Impossibile connettersi all’API di Google. Potrebbe trattarsi di un problema temporaneo — riprova più tardi.",
       "choose_one": "Fornisci esattamente un metodo di credenziali.",
       "required": "Questo campo è obbligatorio.",
@@ -57,7 +57,7 @@
     "abort": {
       "already_configured": "Google Find My Device è già configurato.",
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
-      "reauth_successful": "Ri-autenticazione riuscita."
+      "reauth_successful": "Riautenticazione riuscita."
     }
   },
   "options": {
@@ -84,7 +84,7 @@
       },
       "settings": {
         "title": "Opzioni",
-        "description": "Modifica le impostazioni di monitoraggio:\n• Intervallo di polling posizione: frequenza di interrogazione delle posizioni (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Accuratezza minima: ignora posizioni peggiori di questo valore (25–500 metri)\n• Soglia di movimento: movimento minimo per generare un aggiornamento di posizione (10–200 metri)\n\nFiltro Google Home:\n• Abilita per raggruppare i rilevamenti Google Home nella zona «Casa»\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: «nest» corrisponde a «Kitchen Nest Mini»",
+        "description": "Modifica le impostazioni di monitoraggio:\n• Intervallo di polling posizione: frequenza di interrogazione delle posizioni (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Accuratezza minima: ignora posizioni peggiori di questo valore (25–500 metri)\n• Soglia di movimento: movimento minimo per generare un aggiornamento di posizione (10–200 metri)\n\nFiltro Google Home:\n• Abilita per raggruppare i rilevamenti Google Home nella zona ‘Casa’\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: ‘nest’ corrisponde a ‘Kitchen Nest Mini’",
         "data": {
           "tracked_devices": "Dispositivi monitorati",
           "location_poll_interval": "Intervallo di polling posizione (s)",
@@ -158,7 +158,7 @@
       "fields": {
         "mode": {
           "name": "Modalità",
-          "description": "Scegli «Ricostruisci» per rimuovere entità/dispositivi e ricaricare; «Migra» riapplica solo la migrazione soft dati→opzioni."
+          "description": "Scegli ‘Ricostruisci’ per rimuovere entità/dispositivi e ricaricare; ‘Migra’ riapplica solo la migrazione soft dati→opzioni."
         },
         "device_ids": {
           "name": "Dispositivi (facoltativo)",
@@ -171,6 +171,9 @@
     "button": {
       "play_sound": {
         "name": "Riproduci suono"
+      },
+      "locate_device": {
+        "name": "Localizza ora"
       }
     },
     "binary_sensor": {
@@ -204,7 +207,7 @@
         "name": "Coordinate non valide"
       },
       "stat_low_quality_dropped": {
-        "name": "Accuratezza insufficiente scartata"
+        "name": "Posizioni a bassa accuratezza scartate"
       }
     }
   }

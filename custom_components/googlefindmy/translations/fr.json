@@ -171,6 +171,9 @@
     "button": {
       "play_sound": {
         "name": "Émettre un son"
+      },
+      "locate_device": {
+        "name": "Localiser maintenant"
       }
     },
     "binary_sensor": {
@@ -204,7 +207,7 @@
         "name": "Coordonnées invalides"
       },
       "stat_low_quality_dropped": {
-        "name": "Précision insuffisante écartée"
+        "name": "Positions à faible précision écartées"
       }
     }
   }

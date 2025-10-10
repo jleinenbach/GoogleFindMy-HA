@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/Auth/firebase_messaging/fcmpushclient.py
 #
 # firebase-messaging
 # https://github.com/sdb9696/firebase-messaging
@@ -685,6 +686,12 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         except asyncio.CancelledError:
             self.logger.debug("Listener task cancelled")
             raise
+        except ConnectionResetError:
+            # Log a clean warning without noisy traceback; supervisor will reconnect.
+            self.logger.warning(
+                "FCM connection was reset by the server (this is normal). The connection will be re-established automatically."
+            )
+            self.do_listen = False
         except Exception as ex:
             self.logger.error(
                 "Unknown error in listener: %s\n%s",
@@ -756,7 +763,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self.logger.error("Unexpected error running FcmPushClient: %s", ex)
 
     async def stop(self) -> None:
-        """Graceful stop: cancel tasks, close writer, mark stopped."""
+        """Graceful stop: close writer, cancel tasks, mark stopped"""
         if (
             self.stopping_lock
             and self.stopping_lock.locked()
@@ -772,8 +779,8 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             try:
                 self.run_state = FcmPushClientRunState.STOPPING
                 self.do_listen = False
-                await self._cancel_and_gather()
                 await self._do_writer_close()
+                await self._cancel_and_gather()
             finally:
                 self.run_state = FcmPushClientRunState.STOPPED
 

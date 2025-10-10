@@ -1,6 +1,9 @@
+# custom_components/googlefindmy/NovaApi/ListDevices/nbe_list_devices.py
+#
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
-
+#
+"""Handles fetching the list of Find My devices from the Nova API."""
 from __future__ import annotations
 
 import asyncio
@@ -10,9 +13,6 @@ from typing import Optional
 
 from aiohttp import ClientSession
 
-from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (
-    get_location_data_for_device,
-)
 from custom_components.googlefindmy.NovaApi.nova_request import async_nova_request
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_LIST_DEVICES_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
@@ -21,18 +21,19 @@ from custom_components.googlefindmy.ProtoDecoders.decoder import (
     parse_device_list_protobuf,
     get_canonic_ids,
 )
-from custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device import (
-    register_esp32,
-)
-from custom_components.googlefindmy.SpotApi.UploadPrecomputedPublicKeyIds.upload_precomputed_public_key_ids import (
-    refresh_custom_trackers,
-)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def create_device_list_request() -> str:
-    """Build the protobuf request and return it as a hex string (transport payload)."""
+    """Build the protobuf request and return it as a hex string (transport payload).
+
+    This function creates the serialized message needed to request a list of all
+    Spot-enabled devices from the Nova API. It does not perform any network I/O.
+
+    Returns:
+        A hex-encoded string representing the serialized protobuf message.
+    """
     wrapper = DeviceUpdate_pb2.DevicesListRequest()
 
     # Query for Spot devices only (keeps payload lean).
@@ -54,10 +55,19 @@ async def async_request_device_list(
 ) -> str:
     """Asynchronously request the device list via Nova.
 
+    This is the primary function for fetching the device list within Home Assistant,
+    as it is non-blocking.
+
     Priority of HTTP session (HA best practice):
     1) Explicit `session` argument (tests/special cases),
     2) Registered provider from nova_request (uses HA's async_get_clientsession),
     3) Short-lived fallback session managed by nova_request (DEBUG only).
+
+    Args:
+        username: The Google account username. If None, it will be retrieved
+                  from the cache.
+        session: (Deprecated) The aiohttp ClientSession. This is no longer
+                 forwarded as nova_request handles session management.
 
     Returns:
         Hex-encoded Nova response payload.
@@ -71,7 +81,7 @@ async def async_request_device_list(
         NOVA_LIST_DEVICES_API_SCOPE,
         hex_payload,
         username=username,
-        session=session,
+        # session intentionally not forwarded anymore; nova_request manages reuse/fallback
     )
 
 
@@ -81,7 +91,13 @@ def request_device_list() -> str:
     NOTE:
     - This wrapper spins a private event loop via `asyncio.run(...)`.
     - Do NOT call from inside an active event loop (will raise RuntimeError).
-    - In Home Assistant, prefer `async_request_device_list(...)` and await it.
+    - In Home Assistant, prefer `await async_request_device_list(...)` and await it.
+
+    Returns:
+        The hex-encoded response from the Nova API.
+
+    Raises:
+        RuntimeError: If called from within a running asyncio event loop.
     """
     try:
         return asyncio.run(async_request_device_list())
@@ -97,13 +113,23 @@ def request_device_list() -> str:
 
 # ------------------------------ CLI helper ---------------------------------
 async def _async_cli_main() -> None:
-    """Asynchronous main function for the CLI experience (single event loop)."""
+    """Asynchronous main function for the CLI experience (single event loop).
+
+    This function provides an interactive command-line interface for fetching
+    device locations or registering new microcontroller-based trackers.
+    It is intended for development and testing purposes.
+    """
     print("Loading...")
     result_hex = await async_request_device_list()
 
     device_list = parse_device_list_protobuf(result_hex)
 
     # Maintain side-effect helpers for Spot custom trackers.
+    # NOTE: These imports are CLI-only to avoid heavy HA startup imports.
+    from custom_components.googlefindmy.SpotApi.UploadPrecomputedPublicKeyIds.upload_precomputed_public_key_ids import (  # noqa: E501
+        refresh_custom_trackers,
+    )
+
     refresh_custom_trackers(device_list)
     canonic_ids = get_canonic_ids(device_list)
 
@@ -124,18 +150,35 @@ async def _async_cli_main() -> None:
 
     if selected_value == "r":
         print("Loading...")
+
+        def _register_esp32_cli() -> None:
+            """Synchronous helper to register a new ESP32 device."""
+            # Lazy import to avoid touching spot token logic at HA startup
+            from custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device import (
+                register_esp32,
+            )
+            register_esp32()
+
         # Run potential blocking/IO work in a worker thread to avoid blocking the loop.
-        await asyncio.to_thread(register_esp32)
+        await asyncio.to_thread(_register_esp32_cli)
     else:
         selected_idx = int(selected_value) - 1
         selected_device_name = canonic_ids[selected_idx][0]
         selected_canonic_id = canonic_ids[selected_idx][1]
 
         print("Fetching location...")
+
+        # Lazy import: only needed for the CLI branch
+        from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (  # noqa: E501
+            get_location_data_for_device,
+        )
+
         await get_location_data_for_device(selected_canonic_id, selected_device_name)
 
 
 if __name__ == "__main__":
+    # This block allows the script to be run directly from the command line
+    # for testing or manual device registration.
     try:
         asyncio.run(_async_cli_main())
     except KeyboardInterrupt:

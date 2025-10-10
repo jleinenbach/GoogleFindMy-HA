@@ -9,12 +9,13 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-# Import selectors defensively (older HA versions may not have all selectors available)
+# Defensive import of selector (older HA versions may not expose it)
 try:
     from homeassistant.helpers.selector import selector
 except Exception:  # noqa: BLE001
@@ -27,7 +28,7 @@ from .const import (
     # Data (credentials, immutable)
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
-    DATA_SECRET_BUNDLE,
+    DATA_SECRET_BUNDLE,  # kept for compatibility in translations; not stored anymore
     DATA_AUTH_METHOD,
     # Options (user-changeable)
     OPT_TRACKED_DEVICES,
@@ -39,7 +40,7 @@ from .const import (
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_ENABLE_STATS_ENTITIES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    # Defaults (single source of truth)
+    # Defaults
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_MIN_ACCURACY_THRESHOLD,
@@ -86,6 +87,44 @@ STEP_INDIVIDUAL_DATA_SCHEMA = vol.Schema(
 )
 
 
+def _extract_email_from_secrets(data: Dict[str, Any]) -> Optional[str]:
+    """Best-effort extractor for the Google account email from secrets.json."""
+    candidates = [
+        "googleHomeUsername",
+        CONF_GOOGLE_EMAIL,
+        "google_email",
+        "email",
+        "username",
+        "user",
+    ]
+    for key in candidates:
+        val = data.get(key)
+        if isinstance(val, str) and "@" in val:
+            return val
+    return None
+
+
+def _extract_oauth_from_secrets(data: Dict[str, Any]) -> Optional[str]:
+    """Best-effort extractor for an OAuth token from secrets.json."""
+    candidates = [
+        CONF_OAUTH_TOKEN,
+        "oauthToken",
+        "oauth_token",
+        "OAuthToken",
+        "oauth",
+        "token",
+        "access_token",
+        "adm_token",
+        "admToken",
+        "Auth",  # sometimes present in gpsoauth responses
+    ]
+    for key in candidates:
+        val = data.get(key)
+        if isinstance(val, str) and len(val) > 10:
+            return val
+    return None
+
+
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle the initial config flow for Google Find My Device."""
 
@@ -99,12 +138,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> config_entries.OptionsFlow:
-        """Create the options flow.
-
-        Note:
-            Do not pass config_entry into the handler and do not assign
-            self.config_entry manually. The base class provides it.
-        """
+        """Create the options flow."""
         return OptionsFlowHandler()
 
     # ---------- User entry point ----------
@@ -128,12 +162,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raw = user_input.get("secrets_json", "")
             try:
                 secrets_data = json.loads(raw)
-                # Store raw secrets payload in memory to construct API and fetch devices next
-                self._auth_data = {
-                    DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                    DATA_SECRET_BUNDLE: secrets_data,
-                }
-                return await self.async_step_device_selection()
+
+                email = _extract_email_from_secrets(secrets_data) or ""
+                oauth = _extract_oauth_from_secrets(secrets_data) or ""
+                if not (email and oauth):
+                    errors["base"] = "invalid_token"
+                else:
+                    # Store only minimal credentials in memory for the next step.
+                    self._auth_data = {
+                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                        CONF_OAUTH_TOKEN: oauth,
+                        CONF_GOOGLE_EMAIL: email,
+                        # Keep the bundle transiently so translations/placeholders work in this flow.
+                        DATA_SECRET_BUNDLE: secrets_data,
+                    }
+                    return await self.async_step_device_selection()
             except json.JSONDecodeError:
                 errors["base"] = "invalid_json"
             except Exception:  # noqa: BLE001
@@ -161,18 +204,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     # ---------- Shared helper to create API from stored auth_data ----------
     async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, Optional[str]]:
-        """Build API instance and derive a username if available (async-safe)."""
-        if self._auth_data.get(DATA_AUTH_METHOD) == _AUTH_METHOD_SECRETS:
-            secrets_data = self._auth_data.get(DATA_SECRET_BUNDLE) or {}
-            api = GoogleFindMyAPI(secrets_data=secrets_data)
-            username = secrets_data.get("googleHomeUsername") or secrets_data.get(CONF_GOOGLE_EMAIL) or secrets_data.get("google_email")
-            return api, username
-        # Manual path
-        api = GoogleFindMyAPI(
-            oauth_token=self._auth_data.get(CONF_OAUTH_TOKEN),
-            google_email=self._auth_data.get(CONF_GOOGLE_EMAIL),
-        )
-        return api, self._auth_data.get(CONF_GOOGLE_EMAIL)
+        """Build API instance for setup using minimal credentials."""
+        # During initial setup there is no entry-scoped cache yet,
+        # so we instantiate the API with minimal flow credentials.
+        email = self._auth_data.get(CONF_GOOGLE_EMAIL)
+        oauth = self._auth_data.get(CONF_OAUTH_TOKEN)
+
+        if not (email and oauth):
+            raise HomeAssistantError("Missing credentials in setup flow.")
+
+        api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
+        return api, email
 
     # ---------- Device selection ----------
     async def async_step_device_selection(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -197,7 +239,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if errors:
             return self.async_show_form(step_id="device_selection", data_schema=vol.Schema({}), errors=errors)
 
-        # Build a multi-select; keep cv.multi_select for universal compatibility
+        # Build a multi-select; keep cv.multi_select for wide compatibility
         options_map = {dev_id: dev_name for (dev_name, dev_id) in self._available_devices}
         schema = vol.Schema(
             {
@@ -210,7 +252,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(OPT_DEVICE_POLL_DELAY, default=DEFAULT_DEVICE_POLL_DELAY): vol.All(
                     vol.Coerce(int), vol.Range(min=1, max=60)
                 ),
-                # Provide a sensible initial set of advanced defaults (hidden in strings for UX)
                 vol.Optional(OPT_MIN_ACCURACY_THRESHOLD, default=DEFAULT_MIN_ACCURACY_THRESHOLD): vol.All(
                     vol.Coerce(int), vol.Range(min=25, max=500)
                 ),
@@ -225,10 +266,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
         if user_input is not None:
-            # Create credentials payload for entry.data only
-            data_payload: Dict[str, Any] = dict(self._auth_data)
+            # Data (credentials). Store only minimal credentials.
+            data_payload: Dict[str, Any] = {
+                DATA_AUTH_METHOD: self._auth_data.get(DATA_AUTH_METHOD),
+                CONF_OAUTH_TOKEN: self._auth_data.get(CONF_OAUTH_TOKEN),
+                CONF_GOOGLE_EMAIL: self._auth_data.get(CONF_GOOGLE_EMAIL),
+            }
 
-            # Options (canonical place for non-secrets)
+            # Options
             options_payload: Dict[str, Any] = {
                 OPT_TRACKED_DEVICES: user_input.get(OPT_TRACKED_DEVICES, []),
                 OPT_LOCATION_POLL_INTERVAL: user_input.get(
@@ -251,7 +296,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
             }
 
-            # Prefer modern HA that supports options at create time; fallback to data-only + migration.
+            # Prefer modern HA that supports options at create time; fallback to data-only.
             try:
                 return self.async_create_entry(
                     title="Google Find My Device",
@@ -259,14 +304,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     options=options_payload,  # type: ignore[call-arg]
                 )
             except TypeError:
-                # Older HA: shadow-copy options into data for backward compatibility.
                 shadow = dict(data_payload)
                 shadow.update(options_payload)
                 return self.async_create_entry(title="Google Find My Device", data=shadow)
 
         return self.async_show_form(step_id="device_selection", data_schema=schema)
 
-    # ---------- Reauth (triggered by HA when credentials invalid) ----------
+    # ---------- Reauth ----------
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
         """Start reauthentication flow with context."""
         return await self.async_step_reauth_confirm()
@@ -275,7 +319,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Collect new credentials for reauth and validate them."""
         errors: Dict[str, str] = {}
 
-        # Always-empty optional fields (never reveal existing data)
         schema = vol.Schema(
             {
                 vol.Optional("secrets_json"): str,
@@ -293,30 +336,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 if secrets_json:
                     parsed = json.loads(secrets_json)
-                    new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, DATA_SECRET_BUNDLE: parsed}
-                    api = GoogleFindMyAPI(secrets_data=parsed)
-                    # Basic validation: try device list
-                    _ = await api.async_get_basic_device_list(
-                        parsed.get("googleHomeUsername") or parsed.get(CONF_GOOGLE_EMAIL) or parsed.get("google_email")
-                    )
+                    email = _extract_email_from_secrets(parsed)
+                    oauth = _extract_oauth_from_secrets(parsed)
+                    if not (email and oauth):
+                        errors["base"] = "invalid_token"
+                    else:
+                        new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, CONF_OAUTH_TOKEN: oauth, CONF_GOOGLE_EMAIL: email}
+                        api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
+                        _ = await api.async_get_basic_device_list(email)
                 else:
                     if not (oauth_token and google_email):
                         errors["base"] = "invalid_token"
-                        return self.async_show_form(
-                            step_id="reauth_confirm",
-                            data_schema=schema,
-                            errors=errors,
-                            description_placeholders={
-                                "reason": "Your credentials are invalid or expired. Provide new ones."
-                            },
-                        )
-                    new_data = {
-                        DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                        CONF_OAUTH_TOKEN: oauth_token,
-                        CONF_GOOGLE_EMAIL: google_email,
-                    }
-                    api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
-                    _ = await api.async_get_basic_device_list(google_email)  # validation
+                    else:
+                        new_data = {
+                            DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                            CONF_OAUTH_TOKEN: oauth_token,
+                            CONF_GOOGLE_EMAIL: google_email,
+                        }
+                        api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
+                        _ = await api.async_get_basic_device_list(google_email)
 
             except json.JSONDecodeError:
                 errors["base"] = "invalid_json"
@@ -325,13 +363,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
 
             if not errors:
-                # Use the entry_id from the flow context (HA best practice for reauth).
                 entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
                 assert entry is not None
                 updated_data = dict(entry.data)
                 updated_data.update(new_data)
 
-                # Update credentials (data only), reload, and abort with success reason.
                 return self.async_update_reload_and_abort(
                     entry=entry,
                     data=updated_data,
@@ -349,42 +385,53 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
-    """Options flow to (a) update non-secret settings and (b) optionally refresh credentials.
-
-    Notes:
-        - Do not assign self.config_entry here; the base class provides it.
-        - OptionsFlowWithReload will reload the integration when options change
-          if the flow ends with async_create_entry(data=...).
-        - Do not update the config entry inside the options flow except in the
-          credentials step where we intentionally update entry.data and reload.
-    """
+    """Options flow to update non-secret settings and optionally refresh credentials."""
 
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Show a small menu: edit settings vs. update credentials (uses translations)."""
-        # With async_show_menu we don't build a schema; HA renders translated menu options:
-        # translations: options.step.init.menu_options.settings / credentials
+        """Show a small menu: edit settings vs. update credentials."""
         return self.async_show_menu(
             step_id="init",
             menu_options=["settings", "credentials"],
         )
 
+    # ---------- Helpers to access live cache/API ----------
+    def _get_entry_cache(self, entry: ConfigEntry):
+        """Return the TokenCache for this entry if available."""
+        data = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if isinstance(data, dict) and "cache" in data:
+            return data["cache"]
+        # Fallback: runtime_data may carry the cache
+        return getattr(entry, "runtime_data", None)
+
+    async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
+        """Construct API object from the live entry context (cache-first)."""
+        cache = self._get_entry_cache(entry)
+        if cache is not None:
+            session = async_get_clientsession(self.hass)
+            return GoogleFindMyAPI(cache=cache, session=session)
+
+        # Last resort: try minimal credentials from entry.data to keep Options usable.
+        oauth = entry.data.get(CONF_OAUTH_TOKEN)
+        email = entry.data.get(CONF_GOOGLE_EMAIL)
+        if oauth and email:
+            return GoogleFindMyAPI(oauth_token=oauth, google_email=email)
+
+        # If neither cache nor credentials are available, surface a clear warning.
+        raise RuntimeError(
+            "GoogleFindMyAPI requires either `cache=` or minimal flow credentials (`oauth_token`/`google_email`)."
+        )
+
     # ---------- Settings (non-secret) ----------
     async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Update non-secret options.
-
-        Best practice:
-            - Return async_create_entry(data=options) to commit options.
-            - OptionsFlowWithReload will reload the integration automatically.
-            - Do not call hass.config_entries.async_update_entry() from inside the flow.
-        """
+        """Update non-secret options."""
         errors: Dict[str, str] = {}
 
         entry = self.config_entry
         opt = entry.options
         dat = entry.data
 
-        # Options-first with safe fallbacks (all defaults from const.py)
+        # Current values with safe fallbacks
         current_tracked = opt.get(OPT_TRACKED_DEVICES, dat.get(OPT_TRACKED_DEVICES, []))
         current_interval = opt.get(OPT_LOCATION_POLL_INTERVAL, dat.get(OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL))
         current_delay = opt.get(OPT_DEVICE_POLL_DELAY, dat.get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY))
@@ -395,16 +442,23 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         current_stats = opt.get(OPT_ENABLE_STATS_ENTITIES, dat.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES))
         current_map_token_exp = opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, dat.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION))
 
-        # Build device list (best-effort; do not fail the form)
+        # Build device options (robust against temporary API failures)
         device_options: Dict[str, str] = {}
         try:
             api = await self._async_build_api_from_entry(entry)
             devices = await api.async_get_basic_device_list(entry.data.get(CONF_GOOGLE_EMAIL))
             device_options = {dev["id"]: dev["name"] for dev in devices}
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Failed to fetch device list for options: %s", err)
+            _LOGGER.warning(
+                "Could not fetch a fresh device list for options; using existing tracked devices as fallback. Error: %s",
+                err,
+            )
 
-        # Define the base schema without defaults and inject suggested values dynamically.
+        # Ensure already-tracked IDs remain valid choices even if fetch failed
+        for dev_id in current_tracked or []:
+            device_options.setdefault(dev_id, dev_id)
+
+        # Base schema without defaults; suggested values will be injected
         base_schema = vol.Schema(
             {
                 vol.Optional(OPT_TRACKED_DEVICES): vol.All(cv.multi_select(device_options), vol.Length(min=0)),
@@ -435,7 +489,6 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             # Commit options and trigger automatic reload via OptionsFlowWithReload.
             return self.async_create_entry(title="", data=new_options)
 
-        # Inject suggested/current values for a clean, static schema.
         suggested_values = {
             OPT_TRACKED_DEVICES: current_tracked,
             OPT_LOCATION_POLL_INTERVAL: current_interval,
@@ -459,7 +512,6 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         """Allow refreshing credentials without exposing current values."""
         errors: Dict[str, str] = {}
 
-        # Keep in sync with translations (options.step.credentials.data.*)
         schema = vol.Schema(
             {
                 vol.Optional("new_secrets_json"): str,
@@ -477,11 +529,14 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             try:
                 if secrets_json:
                     parsed = json.loads(secrets_json)
-                    new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, DATA_SECRET_BUNDLE: parsed}
-                    api = GoogleFindMyAPI(secrets_data=parsed)
-                    _ = await api.async_get_basic_device_list(
-                        parsed.get("googleHomeUsername") or parsed.get(CONF_GOOGLE_EMAIL) or parsed.get("google_email")
-                    )  # validation
+                    email = _extract_email_from_secrets(parsed)
+                    oauth = _extract_oauth_from_secrets(parsed)
+                    if not (email and oauth):
+                        errors["base"] = "invalid_token"
+                    else:
+                        new_data = {DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, CONF_OAUTH_TOKEN: oauth, CONF_GOOGLE_EMAIL: email}
+                        api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
+                        _ = await api.async_get_basic_device_list(email)  # validation
                 elif oauth_token and google_email:
                     new_data = {
                         DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
@@ -498,13 +553,10 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                     updated_data = dict(entry.data)
                     updated_data.update(new_data)
 
-                    # Update credentials in data only (never in options)
+                    # Update credentials in data only
                     self.hass.config_entries.async_update_entry(entry, data=updated_data)
-
-                    # Trigger a reload so new credentials are applied immediately
+                    # Reload to apply immediately
                     self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
-
-                    # Abort with success message (matches translations)
                     return self.async_abort(reason="reconfigure_successful")
             except json.JSONDecodeError:
                 errors["base"] = "invalid_json"
@@ -513,16 +565,6 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                 errors["base"] = "cannot_connect"
 
         return self.async_show_form(step_id="credentials", data_schema=schema, errors=errors)
-
-    # ---------- Internal helper ----------
-    async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
-        """Construct API object from entry data (supports both auth methods)."""
-        if entry.data.get(DATA_AUTH_METHOD) == _AUTH_METHOD_SECRETS:
-            return GoogleFindMyAPI(secrets_data=entry.data.get(DATA_SECRET_BUNDLE))
-        return GoogleFindMyAPI(
-            oauth_token=entry.data.get(CONF_OAUTH_TOKEN),
-            google_email=entry.data.get(CONF_GOOGLE_EMAIL),
-        )
 
 
 # ---------- Custom exceptions ----------
