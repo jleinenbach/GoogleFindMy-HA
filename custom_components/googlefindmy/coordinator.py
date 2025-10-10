@@ -755,6 +755,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self._device_names[device_id] = name
 
         self._device_location_data[device_id] = slot
+        # Increment background updates to account for push/manual commits.
+        self.increment_stat("background_updates")
 
     def get_device_last_seen(self, device_id: str) -> Optional[datetime]:
         """Return last_seen as timezone-aware datetime (UTC) if cached.
@@ -932,7 +934,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         - If capability is known from the lightweight device list -> use it (fast, cached).
         - If push readiness is explicitly False -> disable.
         - Otherwise -> optimistic True (known devices) to keep the UI usable.
-          The actual action enforces reality and will start a cooldown on failure.
 
         Args:
             device_id: The canonical ID of the device.
@@ -1069,6 +1070,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         Returns:
             A dictionary containing the location data (empty dict on gating).
+
+        Corrections:
+            - Persist the received location data into the coordinator cache.
+            - Mirror the Google Home spam filter used by the polling path.
+            - Preserve previous coordinates for semantic-only locations.
+            - Validate coordinates/accuracy and de-duplicate via `last_seen`.
+            - Push a fresh snapshot via `push_updated([device_id])`.
         """
         name = self.get_device_display_name(device_id) or device_id
 
@@ -1086,10 +1094,79 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         try:
             location_data = await self.api.async_get_device_location(device_id, name)
-            if location_data:
-                # Successful manual locate: reset automatic poll timer and clear cooldown early
-                self._last_poll_mono = time.monotonic()
-                self._locate_cooldown_until.pop(device_id, None)
+            if not location_data:
+                return {}
+
+            # --- Parity with polling path: Google Home semantic spam filter --------
+            semantic_name = location_data.get("semantic_name")
+            if semantic_name and hasattr(self, "google_home_filter"):
+                try:
+                    should_filter, replacement_location = self.google_home_filter.should_filter_detection(
+                        device_id, semantic_name
+                    )
+                except Exception as gf_err:
+                    _LOGGER.debug("Google Home filter error for %s: %s", name, gf_err)
+                else:
+                    if should_filter:
+                        _LOGGER.debug("Filtering out Google Home spam detection for %s (manual locate)", name)
+                        # Successful but filtered: reset baseline, clear cooldown, and refresh UI.
+                        self._last_poll_mono = time.monotonic()
+                        self._locate_cooldown_until.pop(device_id, None)
+                        self.push_updated([device_id])
+                        return {}
+                    if replacement_location:
+                        location_data = dict(location_data)
+                        location_data["semantic_name"] = replacement_location
+            # ----------------------------------------------------------------------
+
+            # Preserve previous coordinates if only semantic location is provided.
+            if (location_data.get("latitude") is None or location_data.get("longitude") is None) and location_data.get("semantic_name"):
+                prev = self._device_location_data.get(device_id, {})
+                if prev:
+                    location_data.setdefault("latitude", prev.get("latitude"))
+                    location_data.setdefault("longitude", prev.get("longitude"))
+                    location_data.setdefault("accuracy", prev.get("accuracy"))
+                    location_data["status"] = "Semantic location; preserving previous coordinates"
+
+            # Validate coordinates if present.
+            lat = location_data.get("latitude")
+            lon = location_data.get("longitude")
+            acc = location_data.get("accuracy")
+            if lat is not None or lon is not None:
+                if not (
+                    isinstance(lat, (int, float)) and isinstance(lon, (int, float))
+                    and -90 <= float(lat) <= 90 and -180 <= float(lon) <= 180
+                ):
+                    _LOGGER.warning("Invalid or out-of-range coordinates for %s: lat=%s, lon=%s", name, lat, lon)
+                    self.increment_stat("invalid_coords")
+                    return {}
+                if (
+                    isinstance(self._min_accuracy_threshold, int)
+                    and self._min_accuracy_threshold > 0
+                    and isinstance(acc, (int, float))
+                    and float(acc) > float(self._min_accuracy_threshold)
+                ):
+                    _LOGGER.debug(
+                        "Dropping low-quality fix for %s (accuracy=%sm > %sm)", name, acc, self._min_accuracy_threshold
+                    )
+                    self.increment_stat("low_quality_dropped")
+                    return {}
+
+            # De-duplicate by `last_seen` timestamp.
+            existing_data = self._device_location_data.get(device_id, {})
+            if existing_data.get("last_seen") and existing_data.get("last_seen") == location_data.get("last_seen"):
+                _LOGGER.debug("Manual locate for %s returned a duplicate location; skipping state update.", name)
+                self.increment_stat("skipped_duplicates")
+            else:
+                # Commit to cache. `update_device_cache` ensures `last_updated` and stats.
+                slot = dict(location_data)
+                slot.setdefault("last_updated", time.time())
+                self.update_device_cache(device_id, slot)
+
+            # Successful manual locate: reset poll baseline, clear cooldown, push a fresh snapshot.
+            self._last_poll_mono = time.monotonic()
+            self._locate_cooldown_until.pop(device_id, None)
+            self.push_updated([device_id])
             return location_data or {}
         except Exception as err:
             _LOGGER.error("Manual locate for %s failed: %s", name, err)
