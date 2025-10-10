@@ -11,45 +11,45 @@
       },
       "secrets_json": {
         "title": "Methode 1: GoogleFindMyTools secrets.json",
-        "description": "Führe GoogleFindMyTools (Chrome) aus, um Authentifizierungs‑Token zu erzeugen, und füge unten den vollständigen Inhalt der Datei Auth/secrets.json ein.",
+        "description": "Führe GoogleFindMyTools (Chrome) aus, um Authentifizierungs-Token zu erzeugen, und füge unten den vollständigen Inhalt der Datei Auth/secrets.json ein.",
         "data": {
           "secrets_json": "Inhalt der secrets.json"
         }
       },
       "individual_tokens": {
-        "title": "Methode 2: Manueller OAuth‑Token",
-        "description": "Gib deinen OAuth‑Token und deine Google‑E‑Mail‑Adresse aus dem manuellen Anmeldeprozess ein.",
+        "title": "Methode 2: Manueller OAuth-Token",
+        "description": "Gib deinen OAuth-Token und deine Google-E-Mail-Adresse aus dem manuellen Anmeldeprozess ein.",
         "data": {
-          "oauth_token": "OAuth‑Token",
-          "google_email": "Google‑E‑Mail‑Adresse"
+          "oauth_token": "OAuth-Token",
+          "google_email": "Google-E-Mail-Adresse"
         }
       },
       "device_selection": {
         "title": "Geräte und Abfrageintervall",
-        "description": "Wähle die zu verfolgenden Geräte und konfiguriere die Abfrageparameter:\n• Positionsabfrage‑Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden).\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden).\n\nDie Integration fragt die Geräte nacheinander ab und fordert für jedes Gerät mit der angegebenen Verzögerung Positionsdaten an.",
+        "description": "Wähle die zu verfolgenden Geräte und konfiguriere die Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden).\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden).\n\nDie Integration fragt die Geräte nacheinander ab und fordert für jedes Gerät mit der angegebenen Verzögerung Positionsdaten an.",
         "data": {
           "tracked_devices": "Verfolgte Geräte",
-          "location_poll_interval": "Positionsabfrage‑Intervall (s)",
+          "location_poll_interval": "Positionsabfrage-Intervall (s)",
           "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",
           "min_accuracy_threshold": "Mindestgenauigkeit (m)",
           "movement_threshold": "Bewegungsschwelle (m)",
-          "google_home_filter_enabled": "Google‑Home‑Geräte filtern",
-          "google_home_filter_keywords": "Filter‑Schlüsselwörter (kommagetrennt)",
-          "enable_stats_entities": "Statistik‑Entitäten erstellen",
-          "map_view_token_expiration": "Ablauf von Kartenansicht‑Token aktivieren"
+          "google_home_filter_enabled": "Google-Home-Geräte filtern",
+          "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
+          "enable_stats_entities": "Statistik-Entitäten erstellen",
+          "map_view_token_expiration": "Ablauf von Kartenansicht-Token aktivieren"
         }
       },
       "reauth_confirm": {
         "title": "Erneute Authentifizierung",
-        "description": "Deine Anmeldedaten sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth‑Token und deine E‑Mail‑Adresse angeben."
+        "description": "Deine Anmeldedaten sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben."
       }
     },
     "error": {
       "auth_failed": "Authentifizierung fehlgeschlagen. Bitte versuche es erneut.",
       "invalid_token": "Ungültiger Token oder erforderliche Felder fehlen.",
-      "invalid_json": "Ungültiges JSON‑Format im Inhalt der secrets.json.",
-      "no_devices": "Keine Geräte gefunden. Bitte stelle sicher, dass ‚Mein Gerät finden‘ in deinem Google‑Konto aktiviert ist.",
-      "cannot_connect": "Verbindung zur Google‑API fehlgeschlagen. Dies ist möglicherweise ein vorübergehendes Problem – bitte versuche es später erneut.",
+      "invalid_json": "Ungültiges JSON-Format im Inhalt der secrets.json.",
+      "no_devices": "Keine Geräte gefunden. Bitte stelle sicher, dass ‚Mein Gerät finden‘ in deinem Google-Konto aktiviert ist.",
+      "cannot_connect": "Verbindung zur Google-API fehlgeschlagen. Dies ist möglicherweise ein vorübergehendes Problem – bitte versuche es später erneut.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
       "unknown": "Unerwarteter Fehler."
@@ -67,55 +67,64 @@
         "description": "Was möchtest du konfigurieren?",
         "menu_options": {
           "credentials": "Anmeldedaten aktualisieren",
-          "settings": "Einstellungen ändern"
+          "settings": "Einstellungen ändern",
+          "visibility": "Gerätesichtbarkeit"
         }
       },
       "credentials": {
         "title": "Anmeldedaten aktualisieren (optional)",
-        "description": "Aktualisiere deine Anmeldedaten, ohne bestehende Werte preiszugeben. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth‑Token** und **Google‑E‑Mail** eingeben.\n\nFalls angegeben, werden die Anmeldedaten validiert und gespeichert. Die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
+        "description": "Aktualisiere deine Anmeldedaten, ohne bestehende Werte preiszugeben. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth-Token** und **Google-E-Mail** eingeben.\n\nFalls angegeben, werden die Anmeldedaten validiert und gespeichert. Die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
         "data": {
           "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "oauth_token": "Neuer OAuth‑Token",
-          "google_email": "Google‑E‑Mail",
+          "oauth_token": "Neuer OAuth-Token",
+          "google_email": "Google-E-Mail",
           "new_secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "new_oauth_token": "Neuer OAuth‑Token",
-          "new_google_email": "Google‑E‑Mail"
+          "new_oauth_token": "Neuer OAuth-Token",
+          "new_google_email": "Google-E-Mail"
         }
       },
       "settings": {
         "title": "Optionen",
-        "description": "Einstellungen für die Ortung anpassen:\n• Positionsabfrage‑Intervall: Wie häufig Positionen abgefragt werden (60–3600 Sekunden).\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte (1–60 Sekunden).\n• Mindestgenauigkeit: Positionen mit einer größeren Ungenauigkeit als dieser Wert werden ignoriert (25–500 Meter).\n• Bewegungsschwelle: Mindestbewegung, um eine Positionsaktualisierung auszulösen (10–200 Meter).\n\nGoogle‑Home‑Filter:\n• Aktivieren, um Ortungen durch Google‑Home‑Geräte der ‚Zuhause‘‑Zone zuzuordnen.\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt).\n• Beispiel: ‚nest‘ passt zu ‚Küche Nest Mini‘.",
+        "description": "Einstellungen für die Ortung anpassen:\n• Positionsabfrage-Intervall: Wie häufig Positionen abgefragt werden (60–3600 Sekunden).\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte (1–60 Sekunden).\n• Mindestgenauigkeit: Positionen mit einer größeren Ungenauigkeit als dieser Wert werden ignoriert (25–500 Meter).\n• Bewegungsschwelle: Mindestbewegung, um eine Positionsaktualisierung auszulösen (10–200 Meter).\n\nGoogle-Home-Filter:\n• Aktivieren, um Ortungen durch Google-Home-Geräte der ‚Zuhause‘-Zone zuzuordnen.\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt).\n• Beispiel: ‚nest‘ passt zu ‚Küche Nest Mini‘.",
         "data": {
           "tracked_devices": "Verfolgte Geräte",
-          "location_poll_interval": "Positionsabfrage‑Intervall (s)",
+          "location_poll_interval": "Positionsabfrage-Intervall (s)",
           "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",
           "min_accuracy_threshold": "Mindestgenauigkeit (m)",
           "movement_threshold": "Bewegungsschwelle (m)",
-          "google_home_filter_enabled": "Google‑Home‑Geräte filtern",
-          "google_home_filter_keywords": "Filter‑Schlüsselwörter (kommagetrennt)",
-          "enable_stats_entities": "Statistik‑Entitäten erstellen",
-          "map_view_token_expiration": "Ablauf von Kartenansicht‑Token aktivieren"
+          "google_home_filter_enabled": "Google-Home-Geräte filtern",
+          "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
+          "enable_stats_entities": "Statistik-Entitäten erstellen",
+          "map_view_token_expiration": "Ablauf von Kartenansicht-Token aktivieren"
         },
         "data_description": {
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach einer Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab."
         }
+      },
+      "visibility": {
+        "title": "Gerätesichtbarkeit",
+        "description": "Stelle zuvor ignorierte Geräte wieder her, damit sie erneut sichtbar sind. Wähle ein oder mehrere Geräte aus und speichere.",
+        "data": {
+          "unignore_devices": "Geräte wiederherstellen"
+        }
       }
     },
     "error": {
-      "invalid_json": "Ungültiges JSON‑Format im Inhalt der secrets.json.",
+      "invalid_json": "Ungültiges JSON-Format im Inhalt der secrets.json.",
       "invalid": "Validierung fehlgeschlagen. Bitte überprüfe deine Eingabe.",
-      "cannot_connect": "Verbindung zur Google‑API fehlgeschlagen.",
+      "cannot_connect": "Verbindung zur Google-API fehlgeschlagen.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich."
     },
     "abort": {
-      "reconfigure_successful": "Neukonfiguration erfolgreich."
+      "reconfigure_successful": "Neukonfiguration erfolgreich.",
+      "no_ignored_devices": "Es gibt keine ignorierten Geräte, die wiederhergestellt werden können."
     }
   },
   "services": {
     "locate_device": {
       "name": "Gerät orten",
-      "description": "Ermittelt die aktuelle Position eines Google‑Find‑My‑Geräts.",
+      "description": "Ermittelt die aktuelle Position eines Google-Find-My-Geräts.",
       "fields": {
         "device_id": {
           "name": "Gerät",
@@ -125,7 +134,7 @@
     },
     "play_sound": {
       "name": "Ton abspielen",
-      "description": "Spielt einen Ton auf einem Google‑Find‑My‑Gerät ab.",
+      "description": "Spielt einen Ton auf einem Google-Find-My-Gerät ab.",
       "fields": {
         "device_id": {
           "name": "Gerät",
@@ -134,8 +143,8 @@
       }
     },
     "refresh_device_urls": {
-      "name": "Geräte‑URLs aktualisieren",
-      "description": "Aktualisiert die Konfigurations‑URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
+      "name": "Geräte-URLs aktualisieren",
+      "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
       "fields": {}
     },
     "locate_external": {
@@ -162,7 +171,7 @@
         },
         "device_ids": {
           "name": "Geräte (optional)",
-          "description": "Begrenzt den Vorgang auf bestimmte Geräte. Leer lassen, um alle Google‑Find‑My‑Geräte zu berücksichtigen."
+          "description": "Begrenzt den Vorgang auf bestimmte Geräte. Leer lassen, um alle Google-Find-My-Geräte zu berücksichtigen."
         }
       }
     }
@@ -189,13 +198,13 @@
         "name": "Übersprungene Duplikate"
       },
       "stat_background_updates": {
-        "name": "Hintergrund‑Aktualisierungen"
+        "name": "Hintergrund-Aktualisierungen"
       },
       "stat_polled_updates": {
         "name": "Abgefragte Aktualisierungen"
       },
       "stat_crowd_sourced_updates": {
-        "name": "Crowdsourcing‑Aktualisierungen"
+        "name": "Crowdsourcing-Aktualisierungen"
       },
       "stat_history_fallback_used": {
         "name": "Verwendete Verlaufsdaten"
