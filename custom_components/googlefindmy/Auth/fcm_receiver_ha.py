@@ -493,7 +493,8 @@ class FcmReceiverHA:
             existing = getattr(coordinator, "_device_location_data", {}).get(canonic_id, {})
             if existing.get("last_seen") == current_last_seen and current_last_seen:
                 _LOGGER.debug("Duplicate background update for %s (last_seen=%s)", device_name, current_last_seen)
-                coordinator.increment_stat("skipped_duplicates")
+                # The coordinator is now responsible for incrementing this stat.
+                # The coordinator can check if the data has truly changed before incrementing.
                 return
 
             # Commit to coordinator cache via public API if available (encapsulation)
@@ -515,11 +516,11 @@ class FcmReceiverHA:
                     return
 
             # Stats
-            try:
-                coordinator.increment_stat("background_updates")
-            except Exception:
-                pass
+            # Let the coordinator handle the 'background_updates' stat inside 'update_device_cache'
+            # to ensure it's only incremented on a real change.
             if location_data.get("is_own_report") is False:
+                # Crowd-sourced classification is still useful to track here,
+                # as only the receiver has access to this detail from the raw report.
                 coordinator.increment_stat("crowd_sourced_updates")
                 _LOGGER.info("Crowd-sourced update detected for %s via FCM", device_name)
 
