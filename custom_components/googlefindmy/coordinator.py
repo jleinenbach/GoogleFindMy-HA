@@ -6,6 +6,12 @@ Discovery vs. polling semantics:
 - Presence and name/capability caches are updated for all devices.
 - The published snapshot (`self.data`) contains **all** devices (for dynamic entity creation).
 - The sequential **polling cycle** still respects `tracked_devices` (if non-empty).
+
+Google Home semantic locations (note):
+- When the Google Home filter identifies a "Google Home-like" semantic location,
+  we now substitute **Home zone coordinates** (lat/lon[/radius]) instead of forcing
+  a zone label. This lets HA Core's zone engine set the state to `home`, which
+  aligns with best practices.
 """
 from __future__ import annotations
 
@@ -376,10 +382,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             continue
 
                         # --- Apply Google Home filter (keep parity with FCM push path) ---
+                        # Patch: consume coordinate substitution from the filter.
                         semantic_name = location.get("semantic_name")
                         if semantic_name and hasattr(self, "google_home_filter"):
                             try:
-                                should_filter, replacement_location = self.google_home_filter.should_filter_detection(
+                                should_filter, replacement_attrs = self.google_home_filter.should_filter_detection(
                                     dev_id, semantic_name
                                 )
                             except Exception as gf_err:
@@ -392,15 +399,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                         "Filtering out Google Home spam detection for %s", dev_name
                                     )
                                     continue
-                                if replacement_location:
+                                if replacement_attrs:
                                     _LOGGER.info(
-                                        "Google Home filter: %s detected at '%s', using '%s'",
+                                        "Google Home filter: %s detected at '%s', substituting with Home coordinates",
                                         dev_name,
                                         semantic_name,
-                                        replacement_location,
                                     )
                                     location = dict(location)
-                                    location["semantic_name"] = replacement_location
+                                    # Update coordinates and derive accuracy from radius (if present).
+                                    if "latitude" in replacement_attrs and "longitude" in replacement_attrs:
+                                        location["latitude"] = replacement_attrs.get("latitude")
+                                        location["longitude"] = replacement_attrs.get("longitude")
+                                    if "radius" in replacement_attrs and replacement_attrs.get("radius") is not None:
+                                        location["accuracy"] = replacement_attrs.get("radius")
+                                    # Clear semantic name so HA Core's zone engine determines the final state.
+                                    location["semantic_name"] = None
                         # ------------------------------------------------------------------
 
                         lat = location.get("latitude")
@@ -1139,10 +1152,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 return {}
 
             # --- Parity with polling path: Google Home semantic spam filter --------
+            # Patch: consume coordinate substitution from the filter.
             semantic_name = location_data.get("semantic_name")
             if semantic_name and hasattr(self, "google_home_filter"):
                 try:
-                    should_filter, replacement_location = self.google_home_filter.should_filter_detection(
+                    should_filter, replacement_attrs = self.google_home_filter.should_filter_detection(
                         device_id, semantic_name
                     )
                 except Exception as gf_err:
@@ -1155,9 +1169,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         self._locate_cooldown_until.pop(device_id, None)
                         self.push_updated([device_id])
                         return {}
-                    if replacement_location:
+                    if replacement_attrs:
                         location_data = dict(location_data)
-                        location_data["semantic_name"] = replacement_location
+                        if "latitude" in replacement_attrs and "longitude" in replacement_attrs:
+                            location_data["latitude"] = replacement_attrs.get("latitude")
+                            location_data["longitude"] = replacement_attrs.get("longitude")
+                        if "radius" in replacement_attrs and replacement_attrs.get("radius") is not None:
+                            location_data["accuracy"] = replacement_attrs.get("radius")
+                        # Clear semantic name so HA Core's zone engine determines the final state.
+                        location_data["semantic_name"] = None
             # ----------------------------------------------------------------------
 
             # Preserve previous coordinates if only semantic location is provided.
@@ -1245,4 +1265,3 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             )
             self._note_push_transport_problem()
             return False
-
