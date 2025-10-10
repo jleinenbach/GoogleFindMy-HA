@@ -89,6 +89,8 @@ class GoogleFindMyPollingSensor(CoordinatorEntity, BinarySensorEntity):
             model="Find My Device Integration",
             sw_version=INTEGRATION_VERSION,  # Display integration version
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
+            # Mark as a service device to hide the "Delete device" action in HA UI.
+            entry_type=dr.DeviceEntryType.SERVICE,
         )
 
     @callback
