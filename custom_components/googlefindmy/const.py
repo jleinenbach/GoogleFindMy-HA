@@ -11,7 +11,7 @@ from __future__ import annotations
 # Core identifiers
 # --------------------------------------------------------------------------------------
 DOMAIN: str = "googlefindmy"
-INTEGRATION_VERSION: str = "1.5.6-1"
+INTEGRATION_VERSION: str = "1.6"
 
 # --------------------------------------------------------------------------------------
 # Configuration keys (data vs. options separation)
