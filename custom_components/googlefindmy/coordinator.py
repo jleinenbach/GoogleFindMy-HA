@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Protocol, Set
@@ -136,7 +137,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             device_poll_delay: The delay in seconds between polling individual devices.
             min_poll_interval: The minimum allowed interval between polling cycles.
             min_accuracy_threshold: The minimum GPS accuracy in meters to accept a location.
-            allow_history_fallback: Whether to fall back to recorder history for location.
+            allow_history_fallback: Whether to fall back to Recorder history for location.
         """
         self.hass = hass
         self._cache = cache
@@ -199,6 +200,81 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             name=DOMAIN,
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
+
+    # ---------------------------- Coordinate normalization ------------------
+    def _normalize_coords(
+        self,
+        payload: Dict[str, Any],
+        *,
+        device_label: Optional[str] = None,
+        warn_on_invalid: bool = True,
+    ) -> bool:
+        """Validate and normalize latitude/longitude (and optionally accuracy).
+
+        - Accepts numeric-like strings and converts them to floats.
+        - Rejects NaN/Inf and out-of-range values.
+        - Writes normalized floats back into `payload` when valid.
+        - Normalizes `accuracy` to a finite float if present (best-effort).
+
+        Returns:
+            True if latitude/longitude are present and valid after normalization.
+            False if coordinates are missing or invalid.
+
+        Side effects:
+            - Increments `invalid_coords` on invalid input.
+            - Logs warnings for invalid data (unless warn_on_invalid=False).
+        """
+        lat = payload.get("latitude")
+        lon = payload.get("longitude")
+        if lat is None or lon is None:
+            # Missing coordinates is not an error per se (semantic-only is valid).
+            return False
+
+        try:
+            lat_f, lon_f = float(lat), float(lon)
+        except (TypeError, ValueError):
+            self.increment_stat("invalid_coords")
+            if warn_on_invalid:
+                _LOGGER.warning(
+                    "Ignoring invalid (non-numeric) coordinates%s: lat=%r, lon=%r",
+                    f" for {device_label}" if device_label else "",
+                    lat,
+                    lon,
+                )
+            return False
+
+        if not (
+            math.isfinite(lat_f)
+            and math.isfinite(lon_f)
+            and -90.0 <= lat_f <= 90.0
+            and -180.0 <= lon_f <= 180.0
+        ):
+            self.increment_stat("invalid_coords")
+            if warn_on_invalid:
+                _LOGGER.warning(
+                    "Ignoring out-of-range/invalid coordinates%s: lat=%s, lon=%s",
+                    f" for {device_label}" if device_label else "",
+                    lat,
+                    lon,
+                )
+            return False
+
+        # Write back normalized floats
+        payload["latitude"] = lat_f
+        payload["longitude"] = lon_f
+
+        # Best-effort normalize accuracy (if present)
+        acc = payload.get("accuracy")
+        if acc is not None:
+            try:
+                acc_f = float(acc)
+                if math.isfinite(acc_f):
+                    payload["accuracy"] = acc_f
+            except (TypeError, ValueError):
+                # Accuracy can be absent or malformed; not critical enough for a warning.
+                pass
+
+        return True
 
     # ---------------------------- Ignore helpers ----------------------------
     def _get_ignored_set(self) -> Set[str]:
@@ -416,13 +492,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     location["semantic_name"] = None
                         # ------------------------------------------------------------------
 
-                        lat = location.get("latitude")
-                        lon = location.get("longitude")
-                        acc = location.get("accuracy")
-                        last_seen = location.get("last_seen", 0)
-
                         # If we only got a semantic location, preserve previous coordinates.
-                        if (lat is None or lon is None) and location.get("semantic_name"):
+                        if (location.get("latitude") is None or location.get("longitude") is None) and location.get("semantic_name"):
                             prev = self._device_location_data.get(dev_id, {})
                             if prev:
                                 location["latitude"] = prev.get("latitude")
@@ -432,23 +503,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     "Semantic location; preserving previous coordinates"
                                 )
 
-                        # Validate coordinates
+                        # Validate/normalize coordinates (and accuracy if present).
+                        if not self._normalize_coords(location, device_label=dev_name):
+                            if not location.get("semantic_name"):
+                                _LOGGER.debug(
+                                    "No location data (coordinates or semantic name) available for %s in this update.",
+                                    dev_name,
+                                )
+                            # Nothing to commit/update in cache
+                            continue
+
                         lat = location.get("latitude")
                         lon = location.get("longitude")
-                        if not (
-                            isinstance(lat, (int, float))
-                            and isinstance(lon, (int, float))
-                            and -90 <= lat <= 90
-                            and -180 <= lon <= 180
-                        ):
-                            _LOGGER.warning(
-                                "Invalid or out-of-range coordinates for %s: lat=%s, lon=%s",
-                                dev_name,
-                                lat,
-                                lon,
-                            )
-                            self.increment_stat("invalid_coords")
-                            continue
+                        acc = location.get("accuracy")
+                        last_seen = location.get("last_seen", 0)
 
                         # Accuracy quality filter
                         if (
@@ -604,7 +672,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     async def _async_build_device_snapshot_with_fallbacks(
         self, devices: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Build a snapshot using cache, HA state and (optionally) loud history fallback.
+        """Build a snapshot using cache, HA state and (optionally) history fallback.
 
         Args:
             devices: A list of device dictionaries to build the snapshot for.
@@ -655,7 +723,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     snapshot.append(entry)
                     continue
 
-            # Optional loud history fallback
+            # Optional history fallback
             if self.allow_history_fallback:
                 _LOGGER.warning(
                     "No live state for %s (entity_id=%s); attempting history fallback via Recorder.",
@@ -738,7 +806,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
                 stat_name,
-                list(self.stats.keys() ),
+                list(self.stats.keys()),
             )
 
     # ---------------------------- Public platform API -----------------------
@@ -792,6 +860,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
+
+        # Normalize coordinates (best-effort) if present; do not spam warnings here.
+        # The push path may deliver semantic-only updates (no coordinates), which is valid.
+        self._normalize_coords(slot, device_label=device_id, warn_on_invalid=False)
 
         # Ensure last_updated is present
         slot.setdefault("last_updated", time.time())
@@ -1062,7 +1134,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             device_poll_delay: The delay in seconds between polling devices.
             min_poll_interval: The minimum polling interval in seconds.
             min_accuracy_threshold: The minimum accuracy in meters.
-            allow_history_fallback: Whether to allow falling back to recorder history.
+            allow_history_fallback: Whether to allow falling back to Recorder history.
         """
         if tracked_devices is not None:
             self.tracked_devices = list(tracked_devices)
@@ -1189,29 +1261,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     location_data.setdefault("accuracy", prev.get("accuracy"))
                     location_data["status"] = "Semantic location; preserving previous coordinates"
 
-            # Validate coordinates if present.
-            lat = location_data.get("latitude")
-            lon = location_data.get("longitude")
-            acc = location_data.get("accuracy")
-            if lat is not None or lon is not None:
-                if not (
-                    isinstance(lat, (int, float)) and isinstance(lon, (int, float))
-                    and -90 <= float(lat) <= 90 and -180 <= float(lon) <= 180
-                ):
-                    _LOGGER.warning("Invalid or out-of-range coordinates for %s: lat=%s, lon=%s", name, lat, lon)
-                    self.increment_stat("invalid_coords")
-                    return {}
-                if (
-                    isinstance(self._min_accuracy_threshold, int)
-                    and self._min_accuracy_threshold > 0
-                    and isinstance(acc, (int, float))
-                    and float(acc) > float(self._min_accuracy_threshold)
-                ):
+            # Validate/normalize coordinates (and accuracy if present).
+            if not self._normalize_coords(location_data, device_label=name):
+                if not location_data.get("semantic_name"):
                     _LOGGER.debug(
-                        "Dropping low-quality fix for %s (accuracy=%sm > %sm)", name, acc, self._min_accuracy_threshold
+                        "No location data (coordinates or semantic name) available for %s in manual locate.",
+                        name,
                     )
-                    self.increment_stat("low_quality_dropped")
-                    return {}
+                return {}
+
+            acc = location_data.get("accuracy")
+
+            # Accuracy quality filter
+            if (
+                isinstance(self._min_accuracy_threshold, int)
+                and self._min_accuracy_threshold > 0
+                and isinstance(acc, (int, float))
+                and float(acc) > float(self._min_accuracy_threshold)
+            ):
+                _LOGGER.debug(
+                    "Dropping low-quality fix for %s (accuracy=%sm > %sm)", name, acc, self._min_accuracy_threshold
+                )
+                self.increment_stat("low_quality_dropped")
+                return {}
 
             # De-duplicate by `last_seen` timestamp.
             existing_data = self._device_location_data.get(device_id, {})
