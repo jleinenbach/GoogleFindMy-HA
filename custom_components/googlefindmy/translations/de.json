@@ -147,7 +147,7 @@
       "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
       "fields": {}
     },
-    "locate_external": {
+    "locate_device_external": {
       "name": "Gerät orten (extern)",
       "description": "Ortung über den externen Helfer; delegiert an die normale Ortung.",
       "fields": {
