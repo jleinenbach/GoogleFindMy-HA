@@ -142,6 +142,16 @@
         }
       }
     },
+    "stop_sound": {
+      "name": "Interrompi suono",
+      "description": "Interrompe il suono su un dispositivo Google Find My.",
+      "fields": {
+        "device_id": {
+          "name": "Dispositivo",
+          "description": "Seleziona un dispositivo Google Find My (oppure passa un ID canonico tramite Strumenti per sviluppatori)."
+        }
+      }
+    },
     "refresh_device_urls": {
       "name": "Aggiorna URL dei dispositivi",
       "description": "Aggiorna gli URL di configurazione dei dispositivi Google Find My per puntare alla vista mappa integrata.",
