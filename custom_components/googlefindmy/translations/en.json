@@ -147,7 +147,7 @@
       "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view.",
       "fields": {}
     },
-    "locate_external": {
+    "locate_device_external": {
       "name": "Locate Device (External)",
       "description": "Locate a device using the external helper; delegates to the normal locate operation.",
       "fields": {
