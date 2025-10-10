@@ -405,11 +405,12 @@ class FcmReceiverHA:
         """Return True if device is eligible for push processing.
 
         Semantics:
-            * Push-Updates sollen *nicht* durch `tracked_devices` begrenzt werden
-              (Discovery bleibt live).
-            * **Ignored devices** werden hier *früh* verworfen.
+            * `tracked_devices` only limits polling, not push/discovery, to ensure
+              newly added devices get live updates immediately.
+            * Ignored devices are filtered out here to prevent any further processing.
         """
-        # 1) Early ignore via coordinator API (bevorzugt)
+        # 1) Early exit for ignored devices, using the coordinator's API if available.
+        # This is the primary mechanism to respect a user's choice to delete a device.
         try:
             is_ignored_fn = getattr(coordinator, "is_ignored", None)
             if callable(is_ignored_fn) and is_ignored_fn(canonic_id):
@@ -418,7 +419,9 @@ class FcmReceiverHA:
             # defensive fallback continues below
             pass
 
-        # 2) Fallback: options-basierte Ignore-Liste (wenn keine API vorhanden)
+        # 2) Fallback check directly against config entry options.
+        # This ensures the ignore logic still works even if the coordinator
+        # instance is not fully updated yet.
         try:
             entry = getattr(coordinator, "config_entry", None)
             if entry is not None:
@@ -428,7 +431,7 @@ class FcmReceiverHA:
         except Exception:
             pass
 
-        # 3) Default: Push erlaubt
+        # 3) Default to processing the push update.
         return True
 
     def _extract_canonic_id_from_response(self, hex_response: str) -> Optional[str]:
@@ -511,13 +514,14 @@ class FcmReceiverHA:
                     _LOGGER.debug(
                         "Fallback: wrote to coordinator._device_location_data directly (consider upgrading coordinator)"
                     )
+                    # Manually increment stats if using fallback path
+                    coordinator.increment_stat("background_updates")
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.error("Coordinator cache update failed for %s: %s", canonic_id, err)
                     return
 
-            # Stats
-            # Let the coordinator handle the 'background_updates' stat inside 'update_device_cache'
-            # to ensure it's only incremented on a real change.
+            _LOGGER.info("Stored NEW background location update for %s (last_seen=%s)", device_name, current_last_seen)
+
             if location_data.get("is_own_report") is False:
                 # Crowd-sourced classification is still useful to track here,
                 # as only the receiver has access to this detail from the raw report.
