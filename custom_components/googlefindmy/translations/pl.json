@@ -67,7 +67,8 @@
         "description": "Co chcesz skonfigurować?",
         "menu_options": {
           "credentials": "Zaktualizuj poświadczenia",
-          "settings": "Zmień ustawienia"
+          "settings": "Zmień ustawienia",
+          "visibility": "Widoczność urządzeń"
         }
       },
       "credentials": {
@@ -99,6 +100,13 @@
         "data_description": {
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają."
         }
+      },
+      "visibility": {
+        "title": "Widoczność urządzeń",
+        "description": "Przywróć wcześniej ignorowane urządzenia, aby znów były widoczne. Wybierz jedno lub więcej urządzeń i zapisz.",
+        "data": {
+          "unignore_devices": "Przywróć urządzenia"
+        }
       }
     },
     "error": {
@@ -109,7 +117,8 @@
       "required": "To pole jest wymagane."
     },
     "abort": {
-      "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie."
+      "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie.",
+      "no_ignored_devices": "Brak ignorowanych urządzeń do przywrócenia."
     }
   },
   "services": {
@@ -138,9 +147,9 @@
       "description": "Odświeża adresy URL konfiguracji urządzeń Google Find My tak, aby wskazywały na zintegrowany widok mapy.",
       "fields": {}
     },
-    "locate_external": {
+    "locate_device_external": {
       "name": "Zlokalizuj urządzenie (zewnętrznie)",
-      "description": "Zlokalizuj urządzenie przy użyciu zewnętrznej usługi (deleguje do zwykłej lokalizacji).",
+      "description": "Zlokalizuj urządzenie przy użyciu zewnętrznego pomocnika; deleguje do zwykłej lokalizacji.",
       "fields": {
         "device_id": {
           "name": "Urządzenie",
