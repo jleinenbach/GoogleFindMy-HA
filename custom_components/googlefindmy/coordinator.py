@@ -21,7 +21,7 @@ from homeassistant.components.recorder import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
-    # HA session is provided by the integration and reused across I/O
+# HA session is provided by the integration and reused across I/O
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -32,6 +32,8 @@ from .const import (
     UPDATE_INTERVAL,
     LOCATION_REQUEST_TIMEOUT_S,
     DEFAULT_MIN_POLL_INTERVAL,
+    OPT_IGNORED_DEVICES,
+    DEFAULT_OPTIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -168,7 +170,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
             "skipped_duplicates": 0,
-            "background_updates": 0,  # FCM/push-driven updates
+            "background_updates": 0,  # FCM/push-driven updates + manual commits
             "polled_updates": 0,      # sequential poll-driven updates
             "crowd_sourced_updates": 0,
             "history_fallback_used": 0,
@@ -192,6 +194,34 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
 
+    # ---------------------------- Ignore helpers ----------------------------
+    def _get_ignored_set(self) -> Set[str]:
+        """Return the set of device IDs the user chose to ignore (options-first).
+
+        Notes:
+            - Uses config_entry.options if available; falls back to an attribute
+              'ignored_devices' when set through update_settings().
+            - Intentionally simple equality (no normalization) to avoid surprises.
+        """
+        try:
+            entry = getattr(self, "config_entry", None)
+            if entry is not None:
+                raw = entry.options.get(
+                    OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES, [])
+                )
+                if isinstance(raw, list):
+                    return set(x for x in raw if isinstance(x, str))
+        except Exception:  # defensive
+            pass
+        raw_attr = getattr(self, "ignored_devices", None)
+        if isinstance(raw_attr, list):
+            return set(x for x in raw_attr if isinstance(x, str))
+        return set()
+
+    def is_ignored(self, device_id: str) -> bool:
+        """Return True if the device is currently ignored by user choice."""
+        return device_id in self._get_ignored_set()
+
     # Public read-only state for diagnostics/UI
     @property
     def is_polling(self) -> bool:
@@ -209,8 +239,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         Discovery semantics:
         - Always fetch the **full** lightweight device list (no executor).
         - Update presence and metadata caches for **all** devices.
-        - Publish a snapshot for **all** devices so platforms can add entities dynamically.
-        - Limit the sequential poll to `tracked_devices` if the user configured a subset.
+        - The published snapshot (`self.data`) contains **all** devices (for dynamic entity creation).
+        - The sequential **polling cycle** still respects `tracked_devices` (if non-empty).
 
         Returns:
             A list of dictionaries, where each dictionary represents a device's state.
@@ -223,10 +253,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # 1) Always fetch the lightweight FULL device list using native async API
             all_devices = await self.api.async_get_basic_device_list()
             all_devices = all_devices or []
+            ignored = self._get_ignored_set()
 
-            # Record presence from the full list (no tracking filter here).
+            # Record presence from the full list (ignore-filter applied).
             self._present_device_ids = {
-                d["id"] for d in all_devices if isinstance(d.get("id"), str)
+                d["id"] for d in all_devices if isinstance(d.get("id"), str) and d["id"] not in ignored
             }
 
             # 2) Update internal name/capability caches for ALL devices
@@ -244,11 +275,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             now_mono = time.monotonic()
             effective_interval = max(self.location_poll_interval, self.min_poll_interval)
 
-            # Devices to POLL: respect tracked_devices if explicitly set, else poll all
+            # Devices to POLL: respect tracked_devices if explicitly set, else poll all (ignore-filter applied)
             if self.tracked_devices:
-                devices_to_poll = [d for d in all_devices if d["id"] in self.tracked_devices]
+                devices_to_poll = [
+                    d for d in all_devices if d["id"] in self.tracked_devices and d["id"] not in ignored
+                ]
             else:
-                devices_to_poll = list(all_devices)
+                devices_to_poll = [d for d in all_devices if d["id"] not in ignored]
 
             if not self._startup_complete:
                 # Defer the first poll to avoid startup load; it will run after the first interval.
@@ -275,8 +308,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         self._is_polling,
                     )
 
-            # 4) Build data snapshot for ALL devices (enables dynamic entity creation)
-            snapshot = await self._async_build_device_snapshot_with_fallbacks(all_devices)
+            # 4) Build data snapshot for devices visible to the user (ignore-filter applied)
+            visible_devices = [d for d in all_devices if d["id"] not in ignored]
+            snapshot = await self._async_build_device_snapshot_with_fallbacks(visible_devices)
             _LOGGER.debug(
                 "Returning %d device entries; next poll in ~%ds",
                 len(snapshot),
@@ -849,11 +883,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # union of all known names and cached locations
             ids = list({*self._device_names.keys(), *self._device_location_data.keys()})
 
-        # Respect tracked_devices semantics only for POLLING, not for discovery/snapshot
-        # (we still filter here if a user explicitly configured a subset for visibility).
-        # If you want snapshots to always include all, comment out the block below.
-        # if self.tracked_devices:
-        #     ids = [d for d in ids if d in self.tracked_devices]
+        # Apply ignore filter to prevent resurfacing ignored devices via push path.
+        ignored = self._get_ignored_set()
+        ids = [d for d in ids if d not in ignored]
 
         # Build "devices" stubs from id->name mapping
         devices_stub: List[Dict[str, Any]] = [
@@ -934,6 +966,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         - If capability is known from the lightweight device list -> use it (fast, cached).
         - If push readiness is explicitly False -> disable.
         - Otherwise -> optimistic True (known devices) to keep the UI usable.
+          The actual action enforces reality and will start a cooldown on failure.
 
         Args:
             device_id: The canonical ID of the device.
@@ -979,6 +1012,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
           - no in-flight locate for the device,
           - per-device cooldown (lower-bounded by DEFAULT_MIN_POLL_INTERVAL) not active.
         """
+        # Block manual locate for ignored devices.
+        if self.is_ignored(device_id):
+            return False
         if not self._api_push_ready():
             return False
         if self._is_polling:
@@ -994,6 +1030,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self,
         *,
         tracked_devices: Optional[List[str]] = None,
+        ignored_devices: Optional[List[str]] = None,
         location_poll_interval: Optional[int] = None,
         device_poll_delay: Optional[int] = None,
         min_poll_interval: Optional[int] = None,
@@ -1007,6 +1044,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         Args:
             tracked_devices: A list of device IDs to track.
+            ignored_devices: A list of device IDs to hide from snapshots/polling.
             location_poll_interval: The interval in seconds for location polling.
             device_poll_delay: The delay in seconds between polling devices.
             min_poll_interval: The minimum polling interval in seconds.
@@ -1015,6 +1053,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """
         if tracked_devices is not None:
             self.tracked_devices = list(tracked_devices)
+        if ignored_devices is not None:
+            # This attribute is only used as a fallback when config_entry is not available.
+            self.ignored_devices = list(ignored_devices)
 
         if location_poll_interval is not None:
             try:
