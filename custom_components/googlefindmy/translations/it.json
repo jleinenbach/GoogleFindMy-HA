@@ -67,7 +67,8 @@
         "description": "Cosa desideri configurare?",
         "menu_options": {
           "credentials": "Aggiorna credenziali",
-          "settings": "Modifica impostazioni"
+          "settings": "Modifica impostazioni",
+          "visibility": "Visibilità dei dispositivi"
         }
       },
       "credentials": {
@@ -99,6 +100,13 @@
         "data_description": {
           "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono."
         }
+      },
+      "visibility": {
+        "title": "Visibilità dei dispositivi",
+        "description": "Ripristina i dispositivi precedentemente ignorati per renderli di nuovo visibili. Seleziona uno o più dispositivi e salva.",
+        "data": {
+          "unignore_devices": "Ripristina dispositivi"
+        }
       }
     },
     "error": {
@@ -109,7 +117,8 @@
       "required": "Questo campo è obbligatorio."
     },
     "abort": {
-      "reconfigure_successful": "Riconfigurazione riuscita."
+      "reconfigure_successful": "Riconfigurazione riuscita.",
+      "no_ignored_devices": "Non ci sono dispositivi ignorati da ripristinare."
     }
   },
   "services": {
@@ -138,9 +147,9 @@
       "description": "Aggiorna gli URL di configurazione dei dispositivi Google Find My per puntare alla vista mappa integrata.",
       "fields": {}
     },
-    "locate_external": {
+    "locate_device_external": {
       "name": "Localizza dispositivo (esterno)",
-      "description": "Localizza un dispositivo utilizzando il servizio esterno (delegato alla localizzazione normale).",
+      "description": "Localizza un dispositivo utilizzando l’assistente esterno; delega alla localizzazione normale.",
       "fields": {
         "device_id": {
           "name": "Dispositivo",
