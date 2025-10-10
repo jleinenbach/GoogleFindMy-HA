@@ -102,10 +102,10 @@
         }
       },
       "visibility": {
-        "title": "Device visibility",
+        "title": "Device Visibility",
         "description": "Restore previously ignored devices to make them visible again. Select one or more devices to restore and save.",
         "data": {
-          "unignore_devices": "Restore devices"
+          "unignore_devices": "Devices to restore"
         }
       }
     },
@@ -163,7 +163,7 @@
     },
     "rebuild_registry": {
       "name": "Rebuild / Migrate Registry",
-      "description": "Maintenance: run a soft data→options migration or rebuild entities/devices for this integration.",
+      "description": "Maintenance: Run a soft data→options migration or rebuild entities/devices for this integration.",
       "fields": {
         "mode": {
           "name": "Mode",
