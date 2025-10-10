@@ -137,6 +137,13 @@ async def async_setup_entry(
         # Cold boot: create skeletons from tracked IDs without writing placeholder names
         tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
         for dev_id in tracked_ids:
+            # Do not create skeletons for ignored devices
+            try:
+                if hasattr(coordinator, "is_ignored") and coordinator.is_ignored(dev_id):
+                    _LOGGER.debug("Skipping ignored device skeleton sensor: %s", dev_id)
+                    continue
+            except Exception:
+                pass
             entities.append(GoogleFindMyLastSeenSensor(coordinator, {"id": dev_id}))
             known_ids.add(dev_id)
         if tracked_ids:
