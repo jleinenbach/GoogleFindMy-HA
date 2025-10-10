@@ -1265,3 +1265,31 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             )
             self._note_push_transport_problem()
             return False
+
+    async def async_stop_sound(self, device_id: str) -> bool:
+        """Stop sound on a device using the native async API (no executor).
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            True if the command was submitted successfully, False otherwise.
+        """
+        # Less strict than can_play_sound(): stopping is harmless but still requires push readiness.
+        if not self._api_push_ready():
+            _LOGGER.debug(
+                "Suppressing stop_sound call for %s: push not ready",
+                device_id,
+            )
+            return False
+        try:
+            ok = await self.api.async_stop_sound(device_id)
+            if not ok:
+                self._note_push_transport_problem()
+            return bool(ok)
+        except Exception as err:
+            _LOGGER.debug(
+                "async_stop_sound raised for %s: %s; entering cooldown", device_id, err
+            )
+            self._note_push_transport_problem()
+            return False
