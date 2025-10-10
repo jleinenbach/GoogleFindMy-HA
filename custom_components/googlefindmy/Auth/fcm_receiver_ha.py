@@ -42,6 +42,7 @@ try:
         FCM_MONITOR_INTERVAL_S,
         FCM_ABORT_ON_SEQ_ERROR_COUNT,
         DOMAIN,
+        OPT_IGNORED_DEVICES,  # for ignore fallback via options
     )
 except Exception:  # pragma: no cover
     FCM_CLIENT_HEARTBEAT_INTERVAL_S = 20
@@ -51,6 +52,7 @@ except Exception:  # pragma: no cover
     FCM_MONITOR_INTERVAL_S = 1.0
     FCM_ABORT_ON_SEQ_ERROR_COUNT = 3
     DOMAIN = "googlefindmy"
+    OPT_IGNORED_DEVICES = "ignored_devices"
 
 # Optional import of worker run-state enum (for robust state checks)
 try:
@@ -374,6 +376,8 @@ class FcmReceiverHA:
                     _LOGGER.info("Processing background FCM update for %s", name)
                     asyncio.create_task(self._process_background_update(coordinator, canonic_id, hex_string))
                     return
+                else:
+                    _LOGGER.debug("Skipping FCM update for ignored device %s", canonic_id[:8])
 
             # Not matched to any waiting callback or coordinator
             if self.location_update_callbacks:
@@ -400,12 +404,31 @@ class FcmReceiverHA:
     def _is_tracked(self, coordinator: Any, canonic_id: str) -> bool:
         """Return True if device is eligible for push processing.
 
-        Semantics: `tracked_devices` **only limits polling**, not push/discovery.
-        This ensures newly discovered devices (which might not yet be in options)
-        still receive live updates via FCM and can quickly surface in the UI.
+        Semantics:
+            * Push-Updates sollen *nicht* durch `tracked_devices` begrenzt werden
+              (Discovery bleibt live).
+            * **Ignored devices** werden hier *früh* verworfen.
         """
-        # NOTE: Intentionally return True to process *all* push updates.
-        # Polling will continue to respect `tracked_devices`.
+        # 1) Early ignore via coordinator API (bevorzugt)
+        try:
+            is_ignored_fn = getattr(coordinator, "is_ignored", None)
+            if callable(is_ignored_fn) and is_ignored_fn(canonic_id):
+                return False
+        except Exception:
+            # defensive fallback continues below
+            pass
+
+        # 2) Fallback: options-basierte Ignore-Liste (wenn keine API vorhanden)
+        try:
+            entry = getattr(coordinator, "config_entry", None)
+            if entry is not None:
+                ignored = entry.options.get(OPT_IGNORED_DEVICES, [])
+                if isinstance(ignored, list) and canonic_id in ignored:
+                    return False
+        except Exception:
+            pass
+
+        # 3) Default: Push erlaubt
         return True
 
     def _extract_canonic_id_from_response(self, hex_response: str) -> Optional[str]:
@@ -491,10 +514,11 @@ class FcmReceiverHA:
                     _LOGGER.error("Coordinator cache update failed for %s: %s", canonic_id, err)
                     return
 
-            _LOGGER.info("Stored NEW background location update for %s (last_seen=%s)", device_name, current_last_seen)
-
-            # Avoid double-counting if coordinator.update_device_cache() already increments stats.
-            # Crowd-sourced classification is still useful to track here.
+            # Stats
+            try:
+                coordinator.increment_stat("background_updates")
+            except Exception:
+                pass
             if location_data.get("is_own_report") is False:
                 coordinator.increment_stat("crowd_sourced_updates")
                 _LOGGER.info("Crowd-sourced update detected for %s via FCM", device_name)
