@@ -56,6 +56,7 @@ from .const import (
     OPT_MIN_ACCURACY_THRESHOLD,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_IGNORED_DEVICES,  # NEW: persist user's delete decision
     # Defaults
     DEFAULT_OPTIONS,
     DEFAULT_LOCATION_POLL_INTERVAL,
@@ -812,6 +813,7 @@ async def async_remove_config_entry_device(
       the device is linked to this config entry).
     - Purge in-memory caches for the device via the coordinator (keeps UI/state clean).
     - Remove the id from `tracked_devices` options if present (user chose to delete).
+    - Add the id to `ignored_devices` to prevent automatic re-creation.
     - Return True to allow HA to remove the device record and its entities.
     - Never allow removing the integration's own "service" device (ident = 'integration').
     """
@@ -843,12 +845,6 @@ async def async_remove_config_entry_device(
     #  - Remove from tracked_devices (polling) if present.
     #  - Add to ignored_devices (visibility) to prevent automatic re-creation.
     try:
-        # Late import to avoid hard dependency before Step 2 introduces this constant in const.py.
-        try:
-            from .const import OPT_IGNORED_DEVICES  # type: ignore
-        except Exception:  # pragma: no cover - temporary compatibility shim
-            OPT_IGNORED_DEVICES = "ignored_devices"  # noqa: N816
-
         opts = dict(entry.options)
 
         # 1) Remove from tracked_devices if present
@@ -856,13 +852,10 @@ async def async_remove_config_entry_device(
         if isinstance(tracked, list) and dev_id in tracked:
             opts[OPT_TRACKED_DEVICES] = [x for x in tracked if x != dev_id]
 
-        # 2) Add to ignored_devices (idempotent)
-        ignored = opts.get(OPT_IGNORED_DEVICES)
-        if not isinstance(ignored, list):
-            ignored = []
-        if dev_id not in ignored:
-            ignored.append(dev_id)
-            opts[OPT_IGNORED_DEVICES] = ignored
+        # 2) Add to ignored_devices (idempotent + sorted for stable diffs)
+        ignored = set(opts.get(OPT_IGNORED_DEVICES, [])) if isinstance(opts.get(OPT_IGNORED_DEVICES), list) else set()
+        ignored.add(dev_id)
+        opts[OPT_IGNORED_DEVICES] = sorted(ignored)
 
         # Commit options if anything changed
         if opts != entry.options:
