@@ -67,7 +67,8 @@
         "description": "What would you like to configure?",
         "menu_options": {
           "credentials": "Update credentials",
-          "settings": "Modify settings"
+          "settings": "Modify settings",
+          "visibility": "Device visibility"
         }
       },
       "credentials": {
@@ -99,6 +100,13 @@
         "data_description": {
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire."
         }
+      },
+      "visibility": {
+        "title": "Device visibility",
+        "description": "Restore previously ignored devices to make them visible again. Select one or more devices to restore and save.",
+        "data": {
+          "unignore_devices": "Restore devices"
+        }
       }
     },
     "error": {
@@ -109,7 +117,8 @@
       "required": "This field is required."
     },
     "abort": {
-      "reconfigure_successful": "Reconfiguration successful."
+      "reconfigure_successful": "Reconfiguration successful.",
+      "no_ignored_devices": "There are no ignored devices to restore."
     }
   },
   "services": {
