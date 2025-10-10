@@ -142,6 +142,16 @@
         }
       }
     },
+    "stop_sound": {
+      "name": "Ton stoppen",
+      "description": "Stoppt den Ton auf einem Google-Find-My-Gerät.",
+      "fields": {
+        "device_id": {
+          "name": "Gerät",
+          "description": "Wähle ein Gerät aus (oder übergib eine kanonische ID über die Entwicklerwerkzeuge)."
+        }
+      }
+    },
     "refresh_device_urls": {
       "name": "Geräte-URLs aktualisieren",
       "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
