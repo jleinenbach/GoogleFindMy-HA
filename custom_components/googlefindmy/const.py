@@ -108,6 +108,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
 # --------------------------------------------------------------------------------------
 SERVICE_LOCATE_DEVICE: str = "locate_device"
 SERVICE_PLAY_SOUND: str = "play_sound"
+SERVICE_STOP_SOUND: str = "stop_sound"
 SERVICE_LOCATE_EXTERNAL: str = "locate_device_external"
 
 SERVICE_REFRESH_DEVICE_URLS: str = "refresh_device_urls"
@@ -192,6 +193,7 @@ __all__ = [
     "DEFAULT_OPTIONS",
     "SERVICE_LOCATE_DEVICE",
     "SERVICE_PLAY_SOUND",
+    "SERVICE_STOP_SOUND",
     "SERVICE_LOCATE_EXTERNAL",
     "SERVICE_REFRESH_DEVICE_URLS",
     "SERVICE_REFRESH_URLS",
