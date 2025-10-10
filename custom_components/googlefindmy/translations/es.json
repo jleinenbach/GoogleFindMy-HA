@@ -142,6 +142,16 @@
         }
       }
     },
+    "stop_sound": {
+      "name": "Detener sonido",
+      "description": "Detiene el sonido en un dispositivo de Google Find My.",
+      "fields": {
+        "device_id": {
+          "name": "Dispositivo",
+          "description": "Selecciona un dispositivo de Google Find My (o pasa un ID canónico desde Herramientas para desarrolladores)."
+        }
+      }
+    },
     "refresh_device_urls": {
       "name": "Actualizar URL de los dispositivos",
       "description": "Actualiza las URL de configuración de los dispositivos de Google Find My para que apunten a la vista de mapa integrada.",
