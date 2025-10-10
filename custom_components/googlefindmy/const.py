@@ -35,10 +35,12 @@ OPT_ENABLE_STATS_ENTITIES: str = "enable_stats_entities"
 OPT_GOOGLE_HOME_FILTER_ENABLED: str = "google_home_filter_enabled"
 OPT_GOOGLE_HOME_FILTER_KEYWORDS: str = "google_home_filter_keywords"
 OPT_MAP_VIEW_TOKEN_EXPIRATION: str = "map_view_token_expiration"
+OPT_IGNORED_DEVICES: str = "ignored_devices"
 
 # Canonical list of option keys supported by the integration
 OPTION_KEYS: tuple[str, ...] = (
     OPT_TRACKED_DEVICES,
+    OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL,
@@ -88,6 +90,7 @@ DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
 # Aggregate defaults dictionary for option-first reading patterns
 DEFAULT_OPTIONS: dict[str, object] = {
     OPT_TRACKED_DEVICES: [],
+    OPT_IGNORED_DEVICES: [],
     OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL: DEFAULT_MIN_POLL_INTERVAL,
@@ -160,6 +163,7 @@ __all__ = [
     "DATA_SECRET_BUNDLE",
     "DATA_AUTH_METHOD",
     "OPT_TRACKED_DEVICES",
+    "OPT_IGNORED_DEVICES",
     "OPT_LOCATION_POLL_INTERVAL",
     "OPT_DEVICE_POLL_DELAY",
     "OPT_MIN_POLL_INTERVAL",
