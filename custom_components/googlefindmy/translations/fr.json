@@ -67,7 +67,8 @@
         "description": "Que souhaitez-vous configurer ?",
         "menu_options": {
           "credentials": "Mettre à jour les identifiants",
-          "settings": "Modifier les paramètres"
+          "settings": "Modifier les paramètres",
+          "visibility": "Visibilité des appareils"
         }
       },
       "credentials": {
@@ -99,6 +100,13 @@
         "data_description": {
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas."
         }
+      },
+      "visibility": {
+        "title": "Visibilité des appareils",
+        "description": "Restaurez des appareils précédemment ignorés pour les rendre à nouveau visibles. Sélectionnez un ou plusieurs appareils puis enregistrez.",
+        "data": {
+          "unignore_devices": "Restaurer des appareils"
+        }
       }
     },
     "error": {
@@ -109,7 +117,8 @@
       "required": "Ce champ est obligatoire."
     },
     "abort": {
-      "reconfigure_successful": "Reconfiguration réussie."
+      "reconfigure_successful": "Reconfiguration réussie.",
+      "no_ignored_devices": "Aucun appareil ignoré à restaurer."
     }
   },
   "services": {
@@ -138,9 +147,9 @@
       "description": "Actualise les URL de configuration des appareils Google Find My pour qu’elles pointent vers la vue carte intégrée.",
       "fields": {}
     },
-    "locate_external": {
+    "locate_device_external": {
       "name": "Localiser l’appareil (externe)",
-      "description": "Localiser un appareil en utilisant le service externe (délègue à la localisation normale).",
+      "description": "Localiser un appareil à l’aide de l’assistant externe ; délègue à la localisation normale.",
       "fields": {
         "device_id": {
           "name": "Appareil",
