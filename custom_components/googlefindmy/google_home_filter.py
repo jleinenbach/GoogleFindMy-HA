@@ -1,9 +1,9 @@
 # custom_components/googlefindmy/google_home_filter.py
-"""Google Home semantic-location filter (options-first, v2.3).
+"""Google Home semantic-location filter (options-first, v2.3+patch).
 
 This module centralizes heuristics to:
 - suppress noisy "home"-like detections from Google/Nest/Chromecast speakers,
-- optionally substitute obvious Google-Home semantic places with the Home zone,
+- substitute obvious Google-Home semantic places with the **Home zone coordinates**,
 - debounce repeated "Home" reports within a time window.
 
 Design goals
@@ -20,7 +20,7 @@ Public API (stable)
 - `update_config(config_or_entry)`
 - `is_google_home_device(location_name) -> bool`
 - `get_home_zone_name() -> str | None`                      # kept for compatibility
-- `get_home_zone_attributes() -> dict[str, float] | None`   # latitude/longitude/radius
+- `get_home_zone_attributes() -> dict[str, float] | None`   # latitude/longitude[/radius]
 - `is_device_at_home(device_id) -> bool`
 - `reset_spam_tracking(device_id) -> None`
 - `should_filter_detection(device_id, location_name) -> tuple[bool, dict | None]`
@@ -30,8 +30,8 @@ Behavioral note
 Historically, this filter could return a *zone name* to replace semantic labels
 (e.g. "Nest Hub") with "Home". That forced the device_tracker's state to that
 string. As of v2.3 we instead return **GPS coordinates** of `zone.home`
-(plus radius) so that Home Assistant Core applies the standard zone engine and
-sets the tracker state to `home`. This aligns with HA best practices.
+(plus radius when available) so that Home Assistant Core applies the standard
+zone engine and sets the tracker state to `home`. This aligns with HA best practices.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from typing import Any, Mapping, Callable
 
 from homeassistant.components.zone import DOMAIN as ZONE_DOMAIN
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE, ATTR_RADIUS
+from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
 from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
@@ -56,6 +56,10 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Keep local names for zone attributes to avoid fragile imports.
+ZONE_ATTR_RADIUS = "radius"
+ZONE_ATTR_PASSIVE = "passive"
 
 
 class GoogleHomeFilter:
@@ -102,7 +106,8 @@ class GoogleHomeFilter:
         self._spam_threshold: float = float(GOOGLE_HOME_SPAM_THRESHOLD_MINUTES) * 60.0
 
         # Cached Home-zone facts (kept fresh by a state-change listener)
-        self._home_zone_attrs: dict[str, float] | None = None  # {"latitude": float, "longitude": float, "radius": float?}
+        # Example: {"latitude": float, "longitude": float, "radius": float?}
+        self._home_zone_attrs: dict[str, float] | None = None
         self._home_zone_passive: bool = False
         self._unsub_zone_listener: Callable[[], None] | None = None
 
@@ -223,16 +228,16 @@ class GoogleHomeFilter:
             return
 
         attrs = st.attributes or {}
-        self._home_zone_passive = bool(attrs.get("passive", False))
+        self._home_zone_passive = bool(attrs.get(ZONE_ATTR_PASSIVE, False))
         if ATTR_LATITUDE in attrs and ATTR_LONGITUDE in attrs:
             self._home_zone_attrs = {
                 "latitude": float(attrs[ATTR_LATITUDE]),
                 "longitude": float(attrs[ATTR_LONGITUDE]),
             }
-            # 'radius' is optional; keep as float if present
-            if ATTR_RADIUS in attrs and attrs[ATTR_RADIUS] is not None:
+            # 'radius' is optional; keep as float if present and valid
+            if ZONE_ATTR_RADIUS in attrs and attrs[ZONE_ATTR_RADIUS] is not None:
                 try:
-                    self._home_zone_attrs["radius"] = float(attrs[ATTR_RADIUS])  # type: ignore[index]
+                    self._home_zone_attrs["radius"] = float(attrs[ZONE_ATTR_RADIUS])  # type: ignore[index]
                 except (TypeError, ValueError):
                     # Ignore malformed radius
                     pass
@@ -354,14 +359,13 @@ class GoogleHomeFilter:
         """Return (should_filter, replacement_attributes).
 
         Semantics:
-          - If the filter is disabled → (False, None).
-          - If `location_name` already represents a Home zone:
-              * Apply debounce only (i.e., possibly filter, but never substitute).
-          - If `location_name` matches Google-Home device keywords:
-              * If the device is already "home": debounce only.
-              * If the device is NOT "home": substitute with the Home zone **coordinates**,
-                letting HA's zone engine set the state to `home`.
-          - If `zone.home` is *passive*, we never substitute coordinates (warn once).
+          1) If `location_name` is literally the Home zone ("home" or its friendly name):
+             - Apply debounce only (never substitute).
+          2) Else, if `location_name` matches Google-Home keywords:
+             - If device already 'home' → debounce only.
+             - If not 'home' → substitute Home zone **coordinates** (if available & zone not passive).
+          3) Otherwise → pass through unchanged.
+          4) If `zone.home` is *passive*, never substitute coordinates (warn once per call).
 
         Returns:
             should_filter: True → suppress; False → pass through (optionally substituted).
@@ -370,25 +374,22 @@ class GoogleHomeFilter:
         if not self._enabled:
             return False, None
 
-        # 1) Home zone detection has priority (match literal "home" or friendly name).
-        is_home_zone = False
+        # 1) Early: literal 'Home' handling (debounce-only, no substitution).
         if location_name:
-            loc = location_name.strip().casefold()
-            home_name = (self.get_home_zone_name() or "Home").strip().casefold()
-            is_home_zone = loc in {"home", home_name}
+            loc_cf = str(location_name).strip().casefold()
+            home_name_cf = str(self.get_home_zone_name() or "Home").strip().casefold()
+            if loc_cf in {"home", home_name_cf}:
+                if self._should_prevent_spam(device_id):
+                    _LOGGER.debug("Filtering 'home' spam for %s (location_name=%r)", device_id, location_name)
+                    return True, None
+                self._update_spam_tracking(device_id)
+                return False, None
 
-        if is_home_zone:
-            if self._should_prevent_spam(device_id):
-                _LOGGER.debug("Filtering 'home' spam for %s at %s", device_id, location_name)
-                return True, None
-            self._update_spam_tracking(device_id)
-            return False, None
-
-        # 2) Google Home device detection?
+        # 2) Google Home semantic device?
         if not self.is_google_home_device(location_name):
             return False, None
 
-        # 3) Device already at Home → debounce only.
+        # Already home → debounce-only
         if self.is_device_at_home(device_id):
             if self._should_prevent_spam(device_id):
                 _LOGGER.debug("Filtering Google Home spam for %s at %s", device_id, location_name)
@@ -396,11 +397,10 @@ class GoogleHomeFilter:
             self._update_spam_tracking(device_id)
             return False, None
 
-        # 4) Device not at Home → substitute semantic location with the Home zone **coordinates**.
+        # Not home → substitute coordinates (if zone active & known coordinates)
         if self._home_zone_passive:
-            # Passive zones do not affect device_tracker state; substitution would mislead users.
             _LOGGER.warning(
-                "zone.home is configured as passive; cannot substitute coordinates for %s (semantic '%s')",
+                "zone.home is passive; cannot substitute coordinates for %s (semantic %r)",
                 device_id,
                 location_name,
             )
@@ -409,17 +409,13 @@ class GoogleHomeFilter:
         attrs = self.get_home_zone_attributes()
         if attrs:
             _LOGGER.info(
-                "Substituting Google Home detection for %s at '%s' with Home coordinates",
+                "Substituting Google Home detection for %s at %r with Home coordinates",
                 device_id,
                 location_name,
             )
             self._update_spam_tracking(device_id)
-            # Return only the fields coordinators/entities are expected to consume.
-            repl = {
-                "latitude": attrs["latitude"],
-                "longitude": attrs["longitude"],
-            }
-            if "radius" in attrs and isinstance(attrs["radius"], (int, float)):
+            repl = {"latitude": attrs["latitude"], "longitude": attrs["longitude"]}
+            if "radius" in attrs and isinstance(attrs.get("radius"), (int, float)):
                 repl["radius"] = float(attrs["radius"])
             return False, repl
 
