@@ -142,6 +142,16 @@
         }
       }
     },
+    "stop_sound": {
+      "name": "Stop Sound",
+      "description": "Stop the sound on a Google Find My device.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Select a Google Find My device (or pass a canonical ID via Developer Tools)."
+        }
+      }
+    },
     "refresh_device_urls": {
       "name": "Refresh Device URLs",
       "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view.",
