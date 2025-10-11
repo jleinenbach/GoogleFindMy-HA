@@ -11,14 +11,14 @@
       },
       "secrets_json": {
         "title": "Méthode 1 : GoogleFindMyTools secrets.json",
-        "description": "Exécutez GoogleFindMyTools (Chrome) pour générer des jetons d’authentification, puis collez ci-dessous le contenu complet du fichier Auth/secrets.json.",
+        "description": "Exécutez GoogleFindMyTools (Chrome) pour générer des jetons d’authentification, puis collez ci-dessous le contenu complet du fichier Auth/secrets.json.\n\n{hint}",
         "data": {
           "secrets_json": "Contenu du fichier secrets.json"
         }
       },
       "individual_tokens": {
         "title": "Méthode 2 : Jeton OAuth individuel",
-        "description": "Saisissez votre jeton OAuth et votre adresse e-mail Google obtenus lors d’un processus d’authentification manuel.",
+        "description": "Saisissez votre jeton OAuth et votre adresse e-mail Google obtenus lors d’un processus d’authentification manuel.\n\n{hint}",
         "data": {
           "oauth_token": "Jeton OAuth",
           "google_email": "Adresse e-mail Google"
@@ -26,7 +26,7 @@
       },
       "device_selection": {
         "title": "Sélection des appareils et interrogation",
-        "description": "Sélectionnez les appareils à suivre et configurez les paramètres d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)\n\nL’intégration interroge les appareils de manière séquentielle et demande les données de position pour chaque appareil avec le délai spécifié.",
+        "description": "Sélectionnez les appareils à suivre et configurez les paramètres d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes par appareil dans un cycle (1–60 secondes)\n\nL’intégration interroge les appareils de manière séquentielle, en demandant la position de chaque appareil avec le délai spécifié.",
         "data": {
           "tracked_devices": "Appareils suivis",
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
@@ -41,7 +41,7 @@
       },
       "reauth_confirm": {
         "title": "Se réauthentifier",
-        "description": "Vos identifiants semblent invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nAstuce : vous pouvez soit coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail."
+        "description": "{reason}\n\nAstuce : vous pouvez soit coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail."
       }
     },
     "error": {
@@ -73,7 +73,7 @@
       },
       "credentials": {
         "title": "Mettre à jour les identifiants (optionnel)",
-        "description": "Mettez à jour les identifiants sans exposer les valeurs existantes. Fournissez exactement une méthode :\n\n• Coller le contenu complet d’un **secrets.json** neuf\n**ou**\n• Saisir un **jeton OAuth** neuf et une **adresse e-mail Google**.\n\nLe cas échéant, les identifiants seront validés et enregistrés ; l’intégration sera rechargée sans modifier les noms de vos entités.",
+        "description": "{hint}\n\nMettez à jour les identifiants sans exposer les valeurs existantes. Fournissez exactement une méthode :\n\n• Coller le contenu complet d’un **secrets.json** neuf\n**ou**\n• Saisir un **jeton OAuth** neuf et une **adresse e-mail Google**.\n\nLe cas échéant, les identifiants seront validés et enregistrés ; l’intégration sera rechargée sans modifier les noms de vos entités.",
         "data": {
           "secrets_json": "Nouveau secrets.json (contenu complet)",
           "oauth_token": "Nouveau jeton OAuth",
