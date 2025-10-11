@@ -317,8 +317,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> config_entries.OptionsFlow:
-        """Create the options flow."""
-        return OptionsFlowHandler(config_entry)
+        """Create the options flow (HA injects the config entry automatically)."""
+        return OptionsFlowHandler()
 
     # ---------- User entry point ----------
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -582,11 +582,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
-    """Options flow to update non-secret settings and optionally refresh credentials."""
+    """Options flow to update non-secret settings and optionally refresh credentials.
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Store the config entry (OptionsFlowWithReload does not require super init)."""
-        self.config_entry = config_entry
+    NOTE: Home Assistant injects the config entry automatically.
+    Do NOT set self.config_entry manually.
+    """
+
+    # no __init__: HA provides self.config_entry
 
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
