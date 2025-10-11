@@ -41,12 +41,12 @@
       },
       "reauth_confirm": {
         "title": "Reauthenticate",
-        "description": "Your credentials are invalid or expired. Please provide new credentials below.\n\nTip: You can either paste the full contents of a fresh secrets.json **or** supply a new OAuth token and email."
+        "description": "Your credentials appear to be invalid or expired. Please provide new credentials below.\n\nTip: You can either paste the full contents of a fresh secrets.json **or** supply a new OAuth token and email."
       }
     },
     "error": {
       "auth_failed": "Authentication failed. Please try again.",
-      "invalid_token": "Invalid email/token or required fields are missing.",
+      "invalid_token": "Invalid token/email provided or required fields are missing.",
       "invalid_json": "Invalid JSON format in secrets.json content.",
       "no_devices": "No devices found. Please ensure that Find My Device is enabled on your Google account.",
       "cannot_connect": "Failed to connect to the Google API. This may be temporary — please try again later.",
@@ -114,7 +114,8 @@
       "invalid": "Validation failed. Please check your input.",
       "cannot_connect": "Failed to connect to the Google API.",
       "choose_one": "Please provide exactly one credential method.",
-      "required": "This field is required."
+      "required": "This field is required.",
+      "invalid_token": "Invalid credentials (token/email). Please check format and content."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration successful.",
