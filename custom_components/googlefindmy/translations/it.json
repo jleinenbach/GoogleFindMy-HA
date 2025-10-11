@@ -46,7 +46,7 @@
     },
     "error": {
       "auth_failed": "Autenticazione non riuscita. Riprova.",
-      "invalid_token": "Email/token non valido o campi obbligatori mancanti.",
+      "invalid_token": "Credenziali non valide (token/e-mail) o campi obbligatori mancanti.",
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
       "no_devices": "Nessun dispositivo trovato. Assicurati che ‘Trova il mio dispositivo’ sia attivato nel tuo account Google.",
       "cannot_connect": "Impossibile connettersi all’API di Google. Potrebbe trattarsi di un problema temporaneo — riprova più tardi.",
@@ -114,7 +114,8 @@
       "invalid": "Convalida non riuscita. Controlla i tuoi dati.",
       "cannot_connect": "Impossibile connettersi all’API di Google.",
       "choose_one": "Fornisci esattamente un metodo di credenziali.",
-      "required": "Questo campo è obbligatorio."
+      "required": "Questo campo è obbligatorio.",
+      "invalid_token": "Credenziali non valide (token/e-mail). Verifica formato e contenuto."
     },
     "abort": {
       "reconfigure_successful": "Riconfigurazione riuscita.",
