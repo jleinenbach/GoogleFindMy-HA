@@ -114,7 +114,8 @@
       "invalid": "Validierung fehlgeschlagen. Bitte überprüfe deine Eingabe.",
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
-      "required": "Dieses Feld ist erforderlich."
+      "required": "Dieses Feld ist erforderlich.",
+      "invalid_token": "Ungültige Anmeldedaten (Token/E-Mail). Bitte prüfe Format und Inhalt."
     },
     "abort": {
       "reconfigure_successful": "Neukonfiguration erfolgreich.",
