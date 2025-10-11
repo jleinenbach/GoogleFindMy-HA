@@ -11,14 +11,14 @@
       },
       "secrets_json": {
         "title": "Method 1: GoogleFindMyTools secrets.json",
-        "description": "Run GoogleFindMyTools (Chrome) to generate authentication tokens, then paste the full contents of the Auth/secrets.json file below.",
+        "description": "Run GoogleFindMyTools (Chrome) to generate authentication tokens, then paste the full contents of the Auth/secrets.json file below.\n\n{hint}",
         "data": {
           "secrets_json": "Contents of secrets.json file"
         }
       },
       "individual_tokens": {
         "title": "Method 2: Individual OAuth Token",
-        "description": "Enter your OAuth token and Google email address obtained from a manual authentication process.",
+        "description": "Enter your OAuth token and Google email address obtained from a manual authentication process.\n\n{hint}",
         "data": {
           "oauth_token": "OAuth Token",
           "google_email": "Google Email Address"
@@ -41,7 +41,7 @@
       },
       "reauth_confirm": {
         "title": "Reauthenticate",
-        "description": "Your credentials appear to be invalid or expired. Please provide new credentials below.\n\nTip: You can either paste the full contents of a fresh secrets.json **or** supply a new OAuth token and email."
+        "description": "{reason}\n\nTip: You can either paste the full contents of a fresh secrets.json **or** supply a new OAuth token and email."
       }
     },
     "error": {
@@ -73,7 +73,7 @@
       },
       "credentials": {
         "title": "Update Credentials (optional)",
-        "description": "Update credentials without exposing existing values. Provide exactly one method:\n\n• Paste full contents of a new **secrets.json**\n**or**\n• Enter a new **OAuth token** and **Google email**.\n\nIf provided, credentials will be validated and stored; the integration will reload without changing your entity names.",
+        "description": "{hint}\n\nUpdate credentials without exposing existing values. Provide exactly one method:\n\n• Paste full contents of a new **secrets.json**\n**or**\n• Enter a new **OAuth token** and **Google email**.\n\nIf provided, credentials will be validated and stored; the integration will reload without changing your entity names.",
         "data": {
           "secrets_json": "New secrets.json (full contents)",
           "oauth_token": "New OAuth token",
