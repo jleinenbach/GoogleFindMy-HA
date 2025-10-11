@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import voluptuous as vol
@@ -69,6 +70,24 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# ---------------------------
+# Validators (format/plausibility)
+# ---------------------------
+# RFC5322-ish but pragmatic email check (must have at least one dot in domain)
+_EMAIL_RE = re.compile(
+    r"^(?=.{3,254}$)[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$"
+)
+# Allow JWT-like tokens and URL-safe/base64 variants; reject whitespace; min length.
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9\-._~+/=]{24,}$")
+
+def _email_valid(value: str) -> bool:
+    """Return True if value looks like a real email address."""
+    return bool(_EMAIL_RE.match(value or ""))
+
+def _token_plausible(value: str) -> bool:
+    """Return True if value looks like an OAuth/JWT-ish token (no spaces, long enough)."""
+    return bool(_TOKEN_RE.match(value or ""))
 
 # ---------------------------
 # Auth method list
@@ -201,9 +220,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     email = _extract_email_from_secrets(secrets_data) or ""
                     oauth = _extract_oauth_from_secrets(secrets_data) or ""
-                    if not (email and oauth):
-                        missing = [f for f, v in [("email", email), ("oauth_token", oauth)] if not v]
-                        _LOGGER.debug("secrets.json validation failed; missing fields: %s", ", ".join(missing))
+                    if not (_email_valid(email) and _token_plausible(oauth)):
+                        _LOGGER.debug("secrets.json validation failed; email/token not plausible")
                         errors["base"] = "invalid_token"
                     else:
                         # Store only minimal credentials transiently for next step
@@ -236,8 +254,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             oauth_token = (user_input.get(CONF_OAUTH_TOKEN) or "").strip()
             google_email = (user_input.get(CONF_GOOGLE_EMAIL) or "").strip()
 
-            basic_ok = bool(oauth_token and google_email and "@" in google_email and len(oauth_token) >= 16)
-            if basic_ok:
+            if _email_valid(google_email) and _token_plausible(oauth_token):
                 self._auth_data = {
                     DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
                     CONF_OAUTH_TOKEN: oauth_token,
@@ -282,7 +299,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"{DOMAIN}:{email_for_uid}")
             self._abort_if_unique_id_configured()
 
-        # Populate device choices once
+        # Populate device choices once (also serves as online validation)
         if not self._available_devices:
             try:
                 api, username = await self._async_build_api_and_username()
@@ -419,9 +436,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         parsed = json.loads(secrets_json)
                         if not isinstance(parsed, dict):
                             raise TypeError()
-                        email = _extract_email_from_secrets(parsed)
-                        oauth = _extract_oauth_from_secrets(parsed)
-                        if not (email and oauth):
+                        email = _extract_email_from_secrets(parsed) or ""
+                        oauth = _extract_oauth_from_secrets(parsed) or ""
+                        if not (_email_valid(email) and _token_plausible(oauth)):
                             errors["base"] = "invalid_token"
                         else:
                             new_data = {
@@ -432,13 +449,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
                             await api.async_get_basic_device_list(email)  # validation call
                     elif oauth_token and google_email:
-                        new_data = {
-                            DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                            CONF_OAUTH_TOKEN: oauth_token,
-                            CONF_GOOGLE_EMAIL: google_email,
-                        }
-                        api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
-                        await api.async_get_basic_device_list(google_email)
+                        if not (_email_valid(google_email) and _token_plausible(oauth_token)):
+                            errors["base"] = "invalid_token"
+                        else:
+                            new_data = {
+                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                CONF_OAUTH_TOKEN: oauth_token,
+                                CONF_GOOGLE_EMAIL: google_email,
+                            }
+                            api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
+                            await api.async_get_basic_device_list(google_email)
                 except (json.JSONDecodeError, TypeError):
                     errors["base"] = "invalid_json"
                 except Exception as err:  # noqa: BLE001 - network/api
@@ -717,9 +737,9 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                         parsed = json.loads(secrets_json)
                         if not isinstance(parsed, dict):
                             raise TypeError()
-                        email = _extract_email_from_secrets(parsed)
-                        oauth = _extract_oauth_from_secrets(parsed)
-                        if not (email and oauth):
+                        email = _extract_email_from_secrets(parsed) or ""
+                        oauth = _extract_oauth_from_secrets(parsed) or ""
+                        if not (_email_valid(email) and _token_plausible(oauth)):
                             errors["base"] = "invalid_token"
                         else:
                             new_data = {
@@ -730,13 +750,16 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                             api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
                             await api.async_get_basic_device_list(email)  # validation
                     elif oauth_token and google_email:
-                        new_data = {
-                            DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                            CONF_OAUTH_TOKEN: oauth_token,
-                            CONF_GOOGLE_EMAIL: google_email,
-                        }
-                        api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
-                        await api.async_get_basic_device_list(google_email)  # validation
+                        if not (_email_valid(google_email) and _token_plausible(oauth_token)):
+                            errors["base"] = "invalid_token"
+                        else:
+                            new_data = {
+                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                CONF_OAUTH_TOKEN: oauth_token,
+                                CONF_GOOGLE_EMAIL: google_email,
+                            }
+                            api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
+                            await api.async_get_basic_device_list(google_email)  # validation
 
                     if not errors:
                         entry = self.config_entry
