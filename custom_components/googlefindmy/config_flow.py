@@ -3,8 +3,8 @@
 
 Invariants (why this looks the way it does):
 - Exactly **one** authentication method must be provided by the user at a time
-  (either full `secrets.json` *or* manual OAuth token + Google email). We
-  enforce this in reauth/options and guide it in initial setup.
+  (either full `secrets.json` *or* manual OAuth token + Google email).
+  We enforce this in reauth/options and guide it in initial setup.
 - We distinguish syntax errors (`invalid_json`) from missing/invalid content
   (`invalid_token`) to give precise feedback.
 - We use a multiline selector for `secrets_json` where available to reduce
@@ -13,6 +13,8 @@ Invariants (why this looks the way it does):
   setups for the same Google account (quality-scale rule: unique-config-entry).
 - We prefer `entry.runtime_data` over `hass.data` for runtime objects and avoid
   logging secrets.
+- For `secrets.json`, we support multiple token sources and **fail over**:
+  prefer `aas_token`, then `fcm_credentials.installation.token`, then legacy keys.
 """
 from __future__ import annotations
 
@@ -78,8 +80,8 @@ _LOGGER = logging.getLogger(__name__)
 _EMAIL_RE = re.compile(
     r"^(?=.{3,254}$)[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$"
 )
-# Allow JWT-like tokens and URL-safe/base64 variants; reject whitespace; min length.
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9\-._~+/=]{24,}$")
+# Pragmatic token plausibility: no whitespace, at least 16 chars
+_TOKEN_RE = re.compile(r"^\S{16,}$")
 
 
 def _email_valid(value: str) -> bool:
@@ -88,7 +90,7 @@ def _email_valid(value: str) -> bool:
 
 
 def _token_plausible(value: str) -> bool:
-    """Return True if value looks like an OAuth/JWT-ish token (no spaces, long enough)."""
+    """Return True if value looks like a token (no spaces, long enough)."""
     return bool(_TOKEN_RE.match(value or ""))
 
 
@@ -126,7 +128,9 @@ STEP_INDIVIDUAL_DATA_SCHEMA = vol.Schema(
     }
 )
 
-
+# ---------------------------
+# Extractors (email + tokens with preference & failover list)
+# ---------------------------
 def _extract_email_from_secrets(data: Dict[str, Any]) -> Optional[str]:
     """Best-effort extractor for the Google account email from secrets.json."""
     candidates = [
@@ -141,30 +145,135 @@ def _extract_email_from_secrets(data: Dict[str, Any]) -> Optional[str]:
         val = data.get(key)
         if isinstance(val, str) and "@" in val:
             return val
+
+    # Nested fallback shapes (defensive)
+    try:
+        val = data["account"]["email"]
+        if isinstance(val, str) and "@" in val:
+            return val
+    except Exception:
+        pass
     return None
 
 
-def _extract_oauth_from_secrets(data: Dict[str, Any]) -> Optional[str]:
-    """Best-effort extractor for an OAuth token from secrets.json."""
-    candidates = [
+def _extract_oauth_candidates_from_secrets(data: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Return plausible tokens in order of preference."""
+    cands: List[Tuple[str, str]] = []
+
+    # 1) AAS token (preferred)
+    t = data.get("aas_token")
+    if isinstance(t, str) and _token_plausible(t):
+        cands.append(("aas_token", t))
+
+    # 2) FCM Installation JWT (preferred fallback)
+    try:
+        t2 = data["fcm_credentials"]["installation"]["token"]
+        if isinstance(t2, str) and _token_plausible(t2):
+            cands.append(("fcm_installation", t2))
+    except Exception:
+        pass
+
+    # 3) FCM registration token (rarely useful for FMD; lowest priority but keep as last resort)
+    try:
+        t3 = data["fcm_credentials"]["fcm"]["registration"]["token"]
+        if isinstance(t3, str) and _token_plausible(t3):
+            cands.append(("fcm_registration", t3))
+    except Exception:
+        pass
+
+    # 4) Legacy / generic flat keys (very last)
+    for key in (
         CONF_OAUTH_TOKEN,
         "oauthToken",
-        "oauth_token",
         "OAuthToken",
-        "oauth",
         "token",
         "access_token",
         "adm_token",
         "admToken",
-        "Auth",  # sometimes present in gpsoauth responses
-    ]
-    for key in candidates:
-        val = data.get(key)
-        if isinstance(val, str) and len(val) > 10:
-            return val
-    return None
+        "Auth",
+    ):
+        v = data.get(key)
+        if isinstance(v, str) and _token_plausible(v):
+            cands.append((key, v))
+
+    return cands
 
 
+def _extract_oauth_from_secrets(data: Dict[str, Any]) -> Optional[str]:
+    """Single selection from secrets.json using preferred order (no online validation here)."""
+    cands = _extract_oauth_candidates_from_secrets(data)
+    if not cands:
+        return None
+    try:
+        _LOGGER.debug("Choosing OAuth token from secrets source: %s", cands[0][0])
+    except Exception:
+        pass
+    return cands[0][1]
+
+
+# ---------------------------
+# Shared interpreters (Either/Or choice handling)
+# ---------------------------
+def _interpret_credentials_choice(
+    user_input: Dict[str, Any],
+    *,
+    secrets_field: str,
+    token_field: str,
+    email_field: str,
+) -> Tuple[Optional[str], Optional[str], Optional[List[Tuple[str, str]]], Optional[str]]:
+    """Interpret input into exactly-one-method choice.
+
+    Returns: (method, email, token_candidates, error_key)
+      - method: "secrets" | "manual" | None
+      - email: parsed/entered email (for manual or from secrets)
+      - token_candidates: list of (source_name, token) in order of preference (only for secrets/manual)
+      - error_key: translation key if an immediate input error is detected
+    """
+    secrets_json = (user_input.get(secrets_field) or "").strip()
+    oauth_token = (user_input.get(token_field) or "").strip()
+    google_email = (user_input.get(email_field) or "").strip()
+
+    has_secrets = bool(secrets_json)
+    has_token = bool(oauth_token)
+    has_email = bool(google_email)
+
+    # Mixing methods is not allowed
+    if has_secrets and (has_token or has_email):
+        return None, None, None, "choose_one"
+
+    # Neither provided
+    if not has_secrets and not (has_token or has_email):
+        return None, None, None, "choose_one"
+
+    # Secrets path
+    if has_secrets:
+        try:
+            parsed = json.loads(secrets_json)
+            if not isinstance(parsed, dict):
+                raise TypeError()
+        except (json.JSONDecodeError, TypeError):
+            return "secrets", None, None, "invalid_json"
+
+        email = _extract_email_from_secrets(parsed) or ""
+        cands = _extract_oauth_candidates_from_secrets(parsed)
+        if not (_email_valid(email) and cands):
+            return "secrets", None, None, "invalid_token"
+        return "secrets", email, cands, None
+
+    # Manual path (must have both)
+    if not (has_token and has_email):
+        # Partial manual input
+        return None, None, None, "choose_one"
+
+    if not (_email_valid(google_email) and _token_plausible(oauth_token)):
+        return "manual", None, None, "invalid_token"
+
+    return "manual", google_email, [("manual", oauth_token)], None
+
+
+# ---------------------------
+# Config flow
+# ---------------------------
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle the initial config flow for Google Find My Device."""
 
@@ -179,7 +288,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> config_entries.OptionsFlow:
         """Create the options flow."""
-        return OptionsFlowHandler()
+        return OptionsFlowHandler(config_entry)
 
     # ---------- User entry point ----------
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -194,82 +303,84 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
 
     # ---------- Secrets.json path ----------
+    async def _async_pick_working_token(self, email: str, candidates: List[Tuple[str, str]]) -> Optional[str]:
+        """Try tokens in order until one passes a minimal online validation."""
+        for source, token in candidates:
+            try:
+                api = GoogleFindMyAPI(oauth_token=token, google_email=email)
+                # Minimal online call for validation
+                await api.async_get_basic_device_list(email)
+                _LOGGER.debug("Token from '%s' validated successfully.", source)
+                return token
+            except Exception as err:  # noqa: BLE001 - network/auth errors
+                _LOGGER.warning("Token from '%s' failed validation: %s", source, err)
+                continue
+        return None
+
     async def async_step_secrets_json(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Collect and validate secrets.json content.
 
         Invariant: This step expects a *full* secrets.json (valid JSON object) that
-        contains both an email address and an OAuth token. We never log secrets.
+        contains both an email address and an OAuth token (from known sources).
+        We never log secrets. We also perform **online validation with failover**.
         """
         errors: Dict[str, str] = {}
 
         # Use multiline text input for secrets.json to improve UX
         schema = STEP_SECRETS_DATA_SCHEMA
         if selector is not None:
-            schema = vol.Schema(
-                {vol.Required("secrets_json"): selector({"text": {"multiline": True}})}
-            )
+            schema = vol.Schema({vol.Required("secrets_json"): selector({"text": {"multiline": True}})})
 
         if user_input is not None:
-            raw = (user_input.get("secrets_json") or "").strip()
-            if not raw:
-                errors["base"] = "invalid_token"
+            method, email, cands, err = _interpret_credentials_choice(
+                user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
+            )
+            if err:
+                errors["base"] = err
             else:
-                try:
-                    secrets_data = json.loads(raw)
-                    if not isinstance(secrets_data, dict):
-                        raise TypeError("JSON content is not an object")
-                except (json.JSONDecodeError, TypeError):
-                    errors["base"] = "invalid_json"
+                assert method == "secrets" and email and cands
+                chosen = await self._async_pick_working_token(email, cands)
+                if not chosen:
+                    # Syntax was OK but none of the candidates worked online
+                    errors["base"] = "cannot_connect"
                 else:
-                    email = _extract_email_from_secrets(secrets_data) or ""
-                    oauth = _extract_oauth_from_secrets(secrets_data) or ""
-                    if not (_email_valid(email) and _token_plausible(oauth)):
-                        _LOGGER.debug(
-                            "secrets.json validation failed; email/token not plausible"
-                        )
-                        errors["base"] = "invalid_token"
-                    else:
-                        # Store only minimal credentials transiently for next step
-                        self._auth_data = {
-                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                            CONF_OAUTH_TOKEN: oauth,
-                            CONF_GOOGLE_EMAIL: email,
-                            DATA_SECRET_BUNDLE: secrets_data,
-                        }
-                        return await self.async_step_device_selection()
+                    # Store only minimal credentials transiently for next step
+                    self._auth_data = {
+                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                        CONF_OAUTH_TOKEN: chosen,
+                        CONF_GOOGLE_EMAIL: email,
+                        # Keep the original bundle transiently (not stored in entry)
+                        DATA_SECRET_BUNDLE: json.loads(user_input.get("secrets_json") or "{}"),
+                    }
+                    return await self.async_step_device_selection()
 
-        return self.async_show_form(
-            step_id="secrets_json",
-            data_schema=schema,
-            errors=errors,
-        )
+        return self.async_show_form(step_id="secrets_json", data_schema=schema, errors=errors)
 
     # ---------- Manual tokens path ----------
     async def async_step_individual_tokens(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Collect manual OAuth token + email (exactly two fields).
-
-        Invariant: Both fields must be present; basic format checks help the user
-        catch typos early. We still validate by making a minimal API call later.
-        """
+        """Collect manual OAuth token + email (exactly two fields)."""
         errors: Dict[str, str] = {}
         if user_input is not None:
-            oauth_token = (user_input.get(CONF_OAUTH_TOKEN) or "").strip()
-            google_email = (user_input.get(CONF_GOOGLE_EMAIL) or "").strip()
-
-            if _email_valid(google_email) and _token_plausible(oauth_token):
+            method, email, cands, err = _interpret_credentials_choice(
+                user_input,
+                secrets_field="secrets_json",  # not used here
+                token_field=CONF_OAUTH_TOKEN,
+                email_field=CONF_GOOGLE_EMAIL,
+            )
+            if err:
+                errors["base"] = err
+            else:
+                assert method == "manual" and email and cands
+                # For initial setup we defer the online validation to device_selection
+                token = cands[0][1]
                 self._auth_data = {
                     DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                    CONF_OAUTH_TOKEN: oauth_token,
-                    CONF_GOOGLE_EMAIL: google_email,
+                    CONF_OAUTH_TOKEN: token,
+                    CONF_GOOGLE_EMAIL: email,
                 }
                 return await self.async_step_device_selection()
-            errors["base"] = "invalid_token"
 
-        return self.async_show_form(
-            step_id="individual_tokens",
-            data_schema=STEP_INDIVIDUAL_DATA_SCHEMA,
-            errors=errors,
-        )
+        return self.async_show_form(step_id="individual_tokens", data_schema=STEP_INDIVIDUAL_DATA_SCHEMA, errors=errors)
 
     # ---------- Shared helper to create API from stored auth_data ----------
     async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, Optional[str]]:
@@ -285,11 +396,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     # ---------- Device selection ----------
     async def async_step_device_selection(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Select tracked devices and set poll intervals (initial create).
-
-        Invariant: At this point minimal credentials are known. We also set the
-        unique config-entry ID (`DOMAIN:email`) to prevent duplicates.
-        """
+        """Select tracked devices and set poll intervals (initial create)."""
         errors: Dict[str, str] = {}
 
         # Ensure unique_id per Google account to avoid duplicate entries
@@ -312,11 +419,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.error("Failed to fetch devices during setup: %s", err)
                 errors["base"] = "cannot_connect"
 
-        # If we could not fetch anything, show a form with just the error.
         if errors:
-            return self.async_show_form(
-                step_id="device_selection", data_schema=vol.Schema({}), errors=errors
-            )
+            return self.async_show_form(step_id="device_selection", data_schema=vol.Schema({}), errors=errors)
 
         # Build a multi-select; keep cv.multi_select for wide compatibility
         options_map = {dev_id: dev_name for (dev_name, dev_id) in self._available_devices}
@@ -325,15 +429,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(OPT_TRACKED_DEVICES, default=list(options_map.keys())): vol.All(
                     cv.multi_select(options_map), vol.Length(min=1)
                 ),
-                vol.Optional(
-                    OPT_LOCATION_POLL_INTERVAL, default=DEFAULT_LOCATION_POLL_INTERVAL
-                ): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
+                vol.Optional(OPT_LOCATION_POLL_INTERVAL, default=DEFAULT_LOCATION_POLL_INTERVAL): vol.All(
+                    vol.Coerce(int), vol.Range(min=60, max=3600)
+                ),
                 vol.Optional(OPT_DEVICE_POLL_DELAY, default=DEFAULT_DEVICE_POLL_DELAY): vol.All(
                     vol.Coerce(int), vol.Range(min=1, max=60)
                 ),
-                vol.Optional(
-                    OPT_MIN_ACCURACY_THRESHOLD, default=DEFAULT_MIN_ACCURACY_THRESHOLD
-                ): vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
+                vol.Optional(OPT_MIN_ACCURACY_THRESHOLD, default=DEFAULT_MIN_ACCURACY_THRESHOLD): vol.All(
+                    vol.Coerce(int), vol.Range(min=25, max=500)
+                ),
                 vol.Optional(OPT_MOVEMENT_THRESHOLD, default=DEFAULT_MOVEMENT_THRESHOLD): vol.All(
                     vol.Coerce(int), vol.Range(min=10, max=200)
                 ),
@@ -395,11 +499,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Collect new credentials for reauth and validate them.
-
-        Invariant: Exactly one method must be provided. We validate inputs and
-        then reload the entry via `async_update_reload_and_abort`.
-        """
+        """Collect new credentials for reauth and validate them (exactly-one-method + online test)."""
         errors: Dict[str, str] = {}
 
         schema: vol.Schema
@@ -421,72 +521,60 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         if user_input is not None:
-            secrets_json = (user_input.get("secrets_json") or "").strip()
-            oauth_token = (user_input.get(CONF_OAUTH_TOKEN) or "").strip()
-            google_email = (user_input.get(CONF_GOOGLE_EMAIL) or "").strip()
-
-            # Prevent mixing methods; also handle "neither provided"
-            if secrets_json and (oauth_token or google_email):
-                errors["base"] = "choose_one"
-            elif not secrets_json and not (oauth_token and google_email):
-                errors["base"] = "choose_one"
+            method, email, cands, err = _interpret_credentials_choice(
+                user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
+            )
+            if err:
+                errors["base"] = err
             else:
-                new_data: Dict[str, Any] = {}
                 try:
-                    if secrets_json:
-                        parsed = json.loads(secrets_json)
-                        if not isinstance(parsed, dict):
-                            raise TypeError()
-                        email = _extract_email_from_secrets(parsed) or ""
-                        oauth = _extract_oauth_from_secrets(parsed) or ""
-                        if not (_email_valid(email) and _token_plausible(oauth)):
-                            errors["base"] = "invalid_token"
+                    if method == "secrets":
+                        assert email and cands
+                        chosen = await self._async_pick_working_token(email, cands)
+                        if not chosen:
+                            errors["base"] = "cannot_connect"
                         else:
                             new_data = {
                                 DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                CONF_OAUTH_TOKEN: oauth,
+                                CONF_OAUTH_TOKEN: chosen,
                                 CONF_GOOGLE_EMAIL: email,
                             }
-                            api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
-                            await api.async_get_basic_device_list(email)  # validation call
-                    elif oauth_token and google_email:
-                        if not (_email_valid(google_email) and _token_plausible(oauth_token)):
-                            errors["base"] = "invalid_token"
+                    else:
+                        # manual token + email; online validation
+                        assert email and cands
+                        chosen = await self._async_pick_working_token(email, cands)
+                        if not chosen:
+                            errors["base"] = "cannot_connect"
                         else:
                             new_data = {
                                 DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: oauth_token,
-                                CONF_GOOGLE_EMAIL: google_email,
+                                CONF_OAUTH_TOKEN: chosen,
+                                CONF_GOOGLE_EMAIL: email,
                             }
-                            api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
-                            await api.async_get_basic_device_list(google_email)
-                except (json.JSONDecodeError, TypeError):
-                    errors["base"] = "invalid_json"
-                except Exception as err:  # noqa: BLE001 - network/api
-                    _LOGGER.error("Reauth validation failed: %s", err)
+
+                    if not errors:
+                        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+                        assert entry is not None
+                        updated_data = dict(entry.data)
+                        updated_data.update(new_data)
+
+                        return self.async_update_reload_and_abort(
+                            entry=entry,
+                            data=updated_data,
+                            reason="reauth_successful",
+                        )
+                except Exception as err2:  # noqa: BLE001
+                    _LOGGER.error("Reauth validation failed: %s", err2)
                     errors["base"] = "cannot_connect"
 
-                if not errors:
-                    entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
-                    assert entry is not None
-                    updated_data = dict(entry.data)
-                    updated_data.update(new_data)
-
-                    return self.async_update_reload_and_abort(
-                        entry=entry,
-                        data=updated_data,
-                        reason="reauth_successful",
-                    )
-
-        return self.async_show_form(
-            step_id="reauth_confirm",
-            data_schema=schema,
-            errors=errors,
-        )
+        return self.async_show_form(step_id="reauth_confirm", data_schema=schema, errors=errors)
 
 
 class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     """Options flow to update non-secret settings and optionally refresh credentials."""
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        super().__init__(config_entry)
 
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -571,7 +659,9 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             OPT_GOOGLE_HOME_FILTER_KEYWORDS,
             dat.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS),
         )
-        current_stats = opt.get(OPT_ENABLE_STATS_ENTITIES, dat.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES))
+        current_stats = opt.get(
+            OPT_ENABLE_STATS_ENTITIES, dat.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
+        )
         current_map_token_exp = opt.get(
             OPT_MAP_VIEW_TOKEN_EXPIRATION,
             dat.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
@@ -697,7 +787,8 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         """Allow refreshing credentials without exposing current values.
 
         Invariant: Exactly one method must be provided; we validate and then
-        update `entry.data`, followed by an immediate reload.
+        update `entry.data`, followed by an immediate reload. For secrets.json,
+        we also apply online validation with token failover.
         """
         errors: Dict[str, str] = {}
 
@@ -719,45 +810,39 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             )
 
         if user_input is not None:
-            secrets_json = (user_input.get("new_secrets_json") or "").strip()
-            oauth_token = (user_input.get("new_oauth_token") or "").strip()
-            google_email = (user_input.get("new_google_email") or "").strip()
-
-            # Prevent mixing methods; also handle "neither provided"
-            if secrets_json and (oauth_token or google_email):
-                errors["base"] = "choose_one"
-            elif not secrets_json and not (oauth_token and google_email):
-                errors["base"] = "choose_one"
+            method, email, cands, err = _interpret_credentials_choice(
+                user_input,
+                secrets_field="new_secrets_json",
+                token_field="new_oauth_token",
+                email_field="new_google_email",
+            )
+            if err:
+                errors["base"] = err
             else:
-                new_data: Dict[str, Any] = {}
                 try:
-                    if secrets_json:
-                        parsed = json.loads(secrets_json)
-                        if not isinstance(parsed, dict):
-                            raise TypeError()
-                        email = _extract_email_from_secrets(parsed) or ""
-                        oauth = _extract_oauth_from_secrets(parsed) or ""
-                        if not (_email_valid(email) and _token_plausible(oauth)):
-                            errors["base"] = "invalid_token"
+                    if method == "secrets":
+                        assert email and cands
+                        chosen = await self._async_pick_working_token(email, cands)
+                        if not chosen:
+                            errors["base"] = "cannot_connect"
                         else:
                             new_data = {
                                 DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                CONF_OAUTH_TOKEN: oauth,
+                                CONF_OAUTH_TOKEN: chosen,
                                 CONF_GOOGLE_EMAIL: email,
                             }
-                            api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
-                            await api.async_get_basic_device_list(email)  # validation
-                    elif oauth_token and google_email:
-                        if not (_email_valid(google_email) and _token_plausible(oauth_token)):
-                            errors["base"] = "invalid_token"
+                    else:
+                        # manual
+                        assert email and cands
+                        chosen = await self._async_pick_working_token(email, cands)
+                        if not chosen:
+                            errors["base"] = "cannot_connect"
                         else:
                             new_data = {
                                 DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: oauth_token,
-                                CONF_GOOGLE_EMAIL: google_email,
+                                CONF_OAUTH_TOKEN: chosen,
+                                CONF_GOOGLE_EMAIL: email,
                             }
-                            api = GoogleFindMyAPI(oauth_token=oauth_token, google_email=google_email)
-                            await api.async_get_basic_device_list(google_email)  # validation
 
                     if not errors:
                         entry = self.config_entry
@@ -769,18 +854,11 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                         # Reload to apply immediately
                         self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
                         return self.async_abort(reason="reconfigure_successful")
-
-                except (json.JSONDecodeError, TypeError):
-                    errors["base"] = "invalid_json"
-                except Exception as err:  # noqa: BLE001 - network/api
-                    _LOGGER.error("Credentials update failed: %s", err)
+                except Exception as err2:  # noqa: BLE001
+                    _LOGGER.error("Credentials update failed: %s", err2)
                     errors["base"] = "cannot_connect"
 
-        return self.async_show_form(
-            step_id="credentials",
-            data_schema=schema,
-            errors=errors,
-        )
+        return self.async_show_form(step_id="credentials", data_schema=schema, errors=errors)
 
 
 # ---------- Custom exceptions ----------
