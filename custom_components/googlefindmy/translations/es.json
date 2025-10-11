@@ -11,14 +11,14 @@
       },
       "secrets_json": {
         "title": "Método 1: GoogleFindMyTools secrets.json",
-        "description": "Ejecuta GoogleFindMyTools (Chrome) para generar los tokens de autenticación y pega a continuación el contenido completo del archivo Auth/secrets.json.",
+        "description": "Ejecuta GoogleFindMyTools (Chrome) para generar los tokens de autenticación y pega a continuación el contenido completo del archivo Auth/secrets.json.\n\n{hint}",
         "data": {
           "secrets_json": "Contenido del archivo secrets.json"
         }
       },
       "individual_tokens": {
         "title": "Método 2: Token OAuth individual",
-        "description": "Introduce tu token OAuth y tu dirección de correo de Google obtenidos mediante un proceso de autenticación manual.",
+        "description": "Introduce tu token OAuth y tu dirección de correo de Google obtenidos mediante un proceso de autenticación manual.\n\n{hint}",
         "data": {
           "oauth_token": "Token OAuth",
           "google_email": "Dirección de correo de Google"
@@ -41,7 +41,7 @@
       },
       "reauth_confirm": {
         "title": "Volver a autenticar",
-        "description": "Tus credenciales parecen no ser válidas o han caducado. Proporciona nuevas credenciales a continuación.\n\nConsejo: puedes pegar el contenido completo de un secrets.json reciente **o** facilitar un nuevo token OAuth y correo electrónico."
+        "description": "{reason}\n\nConsejo: puedes pegar el contenido completo de un secrets.json reciente **o** facilitar un nuevo token OAuth y correo electrónico."
       }
     },
     "error": {
@@ -73,7 +73,7 @@
       },
       "credentials": {
         "title": "Actualizar credenciales (opcional)",
-        "description": "Actualiza credenciales sin exponer los valores existentes. Proporciona exactamente un método:\n\n• Pega el contenido completo de un **secrets.json** nuevo\n**o**\n• Introduce un **token OAuth** nuevo y **correo de Google**.\n\nSi se proporcionan, las credenciales se validarán y guardarán; la integración se recargará sin cambiar los nombres de tus entidades.",
+        "description": "{hint}\n\nActualiza credenciales sin exponer los valores existentes. Proporciona exactamente un método:\n\n• Pega el contenido completo de un **secrets.json** nuevo\n**o**\n• Introduce un **token OAuth** nuevo y **correo de Google**.\n\nSi se proporcionan, las credenciales se validarán y guardarán; la integración se recargará sin cambiar los nombres de tus entidades.",
         "data": {
           "secrets_json": "Nuevo secrets.json (contenido completo)",
           "oauth_token": "Nuevo token OAuth",
