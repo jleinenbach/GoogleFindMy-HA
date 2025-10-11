@@ -218,6 +218,24 @@ def _extract_oauth_from_secrets(data: Dict[str, Any]) -> Optional[str]:
     return cands[0][1]
 
 
+async def async_pick_working_token(email: str, candidates: List[Tuple[str, str]]) -> Optional[str]:
+    """Try tokens in order until one passes a minimal online validation.
+
+    This performs a very lightweight API call (`async_get_basic_device_list`)
+    to verify the token works for the given Google account.
+    """
+    for source, token in candidates:
+        try:
+            api = GoogleFindMyAPI(oauth_token=token, google_email=email)
+            await api.async_get_basic_device_list(email)
+            _LOGGER.debug("Token from '%s' validated successfully.", source)
+            return token
+        except Exception as err:  # noqa: BLE001 - network/auth errors
+            _LOGGER.warning("Token from '%s' failed validation: %s", source, err)
+            continue
+    return None
+
+
 # ---------------------------
 # Shared interpreters (Either/Or choice handling)
 # ---------------------------
@@ -315,23 +333,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
 
     # ---------- Secrets.json path ----------
-    async def _async_pick_working_token(self, email: str, candidates: List[Tuple[str, str]]) -> Optional[str]:
-        """Try tokens in order until one passes a minimal online validation.
-
-        This performs a very lightweight API call (`async_get_basic_device_list`)
-        to verify the token works for the given Google account.
-        """
-        for source, token in candidates:
-            try:
-                api = GoogleFindMyAPI(oauth_token=token, google_email=email)
-                await api.async_get_basic_device_list(email)
-                _LOGGER.debug("Token from '%s' validated successfully.", source)
-                return token
-            except Exception as err:  # noqa: BLE001 - network/auth errors
-                _LOGGER.warning("Token from '%s' failed validation: %s", source, err)
-                continue
-        return None
-
     async def async_step_secrets_json(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Collect and validate secrets.json content (with online validation + failover).
 
@@ -358,7 +359,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = err
             else:
                 assert method == "secrets" and email and cands
-                chosen = await self._async_pick_working_token(email, cands)
+                chosen = await async_pick_working_token(email, cands)
                 if not chosen:
                     # Syntax was OK but none of the candidates worked online
                     errors["base"] = "cannot_connect"
@@ -551,7 +552,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 try:
                     assert email and cands
-                    chosen = await self._async_pick_working_token(email, cands)
+                    chosen = await async_pick_working_token(email, cands)
                     if not chosen:
                         errors["base"] = "cannot_connect"
                     else:
@@ -834,7 +835,7 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             else:
                 try:
                     assert email and cands
-                    chosen = await self._async_pick_working_token(email, cands)
+                    chosen = await async_pick_working_token(email, cands)
                     if not chosen:
                         errors["base"] = "cannot_connect"
                     else:
