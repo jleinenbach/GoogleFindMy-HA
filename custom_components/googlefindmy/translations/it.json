@@ -11,14 +11,14 @@
       },
       "secrets_json": {
         "title": "Metodo 1: GoogleFindMyTools secrets.json",
-        "description": "Esegui GoogleFindMyTools (Chrome) per generare i token di autenticazione, quindi incolla qui sotto il contenuto completo del file Auth/secrets.json.\n\n{hint}",
+        "description": "Esegui GoogleFindMyTools (Chrome) per generare i token di autenticazione, quindi incolla qui sotto il contenuto completo del file Auth/secrets.json.",
         "data": {
           "secrets_json": "Contenuto del file secrets.json"
         }
       },
       "individual_tokens": {
         "title": "Metodo 2: Token OAuth individuale",
-        "description": "Inserisci il token OAuth e l’indirizzo email Google ottenuti tramite il processo di autenticazione manuale.\n\n{hint}",
+        "description": "Inserisci il token OAuth e l’indirizzo email Google ottenuti tramite il processo di autenticazione manuale.",
         "data": {
           "oauth_token": "Token OAuth",
           "google_email": "Indirizzo email Google"
@@ -41,12 +41,12 @@
       },
       "reauth_confirm": {
         "title": "Riautenticazione",
-        "description": "{reason}\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email."
+        "description": "Le tue credenziali sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email."
       }
     },
     "error": {
       "auth_failed": "Autenticazione non riuscita. Riprova.",
-      "invalid_token": "Token non valido o campi obbligatori mancanti.",
+      "invalid_token": "Email/token non valido o campi obbligatori mancanti.",
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
       "no_devices": "Nessun dispositivo trovato. Assicurati che ‘Trova il mio dispositivo’ sia attivato nel tuo account Google.",
       "cannot_connect": "Impossibile connettersi all’API di Google. Potrebbe trattarsi di un problema temporaneo — riprova più tardi.",
@@ -73,7 +73,7 @@
       },
       "credentials": {
         "title": "Aggiorna credenziali (opzionale)",
-        "description": "{hint}\n\nAggiorna le credenziali senza esporre i valori esistenti. Fornisci esattamente un metodo:\n\n• Incolla il contenuto completo di un **secrets.json** nuovo\n**oppure**\n• Inserisci un **token OAuth** nuovo e **email Google**.\n\nSe fornite, le credenziali saranno convalidate e salvate; l’integrazione verrà ricaricata senza cambiare i nomi delle tue entità.",
+        "description": "Aggiorna le credenziali senza esporre i valori esistenti. Fornisci esattamente un metodo:\n\n• Incolla il contenuto completo di un **secrets.json** nuovo\n**oppure**\n• Inserisci un **token OAuth** nuovo e **email Google**.\n\nSe fornite, le credenziali saranno convalidate e salvate; l’integrazione verrà ricaricata senza cambiare i nomi delle tue entità.",
         "data": {
           "secrets_json": "Nuovo secrets.json (contenuto completo)",
           "oauth_token": "Nuovo token OAuth",
