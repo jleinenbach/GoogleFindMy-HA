@@ -11,14 +11,14 @@
       },
       "secrets_json": {
         "title": "Methode 1: GoogleFindMyTools secrets.json",
-        "description": "Führe GoogleFindMyTools (Chrome) aus, um Authentifizierungs-Token zu erzeugen, und füge unten den vollständigen Inhalt der Datei Auth/secrets.json ein.",
+        "description": "Führe GoogleFindMyTools (Chrome) aus, um Authentifizierungs-Token zu erzeugen, und füge unten den vollständigen Inhalt der Datei Auth/secrets.json ein.\n\n{hint}",
         "data": {
           "secrets_json": "Inhalt der secrets.json"
         }
       },
       "individual_tokens": {
         "title": "Methode 2: Manueller OAuth-Token",
-        "description": "Gib deinen OAuth-Token und deine Google-E-Mail-Adresse aus dem manuellen Anmeldeprozess ein.",
+        "description": "Gib deinen OAuth-Token und deine Google-E-Mail-Adresse aus dem manuellen Anmeldeprozess ein.\n\n{hint}",
         "data": {
           "oauth_token": "OAuth-Token",
           "google_email": "Google-E-Mail-Adresse"
@@ -41,7 +41,7 @@
       },
       "reauth_confirm": {
         "title": "Erneute Authentifizierung",
-        "description": "Deine Anmeldedaten sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben."
+        "description": "{reason}\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben."
       }
     },
     "error": {
@@ -73,7 +73,7 @@
       },
       "credentials": {
         "title": "Anmeldedaten aktualisieren (optional)",
-        "description": "Aktualisiere deine Anmeldedaten, ohne bestehende Werte preiszugeben. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth-Token** und **Google-E-Mail** eingeben.\n\nFalls angegeben, werden die Anmeldedaten validiert und gespeichert. Die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
+        "description": "{hint}\n\nAktualisiere deine Anmeldedaten, ohne bestehende Werte preiszugeben. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth-Token** und **Google-E-Mail** eingeben.\n\nFalls angegeben, werden die Anmeldedaten validiert und gespeichert. Die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
         "data": {
           "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
           "oauth_token": "Neuer OAuth-Token",
