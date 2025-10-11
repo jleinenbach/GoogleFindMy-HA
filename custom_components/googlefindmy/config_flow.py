@@ -157,7 +157,14 @@ def _extract_email_from_secrets(data: Dict[str, Any]) -> Optional[str]:
 
 
 def _extract_oauth_candidates_from_secrets(data: Dict[str, Any]) -> List[Tuple[str, str]]:
-    """Return plausible tokens in order of preference."""
+    """Return plausible tokens in order of preference from a secrets bundle.
+
+    The order encodes our failover strategy:
+    1) 'aas_token' (Account Authentication Service token) — preferred
+    2) 'fcm_credentials.installation.token' — FCM installation JWT
+    3) 'fcm_credentials.fcm.registration.token' — FCM registration token (rare)
+    4) Legacy/generic flat keys such as 'oauth_token', 'access_token', etc.
+    """
     cands: List[Tuple[str, str]] = []
 
     # 1) AAS token (preferred)
@@ -200,7 +207,7 @@ def _extract_oauth_candidates_from_secrets(data: Dict[str, Any]) -> List[Tuple[s
 
 
 def _extract_oauth_from_secrets(data: Dict[str, Any]) -> Optional[str]:
-    """Single selection from secrets.json using preferred order (no online validation here)."""
+    """Return a single selected token from secrets.json using preferred order."""
     cands = _extract_oauth_candidates_from_secrets(data)
     if not cands:
         return None
@@ -223,11 +230,16 @@ def _interpret_credentials_choice(
 ) -> Tuple[Optional[str], Optional[str], Optional[List[Tuple[str, str]]], Optional[str]]:
     """Interpret input into exactly-one-method choice.
 
-    Returns: (method, email, token_candidates, error_key)
-      - method: "secrets" | "manual" | None
-      - email: parsed/entered email (for manual or from secrets)
-      - token_candidates: list of (source_name, token) in order of preference (only for secrets/manual)
-      - error_key: translation key if an immediate input error is detected
+    Returns:
+        tuple(method, email, token_candidates, error_key)
+          - method: "secrets" | "manual" | None
+          - email: parsed/entered email (for manual or from secrets)
+          - token_candidates: list of (source_name, token) in order of preference
+          - error_key: translation key if an immediate input error is detected
+
+    Notes:
+        - Field-level errors are decided by the caller (e.g., to attach invalid_json to the
+          secrets field specifically); this function only returns the canonical error key.
     """
     secrets_json = (user_input.get(secrets_field) or "").strip()
     oauth_token = (user_input.get(token_field) or "").strip()
@@ -280,7 +292,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def __init__(self) -> None:
-        # Keep transient auth info between steps; never log the values.
+        """Initialize transient state for the flow."""
         self._auth_data: Dict[str, Any] = {}
         self._available_devices: List[Tuple[str, str]] = []
 
@@ -304,11 +316,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     # ---------- Secrets.json path ----------
     async def _async_pick_working_token(self, email: str, candidates: List[Tuple[str, str]]) -> Optional[str]:
-        """Try tokens in order until one passes a minimal online validation."""
+        """Try tokens in order until one passes a minimal online validation.
+
+        This performs a very lightweight API call (`async_get_basic_device_list`)
+        to verify the token works for the given Google account.
+        """
         for source, token in candidates:
             try:
                 api = GoogleFindMyAPI(oauth_token=token, google_email=email)
-                # Minimal online call for validation
                 await api.async_get_basic_device_list(email)
                 _LOGGER.debug("Token from '%s' validated successfully.", source)
                 return token
@@ -318,11 +333,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return None
 
     async def async_step_secrets_json(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Collect and validate secrets.json content.
+        """Collect and validate secrets.json content (with online validation + failover).
 
-        Invariant: This step expects a *full* secrets.json (valid JSON object) that
-        contains both an email address and an OAuth token (from known sources).
-        We never log secrets. We also perform **online validation with failover**.
+        Invariant:
+            This step expects a *full* secrets.json (valid JSON object) that contains both
+            an email address and at least one plausible token candidate. We never log secrets.
         """
         errors: Dict[str, str] = {}
 
@@ -336,7 +351,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
             )
             if err:
-                errors["base"] = err
+                # Attach invalid_json to the field to provide precise feedback
+                if err == "invalid_json":
+                    errors["secrets_json"] = "invalid_json"
+                else:
+                    errors["base"] = err
             else:
                 assert method == "secrets" and email and cands
                 chosen = await self._async_pick_working_token(email, cands)
@@ -371,7 +390,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = err
             else:
                 assert method == "manual" and email and cands
-                # For initial setup we defer the online validation to device_selection
+                # For initial setup we defer the online validation to device_selection.
                 token = cands[0][1]
                 self._auth_data = {
                     DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
@@ -525,34 +544,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
             )
             if err:
-                errors["base"] = err
+                if err == "invalid_json":
+                    errors["secrets_json"] = "invalid_json"
+                else:
+                    errors["base"] = err
             else:
                 try:
-                    if method == "secrets":
-                        assert email and cands
-                        chosen = await self._async_pick_working_token(email, cands)
-                        if not chosen:
-                            errors["base"] = "cannot_connect"
-                        else:
-                            new_data = {
-                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                CONF_OAUTH_TOKEN: chosen,
-                                CONF_GOOGLE_EMAIL: email,
-                            }
+                    assert email and cands
+                    chosen = await self._async_pick_working_token(email, cands)
+                    if not chosen:
+                        errors["base"] = "cannot_connect"
                     else:
-                        # manual token + email; online validation
-                        assert email and cands
-                        chosen = await self._async_pick_working_token(email, cands)
-                        if not chosen:
-                            errors["base"] = "cannot_connect"
-                        else:
-                            new_data = {
-                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: chosen,
-                                CONF_GOOGLE_EMAIL: email,
-                            }
+                        new_data = {
+                            DATA_AUTH_METHOD: (
+                                _AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL
+                            ),
+                            CONF_OAUTH_TOKEN: chosen,
+                            CONF_GOOGLE_EMAIL: email,
+                        }
 
-                    if not errors:
                         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
                         assert entry is not None
                         updated_data = dict(entry.data)
@@ -574,7 +584,8 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     """Options flow to update non-secret settings and optionally refresh credentials."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
-        super().__init__(config_entry)
+        """Store the config entry (OptionsFlowWithReload does not require super init)."""
+        self.config_entry = config_entry
 
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -659,9 +670,7 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             OPT_GOOGLE_HOME_FILTER_KEYWORDS,
             dat.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS),
         )
-        current_stats = opt.get(
-            OPT_ENABLE_STATS_ENTITIES, dat.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
-        )
+        current_stats = opt.get(OPT_ENABLE_STATS_ENTITIES, dat.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES))
         current_map_token_exp = opt.get(
             OPT_MAP_VIEW_TOKEN_EXPIRATION,
             dat.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
@@ -786,9 +795,10 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     async def async_step_credentials(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Allow refreshing credentials without exposing current values.
 
-        Invariant: Exactly one method must be provided; we validate and then
-        update `entry.data`, followed by an immediate reload. For secrets.json,
-        we also apply online validation with token failover.
+        Invariant:
+            Exactly one method must be provided; we validate and then update `entry.data`,
+            followed by an immediate reload. For secrets.json, we also apply online
+            validation with token failover.
         """
         errors: Dict[str, str] = {}
 
@@ -817,34 +827,25 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                 email_field="new_google_email",
             )
             if err:
-                errors["base"] = err
+                if err == "invalid_json":
+                    errors["new_secrets_json"] = "invalid_json"
+                else:
+                    errors["base"] = err
             else:
                 try:
-                    if method == "secrets":
-                        assert email and cands
-                        chosen = await self._async_pick_working_token(email, cands)
-                        if not chosen:
-                            errors["base"] = "cannot_connect"
-                        else:
-                            new_data = {
-                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                CONF_OAUTH_TOKEN: chosen,
-                                CONF_GOOGLE_EMAIL: email,
-                            }
+                    assert email and cands
+                    chosen = await self._async_pick_working_token(email, cands)
+                    if not chosen:
+                        errors["base"] = "cannot_connect"
                     else:
-                        # manual
-                        assert email and cands
-                        chosen = await self._async_pick_working_token(email, cands)
-                        if not chosen:
-                            errors["base"] = "cannot_connect"
-                        else:
-                            new_data = {
-                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: chosen,
-                                CONF_GOOGLE_EMAIL: email,
-                            }
+                        new_data = {
+                            DATA_AUTH_METHOD: (
+                                _AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL
+                            ),
+                            CONF_OAUTH_TOKEN: chosen,
+                            CONF_GOOGLE_EMAIL: email,
+                        }
 
-                    if not errors:
                         entry = self.config_entry
                         updated_data = dict(entry.data)
                         updated_data.update(new_data)
