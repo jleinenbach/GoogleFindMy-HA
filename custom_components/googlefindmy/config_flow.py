@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/config_flow.py
 """Config flow for Google Find My Device (custom integration)."""
 from __future__ import annotations
 
@@ -386,6 +387,24 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     """Options flow to update non-secret settings and optionally refresh credentials."""
+
+    # ---------- Helper: token validation (satisfy older code paths) ----------
+    async def _async_pick_working_token(self, email: str, candidates: List[Tuple[str, str]]) -> Optional[str]:
+        """Try candidate tokens (source, token) until one validates via a minimal API call.
+
+        NOTE:
+        - This helper exists to avoid AttributeError if an options path calls it.
+        - Current code does not rely on it, but older branches might.
+        """
+        for source, token in candidates:
+            try:
+                api = GoogleFindMyAPI(oauth_token=token, google_email=email)
+                await api.async_get_basic_device_list(email)
+                _LOGGER.debug("Token from '%s' validated successfully.", source)
+                return token
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Token from '%s' failed validation: %s", source, err)
+        return None
 
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
