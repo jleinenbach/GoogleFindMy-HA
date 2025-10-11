@@ -1,5 +1,12 @@
 # custom_components/googlefindmy/diagnostics.py
-"""Diagnostics for the Google Find My Device integration."""
+"""Diagnostics for the Google Find My Device integration.
+
+Design goals (HA quality scale / Platinum-ready):
+- Never leak secrets or personal data (tokens, emails, device IDs, coordinates, names).
+- Provide enough structured, anonymized context to debug typical issues (polling, counts, timings).
+- Prefer runtime_data (modern pattern) but gracefully fall back to hass.data for older setups.
+- Keep redaction centralized and defensive (include common token/email keys even if we don't expose them now).
+"""
 from __future__ import annotations
 
 import time
@@ -8,9 +15,13 @@ from typing import Any, Optional
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.loader import async_get_integration
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     DOMAIN,
+    # user-facing options (non-secret)
     OPT_TRACKED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
@@ -20,26 +31,63 @@ from .const import (
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_ENABLE_STATS_ENTITIES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_IGNORED_DEVICES,
+    # secrets in entry.data (must never be exposed)
+    CONF_OAUTH_TOKEN,
+    CONF_GOOGLE_EMAIL,
 )
 
-# Nothing to redact in our current summary (we avoid secrets entirely),
-# but keep the hook ready in case we add more fields later.
-TO_REDACT: list[str] = []
+# Keys to redact anywhere they appear in the diagnostics payload.
+# Keep this list generous; it is safe to over-redact.
+TO_REDACT: list[str] = [
+    # Our entry.data keys
+    CONF_OAUTH_TOKEN,
+    CONF_GOOGLE_EMAIL,
+    # Common token/email shapes that *might* appear if future fields are added
+    "aas_token",
+    "access_token",
+    "refresh_token",
+    "token",
+    "security_token",
+    "app_id",
+    "android_id",
+    "fid",
+    "email",
+    "username",
+    "user",
+    "Auth",
+    "secret",
+    "private",
+    "public",
+    "p256dh",
+    "auth",
+    "endpoint",
+]
 
 
 def _monotonic_to_wall_seconds(last_mono: Optional[float]) -> Optional[float]:
-    """Convert a stored monotonic timestamp to wall-clock seconds since epoch.
+    """Convert a stored monotonic timestamp to wall-clock seconds since epoch (UTC).
 
-    NOTE:
-    - Our coordinator currently tracks the last poll baseline in a monotonic clock.
-      For diagnostics (best-effort), we infer the wall time using the current deltas.
-    - If the internal field is absent, we return None gracefully.
+    We infer the wall time using the current monotonic delta; this is best-effort
+    and intentionally avoids reading any precise location timestamps from entities.
     """
     if not isinstance(last_mono, (int, float)) or last_mono <= 0:
         return None
     now_wall = time.time()
     now_mono = time.monotonic()
+    # Clamp at 0 to avoid negative values when clocks drift
     return max(0.0, now_wall - (now_mono - float(last_mono)))
+
+
+def _count_keywords(value: Any) -> int:
+    """Count comma-separated keywords without exposing their content."""
+    if not value:
+        return 0
+    try:
+        parts = [p.strip() for p in str(value).split(",")]
+        return sum(1 for p in parts if p)
+    except Exception:
+        return 0
 
 
 async def async_get_config_entry_diagnostics(
@@ -47,74 +95,104 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return anonymized diagnostics for a config entry.
 
-    Best practice:
-    - Never include secrets, location coordinates, device IDs, device names or emails.
-    - Keep output useful for debugging: show options summary, stats, counts, timing.
-    - Prefer entry.runtime_data if present; otherwise fall back to hass.data.
+    Best practices:
+    - Do NOT include: coordinates, device IDs, device names, emails, tokens,
+      unique_id, or any raw content from external services.
+    - DO include: anonymized counters, booleans, timings, and versions.
     """
-    # Prefer runtime_data if the integration adopts it; otherwise fall back.
+    # --- Integration metadata (manifest) ---
+    integration_meta: dict[str, Any] = {}
+    try:
+        integ = await async_get_integration(hass, DOMAIN)
+        # Name and version from manifest; both are safe to expose
+        integration_meta = {
+            "name": integ.name,
+            "version": integ.version,
+        }
+    except Exception:
+        # Stay resilient if loader fails in custom environments
+        integration_meta = {}
+
+    # --- Coordinator / runtime_data (preferred) or hass.data fallback ---
     coordinator = None
     runtime = getattr(entry, "runtime_data", None)
     if runtime:
-        # Allow either a direct coordinator or a simple holder object.
+        # Allow either a direct coordinator or a holder object with attribute "coordinator"
         coordinator = getattr(runtime, "coordinator", runtime)
     if coordinator is None:
         coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
 
-    # Build a compact, anonymized config snapshot from options (no secrets).
+    # --- Build a compact, anonymized options snapshot (no raw strings that could contain PII) ---
     opt = entry.options
+    ignored_list = opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or []
+    if not isinstance(ignored_list, list):
+        ignored_list = []
     config_summary = {
+        # Durations and numeric thresholds
         "location_poll_interval": int(opt.get(OPT_LOCATION_POLL_INTERVAL, 300)),
         "device_poll_delay": int(opt.get(OPT_DEVICE_POLL_DELAY, 5)),
         "min_accuracy_threshold": int(opt.get(OPT_MIN_ACCURACY_THRESHOLD, 100)),
         "movement_threshold": int(opt.get(OPT_MOVEMENT_THRESHOLD, 50)),
+        # Feature toggles
         "google_home_filter_enabled": bool(opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, False)),
-        # Do NOT include the actual keywords; only their count to avoid revealing user text
-        "google_home_filter_keywords_count": len(
-            [k.strip() for k in str(opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, "")).split(",") if k.strip()]
-        ),
         "enable_stats_entities": bool(opt.get(OPT_ENABLE_STATS_ENTITIES, True)),
         "map_view_token_expiration": bool(opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, True)),
-        # tracked devices: only the count, never IDs
+        # Counts only (never expose strings/IDs)
+        "google_home_filter_keywords_count": _count_keywords(opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS)),
         "tracked_devices_count": len(opt.get(OPT_TRACKED_DEVICES, [])),
+        "ignored_devices_count": len(ignored_list),
     }
 
-    payload: dict[str, Any] = {
-        "entry": {
-            # sanitize entry meta; do not include unique_id, data, or title if it could be user-provided PII
-            "entry_id": entry.entry_id,
-            "version": entry.version,
-            "domain": entry.domain,
-        },
-        "config": async_redact_data(config_summary, TO_REDACT),
-    }
+    # --- Device & entity registry counts (anonymized) ---
+    device_registry_counts: dict[str, Any] = {}
+    try:
+        dev_reg = dr.async_get(hass)
+        devices_for_entry = [
+            d for d in dev_reg.devices.values() if entry.entry_id in d.config_entries
+        ]
+        device_registry_counts["devices_count"] = len(devices_for_entry)
+    except Exception:
+        device_registry_counts["devices_count"] = None
 
-    # Enrich with coordinator info if available (all anonymized)
+    entity_registry_counts: dict[str, Any] = {}
+    try:
+        ent_reg = er.async_get(hass)
+        entities_for_entry = [
+            e for e in ent_reg.entities.values() if e.config_entry_id == entry.entry_id
+        ]
+        entity_registry_counts["entities_count"] = len(entities_for_entry)
+    except Exception:
+        entity_registry_counts["entities_count"] = None
+
+    # --- Coordinator-derived info (all anonymized/counted) ---
+    coordinator_block: dict[str, Any] = {}
     if coordinator is not None:
-        # counts – never include names or IDs
+        # Boolean flags and counters only; never expose maps with device IDs/names
         try:
             known_devices_count = len(getattr(coordinator, "_device_names", {}) or {})
         except (AttributeError, TypeError):
             known_devices_count = None
+
         try:
             cache_items_count = len(getattr(coordinator, "_device_location_data", {}) or {})
         except (AttributeError, TypeError):
             cache_items_count = None
 
-        # last successful poll (best-effort using monotonic baseline if present)
-        last_poll_wall = None
         try:
             last_poll_wall = _monotonic_to_wall_seconds(getattr(coordinator, "_last_poll_mono", None))
         except (AttributeError, TypeError):
             last_poll_wall = None
 
-        # stats are already anonymized counters
         try:
             stats = dict(getattr(coordinator, "stats", {}) or {})
+            # Stats should already be anonymized counters; still ensure only ints
+            for k, v in list(stats.items()):
+                if not isinstance(v, (int, float)):
+                    stats[k] = None
         except (AttributeError, TypeError):
             stats = {}
 
-        payload["coordinator"] = {
+        coordinator_block = {
             "is_polling": bool(getattr(coordinator, "_is_polling", False)),
             "known_devices_count": known_devices_count,
             "cache_items_count": cache_items_count,
@@ -122,4 +200,24 @@ async def async_get_config_entry_diagnostics(
             "stats": stats,
         }
 
-    return payload
+    # --- Assemble payload (without secrets) ---
+    payload: dict[str, Any] = {
+        "integration": integration_meta,
+        "entry": {
+            # Safe metadata only; DO NOT include entry.unique_id, entry.title, or entry.data (contains secrets)
+            "entry_id": entry.entry_id,
+            "version": entry.version,  # config-entry schema version (safe)
+            "domain": entry.domain,
+        },
+        "config": config_summary,
+        "registries": {
+            "device": device_registry_counts,
+            "entity": entity_registry_counts,
+        },
+    }
+    if coordinator_block:
+        payload["coordinator"] = coordinator_block
+
+    # --- Final safety net: redact known secret-like keys anywhere in the payload ---
+    # (We already avoided including secrets, but this keeps us safe against future extensions.)
+    return async_redact_data(payload, TO_REDACT)
