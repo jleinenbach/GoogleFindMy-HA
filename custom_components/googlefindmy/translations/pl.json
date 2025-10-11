@@ -11,14 +11,14 @@
       },
       "secrets_json": {
         "title": "Metoda 1: GoogleFindMyTools secrets.json",
-        "description": "Uruchom GoogleFindMyTools (Chrome), aby wygenerować tokeny uwierzytelniające, a następnie wklej poniżej pełną zawartość pliku Auth/secrets.json.\n\n{hint}",
+        "description": "Uruchom GoogleFindMyTools (Chrome), aby wygenerować tokeny uwierzytelniające, a następnie wklej poniżej pełną zawartość pliku Auth/secrets.json.",
         "data": {
           "secrets_json": "Zawartość pliku secrets.json"
         }
       },
       "individual_tokens": {
         "title": "Metoda 2: Indywidualny token OAuth",
-        "description": "Wprowadź token OAuth i adres e-mail Google uzyskane podczas ręcznej autoryzacji.\n\n{hint}",
+        "description": "Wprowadź token OAuth i adres e-mail Google uzyskane podczas ręcznej autoryzacji.",
         "data": {
           "oauth_token": "Token OAuth",
           "google_email": "Adres e-mail Google"
@@ -41,12 +41,12 @@
       },
       "reauth_confirm": {
         "title": "Ponowne uwierzytelnienie",
-        "description": "{reason}\n\nWskazówka: możesz wkleić pełną zawartość nowego pliku secrets.json **albo** podać nowy token OAuth i adres e-mail."
+        "description": "Twoje poświadczenia są nieprawidłowe lub wygasły. Podaj poniżej nowe.\n\nWskazówka: możesz wkleić pełną zawartość nowego pliku secrets.json **albo** podać nowy token OAuth i adres e-mail."
       }
     },
     "error": {
       "auth_failed": "Uwierzytelnianie nie powiodło się. Spróbuj ponownie.",
-      "invalid_token": "Podano nieprawidłowy token lub brakuje wymaganych pól.",
+      "invalid_token": "Nieprawidłowy e-mail/token lub brakuje wymaganych pól.",
       "invalid_json": "Nieprawidłowy format JSON w zawartości pliku secrets.json.",
       "no_devices": "Nie znaleziono urządzeń. Upewnij się, że „Znajdź moje urządzenie” jest włączone na Twoim koncie Google.",
       "cannot_connect": "Nie udało się połączyć z interfejsem Google API. Może to być problem tymczasowy — spróbuj ponownie później.",
@@ -73,7 +73,7 @@
       },
       "credentials": {
         "title": "Aktualizuj poświadczenia (opcjonalnie)",
-        "description": "{hint}\n\nZaktualizuj poświadczenia bez ujawniania istniejących wartości. Podaj dokładnie jedną metodę:\n\n• Wklej pełną zawartość nowego **secrets.json**\n**albo**\n• Podaj nowy **token OAuth** i **adres e-mail Google**.\n\nJeśli podasz nowe dane, zostaną one zweryfikowane i zapisane; integracja przeładuje się bez zmiany nazw Twoich encji.",
+        "description": "Zaktualizuj poświadczenia bez ujawniania istniejących wartości. Podaj dokładnie jedną metodę:\n\n• Wklej pełną zawartość nowego **secrets.json**\n**albo**\n• Podaj nowy **token OAuth** i **adres e-mail Google**.\n\nJeśli podasz nowe dane, zostaną one zweryfikowane i zapisane; integracja przeładuje się bez zmiany nazw Twoich encji.",
         "data": {
           "secrets_json": "Nowy secrets.json (pełna zawartość)",
           "oauth_token": "Nowy token OAuth",
