@@ -81,13 +81,16 @@ _EMAIL_RE = re.compile(
 # Allow JWT-like tokens and URL-safe/base64 variants; reject whitespace; min length.
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9\-._~+/=]{24,}$")
 
+
 def _email_valid(value: str) -> bool:
     """Return True if value looks like a real email address."""
     return bool(_EMAIL_RE.match(value or ""))
 
+
 def _token_plausible(value: str) -> bool:
     """Return True if value looks like an OAuth/JWT-ish token (no spaces, long enough)."""
     return bool(_TOKEN_RE.match(value or ""))
+
 
 # ---------------------------
 # Auth method list
@@ -202,9 +205,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Use multiline text input for secrets.json to improve UX
         schema = STEP_SECRETS_DATA_SCHEMA
         if selector is not None:
-            schema = vol.Schema({
-                vol.Required("secrets_json"): selector({"text": {"multiline": True}})
-            })
+            schema = vol.Schema(
+                {vol.Required("secrets_json"): selector({"text": {"multiline": True}})}
+            )
 
         if user_input is not None:
             raw = (user_input.get("secrets_json") or "").strip()
@@ -221,7 +224,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     email = _extract_email_from_secrets(secrets_data) or ""
                     oauth = _extract_oauth_from_secrets(secrets_data) or ""
                     if not (_email_valid(email) and _token_plausible(oauth)):
-                        _LOGGER.debug("secrets.json validation failed; email/token not plausible")
+                        _LOGGER.debug(
+                            "secrets.json validation failed; email/token not plausible"
+                        )
                         errors["base"] = "invalid_token"
                     else:
                         # Store only minimal credentials transiently for next step
@@ -237,9 +242,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="secrets_json",
             data_schema=schema,
             errors=errors,
-            description_placeholders={
-                "hint": "Please paste the full file contents; both email and OAuth token must be present.",
-            },
         )
 
     # ---------- Manual tokens path ----------
@@ -267,9 +269,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="individual_tokens",
             data_schema=STEP_INDIVIDUAL_DATA_SCHEMA,
             errors=errors,
-            description_placeholders={
-                "hint": "Provide both fields. This method should be used if the secrets.json method fails.",
-            },
         )
 
     # ---------- Shared helper to create API from stored auth_data ----------
@@ -315,7 +314,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # If we could not fetch anything, show a form with just the error.
         if errors:
-            return self.async_show_form(step_id="device_selection", data_schema=vol.Schema({}), errors=errors)
+            return self.async_show_form(
+                step_id="device_selection", data_schema=vol.Schema({}), errors=errors
+            )
 
         # Build a multi-select; keep cv.multi_select for wide compatibility
         options_map = {dev_id: dev_name for (dev_name, dev_id) in self._available_devices}
@@ -324,15 +325,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(OPT_TRACKED_DEVICES, default=list(options_map.keys())): vol.All(
                     cv.multi_select(options_map), vol.Length(min=1)
                 ),
-                vol.Optional(OPT_LOCATION_POLL_INTERVAL, default=DEFAULT_LOCATION_POLL_INTERVAL): vol.All(
-                    vol.Coerce(int), vol.Range(min=60, max=3600)
-                ),
+                vol.Optional(
+                    OPT_LOCATION_POLL_INTERVAL, default=DEFAULT_LOCATION_POLL_INTERVAL
+                ): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
                 vol.Optional(OPT_DEVICE_POLL_DELAY, default=DEFAULT_DEVICE_POLL_DELAY): vol.All(
                     vol.Coerce(int), vol.Range(min=1, max=60)
                 ),
-                vol.Optional(OPT_MIN_ACCURACY_THRESHOLD, default=DEFAULT_MIN_ACCURACY_THRESHOLD): vol.All(
-                    vol.Coerce(int), vol.Range(min=25, max=500)
-                ),
+                vol.Optional(
+                    OPT_MIN_ACCURACY_THRESHOLD, default=DEFAULT_MIN_ACCURACY_THRESHOLD
+                ): vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
                 vol.Optional(OPT_MOVEMENT_THRESHOLD, default=DEFAULT_MOVEMENT_THRESHOLD): vol.All(
                     vol.Coerce(int), vol.Range(min=10, max=200)
                 ),
@@ -481,9 +482,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="reauth_confirm",
             data_schema=schema,
             errors=errors,
-            description_placeholders={
-                "reason": "Your credentials are invalid or expired. Please provide new ones using exactly one method.",
-            },
         )
 
 
@@ -782,9 +780,6 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             step_id="credentials",
             data_schema=schema,
             errors=errors,
-            description_placeholders={
-                "hint": "Provide exactly one method to update your credentials.",
-            },
         )
 
 
