@@ -41,12 +41,12 @@
       },
       "reauth_confirm": {
         "title": "Se réauthentifier",
-        "description": "Vos identifiants sont invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nAstuce : vous pouvez coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail."
+        "description": "Vos identifiants semblent invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nAstuce : vous pouvez soit coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail."
       }
     },
     "error": {
       "auth_failed": "Échec de l’authentification. Veuillez réessayer.",
-      "invalid_token": "E-mail/jeton invalide ou champs requis manquants.",
+      "invalid_token": "Identifiants invalides (jeton/e-mail) ou champs requis manquants.",
       "invalid_json": "Format JSON invalide dans le contenu de secrets.json.",
       "no_devices": "Aucun appareil trouvé. Assurez-vous que « Localiser mon appareil » est activé sur votre compte Google.",
       "cannot_connect": "Échec de la connexion à l’API Google. Il peut s’agir d’un problème temporaire — réessayez plus tard.",
@@ -114,7 +114,8 @@
       "invalid": "Échec de la validation. Veuillez vérifier vos saisies.",
       "cannot_connect": "Échec de la connexion à l’API Google.",
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
-      "required": "Ce champ est obligatoire."
+      "required": "Ce champ est obligatoire.",
+      "invalid_token": "Identifiants invalides (jeton/e-mail). Veuillez vérifier le format et le contenu."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration réussie.",
