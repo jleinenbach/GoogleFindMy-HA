@@ -9,7 +9,7 @@ import asyncio
 import datetime
 import hashlib
 import logging
-from typing import Optional, List, Dict, Any, Iterable
+from typing import Optional, List, Dict, Any
 
 from google.protobuf.message import DecodeError
 
@@ -136,12 +136,29 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
 
 
 def _normalize_ts_seconds(ts_obj: Any) -> int:
-    """Extract seconds from a protobuf-like timestamp safely (non-negative int)."""
+    """Return a non-negative UNIX timestamp (seconds) from diverse inputs.
+
+    Accepts:
+    - Protobuf Timestamp-like objects with attribute `seconds`
+    - Numeric seconds (float/int)
+    - Milliseconds are heuristically detected and converted to seconds
+    """
     try:
-        seconds = int(getattr(ts_obj, "seconds", 0) or 0)
+        # Prefer protobuf-style attribute if available
+        secs_attr = getattr(ts_obj, "seconds", None)
+        if secs_attr is not None:
+            v = float(secs_attr)
+        else:
+            v = float(ts_obj)
     except Exception:
-        seconds = 0
-    return max(0, seconds)
+        return 0
+
+    # Heuristic: extremely large numbers are likely milliseconds
+    if v > 1e12:
+        v = v / 1000.0
+    if v < 0:
+        v = 0
+    return int(v)
 
 
 async def _offload_decrypt_aes(identity_key: bytes, encrypted_location: bytes) -> bytes:
@@ -150,7 +167,12 @@ async def _offload_decrypt_aes(identity_key: bytes, encrypted_location: bytes) -
     return await asyncio.to_thread(decrypt_aes_gcm, identity_key_hash, encrypted_location)
 
 
-async def _offload_decrypt_foreign(identity_key: bytes, encrypted_location: bytes, public_key_random: bytes, time_offset: int) -> bytes:
+async def _offload_decrypt_foreign(
+    identity_key: bytes,
+    encrypted_location: bytes,
+    public_key_random: bytes,
+    time_offset: int,
+) -> bytes:
     """Offload ECC-based decryption for foreign reports."""
     return await asyncio.to_thread(decrypt, identity_key, encrypted_location, public_key_random, time_offset)
 
@@ -162,7 +184,7 @@ async def async_decrypt_location_response_locations(
 
     Guarantees:
     - Event loop remains responsive: CPU-heavy crypto is offloaded via asyncio.to_thread().
-    - Robust against partial/invalid reports (warn and continue).
+    - Robust against partial/invalid reports (log and continue).
     - No prints or process termination; errors bubble or are logged with context.
     """
     # Defensive guards on required metadata
@@ -240,8 +262,8 @@ async def async_decrypt_location_response_locations(
                 )
             )
         except Exception as one_exc:
-            # Continue with other reports (resilience)
-            _LOGGER.warning("Failed to process one location report: %s", one_exc)
+            # Continue with other reports (per-item resilience; avoid warn spam)
+            _LOGGER.debug("Failed to process one location report: %s", one_exc)
 
     if not wrapped:
         _LOGGER.debug("[DecryptLocations] No locations found.")
@@ -268,7 +290,7 @@ async def async_decrypt_location_response_locations(
                     # Protobuf parsing is relatively cheap → inline
                     proto_loc.ParseFromString(loc.decrypted_location)
                 except DecodeError as de:
-                    _LOGGER.warning("Failed to parse Location protobuf: %s", de)
+                    _LOGGER.debug("Failed to parse Location protobuf: %s", de)
                     continue
 
                 latitude = proto_loc.latitude / 1e7
@@ -308,7 +330,7 @@ async def async_decrypt_location_response_locations(
 
             structured.append(payload)
         except Exception as one_exc:
-            _LOGGER.warning("Failed to convert one WrappedLocation to structured payload: %s", one_exc)
+            _LOGGER.debug("Failed to convert one WrappedLocation to structured payload: %s", one_exc)
 
     return structured
 
