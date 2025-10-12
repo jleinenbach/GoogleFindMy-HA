@@ -1,4 +1,3 @@
-# custom_components/googlefindmy/coordinator.py
 """Data coordinator for Google Find My Device (async-first, HA-friendly).
 
 Discovery vs. polling semantics:
@@ -12,6 +11,14 @@ Google Home semantic locations (note):
   we now substitute **Home zone coordinates** (lat/lon[/radius]) instead of forcing
   a zone label. This lets HA Core's zone engine set the state to `home`, which
   aligns with best practices.
+
+Thread-safety and quality goals:
+- All state mutations and task creations occur on HA's event loop thread.
+- Public methods that may be invoked from background threads marshal execution
+  onto the loop using a single hop (no chained hops).
+- Owner-driven locates introduce a server-side purge/cooldown window; we respect
+  this via **per-device poll cooldowns** with **dynamic guardrails** (min/max bounds),
+  without changing any external API or entity fields.
 """
 from __future__ import annotations
 
@@ -44,6 +51,18 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# -------------------------------------------------------------------------
+# Internal guardrails for dynamic cooldowns (module-local on purpose)
+# Rationale: Only used by this coordinator; keep const.py focused on cross-cutting constants.
+# Values are *bounds* that clamp dynamic guesses; they are not fixed thresholds.
+# -------------------------------------------------------------------------
+_COOLDOWN_OWNER_MIN_S = 300      # 5 min
+_COOLDOWN_OWNER_MAX_S = 900      # 15 min
+
+def _clamp(val: float, lo: float, hi: float) -> float:
+    """Return val clamped into [lo, hi]."""
+    return max(lo, min(hi, val))
 
 
 class CacheProtocol(Protocol):
@@ -194,6 +213,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Manual locate gating (UX + server protection)
         self._locate_inflight: Set[str] = set()                # device_id -> in-flight flag
         self._locate_cooldown_until: Dict[str, float] = {}     # device_id -> mono deadline
+
+        # NEW: Per-device poll cooldowns after owner reports (server purge window)
+        # Only affects internal scheduling; no external API changes.
+        self._device_poll_cooldown_until: Dict[str, float] = {}
 
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
@@ -404,6 +427,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 ]
             else:
                 devices_to_poll = [d for d in all_devices if d["id"] not in ignored]
+
+            # Apply per-device poll cooldowns (owner locate purge window)
+            if self._device_poll_cooldown_until and devices_to_poll:
+                filtered: List[Dict[str, Any]] = []
+                skipped = 0
+                for d in devices_to_poll:
+                    until = self._device_poll_cooldown_until.get(d["id"], 0.0)
+                    if until and now_mono < until:
+                        skipped += 1
+                        continue
+                    filtered.append(d)
+                if skipped:
+                    _LOGGER.debug(
+                        "Per-device poll cooldown active; skipping %d device(s) this cycle",
+                        skipped,
+                    )
+                devices_to_poll = filtered
 
             if not self._startup_complete:
                 # Defer the first poll to avoid startup load; it will run after the first interval.
@@ -857,7 +897,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
                 stat_name,
-                list(self.stats.keys()),
+                list(self.stats.keys() ),
             )
 
     def increment_stat(self, stat_name: str) -> None:
@@ -1017,6 +1057,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
+        self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
         # Push a minimal update so listeners can refresh availability quickly
         self.async_set_updated_data(self.data)
@@ -1188,8 +1229,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             return False
         if device_id in self._locate_inflight:
             return False
-        until = self._locate_cooldown_until.get(device_id, 0.0)
-        if until and time.monotonic() < until:
+        # Respect both manual-locate and poll cooldowns for the device
+        now_mono = time.monotonic()
+        until_manual = self._locate_cooldown_until.get(device_id, 0.0)
+        if until_manual and now_mono < until_manual:
+            return False
+        until_poll = self._device_poll_cooldown_until.get(device_id, 0.0)
+        if until_poll and now_mono < until_poll:
             return False
         return True
 
@@ -1269,8 +1315,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
           - Reject immediately if `can_request_location()` is False.
           - Mark request as in-flight and (optimistically) start a cooldown that
             equals `DEFAULT_MIN_POLL_INTERVAL`. This disables repeated clicks.
-          - On success: reset the polling baseline and clear the cooldown early
-            to re-enable the button once we got a response.
+          - On success: reset the polling baseline and set a **per-device cooldown**
+            (owner-report purge window) by clamping a dynamic guess.
           - Always notify listeners via `async_set_updated_data(self.data)`.
 
         Args:
@@ -1378,9 +1424,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 slot.setdefault("last_updated", time.time())
                 self.update_device_cache(device_id, slot)
 
-            # Successful manual locate: reset poll baseline, clear cooldown, push a fresh snapshot.
+            # Successful manual locate:
+            # - reset poll baseline,
+            # - set a per-device poll cooldown (owner purge window) using a dynamic guess
+            #   clamped into guardrails,
+            # - set the same cooldown for manual locate button to avoid spamming.
             self._last_poll_mono = time.monotonic()
-            self._locate_cooldown_until.pop(device_id, None)
+            dynamic_guess = max(float(DEFAULT_MIN_POLL_INTERVAL), float(self.location_poll_interval))
+            owner_cooldown = _clamp(dynamic_guess, _COOLDOWN_OWNER_MIN_S, _COOLDOWN_OWNER_MAX_S)
+            now_mono = time.monotonic()
+            self._device_poll_cooldown_until[device_id] = now_mono + owner_cooldown
+            self._locate_cooldown_until[device_id] = now_mono + owner_cooldown
+
             self.push_updated([device_id])
             return location_data or {}
         except Exception as err:
