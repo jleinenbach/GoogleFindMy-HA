@@ -35,6 +35,9 @@ _LOGGER = logging.getLogger(__name__)
 # Soft limit to avoid pathological payloads; large batches are unusual and heavy.
 _MAX_REPORTS: int = 500
 
+# Strict length of Ephemeral Identity Key (bytes)
+_EIK_LEN: int = 32
+
 
 # ---- Exceptions (specific, compatible via RuntimeError) -----------------------
 class DecryptionError(RuntimeError):
@@ -72,12 +75,13 @@ def is_mcu_tracker(device_registration: DeviceRegistration) -> bool:
 
 
 async def async_retrieve_identity_key(device_registration: DeviceRegistration) -> bytes:
-    """Derive the device identity key (async).
+    """Retrieve the device Ephemeral Identity Key (EIK) asynchronously.
 
-    Flow:
-    - Apply MCU bit-flip quirk.
+    Flow (async-first, HA-friendly):
+    - Apply MCU bit-flip quirk to the encrypted EIK blob.
     - Obtain owner key (async).
     - Decrypt EIK (CPU-bound → offload to thread).
+    - Strictly validate length to avoid silent misuse downstream.
 
     Raises:
         StaleOwnerKeyError: if tracker is encrypted with an older owner key.
@@ -96,11 +100,11 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
 
     try:
         # CPU-heavy → do not block the event loop
-        identity_key = await asyncio.to_thread(decrypt_eik, owner_key, encrypted_identity_key)
-        # Basic sanity (defensive): expected sizes are typically 32 bytes; avoid hard fail if library changes.
-        if not isinstance(identity_key, (bytes, bytearray)) or len(identity_key) < 16:
-            raise DecryptionError("Identity key looks invalid or truncated.")
-        return bytes(identity_key)
+        eik_bytes = await asyncio.to_thread(decrypt_eik, owner_key, encrypted_identity_key)
+        # Strict sanity: EIK must be exactly 32 bytes
+        if not isinstance(eik_bytes, (bytes, bytearray)) or len(eik_bytes) != _EIK_LEN:
+            raise DecryptionError(f"Ephemeral identity key invalid (expected {_EIK_LEN} bytes).")
+        return bytes(eik_bytes)
     except Exception as e:
         current_owner_key_version = None
         try:
