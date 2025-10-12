@@ -52,6 +52,7 @@ class CacheProtocol(Protocol):
     This protocol ensures that any cache object passed to the coordinator
     provides the necessary asynchronous methods for getting and setting values.
     """
+
     async def async_get_cached_value(self, key: str) -> Any: ...
     async def async_set_cached_value(self, key: str, value: Any) -> None: ...
 
@@ -106,7 +107,27 @@ def _sync_get_last_gps_from_history(
 
 
 class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
-    """Coordinator that manages polling, cache, and push updates for Google Find My Device."""
+    """Coordinator that manages polling, cache, and push updates for Google Find My Device.
+
+    Thread-safety & event loop rules (IMPORTANT):
+    - All interactions that create HA tasks or publish state must occur on the HA event loop.
+    - This class provides small helpers to "hop" from any background thread into the loop
+      using `loop.call_soon_threadsafe(...)` before touching HA APIs.
+
+    Pitfalls & mitigations (general guidance for future reviewers):
+    - Pitfall 1 – return values with `call_soon_threadsafe`:
+      `call_soon_threadsafe` does not propagate return values to the calling thread.
+      **Mitigation:** All methods we marshal to the loop in this module (e.g. `increment_stat`,
+      `update_device_cache`, `push_updated`, `purge_device`) are consciously `None`-returning.
+    - Pitfall 2 – excessive thread hops:
+      Unnecessary hops add overhead if used for micro-operations.
+      **Mitigation:** We hop **once at the public method boundary**, then execute the
+      complete logic on the HA loop (single-threaded, deterministic).
+    - Pitfall 3 – complex external locks:
+      Using extra `threading.Lock`s for shared state increases complexity and risk.
+      **Mitigation:** We **serialize** state changes by marshalling to the **single-threaded**
+      HA event loop – the loop itself is the synchronization primitive.
+    """
 
     # ---------------------------- Lifecycle ---------------------------------
     def __init__(
@@ -192,7 +213,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._stats_debounce_seconds: float = 5.0
 
         # Load persistent statistics asynchronously (name the task for better debugging)
-        hass.async_create_task(self._async_load_stats(), name=f"{DOMAIN}.load_stats")
+        self.hass.async_create_task(self._async_load_stats(), name=f"{DOMAIN}.load_stats")
 
         super().__init__(
             hass,
@@ -200,6 +221,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             name=DOMAIN,
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
+
+    # ---------------------------- Event loop helpers ------------------------
+    def _is_on_hass_loop(self) -> bool:
+        """Return True if currently executing on the HA event loop thread."""
+        loop = self.hass.loop
+        try:
+            return asyncio.get_running_loop() is loop
+        except RuntimeError:
+            return False
+
+    def _run_on_hass_loop(self, func, *args) -> None:
+        """Schedule a plain callable to run on the HA loop thread ASAP.
+
+        Note:
+        - This is intentionally **fire-and-forget**; `call_soon_threadsafe` does not
+          return the callable's result to the caller. Only use with functions that
+          **return None** and are safe to run on the HA loop.
+        """
+        self.hass.loop.call_soon_threadsafe(func, *args)
 
     # ---------------------------- Coordinate normalization ------------------
     def _normalize_coords(
@@ -378,6 +418,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         len(devices_to_poll),
                         effective_interval,
                     )
+                    # Always create tasks from the HA loop thread
                     self.hass.async_create_task(
                         self._async_start_poll_cycle(devices_to_poll),
                         name=f"{DOMAIN}.poll_cycle",
@@ -770,7 +811,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
 
     async def _debounced_save_stats(self) -> None:
-        """Debounce wrapper to coalesce frequent stat updates into a single write."""
+        """Debounce wrapper to coalesce frequent stat updates into a single write.
+
+        This coroutine MUST run on the HA event loop. It is scheduled safely via
+        `_schedule_stats_persist()` which ensures loop-thread execution.
+        """
         try:
             await asyncio.sleep(self._stats_debounce_seconds)
             await self._async_save_stats()
@@ -781,20 +826,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug("Debounced stats save failed: %s", err)
 
     def _schedule_stats_persist(self) -> None:
-        """(Re)schedule a debounced persistence task for statistics."""
-        # Cancel a pending writer, if any, and schedule a fresh one.
-        if self._stats_save_task and not self._stats_save_task.done():
-            self._stats_save_task.cancel()
-        self._stats_save_task = self.hass.async_create_task(
-            self._debounced_save_stats(), name=f"{DOMAIN}.save_stats_debounced"
-        )
+        """(Re)schedule a debounced persistence task for statistics.
 
-    def increment_stat(self, stat_name: str) -> None:
-        """Increment a statistic counter and schedule debounced persistence.
-
-        Args:
-            stat_name: The name of the statistic to increment.
+        Thread-safe: may be called from any thread. Ensures cancellation and creation
+        of the debounced task happen on the HA loop.
         """
+        def _do_schedule() -> None:
+            # Cancel a pending writer, if any, and schedule a fresh one (loop-local).
+            if self._stats_save_task and not self._stats_save_task.done():
+                self._stats_save_task.cancel()
+            self._stats_save_task = self.hass.loop.create_task(
+                self._debounced_save_stats(), name=f"{DOMAIN}.save_stats_debounced"
+            )
+
+        if self._is_on_hass_loop():
+            _do_schedule()
+        else:
+            self._run_on_hass_loop(_do_schedule)
+
+    def _increment_stat_on_loop(self, stat_name: str) -> None:
+        """Increment a statistic on the HA loop and schedule persistence."""
         if stat_name in self.stats:
             before = self.stats[stat_name]
             self.stats[stat_name] = before + 1
@@ -808,6 +859,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 stat_name,
                 list(self.stats.keys()),
             )
+
+    def increment_stat(self, stat_name: str) -> None:
+        """Increment a statistic counter (thread-safe).
+
+        May be called from any thread. The actual mutation and scheduling are
+        marshalled onto the HA event loop.
+
+        Note on performance:
+        - The "hop" to the loop occurs exactly once here (constant per call).
+          We avoid repeated hops for inner micro-operations.
+        """
+        if self._is_on_hass_loop():
+            self._increment_stat_on_loop(stat_name)
+        else:
+            self._run_on_hass_loop(self._increment_stat_on_loop, stat_name)
 
     # ---------------------------- Public platform API -----------------------
     def get_device_location_data(self, device_id: str) -> Optional[Dict[str, Any]]:
@@ -846,7 +912,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         slot.setdefault("last_seen", float(ts_epoch))
 
     def update_device_cache(self, device_id: str, location_data: Dict[str, Any]) -> None:
-        """Public, encapsulated update of the internal location cache for one device.
+        """Public, encapsulated update of the internal location cache for one device (thread-safe).
 
         Used by the FCM receiver (push path). Expects validated fields.
 
@@ -854,6 +920,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             device_id: The canonical ID of the device.
             location_data: The new location data dictionary.
         """
+        if not self._is_on_hass_loop():
+            # Marshal entire update onto the HA loop to avoid cross-thread mutations.
+            self._run_on_hass_loop(self.update_device_cache, device_id, location_data)
+            return
+
         if not isinstance(location_data, dict):
             _LOGGER.debug("Ignored cache update for %s: payload is not a dict", device_id)
             return
@@ -932,11 +1003,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         return sorted(list(known - set(self._present_device_ids)))
 
     def purge_device(self, device_id: str) -> None:
-        """Remove all cached data and cooldown state for a device.
+        """Remove all cached data and cooldown state for a device (thread-safe publish).
 
         Called from the config-entry device deletion flow. This does not trigger a poll,
         but it immediately publishes an updated snapshot so UI can refresh.
         """
+        if not self._is_on_hass_loop():
+            self._run_on_hass_loop(self.purge_device, device_id)
+            return
+
         self._device_location_data.pop(device_id, None)
         self._device_names.pop(device_id, None)
         self._device_caps.pop(device_id, None)
@@ -950,6 +1025,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def push_updated(self, device_ids: Optional[List[str]] = None) -> None:
         """Publish a fresh snapshot to listeners after push (FCM) cache updates.
 
+        Thread-safe: may be called from any thread. This method ensures all state
+        publishing happens on the HA event loop.
+
         This **does not** trigger a poll. It:
         - Immediately pushes cache state to entities via `async_set_updated_data()`.
         - Resets the internal poll baseline to 'now' to prevent an immediate re-poll.
@@ -958,6 +1036,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         Args:
             device_ids: An optional list of device IDs to include in the update.
         """
+        if not self._is_on_hass_loop():
+            self._run_on_hass_loop(self.push_updated, device_ids)
+            return
+
         wall_now = time.time()
         self._last_poll_mono = time.monotonic()  # reset poll timer
 
@@ -1192,7 +1274,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
           - Always notify listeners via `async_set_updated_data(self.data)`.
 
         Args:
-            device_id: The canonical ID of the device to locate.
+            device_id: The canonical ID of the device.
 
         Returns:
             A dictionary containing the location data (empty dict on gating).
