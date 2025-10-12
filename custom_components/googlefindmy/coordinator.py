@@ -897,7 +897,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
                 stat_name,
-                list(self.stats.keys() ),
+                list(self.stats.keys()),
             )
 
     def increment_stat(self, stat_name: str) -> None:
