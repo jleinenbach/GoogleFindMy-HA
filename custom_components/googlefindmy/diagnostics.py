@@ -37,18 +37,24 @@ from .const import (
     CONF_GOOGLE_EMAIL,
 )
 
+# ---------------------------------------------------------------------------
+# Redaction policy
+# ---------------------------------------------------------------------------
 # Keys to redact anywhere they appear in the diagnostics payload.
-# Keep this list generous; it is safe to over-redact.
+# Keep this list generous; it is safe to over-redact (defense-in-depth).
 TO_REDACT: list[str] = [
-    # Our entry.data keys
+    # Known integration secrets (entry.data)
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
-    # Common token/email shapes that *might* appear if future fields are added
+    # Common token/email/credential shapes
     "aas_token",
     "access_token",
     "refresh_token",
     "token",
     "security_token",
+    "authorization",
+    "cookie",
+    "set-cookie",
     "app_id",
     "android_id",
     "fid",
@@ -62,7 +68,46 @@ TO_REDACT: list[str] = [
     "p256dh",
     "auth",
     "endpoint",
+    # Identity resolving / E2EE related (never expose!)
+    "irk",
+    "irk_hex",
+    "identity_resolving_key",
+    "identity_resolving_keys",
+    "encrypted_identity_resolving_key",
+    "encrypted_identity_resolving_keys",
+    "identityResolvingKey",
+    "identityResolvingKeys",
+    "encryptedIdentityResolvingKey",
+    "encryptedIdentityResolvingKeys",
+    "eik",
+    "eik_hex",
+    "identity_key",
+    "identity_keys",
+    "encrypted_identity_key",
+    "encrypted_identity_keys",
+    "identityKey",
+    "identityKeys",
+    "encryptedIdentityKey",
+    "encryptedIdentityKeys",
+    "ownerKey",
+    "ownerKeyVersion",
+    # Device identifiers (avoid leaking stable IDs)
+    "device_id",
+    "deviceId",
+    "canonical_id",
+    "canonicalId",
+    "canonic_id",
+    "canonicId",
+    "canonicIds",
+    # Location-related fields (we do not include them, but redact defensively)
+    "latitude",
+    "longitude",
+    "altitude",
 ]
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _monotonic_to_wall_seconds(last_mono: Optional[float]) -> Optional[float]:
@@ -88,6 +133,20 @@ def _count_keywords(value: Any) -> int:
         return sum(1 for p in parts if p)
     except Exception:
         return 0
+
+
+def _coerce_pos_int(value: Any, default: int) -> int:
+    """Best-effort positive-int coercion for options (defensive)."""
+    try:
+        v = int(value)
+        return v if v >= 0 else default
+    except Exception:
+        return default
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics entrypoint
+# ---------------------------------------------------------------------------
 
 
 async def async_get_config_entry_diagnostics(
@@ -127,19 +186,23 @@ async def async_get_config_entry_diagnostics(
     ignored_list = opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or []
     if not isinstance(ignored_list, list):
         ignored_list = []
+
     config_summary = {
         # Durations and numeric thresholds
-        "location_poll_interval": int(opt.get(OPT_LOCATION_POLL_INTERVAL, 300)),
-        "device_poll_delay": int(opt.get(OPT_DEVICE_POLL_DELAY, 5)),
-        "min_accuracy_threshold": int(opt.get(OPT_MIN_ACCURACY_THRESHOLD, 100)),
-        "movement_threshold": int(opt.get(OPT_MOVEMENT_THRESHOLD, 50)),
+        "location_poll_interval": _coerce_pos_int(opt.get(OPT_LOCATION_POLL_INTERVAL, 300), 300),
+        "device_poll_delay": _coerce_pos_int(opt.get(OPT_DEVICE_POLL_DELAY, 5), 5),
+        "min_accuracy_threshold": _coerce_pos_int(opt.get(OPT_MIN_ACCURACY_THRESHOLD, 100), 100),
+        "movement_threshold": _coerce_pos_int(opt.get(OPT_MOVEMENT_THRESHOLD, 50), 50),
         # Feature toggles
         "google_home_filter_enabled": bool(opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, False)),
         "enable_stats_entities": bool(opt.get(OPT_ENABLE_STATS_ENTITIES, True)),
-        "map_view_token_expiration": bool(opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, True)),
+        # Token lifetime: store numeric value if available; do not expose strings
+        "map_view_token_expiration_seconds": _coerce_pos_int(
+            opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, 0), 0
+        ),
         # Counts only (never expose strings/IDs)
         "google_home_filter_keywords_count": _count_keywords(opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS)),
-        "tracked_devices_count": len(opt.get(OPT_TRACKED_DEVICES, [])),
+        "tracked_devices_count": len(opt.get(OPT_TRACKED_DEVICES, []) or []),
         "ignored_devices_count": len(ignored_list),
     }
 
@@ -185,7 +248,7 @@ async def async_get_config_entry_diagnostics(
 
         try:
             stats = dict(getattr(coordinator, "stats", {}) or {})
-            # Stats should already be anonymized counters; still ensure only ints
+            # Stats should already be anonymized counters; still ensure only numbers
             for k, v in list(stats.items()):
                 if not isinstance(v, (int, float)):
                     stats[k] = None
