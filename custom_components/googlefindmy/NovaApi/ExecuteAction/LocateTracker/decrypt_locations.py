@@ -9,6 +9,7 @@ import asyncio
 import datetime
 import hashlib
 import logging
+import math
 from typing import Optional, List, Dict, Any
 
 from google.protobuf.message import DecodeError
@@ -35,7 +36,7 @@ _LOGGER = logging.getLogger(__name__)
 # Soft limit to avoid pathological payloads; large batches are unusual and heavy.
 _MAX_REPORTS: int = 500
 
-# Strict length of Ephemeral Identity Key (bytes)
+# Strict length of Ephemeral Identity Key (bytes). Paper and ecosystem practice expect 32 bytes.
 _EIK_LEN: int = 32
 
 
@@ -54,16 +55,18 @@ def create_google_maps_link(latitude: float, longitude: float) -> Optional[str]:
     Contract:
     - Returns a valid URL string, or None if coordinates are invalid.
     - Avoids mixing error strings with URLs at call sites.
+
+    Note: Keep this for developer diagnostics (debug level only elsewhere).
     """
     try:
         lat_f = float(latitude)
         lon_f = float(longitude)
     except (TypeError, ValueError):
-        _LOGGER.warning("Invalid coordinate types for Maps link: lat=%r, lon=%r", latitude, longitude)
+        _LOGGER.debug("Invalid coordinate types for Maps link; skipping link generation")
         return None
 
     if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
-        _LOGGER.warning("Invalid coordinate values for Maps link: lat=%s, lon=%s", lat_f, lon_f)
+        _LOGGER.debug("Out-of-bounds coordinates for Maps link; skipping link generation")
         return None
 
     return f"https://www.google.com/maps/search/?api=1&query={lat_f},{lon_f}"
@@ -181,6 +184,50 @@ async def _offload_decrypt_foreign(
     return await asyncio.to_thread(decrypt, identity_key, encrypted_location, public_key_random, time_offset)
 
 
+# ----------------------------- Validation helpers -----------------------------
+def _is_valid_latlon(lat: float, lon: float) -> bool:
+    """Validate latitude/longitude are finite and within geographic bounds.
+
+    POPETS'25 notes integer-scaled coordinates (±90/±180 after scaling by 1e7).
+    We validate after scaling here and fail fast on out-of-range/NaN/Inf.
+    """
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
+        return False
+    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+        return False
+    return True
+
+
+def _infer_report_hint(status_value: Any) -> Optional[str]:
+    """Infer report type hints from the protobuf Status enum name.
+
+    We keep this intentionally conservative and *only* set a hint if we can map
+    the enum name unambiguously. Otherwise we return None (no guessing).
+    Hints are consumed by the coordinator to apply type-aware cooldowns
+    reflecting server throttling observed in POPETS'25 (§4–5).
+
+    Returns:
+        "high_traffic", "in_all_areas", or None.
+    """
+    try:
+        # Common_pb2.Status is a protobuf enum; Name(...) returns its symbolic name.
+        name = Common_pb2.Status.Name(int(status_value)).lower()
+    except Exception:
+        return None
+
+    if "high" in name and "traffic" in name:
+        return "high_traffic"
+    if "in" in name and "all" in name and "areas" in name:
+        return "in_all_areas"
+    return None
+
+
+# ----------------------------- Main decryptor ---------------------------------
 async def async_decrypt_location_response_locations(
     device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
 ) -> List[Dict[str, Any]]:
@@ -188,8 +235,14 @@ async def async_decrypt_location_response_locations(
 
     Guarantees:
     - Event loop remains responsive: CPU-heavy crypto is offloaded via asyncio.to_thread().
+    - Fail-fast: malformed coordinates are dropped at the decryption boundary,
+      preventing bad data from leaking into higher layers (HA Platinum quality).
     - Robust against partial/invalid reports (log and continue).
     - No prints or process termination; errors bubble or are logged with context.
+
+    POPETS'25 reference (Böttger et al., 2025):
+      - Integer-scaled coordinates and validation: §4
+      - "High Traffic" vs. "In All Areas" throttling semantics: §4–5
     """
     # Defensive guards on required metadata
     try:
@@ -273,10 +326,12 @@ async def async_decrypt_location_response_locations(
         _LOGGER.debug("[DecryptLocations] No locations found.")
         return []
 
-    # Convert to structured payloads for HA entities
+    # Convert to structured payloads for HA entities (with fail-fast validation)
     structured: List[Dict[str, Any]] = []
     for loc in wrapped:
         try:
+            report_hint = _infer_report_hint(loc.status)  # may be None (conservative)
+
             if loc.status == Common_pb2.Status.SEMANTIC:
                 payload: Dict[str, Any] = {
                     "latitude": None,
@@ -288,21 +343,32 @@ async def async_decrypt_location_response_locations(
                     "is_own_report": loc.is_own_report,
                     "semantic_name": loc.name,
                 }
+                # Internal hint helps the coordinator schedule throttling-aware cooldowns.
+                if report_hint:
+                    payload["_report_hint"] = report_hint
             else:
                 proto_loc = DeviceUpdate_pb2.Location()
                 try:
                     # Protobuf parsing is relatively cheap → inline
                     proto_loc.ParseFromString(loc.decrypted_location)
                 except DecodeError as de:
-                    _LOGGER.debug("Failed to parse Location protobuf: %s", de)
+                    _LOGGER.debug("Failed to parse Location protobuf; dropping one report: %s", de)
                     continue
 
+                # --- Fail-fast coordinate validation (POPETS'25 §4) -----------------
+                # The protocol uses integer-scaled lat/lon (1e7). We validate *after* scaling.
                 latitude = proto_loc.latitude / 1e7
                 longitude = proto_loc.longitude / 1e7
+                if not _is_valid_latlon(latitude, longitude):
+                    # Keep the message non-sensitive: do not print raw coordinates.
+                    _LOGGER.debug("Dropping invalid/out-of-bounds coordinates from one report")
+                    continue
+                # ---------------------------------------------------------------------
+
                 altitude = proto_loc.altitude
 
                 if _LOGGER.isEnabledFor(logging.DEBUG):
-                    _LOGGER.debug("Latitude: %s | Longitude: %s | Altitude: %s", latitude, longitude, altitude)
+                    _LOGGER.debug("Parsed valid coordinates (altitude present: %s)", altitude is not None)
                     maps_link = create_google_maps_link(latitude, longitude)
                     if maps_link:
                         _LOGGER.debug("Google Maps Link: %s", maps_link)
@@ -317,6 +383,8 @@ async def async_decrypt_location_response_locations(
                     "is_own_report": loc.is_own_report,
                     "semantic_name": None,
                 }
+                if report_hint:
+                    payload["_report_hint"] = report_hint
 
             # Log with timezone-awareness if HA util is available (debug only)
             if _LOGGER.isEnabledFor(logging.DEBUG):
