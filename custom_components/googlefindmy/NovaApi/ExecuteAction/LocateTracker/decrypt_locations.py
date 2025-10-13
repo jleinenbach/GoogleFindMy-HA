@@ -204,18 +204,32 @@ def _is_valid_latlon(lat: float, lon: float) -> bool:
 
 
 def _infer_report_hint(status_value: Any) -> Optional[str]:
-    """Infer report type hints from the protobuf Status enum name.
+    """Infer a throttling hint from the protobuf Status.
 
-    We keep this intentionally conservative and *only* set a hint if we can map
-    the enum name unambiguously. Otherwise we return None (no guessing).
-    Hints are consumed by the coordinator to apply type-aware cooldowns
-    reflecting server throttling observed in POPETS'25 (§4–5).
+    Strategy:
+    1) Prefer **explicit enum comparisons** (robust across locales).
+    2) Fall back to **name substring checks** if enums are unavailable
+       in the environment/build (defensive coding for older protobufs).
 
-    Returns:
-        "high_traffic", "in_all_areas", or None.
+    Hints:
+        - "high_traffic"  → aggregated server-side reports typically throttled more aggressively.
+        - "in_all_areas"  → crowdsourced reports available broadly; back off for longer.
+        - None            → unknown/irrelevant; coordinator applies no type-specific cooldown.
     """
+    # --- Explicit enum mapping (robust path) -----------------------
     try:
-        # Common_pb2.Status is a protobuf enum; Name(...) returns its symbolic name.
+        if int(status_value) == getattr(Common_pb2.Status, "CROWDSOURCED"):
+            return "in_all_areas"
+    except Exception:
+        pass
+    try:
+        if int(status_value) == getattr(Common_pb2.Status, "AGGREGATED"):
+            return "high_traffic"
+    except Exception:
+        pass
+
+    # --- Conservative fallback based on enum name -------------------
+    try:
         name = Common_pb2.Status.Name(int(status_value)).lower()
     except Exception:
         return None
