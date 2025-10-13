@@ -74,6 +74,10 @@ from .const import (
     DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     DEFAULT_ENABLE_STATS_ENTITIES,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_OPTIONS,
+    OPT_OPTIONS_SCHEMA_VERSION,
+    coerce_ignored_mapping,
+    ignored_choices_for_ui,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -732,34 +736,15 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         """Show and restore ignored devices by removing them from OPT_IGNORED_DEVICES."""
         entry = self.config_entry
         options = dict(entry.options)
-        ignored = options.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or []
-        if not isinstance(ignored, list):
-            ignored = []
+        raw = options.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
+        ignored_map, _migrated = coerce_ignored_mapping(raw)
 
         # Abort early if nothing to restore
-        if not ignored:
+        if not ignored_map:
             return self.async_abort(reason="no_ignored_devices")
 
-        # Build display map: "<friendly> (<id>)"
-        dev_reg = dr.async_get(self.hass)
-        choices: Dict[str, str] = {}
-        for dev_id in ignored:
-            friendly = dev_id
-            try:
-                # Try to resolve a device by identifier (DOMAIN, dev_id)
-                device = next(
-                    (
-                        d
-                        for d in dev_reg.devices.values()
-                        if any(ident for ident in d.identifiers if ident == (DOMAIN, dev_id))
-                    ),
-                    None,
-                )
-                if device:
-                    friendly = device.name_by_user or device.name or dev_id
-            except Exception:  # pragma: no cover - defensive
-                pass
-            choices[dev_id] = f"{friendly} ({dev_id})"
+        # Directly use stored names for choices
+        choices = ignored_choices_for_ui(ignored_map)
 
         schema = vol.Schema({vol.Optional("unignore_devices", default=[]): cv.multi_select(choices)})
 
@@ -768,12 +753,17 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             if not isinstance(to_restore, list):
                 to_restore = list(to_restore)  # in case of set/tuple
 
-            new_ignored = [x for x in ignored if x not in to_restore]
-            new_options = dict(entry.options)
-            new_options[OPT_IGNORED_DEVICES] = new_ignored
+            # Remove selected ids from the mapping
+            for dev_id in to_restore:
+                ignored_map.pop(dev_id, None)
 
-            # Trigger automatic reload via OptionsFlowWithReload
-            return self.async_create_entry(title="", data=new_options)
+            new_options = dict(entry.options)
+            new_options[OPT_IGNORED_DEVICES] = ignored_map
+            new_options[OPT_OPTIONS_SCHEMA_VERSION] = 2
+
+            if new_options != entry.options:
+                self.hass.config_entries.async_update_entry(entry, options=new_options)
+            return self.async_abort(reason="visibility_restored")
 
         return self.async_show_form(step_id="visibility", data_schema=schema)
 
