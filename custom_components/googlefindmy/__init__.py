@@ -93,6 +93,9 @@ from .api import (
     register_fcm_receiver_provider as api_register_fcm_provider,
     unregister_fcm_receiver_provider as api_unregister_fcm_provider,
 )
+# Eagerly import diagnostics to prevent blocking calls on-demand
+from . import diagnostics
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -309,15 +312,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # 2) Optional: register HA-managed aiohttp session for Nova API (defer import)
     try:
-        from .NovaApi import nova_request as nova  # defer heavy import to setup
+        from .NovaApi import nova_request as nova
         reg = getattr(nova, "register_hass", None)
         unreg = getattr(nova, "unregister_session_provider", None)
         if callable(reg):
             reg(hass)
             if callable(unreg):
                 entry.async_on_unload(unreg)
-            else:
-                _LOGGER.debug("Nova API unregister hook not present; continuing without unload hook.")
         else:
             _LOGGER.debug("Nova API register_hass() not available; continuing with module defaults.")
     except Exception as err:  # Defensive: Nova module may not expose hooks in some builds
@@ -326,8 +327,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 3) Soft-migrate mutable settings from data -> options (never secrets)
     await _async_soft_migrate_data_to_options(hass, entry)
 
-    # 4) Acquire shared FCM and keep it alive while this entry exists
-    fcm = await _async_acquire_shared_fcm(hass)
+    # 4) Acquire shared FCM and create a startup barrier for the first poll cycle.
+    fcm_ready_event = asyncio.Event()
+
+    # This task runs in the background. When the FCM provider is ready,
+    # it sets the event, unblocking the coordinator's first poll.
+    async def _acquire_and_register_fcm_with_barrier() -> None:
+        try:
+            receiver = await _async_acquire_shared_fcm(hass)
+            # Register provider for both consumer modules
+            loc_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
+            api_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
+            # Signal readiness to the coordinator
+            fcm_ready_event.set()
+        except Exception as err:
+            _LOGGER.debug("FCM acquisition/registration not ready yet: %s", err)
+
+    hass.async_create_task(_acquire_and_register_fcm_with_barrier())
+    fcm = await _async_acquire_shared_fcm(hass)  # Ensure fcm is available for unload logic
 
     # NOTE (lifecycle): Do not await long-running shutdowns inside async_on_unload.
     # We only *signal* the FCM receiver to stop here (non-blocking). The awaited
@@ -375,6 +392,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ),
     )
     coordinator.config_entry = entry  # convenience for platforms
+
+    # Hand over the barrier without changing the coordinator's signature.
+    # This is a minimal, backward-compatible way to pass the event.
+    setattr(coordinator, "fcm_ready_event", fcm_ready_event)
 
     # Register the coordinator with the shared FCM receiver (clear synchronous contract).
     fcm.register_coordinator(coordinator)
