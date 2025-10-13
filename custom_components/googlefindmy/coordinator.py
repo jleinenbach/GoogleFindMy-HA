@@ -40,7 +40,7 @@ import logging
 import math
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Protocol, Set
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -51,6 +51,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
 # HA session is provided by the integration and reused across I/O
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
@@ -244,6 +245,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Only affects internal scheduling; no external API changes.
         self._device_poll_cooldown_until: Dict[str, float] = {}
 
+        # Short retry scheduler for FCM deferral (coalesced)
+        self._defer_retry_unsub: Optional[Callable[[], None]] = None
+
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
             "skipped_duplicates": 0,
@@ -290,6 +294,24 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
           **return None** and are safe to run on the HA loop.
         """
         self.hass.loop.call_soon_threadsafe(func, *args)
+
+    def _schedule_short_retry(self, delay_seconds: float = 5.0) -> None:
+        """Schedule a short, coalesced refresh when polling is deferred.
+
+        Implementation details:
+        - Uses `async_call_later` to avoid busy loops and to keep load minimal.
+        - Coalesces multiple deferrals: if a retry is already scheduled, do nothing.
+        - The callback clears its own handle and requests a coordinator refresh.
+        """
+        if self._defer_retry_unsub is not None:
+            return
+
+        def _retry_callback(_now) -> None:
+            self._defer_retry_unsub = None
+            # Request a refresh (this will run _async_update_data again)
+            self.hass.async_create_task(self.async_request_refresh())
+
+        self._defer_retry_unsub = async_call_later(self.hass, delay_seconds, _retry_callback)
 
     # ---------------------------- Cooldown helpers (server-aware) -----------
     def _compute_type_cooldown_seconds(self, report_hint: Optional[str]) -> int:
@@ -460,26 +482,52 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     # ---------------------------- HA Coordinator ----------------------------
     def _is_fcm_ready_soft(self) -> bool:
-        """Best-effort check if the shared FCM receiver reports readiness.
+        """Return True if push transport appears ready (no awaits, no I/O).
 
-        Notes:
-            - Reads the HA-managed singleton from hass.data[DOMAIN]['fcm_receiver'].
-            - Only inspects simple boolean properties (no network, no awaits).
-            - Returns False if the receiver is missing or readiness cannot be determined.
+        Order:
+          1) Ask API (single source of truth if available).
+          2) Receiver-level booleans.
+          3) Push-client heuristic (run_state + do_listen).
+          4) Token presence as last resort.
         """
         try:
-            bucket = self.hass.data.get(DOMAIN, {})
-            fcm = bucket.get("fcm_receiver")
-            if fcm is None:
+            # 1) API knowledge (preferred)
+            try:
+                fn = getattr(self.api, "is_push_ready", None)
+                if callable(fn):
+                    return bool(fn())
+            except Exception:
+                pass
+
+            # 2) Receiver-level flags
+            fcm = self.hass.data.get(DOMAIN, {}).get("fcm_receiver")
+            if not fcm:
                 return False
             for attr in ("is_ready", "ready"):
                 val = getattr(fcm, attr, None)
                 if isinstance(val, bool):
                     return val
+
+            # 3) Heuristic: push client state (no enum import)
+            pc = getattr(fcm, "pc", None)
+            if pc is not None:
+                state = getattr(pc, "run_state", None)
+                # tolerate Enum, str, or int-like; prefer .name if present
+                state_name = getattr(state, "name", state)
+                if state_name == "STARTED" and bool(getattr(pc, "do_listen", False)):
+                    return True
+
+            # 4) Token as last resort
+            try:
+                token = fcm.get_fcm_token()
+                if isinstance(token, str) and len(token) >= 10:
+                    return True
+            except Exception:
+                pass
+
+            return False
         except Exception:
-            # Be defensive: any inspection error means "not ready".
-            pass
-        return False
+            return False
 
     def _note_fcm_deferral(self, now_mono: float) -> None:
         """Advance a quiet escalation timeline while FCM is not ready.
@@ -530,6 +578,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             UpdateFailed: For other transient or unexpected errors.
         """
         try:
+            # --- START PATCH: UNIFIED POLLING LOGIC ---
+            # One-time wait for FCM on first run.
+            if not self._startup_complete:
+                fcm_evt = getattr(self, "fcm_ready_event", None)
+                if isinstance(fcm_evt, asyncio.Event) and not fcm_evt.is_set():
+                    _LOGGER.debug("First run: waiting for FCM provider to become ready...")
+                    try:
+                        await asyncio.wait_for(fcm_evt.wait(), timeout=15.0)
+                        _LOGGER.debug("FCM provider is ready; proceeding.")
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning("FCM provider not ready after 15s; proceeding anyway.")
+                self._startup_complete = True
+
             # 1) Always fetch the lightweight FULL device list using native async API
             all_devices = await self.api.async_get_basic_device_list()
             all_devices = all_devices or []
@@ -556,13 +617,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             effective_interval = max(self.location_poll_interval, self.min_poll_interval)
 
             # Build list of devices to POLL:
-            # - must not be ignored
-            # - must be enabled in Device Registry (disabled_by is None)
             dev_reg = dr.async_get(self.hass)
 
             def _is_enabled_in_registry(dev_id: str) -> bool:
                 device = dev_reg.async_get_device(identifiers={(DOMAIN, dev_id)})
-                # If no registry entry yet, allow polling (entity creation path). If present and disabled, skip.
                 return device is None or device.disabled_by is None
 
             devices_to_poll = [
@@ -570,73 +628,40 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 if d["id"] not in ignored and _is_enabled_in_registry(d["id"])
             ]
 
-            # Apply per-device poll cooldowns (owner locate purge window + type-aware cooldowns)
+            # Apply per-device poll cooldowns
             if self._device_poll_cooldown_until and devices_to_poll:
-                filtered: List[Dict[str, Any]] = []
-                skipped = 0
-                for d in devices_to_poll:
-                    until = self._device_poll_cooldown_until.get(d["id"], 0.0)
-                    if until and now_mono < until:
-                        skipped += 1
-                        continue
-                    filtered.append(d)
-                if skipped:
-                    _LOGGER.debug(
-                        "Per-device poll cooldown active; skipping %d device(s) this cycle",
-                        skipped,
-                    )
-                devices_to_poll = filtered
+                devices_to_poll = [
+                    d for d in devices_to_poll
+                    if now_mono >= self._device_poll_cooldown_until.get(d["id"], 0.0)
+                ]
 
-            if not self._startup_complete:
-                fcm_evt = getattr(self, "fcm_ready_event", None)
-                if isinstance(fcm_evt, asyncio.Event) and not fcm_evt.is_set():
-                    _LOGGER.debug("First poll cycle is waiting for FCM provider to become ready...")
-                    try:
-                        await asyncio.wait_for(fcm_evt.wait(), timeout=15.0)
-                        _LOGGER.debug("FCM provider is ready; proceeding with first poll cycle.")
-                    except asyncio.TimeoutError:
-                        _LOGGER.warning(
-                            "FCM provider not ready after 15s; proceeding with first poll cycle anyway."
-                        )
-                
-                self._startup_complete = True
-                
-                if devices_to_poll:
-                    _LOGGER.debug("Triggering initial poll cycle immediately after startup.")
+            # Simplified unified polling logic
+            due = (now_mono - self._last_poll_mono) >= effective_interval
+            if due and not self._is_polling and devices_to_poll:
+                if not self._is_fcm_ready_soft():
+                    # Do not move the poll baseline on deferral; instead, schedule a short retry.
+                    self._note_fcm_deferral(now_mono)
+                    self._schedule_short_retry(5.0)
+                    _LOGGER.debug("Deferring polling cycle: FCM/push not ready yet.")
+                else:
+                    if self._fcm_defer_started_mono:
+                        self._clear_fcm_deferral()
+                    _LOGGER.debug(
+                        "Scheduling background polling cycle (devices=%d, interval=%ds)",
+                        len(devices_to_poll),
+                        effective_interval,
+                    )
                     self.hass.async_create_task(
                         self._async_start_poll_cycle(devices_to_poll),
-                        name=f"{DOMAIN}.initial_poll_cycle",
+                        name=f"{DOMAIN}.poll_cycle",
                     )
             else:
-                due = (now_mono - self._last_poll_mono) >= effective_interval
-                if due and not self._is_polling and devices_to_poll:
-                    # Gate polling on FCM readiness to prevent startup/reload race.
-                    if not self._is_fcm_ready_soft():
-                        # Defer polling: move baseline forward to avoid tight loops and escalate politely.
-                        self._last_poll_mono = now_mono
-                        self._note_fcm_deferral(now_mono)
-                        _LOGGER.debug("Deferring polling cycle: FCM/push not ready yet (reload gating).")
-                    else:
-                        # If we just recovered, clear the escalation state once.
-                        if self._fcm_defer_started_mono:
-                            self._clear_fcm_deferral()
-                        _LOGGER.debug(
-                            "Scheduling background polling cycle (devices=%d, interval=%ds)",
-                            len(devices_to_poll),
-                            effective_interval,
-                        )
-                        # Always create tasks from the HA loop thread
-                        self.hass.async_create_task(
-                            self._async_start_poll_cycle(devices_to_poll),
-                            name=f"{DOMAIN}.poll_cycle",
-                        )
-                else:
-                    _LOGGER.debug(
-                        "Poll not due (elapsed=%.1fs/%ss) or already running=%s",
-                        now_mono - self._last_poll_mono,
-                        effective_interval,
-                        self._is_polling,
-                    )
+                _LOGGER.debug(
+                    "Poll not due (elapsed=%.1fs/%ss) or already running=%s",
+                    now_mono - self._last_poll_mono,
+                    effective_interval,
+                    self._is_polling,
+                )
 
             # 4) Build data snapshot for devices visible to the user (ignore-filter applied)
             visible_devices = [d for d in all_devices if d["id"] not in ignored]
@@ -647,6 +672,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 int(max(0, effective_interval - (time.monotonic() - self._last_poll_mono))),
             )
             return snapshot
+            # --- END PATCH ---
 
         except asyncio.CancelledError:
             raise
@@ -688,9 +714,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # if readiness regressed between scheduling and execution, skip cleanly.
             if not self._is_fcm_ready_soft():
                 _LOGGER.debug("Skipping polling cycle: FCM/push not ready yet.")
-                # Move baseline to now so we don't immediately reschedule; keep escalation ticking.
-                self._last_poll_mono = time.monotonic()
-                self._note_fcm_deferral(self._last_poll_mono)
+                # Do not move the baseline on deferral; schedule a short retry and keep escalation ticking.
+                self._note_fcm_deferral(time.monotonic())
+                self._schedule_short_retry(5.0)
                 return
             else:
                 # If we were deferring previously, clear the escalation timeline.
