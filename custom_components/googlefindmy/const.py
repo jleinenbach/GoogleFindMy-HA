@@ -7,6 +7,9 @@ Keep comments and docstrings in English; user-facing strings belong in translati
 
 from __future__ import annotations
 
+import time
+from typing import Any
+
 # --------------------------------------------------------------------------------------
 # Core identifiers
 # --------------------------------------------------------------------------------------
@@ -88,8 +91,9 @@ DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
 
 # Aggregate defaults dictionary for option-first reading patterns
 DEFAULT_OPTIONS: dict[str, object] = {
-    # OPT_IGNORED_DEVICES is intentionally not pre-populated here to avoid bloating storage.
-    OPT_IGNORED_DEVICES: [],
+    # Store ignored devices as mapping {device_id: {"name": str, "aliases": [str], "ignored_at": int, "source": str}}
+    # Backwards-compatible: old list[str] or dict[str,str] is auto-migrated on first write.
+    OPT_IGNORED_DEVICES: {},
     OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL: DEFAULT_MIN_POLL_INTERVAL,
@@ -101,6 +105,75 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_GOOGLE_HOME_FILTER_KEYWORDS: DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
 }
+
+# -------------------- Options schema versioning (lightweight) --------------------
+# Used to mark that OPT_IGNORED_DEVICES is in "v2" (mapping with metadata).
+OPT_OPTIONS_SCHEMA_VERSION = "options_schema_version"
+_IGN_KEY_NAME = "name"
+_IGN_KEY_ALIASES = "aliases"
+_IGN_KEY_IGNORED_AT = "ignored_at"
+_IGN_KEY_SOURCE = "source"
+
+def _now_epoch() -> int:
+    """Return current epoch timestamp as an integer."""
+    return int(time.time())
+
+def coerce_ignored_mapping(raw: object) -> tuple[dict[str, dict], bool]:
+    """Coerce various legacy shapes into v2 mapping.
+    Accepted inputs:
+      v0: list[str]                   -> ids only
+      v1: dict[str, str]             -> id -> name
+      v2: dict[str, dict[str, Any]]  -> id -> metadata
+    Returns (mapping, changed_flag).
+    """
+    changed = False
+    out: dict[str, dict] = {}
+    if isinstance(raw, list):
+        # v0 -> v2
+        for dev_id in raw:
+            if isinstance(dev_id, str):
+                out[dev_id] = {
+                    _IGN_KEY_NAME: dev_id,
+                    _IGN_KEY_ALIASES: [],
+                    _IGN_KEY_IGNORED_AT: _now_epoch(),
+                    _IGN_KEY_SOURCE: "migrated_v0",
+                }
+        changed = True
+    elif isinstance(raw, dict):
+        # str->str ? (v1)
+        if all(isinstance(v, str) for v in raw.values()):
+            for dev_id, name in raw.items():  # type: ignore[assignment]
+                if isinstance(dev_id, str):
+                    out[dev_id] = {
+                        _IGN_KEY_NAME: name,
+                        _IGN_KEY_ALIASES: [],
+                        _IGN_KEY_IGNORED_AT: _now_epoch(),
+                        _IGN_KEY_SOURCE: "migrated_v1",
+                    }
+            changed = True
+        else:
+            # assume v2-ish; normalize keys
+            for dev_id, meta in raw.items():  # type: ignore[assignment]
+                if not isinstance(dev_id, str):
+                    continue
+                if not isinstance(meta, dict):
+                    meta = {_IGN_KEY_NAME: str(meta)}
+                out[dev_id] = {
+                    _IGN_KEY_NAME: meta.get(_IGN_KEY_NAME) or dev_id,
+                    _IGN_KEY_ALIASES: list(meta.get(_IGN_KEY_ALIASES) or []),
+                    _IGN_KEY_IGNORED_AT: int(meta.get(_IGN_KEY_IGNORED_AT) or _now_epoch()),
+                    _IGN_KEY_SOURCE: meta.get(_IGN_KEY_SOURCE) or "registry",
+                }
+    else:
+        out = {}
+    return out, changed
+
+def ignored_choices_for_ui(ignored_map: dict[str, dict]) -> dict[str, str]:
+    """Build UI labels 'Name (id)' directly from the stored mapping."""
+    return {
+        dev_id: f"{(meta.get(_IGN_KEY_NAME) or dev_id)} ({dev_id})"
+        for dev_id, meta in ignored_map.items()
+    }
 
 # --------------------------------------------------------------------------------------
 # CONFIG_FIELDS — server-side validation contract for config/options flows
@@ -267,4 +340,6 @@ __all__ = [
     "FCM_ABORT_ON_SEQ_ERROR_COUNT",
     "STORAGE_KEY",
     "STORAGE_VERSION",
+    "coerce_ignored_mapping",
+    "ignored_choices_for_ui",
 ]
