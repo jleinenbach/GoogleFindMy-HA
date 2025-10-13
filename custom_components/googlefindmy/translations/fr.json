@@ -26,9 +26,8 @@
       },
       "device_selection": {
         "title": "Sélection des appareils et interrogation",
-        "description": "Sélectionnez les appareils à suivre et configurez les paramètres d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)\n\nL’intégration interroge les appareils de manière séquentielle et demande les données de position pour chaque appareil avec le délai spécifié.",
+        "description": "Les nouveaux appareils détectés apparaissent désactivés et peuvent être activés dans les paramètres de l’appareil. Configurez ici les paramètres généraux d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)",
         "data": {
-          "tracked_devices": "Appareils suivis",
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d’appareil (s)",
           "min_accuracy_threshold": "Précision minimale (m)",
@@ -85,9 +84,8 @@
       },
       "settings": {
         "title": "Options",
-        "description": "Modifier les paramètres de suivi :\n• Intervalle d’interrogation de position : fréquence des requêtes de position (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes par appareil (1–60 secondes)\n• Précision minimale : ignorer les positions moins précises que cette valeur (25–500 mètres)\n• Seuil de mouvement : mouvement minimal déclenchant une mise à jour de la position (10–200 mètres)\n\nFiltre Google Home :\n• Activer pour regrouper les détections Google Home dans la zone « Domicile »\n• Les mots-clés acceptent les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
+        "description": "Ajuster les paramètres de localisation :\n• Intervalle d’interrogation de position : fréquence des requêtes de position (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes par appareil (1–60 secondes)\n• Précision minimale : ignorer les positions moins précises que cette valeur (25–500 mètres)\n• Seuil de mouvement : mouvement minimal déclenchant une mise à jour de la position (10–200 mètres)\n\nFiltre Google Home :\n• Activer pour associer les détections Google Home à la zone « Domicile »\n• Les mots-clés acceptent les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
         "data": {
-          "tracked_devices": "Appareils suivis",
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d’appareil (s)",
           "min_accuracy_threshold": "Précision minimale (m)",
