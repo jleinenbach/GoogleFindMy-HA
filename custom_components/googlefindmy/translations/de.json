@@ -228,6 +228,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Verworfene Standorte (geringe Genauigkeit)"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Unwesentliche Aktualisierungen verworfen"
       }
     }
   }
