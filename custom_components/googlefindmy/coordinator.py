@@ -40,7 +40,7 @@ import logging
 import math
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Protocol, Set
+from typing import Any, Dict, List, Optional, Protocol, Set, Callable
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -51,8 +51,8 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
 # HA session is provided by the integration and reused across I/O
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.event import async_call_later
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import GoogleFindMyAPI
@@ -245,9 +245,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Only affects internal scheduling; no external API changes.
         self._device_poll_cooldown_until: Dict[str, float] = {}
 
-        # Short retry scheduler for FCM deferral (coalesced)
-        self._defer_retry_unsub: Optional[Callable[[], None]] = None
-
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
             "skipped_duplicates": 0,
@@ -268,6 +265,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         # Load persistent statistics asynchronously (name the task for better debugging)
         self.hass.async_create_task(self._async_load_stats(), name=f"{DOMAIN}.load_stats")
+
+        # Short-retry scheduling handle (coalesced)
+        self._short_retry_cancel: Optional[Callable[[], None]] = None
 
         super().__init__(
             hass,
@@ -295,23 +295,44 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """
         self.hass.loop.call_soon_threadsafe(func, *args)
 
-    def _schedule_short_retry(self, delay_seconds: float = 5.0) -> None:
-        """Schedule a short, coalesced refresh when polling is deferred.
+    def _schedule_short_retry(self, delay_s: float = 5.0) -> None:
+        """Schedule a short, coalesced refresh instead of shifting the poll baseline.
 
-        Implementation details:
-        - Uses `async_call_later` to avoid busy loops and to keep load minimal.
-        - Coalesces multiple deferrals: if a retry is already scheduled, do nothing.
-        - The callback clears its own handle and requests a coordinator refresh.
+        Rationale:
+        - When FCM/push is not ready, we *do not* advance `_last_poll_mono`.
+          Advancing the baseline hides readiness transitions and can put the
+          scheduler to "sleep". Instead, we request a short follow-up refresh.
+
+        Behavior:
+        - Coalesces multiple calls by cancelling a pending callback first.
+        - Always runs on the HA event loop.
+
+        Args:
+            delay_s: Delay in seconds before requesting a coordinator refresh.
         """
-        if self._defer_retry_unsub is not None:
-            return
+        def _do_schedule() -> None:
+            # Cancel a pending short retry (coalesce)
+            if self._short_retry_cancel is not None:
+                try:
+                    self._short_retry_cancel()
+                except Exception:  # defensive
+                    pass
+                finally:
+                    self._short_retry_cancel = None
 
-        def _retry_callback(_now) -> None:
-            self._defer_retry_unsub = None
-            # Request a refresh (this will run _async_update_data again)
-            self.hass.async_create_task(self.async_request_refresh())
+            def _cb(_now) -> None:
+                # Clear handle and request a refresh (non-blocking)
+                self._short_retry_cancel = None
+                self.async_request_refresh()
 
-        self._defer_retry_unsub = async_call_later(self.hass, delay_seconds, _retry_callback)
+            self._short_retry_cancel = async_call_later(
+                self.hass, max(0.0, float(delay_s)), _cb
+            )
+
+        if self._is_on_hass_loop():
+            _do_schedule()
+        else:
+            self._run_on_hass_loop(_do_schedule)
 
     # ---------------------------- Cooldown helpers (server-aware) -----------
     def _compute_type_cooldown_seconds(self, report_hint: Optional[str]) -> int:
@@ -484,7 +505,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def _is_fcm_ready_soft(self) -> bool:
         """Return True if push transport appears ready (no awaits, no I/O).
 
-        Order:
+        Priority order:
           1) Ask API (single source of truth if available).
           2) Receiver-level booleans.
           3) Push-client heuristic (run_state + do_listen).
@@ -639,10 +660,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             due = (now_mono - self._last_poll_mono) >= effective_interval
             if due and not self._is_polling and devices_to_poll:
                 if not self._is_fcm_ready_soft():
-                    # Do not move the poll baseline on deferral; instead, schedule a short retry.
+                    # No baseline jump; schedule a short retry and escalate politely.
                     self._note_fcm_deferral(now_mono)
-                    self._schedule_short_retry(5.0)
-                    _LOGGER.debug("Deferring polling cycle: FCM/push not ready yet.")
+                    self._schedule_short_retry(min(5.0, effective_interval / 2.0))
                 else:
                     if self._fcm_defer_started_mono:
                         self._clear_fcm_deferral()
@@ -713,8 +733,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # Double-check FCM readiness inside the lock to avoid a narrow race:
             # if readiness regressed between scheduling and execution, skip cleanly.
             if not self._is_fcm_ready_soft():
-                _LOGGER.debug("Skipping polling cycle: FCM/push not ready yet.")
-                # Do not move the baseline on deferral; schedule a short retry and keep escalation ticking.
+                # No baseline jump; schedule a short retry and keep escalation ticking.
                 self._note_fcm_deferral(time.monotonic())
                 self._schedule_short_retry(5.0)
                 return
