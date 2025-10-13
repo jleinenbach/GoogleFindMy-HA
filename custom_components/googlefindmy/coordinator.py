@@ -369,10 +369,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
                 _LOGGER.warning(
-                    "Ignoring invalid (non-numeric) coordinates%s: lat=%r, lon=%r",
+                    "Ignoring invalid (non-numeric) coordinates%s",
                     f" for {device_label}" if device_label else "",
-                    lat,
-                    lon,
                 )
             return False
 
@@ -385,10 +383,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
                 _LOGGER.warning(
-                    "Ignoring out-of-range/invalid coordinates%s: lat=%s, lon=%s",
+                    "Ignoring out-of-range/invalid coordinates%s",
                     f" for {device_label}" if device_label else "",
-                    lat,
-                    lon,
                 )
             return False
 
@@ -708,7 +704,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             continue
 
                         # Age diagnostics (informational)
-                        wall_now = time.time()
+                        wall_now = time.time()  # <-- define before later use (avoid unbound variable)
                         if last_seen:
                             age_hours = max(0.0, (wall_now - float(last_seen)) / 3600.0)
                             if age_hours > 24:
@@ -724,9 +720,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     age_hours,
                                 )
 
-                        # Apply type-aware cooldowns based on internal hint (if any).
+                        # Apply type-aware cooldowns based on internal hint (if any) and count stats.
                         report_hint = location.get("_report_hint")
                         self._apply_report_type_cooldown(dev_id, report_hint)
+                        if report_hint:
+                            self.increment_stat("crowd_sourced_updates")
 
                         # Ensure we don't leak the internal hint into public snapshots/entities.
                         location.pop("_report_hint", None)
@@ -984,7 +982,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
                 stat_name,
-                list(self.stats.keys()),
+                list(self.stats.keys()]),
             )
 
     def increment_stat(self, stat_name: str) -> None:
@@ -1064,7 +1062,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         slot = dict(location_data)
 
         # Apply type-aware cooldowns (if the decrypt layer provided a hint)
-        self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+        hint = slot.get("_report_hint")
+        self._apply_report_type_cooldown(device_id, hint)
+        if hint:
+            self.increment_stat("crowd_sourced_updates")
 
         # Ensure we don't leak internal hints into public snapshots/entities.
         slot.pop("_report_hint", None)
@@ -1527,7 +1528,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 slot.setdefault("last_updated", time.time())
 
                 # Apply type-aware cooldowns based on internal hint (if any), then strip it.
-                self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+                hint = slot.get("_report_hint")
+                self._apply_report_type_cooldown(device_id, hint)
+                if hint:
+                    self.increment_stat("crowd_sourced_updates")
                 slot.pop("_report_hint", None)
 
                 self.update_device_cache(device_id, slot)
