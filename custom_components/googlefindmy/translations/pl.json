@@ -228,6 +228,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Odrzucono zbyt niską dokładność"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Odrzucone nieistotne aktualizacje"
       }
     }
   }
