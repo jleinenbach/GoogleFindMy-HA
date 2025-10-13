@@ -761,9 +761,8 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             new_options[OPT_IGNORED_DEVICES] = ignored_map
             new_options[OPT_OPTIONS_SCHEMA_VERSION] = 2
 
-            if new_options != entry.options:
-                self.hass.config_entries.async_update_entry(entry, options=new_options)
-            return self.async_abort(reason="reconfigure_successful")
+            # Trigger automatic reload via OptionsFlowWithReload by returning a create_entry result.
+            return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(step_id="visibility", data_schema=schema)
 
