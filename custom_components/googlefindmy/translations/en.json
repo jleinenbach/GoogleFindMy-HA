@@ -26,9 +26,8 @@
       },
       "device_selection": {
         "title": "Select Devices and Polling",
-        "description": "Select the devices to track and configure the polling parameters:\n• Location poll interval: How often to start a new polling cycle (60–3600 seconds)\n• Device poll delay: Delay between individual device polls within a cycle (1–60 seconds)\n\nThe integration cycles through devices sequentially, requesting location data for each device with the specified delay.",
+        "description": "Newly discovered devices appear disabled and can be enabled in device settings. Configure the general polling parameters:\n• Location poll interval: How often to start a new polling cycle (60–3600 seconds)\n• Device poll delay: Delay between individual device polls within a cycle (1–60 seconds)",
         "data": {
-          "tracked_devices": "Tracked devices",
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
           "min_accuracy_threshold": "Minimum accuracy (m)",
@@ -85,9 +84,8 @@
       },
       "settings": {
         "title": "Options",
-        "description": "Modify tracking settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Min accuracy threshold: Ignore locations worse than this (25–500 meters)\n• Movement threshold: Minimum movement to trigger a location update (10–200 meters)\n\nGoogle Home Filter:\n• Enable to group Google Home detections into the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: 'nest' matches 'Kitchen Nest Mini'",
+        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Minimum accuracy: Ignore locations with an accuracy worse than this value (25–500 meters)\n• Movement threshold: Minimum movement required to trigger a location update (10–200 meters)\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: “nest” matches “Kitchen Nest Mini”",
         "data": {
-          "tracked_devices": "Tracked devices",
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
           "min_accuracy_threshold": "Minimum accuracy (m)",
