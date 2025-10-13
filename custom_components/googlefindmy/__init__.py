@@ -8,6 +8,7 @@ Version: 2.5 — Storage refactor & lifecycle hardening
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -76,6 +77,8 @@ from .const import (
     MODE_REBUILD,
     MODE_MIGRATE,
     REBUILD_REGISTRY_MODES,
+    OPT_OPTIONS_SCHEMA_VERSION,
+    coerce_ignored_mapping,
 )
 from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
@@ -862,16 +865,34 @@ async def async_remove_config_entry_device(
     except Exception as err:
         _LOGGER.debug("Coordinator purge failed for %s: %s", dev_id, err)
 
-    # Persist user's delete decision: add to ignored_devices (idempotent + stable ordering)
+    # Persist user's delete decision: add to ignored_devices mapping (idempotent, lossless)
     try:
         opts = dict(entry.options)
-        ignored = set(opts.get(OPT_IGNORED_DEVICES, [])) if isinstance(opts.get(OPT_IGNORED_DEVICES), list) else set()
-        ignored.add(dev_id)
-        opts[OPT_IGNORED_DEVICES] = sorted(ignored)
+        # Coerce legacy shapes (list / dict[str,str]) to v2 mapping
+        current_raw = opts.get(OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES))
+        ignored_map, migrated = coerce_ignored_mapping(current_raw)
+
+        # Determine the best human name at deletion time
+        name_to_store = device_entry.name_by_user or device_entry.name or dev_id
+
+        meta = ignored_map.get(dev_id, {})
+        prev_name = meta.get("name")
+        aliases = list(meta.get("aliases") or [])
+        if prev_name and prev_name != name_to_store and prev_name not in aliases:
+            aliases.append(prev_name)  # keep history as alias
+
+        ignored_map[dev_id] = {
+            "name": name_to_store,
+            "aliases": aliases,
+            "ignored_at": int(time.time()),
+            "source": "registry",
+        }
+        opts[OPT_IGNORED_DEVICES] = ignored_map
+        opts[OPT_OPTIONS_SCHEMA_VERSION] = 2
 
         if opts != entry.options:
             hass.config_entries.async_update_entry(entry, options=opts)
-            _LOGGER.info("Marked device %s as ignored for entry '%s'", dev_id, entry.title)
+            _LOGGER.info("Marked device '%s' (%s) as ignored for entry '%s'", name_to_store, dev_id, entry.title)
     except Exception as err:
         _LOGGER.debug("Persisting delete decision failed for %s: %s", dev_id, err)
 
