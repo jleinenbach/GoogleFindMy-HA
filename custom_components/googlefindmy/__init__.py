@@ -216,7 +216,13 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
 # --------------------------- Shared FCM provider ---------------------------
 
 async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
-    """Get or create the shared FCM receiver for this HA instance."""
+    """Get or create the shared FCM receiver for this HA instance.
+
+    Behavior:
+        - Creates and initializes the singleton if missing.
+        - Registers provider callbacks for API and LocateTracker once.
+        - Maintains a reference counter to support multiple entries.
+    """
     bucket = hass.data.setdefault(DOMAIN, {})
     refcount = int(bucket.get("fcm_refcount", 0))
     fcm: FcmReceiverHA | None = bucket.get("fcm_receiver")
@@ -230,7 +236,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         bucket["fcm_receiver"] = fcm
         _LOGGER.info("Shared FCM receiver initialized")
 
-        # Register provider for both consumer modules (API + LocateTracker)
+        # Register provider for both consumer modules (exactly once on first acquire)
         loc_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
         api_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
 
@@ -280,15 +286,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
       4) Build coordinator, register views/services, forward platforms.
       5) Schedule initial refresh after HA is fully started.
 
-    Args:
-        hass: The Home Assistant instance.
-        entry: The config entry being set up.
-
-    Returns:
-        True if the setup was successful, False otherwise.
-
-    Raises:
-        ConfigEntryNotReady: If a required setup step fails.
+    Notes:
+        * FCM acquisition/registration now happens through a single deterministic path.
+          The startup barrier is set immediately after a successful acquire, avoiding
+          duplicate provider registrations or refcount bumps.
     """
     # Detect cold start vs. reload (survives reloads within the same HA runtime)
     domain_bucket = hass.data.setdefault(DOMAIN, {})
@@ -329,22 +330,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # 4) Acquire shared FCM and create a startup barrier for the first poll cycle.
     fcm_ready_event = asyncio.Event()
-
-    # This task runs in the background. When the FCM provider is ready,
-    # it sets the event, unblocking the coordinator's first poll.
-    async def _acquire_and_register_fcm_with_barrier() -> None:
-        try:
-            receiver = await _async_acquire_shared_fcm(hass)
-            # Register provider for both consumer modules
-            loc_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
-            api_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
-            # Signal readiness to the coordinator
-            fcm_ready_event.set()
-        except Exception as err:
-            _LOGGER.debug("FCM acquisition/registration not ready yet: %s", err)
-
-    hass.async_create_task(_acquire_and_register_fcm_with_barrier())
-    fcm = await _async_acquire_shared_fcm(hass)  # Ensure fcm is available for unload logic
+    # Single acquisition path: acquire and register providers once, then set the barrier.
+    fcm = await _async_acquire_shared_fcm(hass)
+    fcm_ready_event.set()
 
     # NOTE (lifecycle): Do not await long-running shutdowns inside async_on_unload.
     # We only *signal* the FCM receiver to stop here (non-blocking). The awaited
@@ -394,7 +382,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.config_entry = entry  # convenience for platforms
 
     # Hand over the barrier without changing the coordinator's signature.
-    # This is a minimal, backward-compatible way to pass the event.
+    # Event is already set after successful FCM acquisition to avoid startup races.
     setattr(coordinator, "fcm_ready_event", fcm_ready_event)
 
     # Register the coordinator with the shared FCM receiver (clear synchronous contract).
@@ -488,13 +476,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
           The awaited stop and refcount release are handled here to avoid long
           awaits inside `async_on_unload`.
         - TokenCache is explicitly closed here to flush and mark the cache closed.
-
-    Args:
-        hass: The Home Assistant instance.
-        entry: The config entry to unload.
-
-    Returns:
-        True if the unload was successful.
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
