@@ -763,7 +763,7 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
 
             if new_options != entry.options:
                 self.hass.config_entries.async_update_entry(entry, options=new_options)
-            return self.async_abort(reason="visibility_restored")
+            return self.async_abort(reason="reconfigure_successful")
 
         return self.async_show_form(step_id="visibility", data_schema=schema)
 
