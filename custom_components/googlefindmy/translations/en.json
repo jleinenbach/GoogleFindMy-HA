@@ -228,6 +228,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Low-accuracy dropped"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Non-significant updates dropped"
       }
     }
   }
