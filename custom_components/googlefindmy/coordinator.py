@@ -529,17 +529,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             ConfigEntryAuthFailed: If authentication fails during device list fetching.
             UpdateFailed: For other transient or unexpected errors.
         """
-        if not self._startup_complete:
-            fcm_evt = getattr(self, "fcm_ready_event", None)
-            if isinstance(fcm_evt, asyncio.Event) and not fcm_evt.is_set():
-                _LOGGER.debug("First poll cycle is waiting for FCM provider to become ready...")
-                try:
-                    await asyncio.wait_for(fcm_evt.wait(), timeout=15.0)
-                    _LOGGER.debug("FCM provider is ready; proceeding with first poll cycle.")
-                except asyncio.TimeoutError:
-                    _LOGGER.warning(
-                        "FCM provider not ready after 15s; proceeding with first poll cycle anyway."
-                    )
         try:
             # 1) Always fetch the lightweight FULL device list using native async API
             all_devices = await self.api.async_get_basic_device_list()
@@ -599,10 +588,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 devices_to_poll = filtered
 
             if not self._startup_complete:
-                # Defer the first poll to avoid startup load; it will run after the first interval.
+                fcm_evt = getattr(self, "fcm_ready_event", None)
+                if isinstance(fcm_evt, asyncio.Event) and not fcm_evt.is_set():
+                    _LOGGER.debug("First poll cycle is waiting for FCM provider to become ready...")
+                    try:
+                        await asyncio.wait_for(fcm_evt.wait(), timeout=15.0)
+                        _LOGGER.debug("FCM provider is ready; proceeding with first poll cycle.")
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning(
+                            "FCM provider not ready after 15s; proceeding with first poll cycle anyway."
+                        )
+                
                 self._startup_complete = True
-                self._last_poll_mono = now_mono
-                _LOGGER.debug("First startup - set poll baseline; next poll follows normal schedule")
+                
+                if devices_to_poll:
+                    _LOGGER.debug("Triggering initial poll cycle immediately after startup.")
+                    self.hass.async_create_task(
+                        self._async_start_poll_cycle(devices_to_poll),
+                        name=f"{DOMAIN}.initial_poll_cycle",
+                    )
             else:
                 due = (now_mono - self._last_poll_mono) >= effective_interval
                 if due and not self._is_polling and devices_to_poll:
