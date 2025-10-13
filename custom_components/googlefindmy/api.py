@@ -452,6 +452,23 @@ class GoogleFindMyAPI:
                 err,
             )
             return {}
+        except RuntimeError as err:
+            # Startup safety net: during cold boot, the FCM provider may not yet be registered.
+            # Downgrade this expected transient to DEBUG and retry on the next cycle.
+            if "FCM receiver provider has not been registered" in str(err):
+                _LOGGER.debug(
+                    "Startup race: FCM provider not ready for %s (%s). Will retry on next cycle.",
+                    device_name,
+                    device_id,
+                )
+                return {}
+            _LOGGER.error(
+                "Runtime error while getting async location for %s (%s): %s",
+                device_name,
+                device_id,
+                err,
+            )
+            return {}
         except Exception as err:
             _LOGGER.error(
                 "Failed to get async location for %s (%s): %s",
