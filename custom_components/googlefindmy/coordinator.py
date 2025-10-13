@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/coordinator.py
 """Data coordinator for Google Find My Device (async-first, HA-friendly).
 
 Discovery vs. polling semantics:
@@ -19,6 +20,16 @@ Thread-safety and quality goals:
 - Owner-driven locates introduce a server-side purge/cooldown window; we respect
   this via **per-device poll cooldowns** with **dynamic guardrails** (min/max bounds),
   without changing any external API or entity fields.
+
+Implementation notes (server behaviour, POPETS'25):
+- The network applies *type-specific throttling* to crowdsourced reports:
+  "In All Areas" reports are effectively throttled for ~10 minutes,
+  "High Traffic" reports for ~5 minutes. We respect this by applying
+  per-device cooldowns derived from an internal `_report_hint` (set by the
+  decrypt/parse layer) without changing public APIs or entity attributes.
+- The well-known "~9h" rate limit discussed in the paper applies to *finder*
+  devices contributing reports, not to the owner pulling locations. We **document**
+  this here for maintainers but do **not** enforce it client-side.
 """
 from __future__ import annotations
 
@@ -59,6 +70,12 @@ _LOGGER = logging.getLogger(__name__)
 # -------------------------------------------------------------------------
 _COOLDOWN_OWNER_MIN_S = 300      # 5 min
 _COOLDOWN_OWNER_MAX_S = 900      # 15 min
+
+# Server-informed minimum cooldowns per report type (POPETS'25)
+# We never go below these values; actual applied cooldown also respects the user poll interval.
+_COOLDOWN_MIN_IN_ALL_AREAS_S = 600  # 10 min
+_COOLDOWN_MIN_HIGH_TRAFFIC_S  = 300  # 5 min
+
 
 def _clamp(val: float, lo: float, hi: float) -> float:
     """Return val clamped into [lo, hi]."""
@@ -214,7 +231,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._locate_inflight: Set[str] = set()                # device_id -> in-flight flag
         self._locate_cooldown_until: Dict[str, float] = {}     # device_id -> mono deadline
 
-        # NEW: Per-device poll cooldowns after owner reports (server purge window)
+        # NEW: Per-device poll cooldowns after owner reports and type-hinted crowdsourced reports.
         # Only affects internal scheduling; no external API changes.
         self._device_poll_cooldown_until: Dict[str, float] = {}
 
@@ -263,6 +280,59 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
           **return None** and are safe to run on the HA loop.
         """
         self.hass.loop.call_soon_threadsafe(func, *args)
+
+    # ---------------------------- Cooldown helpers (server-aware) -----------
+    def _compute_type_cooldown_seconds(self, report_hint: Optional[str]) -> int:
+        """Return a server-aware cooldown duration in seconds for a crowdsourced report type.
+
+        We derive cooldowns from POPETS'25 observations:
+        - "in_all_areas": ~10 min throttle window (min).
+        - "high_traffic": ~5 min throttle window (min).
+
+        To ensure the cooldown is always meaningful in the user's setup, we also
+        bound it by the configured polling interval: cooldown = max(server_min, location_poll_interval).
+
+        Args:
+            report_hint: One of {"in_all_areas", "high_traffic", None}.
+
+        Returns:
+            A non-negative integer number of seconds to cool down, or 0 if not applicable.
+        """
+        if not report_hint:
+            return 0
+
+        base_interval = max(1, int(self.location_poll_interval))
+        if report_hint == "in_all_areas":
+            return max(_COOLDOWN_MIN_IN_ALL_AREAS_S, base_interval)
+        if report_hint == "high_traffic":
+            return max(_COOLDOWN_MIN_HIGH_TRAFFIC_S, base_interval)
+        return 0
+
+    def _apply_report_type_cooldown(self, device_id: str, report_hint: Optional[str]) -> None:
+        """Apply a per-device poll cooldown based on the crowdsourced report type.
+
+        - Does nothing for None/unknown hints.
+        - Uses monotonic time, and **extends** any existing cooldown (takes the max).
+        - Internal only; does not touch public APIs or entity attributes.
+        """
+        try:
+            seconds = int(self._compute_type_cooldown_seconds(report_hint))
+        except Exception:  # defensive
+            seconds = 0
+        if seconds <= 0:
+            return
+
+        now_mono = time.monotonic()
+        new_deadline = now_mono + float(seconds)
+        prev_deadline = self._device_poll_cooldown_until.get(device_id, 0.0)
+        if new_deadline > prev_deadline:
+            self._device_poll_cooldown_until[device_id] = new_deadline
+            _LOGGER.debug(
+                "Applied %ss cooldown for %s due to report type '%s'",
+                seconds,
+                device_id,
+                report_hint,
+            )
 
     # ---------------------------- Coordinate normalization ------------------
     def _normalize_coords(
@@ -428,7 +498,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             else:
                 devices_to_poll = [d for d in all_devices if d["id"] not in ignored]
 
-            # Apply per-device poll cooldowns (owner locate purge window)
+            # Apply per-device poll cooldowns (owner locate purge window + type-aware cooldowns)
             if self._device_poll_cooldown_until and devices_to_poll:
                 filtered: List[Dict[str, Any]] = []
                 skipped = 0
@@ -499,6 +569,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         This runs with a lock to avoid overlapping cycles, updates the
         internal cache, and pushes snapshots at start and end.
+
+        Throttling awareness:
+        - If a device returns a crowdsourced location with `_report_hint` equal to
+          "in_all_areas" (~10 min throttle) or "high_traffic" (~5 min throttle),
+          we apply a per-device cooldown so subsequent polls avoid the throttled window.
+          (See POPETS'25 for measured behaviour.)
+        - The cooldown is at least the server minimum and at least one user poll interval.
 
         Args:
             devices: A list of device dictionaries to poll.
@@ -592,14 +669,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     dev_name,
                                 )
                             # Nothing to commit/update in cache
+                            # Strip any internal hint before dropping to avoid accidental exposure
+                            location.pop("_report_hint", None)
                             continue
 
-                        lat = location.get("latitude")
-                        lon = location.get("longitude")
-                        acc = location.get("accuracy")
-                        last_seen = location.get("last_seen", 0)
-
                         # Accuracy quality filter
+                        acc = location.get("accuracy")
                         if (
                             isinstance(self._min_accuracy_threshold, int)
                             and self._min_accuracy_threshold > 0
@@ -613,9 +688,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                 self._min_accuracy_threshold,
                             )
                             self.increment_stat("low_quality_dropped")
+                            # Strip any internal hint before dropping to avoid accidental exposure
+                            location.pop("_report_hint", None)
                             continue
 
                         # De-duplicate by identical last_seen
+                        last_seen = location.get("last_seen", 0)
                         existing = self._device_location_data.get(dev_id, {})
                         existing_last_seen = existing.get("last_seen")
                         if existing_last_seen == last_seen and last_seen:
@@ -625,6 +703,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                 last_seen,
                             )
                             self.increment_stat("skipped_duplicates")
+                            # Strip any internal hint before skipping to avoid accidental exposure
+                            location.pop("_report_hint", None)
                             continue
 
                         # Age diagnostics (informational)
@@ -643,6 +723,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     dev_name,
                                     age_hours,
                                 )
+
+                        # Apply type-aware cooldowns based on internal hint (if any).
+                        report_hint = location.get("_report_hint")
+                        self._apply_report_type_cooldown(dev_id, report_hint)
+
+                        # Ensure we don't leak the internal hint into public snapshots/entities.
+                        location.pop("_report_hint", None)
 
                         # Commit to cache and bump statistics
                         location["last_updated"] = wall_now  # wall-clock for UX
@@ -956,6 +1043,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         Used by the FCM receiver (push path). Expects validated fields.
 
+        Internal rules:
+        - Applies type-aware cooldowns based on an internal `_report_hint` (if present).
+        - Strips `_report_hint` from the cached payload to avoid exposing internal fields.
+
         Args:
             device_id: The canonical ID of the device.
             location_data: The new location data dictionary.
@@ -971,6 +1062,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
+
+        # Apply type-aware cooldowns (if the decrypt layer provided a hint)
+        self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+
+        # Ensure we don't leak internal hints into public snapshots/entities.
+        slot.pop("_report_hint", None)
 
         # Normalize coordinates (best-effort) if present; do not spam warnings here.
         # The push path may deliver semantic-only updates (no coordinates), which is valid.
@@ -1319,6 +1416,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             (owner-report purge window) by clamping a dynamic guess.
           - Always notify listeners via `async_set_updated_data(self.data)`.
 
+        POPETS'25-informed behaviour:
+          - If the returned payload carries an internal `_report_hint` of
+            "in_all_areas" (~10 min throttle) or "high_traffic" (~5 min throttle),
+            we additionally apply a type-aware cooldown (at least server minimum
+            and at least one user poll interval). This stacks with the owner cooldown.
+
         Args:
             device_id: The canonical ID of the device.
 
@@ -1422,6 +1525,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 # Commit to cache. `update_device_cache` ensures `last_updated` and stats.
                 slot = dict(location_data)
                 slot.setdefault("last_updated", time.time())
+
+                # Apply type-aware cooldowns based on internal hint (if any), then strip it.
+                self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+                slot.pop("_report_hint", None)
+
                 self.update_device_cache(device_id, slot)
 
             # Successful manual locate:
@@ -1433,8 +1541,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             dynamic_guess = max(float(DEFAULT_MIN_POLL_INTERVAL), float(self.location_poll_interval))
             owner_cooldown = _clamp(dynamic_guess, _COOLDOWN_OWNER_MIN_S, _COOLDOWN_OWNER_MAX_S)
             now_mono = time.monotonic()
-            self._device_poll_cooldown_until[device_id] = now_mono + owner_cooldown
-            self._locate_cooldown_until[device_id] = now_mono + owner_cooldown
+            # Extend (not overwrite) any type-aware cooldown applied above
+            existing_deadline = self._device_poll_cooldown_until.get(device_id, 0.0)
+            owner_deadline = now_mono + owner_cooldown
+            self._device_poll_cooldown_until[device_id] = max(existing_deadline, owner_deadline)
+            self._locate_cooldown_until[device_id] = max(
+                self._locate_cooldown_until.get(device_id, 0.0), owner_deadline
+            )
 
             self.push_updated([device_id])
             return location_data or {}
