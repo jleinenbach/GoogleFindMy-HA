@@ -226,6 +226,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._is_polling = False
         self._startup_complete = False
         self._last_poll_mono: float = 0.0  # monotonic timestamp for scheduling
+        # FCM deferral/escalation bookkeeping (to surface issues without log spam)
+        # 0.0 means no active deferral window; stage marks last emitted severity.
+        self._fcm_defer_started_mono: float = 0.0
+        self._fcm_last_stage: int = 0  # 0=none, 1=warned, 2=errored
 
         # Push readiness memoization and cooldown after transport errors
         self._push_ready_memo: Optional[bool] = None
@@ -454,6 +458,59 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         return self._is_polling
 
     # ---------------------------- HA Coordinator ----------------------------
+    def _is_fcm_ready_soft(self) -> bool:
+        """Best-effort check if the shared FCM receiver reports readiness.
+
+        Notes:
+            - Reads the HA-managed singleton from hass.data[DOMAIN]['fcm_receiver'].
+            - Only inspects simple boolean properties (no network, no awaits).
+            - Returns False if the receiver is missing or readiness cannot be determined.
+        """
+        try:
+            bucket = self.hass.data.get(DOMAIN, {})
+            fcm = bucket.get("fcm_receiver")
+            if fcm is None:
+                return False
+            for attr in ("is_ready", "ready"):
+                val = getattr(fcm, attr, None)
+                if isinstance(val, bool):
+                    return val
+        except Exception:
+            # Be defensive: any inspection error means "not ready".
+            pass
+        return False
+
+    def _note_fcm_deferral(self, now_mono: float) -> None:
+        """Advance a quiet escalation timeline while FCM is not ready.
+
+        Emits at most:
+            - one WARNING after ~60s
+            - one ERROR   after ~300s
+        Resets when readiness returns.
+        """
+        if self._fcm_defer_started_mono == 0.0:
+            self._fcm_defer_started_mono = now_mono
+            self._fcm_last_stage = 0
+            return
+        elapsed = now_mono - self._fcm_defer_started_mono
+        if elapsed >= 60 and self._fcm_last_stage < 1:
+            self._fcm_last_stage = 1
+            _LOGGER.warning(
+                "Polling deferred: FCM/push not ready 60s after (re)start. Polls and actions remain gated."
+            )
+        if elapsed >= 300 and self._fcm_last_stage < 2:
+            self._fcm_last_stage = 2
+            _LOGGER.error(
+                "Polling still deferred: FCM/push not ready after 5 minutes. Check credentials/network."
+            )
+
+    def _clear_fcm_deferral(self) -> None:
+        """Clear the escalation timeline once FCM becomes ready (log once)."""
+        if self._fcm_defer_started_mono:
+            _LOGGER.info("FCM/push is ready; resuming scheduled polling.")
+        self._fcm_defer_started_mono = 0.0
+        self._fcm_last_stage = 0
+
     async def _async_update_data(self) -> List[Dict[str, Any]]:
         """Provide cached device data; trigger background poll if due.
 
@@ -537,16 +594,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             else:
                 due = (now_mono - self._last_poll_mono) >= effective_interval
                 if due and not self._is_polling and devices_to_poll:
-                    _LOGGER.debug(
-                        "Scheduling background polling cycle (devices=%d, interval=%ds)",
-                        len(devices_to_poll),
-                        effective_interval,
-                    )
-                    # Always create tasks from the HA loop thread
-                    self.hass.async_create_task(
-                        self._async_start_poll_cycle(devices_to_poll),
-                        name=f"{DOMAIN}.poll_cycle",
-                    )
+                    # Gate polling on FCM readiness to prevent startup/reload race.
+                    if not self._is_fcm_ready_soft():
+                        # Defer polling: move baseline forward to avoid tight loops and escalate politely.
+                        self._last_poll_mono = now_mono
+                        self._note_fcm_deferral(now_mono)
+                        _LOGGER.debug("Deferring polling cycle: FCM/push not ready yet (reload gating).")
+                    else:
+                        # If we just recovered, clear the escalation state once.
+                        if self._fcm_defer_started_mono:
+                            self._clear_fcm_deferral()
+                        _LOGGER.debug(
+                            "Scheduling background polling cycle (devices=%d, interval=%ds)",
+                            len(devices_to_poll),
+                            effective_interval,
+                        )
+                        # Always create tasks from the HA loop thread
+                        self.hass.async_create_task(
+                            self._async_start_poll_cycle(devices_to_poll),
+                            name=f"{DOMAIN}.poll_cycle",
+                        )
                 else:
                     _LOGGER.debug(
                         "Poll not due (elapsed=%.1fs/%ss) or already running=%s",
@@ -600,6 +667,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         async with self._poll_lock:
             if self._is_polling:
                 return
+
+            # Double-check FCM readiness inside the lock to avoid a narrow race:
+            # if readiness regressed between scheduling and execution, skip cleanly.
+            if not self._is_fcm_ready_soft():
+                _LOGGER.debug("Skipping polling cycle: FCM/push not ready yet.")
+                # Move baseline to now so we don't immediately reschedule; keep escalation ticking.
+                self._last_poll_mono = time.monotonic()
+                self._note_fcm_deferral(self._last_poll_mono)
+                return
+            else:
+                # If we were deferring previously, clear the escalation timeline.
+                if self._fcm_defer_started_mono:
+                    self._clear_fcm_deferral()
 
             self._is_polling = True
             # Push a snapshot from cache to signal "polling" state to listeners
