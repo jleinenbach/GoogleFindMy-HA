@@ -228,6 +228,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Posizioni a bassa accuratezza scartate"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Aggiornamenti non significativi scartati"
       }
     }
   }
