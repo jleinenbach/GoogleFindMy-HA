@@ -6,6 +6,11 @@ Design goals (HA quality scale / Platinum-ready):
 - Provide enough structured, anonymized context to debug typical issues (polling, counts, timings).
 - Prefer runtime_data (modern pattern) but gracefully fall back to hass.data for older setups.
 - Keep redaction centralized and defensive (include common token/email keys even if we don't expose them now).
+
+Privacy note:
+- POPETS’25 (Böttger et al., 2025) highlights that EID-related artifacts and UT bits can be used
+  for correlation/identification. We therefore **over-redact** such fields, even if we never place
+  them into diagnostics directly. This is a defense-in-depth safeguard to keep future changes safe.
 """
 from __future__ import annotations
 
@@ -91,6 +96,15 @@ TO_REDACT: list[str] = [
     "encryptedIdentityKeys",
     "ownerKey",
     "ownerKeyVersion",
+    # EID / UT artifacts (see POPETS’25; redact to avoid correlation)
+    "eid",
+    "eid_prefix",
+    "eidPrefix",
+    "truncated_eid",
+    "truncatedEid",
+    "ut",
+    "ut_bits",
+    "utBits",
     # Device identifiers (avoid leaking stable IDs)
     "device_id",
     "deviceId",
@@ -158,6 +172,11 @@ async def async_get_config_entry_diagnostics(
     - Do NOT include: coordinates, device IDs, device names, emails, tokens,
       unique_id, or any raw content from external services.
     - DO include: anonymized counters, booleans, timings, and versions.
+
+    POPETS’25 context (documentation only):
+    - Server-side throttling and purging behaviors inform our coordinator logic,
+      but diagnostics remain strictly anonymized and redacted to avoid leakage of
+      EID/UT artifacts or stable identifiers.
     """
     # --- Integration metadata (manifest) ---
     integration_meta: dict[str, Any] = {}
