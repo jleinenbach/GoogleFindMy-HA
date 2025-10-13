@@ -62,6 +62,7 @@ from .const import (
     DEFAULT_MIN_POLL_INTERVAL,
     OPT_IGNORED_DEVICES,
     DEFAULT_OPTIONS,
+    coerce_ignored_mapping,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -149,7 +150,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     """Coordinator that manages polling, cache, and push updates for Google Find My Device.
 
     Thread-safety & event loop rules (IMPORTANT):
-    - All interactions that create HA tasks or publish state must occur on the HA event loop.
+    - All interactions that create HA tasks or publish state must occur on the HA event loop thread.
     - This class provides small helpers to "hop" from any background thread into the loop
       using `loop.call_soon_threadsafe(...)` before touching HA APIs.
 
@@ -431,11 +432,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         try:
             entry = getattr(self, "config_entry", None)
             if entry is not None:
-                raw = entry.options.get(
-                    OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES, [])
-                )
-                if isinstance(raw, list):
-                    return set(x for x in raw if isinstance(x, str))
+                raw = entry.options.get(OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES, {}))
+                # Accept list[str] (legacy) or mapping (current)
+                mapping, _migrated = coerce_ignored_mapping(raw)
+                if mapping:
+                    return set(mapping.keys())
         except Exception:  # defensive
             pass
         raw_attr = getattr(self, "ignored_devices", None)
@@ -528,6 +529,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             ConfigEntryAuthFailed: If authentication fails during device list fetching.
             UpdateFailed: For other transient or unexpected errors.
         """
+        if not self._startup_complete:
+            fcm_evt = getattr(self, "fcm_ready_event", None)
+            if isinstance(fcm_evt, asyncio.Event) and not fcm_evt.is_set():
+                _LOGGER.debug("First poll cycle is waiting for FCM provider to become ready...")
+                try:
+                    await asyncio.wait_for(fcm_evt.wait(), timeout=15.0)
+                    _LOGGER.debug("FCM provider is ready; proceeding with first poll cycle.")
+                except asyncio.TimeoutError:
+                    _LOGGER.warning(
+                        "FCM provider not ready after 15s; proceeding with first poll cycle anyway."
+                    )
         try:
             # 1) Always fetch the lightweight FULL device list using native async API
             all_devices = await self.api.async_get_basic_device_list()
