@@ -175,6 +175,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         device_poll_delay: int = 5,
         min_poll_interval: int = DEFAULT_MIN_POLL_INTERVAL,
         min_accuracy_threshold: int = 100,
+        movement_threshold: int = 50,
         allow_history_fallback: bool = False,
     ) -> None:
         """Initialize the coordinator.
@@ -194,6 +195,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             device_poll_delay: The delay in seconds between polling individual devices.
             min_poll_interval: The minimum allowed interval between polling cycles.
             min_accuracy_threshold: The minimum GPS accuracy in meters to accept a location.
+            movement_threshold: Movement delta in meters for significance gating (default 50 m).
             allow_history_fallback: Whether to fall back to Recorder history for location.
         """
         self.hass = hass
@@ -209,6 +211,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self.device_poll_delay = int(device_poll_delay)
         self.min_poll_interval = int(min_poll_interval)  # hard lower bound between cycles
         self._min_accuracy_threshold = int(min_accuracy_threshold)  # quality filter (meters)
+        self._movement_threshold = int(movement_threshold)  # meters; used by significance gate
         self.allow_history_fallback = bool(allow_history_fallback)
 
         # Internal caches & bookkeeping
@@ -245,6 +248,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             "timeouts": 0,
             "invalid_coords": 0,
             "low_quality_dropped": 0,
+            "non_significant_dropped": 0,
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
@@ -286,30 +290,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """Return a server-aware cooldown duration in seconds for a crowdsourced report type.
 
         We derive cooldowns from POPETS'25 observations:
-        - "in_all_areas": ~10 min throttle window (min).
-        - "high_traffic": ~5 min throttle window (min).
+        - "in_all_areas": ~10 min throttle window (minimum).
+        - "high_traffic": ~5 min throttle window (minimum).
 
-        To ensure the cooldown is always meaningful in the user's setup, we also
-        bound it by the configured polling interval: cooldown = max(server_min, location_poll_interval).
-
-        Args:
-            report_hint: One of {"in_all_areas", "high_traffic", None}.
-
-        Returns:
-            A non-negative integer number of seconds to cool down, or 0 if not applicable.
+        IMPORTANT:
+        - To guarantee effect, the applied cooldown is **never shorter than** the
+          configured `location_poll_interval`. This ensures at least one scheduled
+          poll cycle is skipped in practice (see review note).
         """
         if not report_hint:
             return 0
 
-        base_interval = max(1, int(self.location_poll_interval))
+        # Guarantee the cooldown always spans at least one poll interval
+        effective_poll = max(1, int(self.location_poll_interval))
         if report_hint == "in_all_areas":
-            return max(_COOLDOWN_MIN_IN_ALL_AREAS_S, base_interval)
-        if report_hint == "high_traffic":
-            return max(_COOLDOWN_MIN_HIGH_TRAFFIC_S, base_interval)
-        return 0
+            base_cooldown = _COOLDOWN_MIN_IN_ALL_AREAS_S
+        elif report_hint == "high_traffic":
+            base_cooldown = _COOLDOWN_MIN_HIGH_TRAFFIC_S
+        else:
+            return 0
+
+        return max(base_cooldown, effective_poll)
 
     def _apply_report_type_cooldown(self, device_id: str, report_hint: Optional[str]) -> None:
-        """Apply a per-device poll cooldown based on the crowdsourced report type.
+        """Apply a per-device **poll** cooldown based on the crowdsourced report type.
 
         - Does nothing for None/unknown hints.
         - Uses monotonic time, and **extends** any existing cooldown (takes the max).
@@ -328,10 +332,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         if new_deadline > prev_deadline:
             self._device_poll_cooldown_until[device_id] = new_deadline
             _LOGGER.debug(
-                "Applied %ss cooldown for %s due to report type '%s'",
+                "Applied %ss poll cooldown for %s (hint='%s', poll_interval=%ss)",
                 seconds,
                 device_id,
                 report_hint,
+                self.location_poll_interval,
             )
 
     # ---------------------------- Coordinate normalization ------------------
@@ -369,8 +374,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
                 _LOGGER.warning(
-                    "Ignoring invalid (non-numeric) coordinates%s",
+                    "Ignoring invalid (non-numeric) coordinates%s: lat=%r, lon=%r",
                     f" for {device_label}" if device_label else "",
+                    lat,
+                    lon,
                 )
             return False
 
@@ -383,8 +390,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self.increment_stat("invalid_coords")
             if warn_on_invalid:
                 _LOGGER.warning(
-                    "Ignoring out-of-range/invalid coordinates%s",
+                    "Ignoring out-of-range/invalid coordinates%s: lat=%s, lon=%s",
                     f" for {device_label}" if device_label else "",
+                    lat,
+                    lon,
                 )
             return False
 
@@ -688,23 +697,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             location.pop("_report_hint", None)
                             continue
 
-                        # De-duplicate by identical last_seen
+                        # De-duplicate replaced by significance gate
                         last_seen = location.get("last_seen", 0)
-                        existing = self._device_location_data.get(dev_id, {})
-                        existing_last_seen = existing.get("last_seen")
-                        if existing_last_seen == last_seen and last_seen:
+                        if not self._is_significant_update(dev_id, location):
                             _LOGGER.debug(
-                                "Skipping duplicate location for %s (last_seen=%s)",
+                                "Skipping non-significant update for %s (last_seen=%s)",
                                 dev_name,
                                 last_seen,
                             )
-                            self.increment_stat("skipped_duplicates")
-                            # Strip any internal hint before skipping to avoid accidental exposure
+                            self.increment_stat("non_significant_dropped")
+                            # Strip internal hint before dropping to avoid accidental exposure
                             location.pop("_report_hint", None)
                             continue
 
                         # Age diagnostics (informational)
-                        wall_now = time.time()  # <-- define before later use (avoid unbound variable)
+                        wall_now = time.time()
                         if last_seen:
                             age_hours = max(0.0, (wall_now - float(last_seen)) / 3600.0)
                             if age_hours > 24:
@@ -720,11 +727,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     age_hours,
                                 )
 
-                        # Apply type-aware cooldowns based on internal hint (if any) and count stats.
+                        # Apply type-aware cooldowns based on internal hint (if any).
                         report_hint = location.get("_report_hint")
                         self._apply_report_type_cooldown(dev_id, report_hint)
-                        if report_hint:
-                            self.increment_stat("crowd_sourced_updates")
 
                         # Ensure we don't leak the internal hint into public snapshots/entities.
                         location.pop("_report_hint", None)
@@ -982,7 +987,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
                 stat_name,
-                list(self.stats.keys()]),
+                list(self.stats.keys() ),
             )
 
     def increment_stat(self, stat_name: str) -> None:
@@ -1039,11 +1044,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def update_device_cache(self, device_id: str, location_data: Dict[str, Any]) -> None:
         """Public, encapsulated update of the internal location cache for one device (thread-safe).
 
-        Used by the FCM receiver (push path). Expects validated fields.
+        Used by the FCM receiver (push path) and by internal manual-commit call sites.
+        Expects validated fields (decrypt layer performs fail-fast checks).
 
         Internal rules:
-        - Applies type-aware cooldowns based on an internal `_report_hint` (if present).
+        - Applies type-aware **poll** cooldowns based on an internal `_report_hint` (if present).
         - Strips `_report_hint` from the cached payload to avoid exposing internal fields.
+        - Runs significance gating to prevent redundant cache churn. The cooldown still applies
+          even if the update is dropped as non-significant (server-friendly behaviour).
 
         Args:
             device_id: The canonical ID of the device.
@@ -1061,18 +1069,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
 
-        # Apply type-aware cooldowns (if the decrypt layer provided a hint)
-        hint = slot.get("_report_hint")
-        self._apply_report_type_cooldown(device_id, hint)
-        if hint:
-            self.increment_stat("crowd_sourced_updates")
-
-        # Ensure we don't leak internal hints into public snapshots/entities.
+        # Apply type-aware **poll** cooldowns (if decrypt layer provided a hint),
+        # then drop the hint to keep internal-only.
+        self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
         slot.pop("_report_hint", None)
 
         # Normalize coordinates (best-effort) if present; do not spam warnings here.
         # The push path may deliver semantic-only updates (no coordinates), which is valid.
         self._normalize_coords(slot, device_label=device_id, warn_on_invalid=False)
+
+        # Significance gate (prevents redundant churn while still respecting cooldowns)
+        if not self._is_significant_update(device_id, slot):
+            self.increment_stat("non_significant_dropped")
+            return
 
         # Ensure last_updated is present
         slot.setdefault("last_updated", time.time())
@@ -1085,6 +1094,82 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_location_data[device_id] = slot
         # Increment background updates to account for push/manual commits.
         self.increment_stat("background_updates")
+
+    # ---------------------------- Significance / gating ----------------------
+    def _haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Return distance in meters between two WGS84 coordinates.
+
+        Implementation note:
+            Kept lightweight and allocation-free; called per candidate update only.
+        """
+        from math import radians, sin, cos, sqrt, atan2
+
+        R = 6371000.0  # Earth radius in meters
+        lat1_r, lon1_r = radians(float(lat1)), radians(float(lon1))
+        lat2_r, lon2_r = radians(float(lat2)), radians(float(lon2))
+        dlat = lat2_r - lat1_r
+        dlon = lon2_r - lon1_r
+        a = sin(dlat / 2.0) ** 2 + cos(lat1_r) * cos(lat2_r) * sin(dlon / 2.0) ** 2
+        c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a))
+        return R * c
+
+    def _is_significant_update(self, device_id: str, new_data: Dict[str, Any]) -> bool:
+        """Return True if the update carries meaningful new information.
+
+        Criteria (coarse → fine):
+          1) No previous data -> significant.
+          2) Newer `last_seen` -> significant.
+          3) Same `last_seen` but:
+             3a) Position changed more than `self._movement_threshold` meters, or
+             3b) Accuracy improved by ≥20% (smaller is better), or
+             3c) Source/status changed (e.g., own → crowdsourced or semantic changes).
+
+        Notes:
+          * This replaces the old "same last_seen == duplicate" heuristic.
+          * Movement threshold is user-configurable (options) and defaults to 50 m.
+        """
+        existing = self._device_location_data.get(device_id)
+        if not existing:
+            return True
+
+        n_seen = new_data.get("last_seen")
+        e_seen = existing.get("last_seen")
+        try:
+            if n_seen is not None and e_seen is not None and float(n_seen) > float(e_seen):
+                return True
+        except Exception:
+            # If timestamps are non-numeric, fall through to other checks.
+            pass
+
+        # Same timestamp? Check for spatial delta and accuracy improvement.
+        if n_seen == e_seen:
+            n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
+            e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
+            if all(isinstance(v, (int, float)) for v in (n_lat, n_lon, e_lat, e_lon)):
+                try:
+                    dist = self._haversine_distance(e_lat, e_lon, n_lat, n_lon)
+                    if dist > float(self._movement_threshold):
+                        return True
+                except Exception:
+                    # Ignore distance errors and continue checks.
+                    pass
+
+            n_acc = new_data.get("accuracy")
+            e_acc = existing.get("accuracy")
+            if isinstance(n_acc, (int, float)) and isinstance(e_acc, (int, float)):
+                try:
+                    if float(n_acc) < float(e_acc) * 0.8:  # ≥20% better accuracy
+                        return True
+                except Exception:
+                    pass
+
+        # Source or semantic change can still be valuable.
+        if new_data.get("is_own_report") != existing.get("is_own_report"):
+            return True
+        if new_data.get("semantic_name") != existing.get("semantic_name"):
+            return True
+
+        return False
 
     def get_device_last_seen(self, device_id: str) -> Optional[datetime]:
         """Return last_seen as timezone-aware datetime (UTC) if cached.
@@ -1346,6 +1431,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         device_poll_delay: Optional[int] = None,
         min_poll_interval: Optional[int] = None,
         min_accuracy_threshold: Optional[int] = None,
+        movement_threshold: Optional[int] = None,
         allow_history_fallback: Optional[bool] = None,
     ) -> None:
         """Apply updated user settings provided by the config entry (options-first).
@@ -1360,6 +1446,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             device_poll_delay: The delay in seconds between polling devices.
             min_poll_interval: The minimum polling interval in seconds.
             min_accuracy_threshold: The minimum accuracy in meters.
+            movement_threshold: The spatial delta (meters) required to treat updates as significant.
             allow_history_fallback: Whether to allow falling back to Recorder history.
         """
         if tracked_devices is not None:
@@ -1395,6 +1482,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 _LOGGER.warning(
                     "Ignoring invalid min_accuracy_threshold=%r", min_accuracy_threshold
                 )
+
+        if movement_threshold is not None:
+            try:
+                self._movement_threshold = max(0, int(movement_threshold))
+            except (TypeError, ValueError):
+                _LOGGER.warning("Ignoring invalid movement_threshold=%r", movement_threshold)
 
         if allow_history_fallback is not None:
             self.allow_history_fallback = bool(allow_history_fallback)
@@ -1517,24 +1610,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 self.increment_stat("low_quality_dropped")
                 return {}
 
-            # De-duplicate by `last_seen` timestamp.
+            # De-duplicate replaced by significance gate
             existing_data = self._device_location_data.get(device_id, {})
-            if existing_data.get("last_seen") and existing_data.get("last_seen") == location_data.get("last_seen"):
-                _LOGGER.debug("Manual locate for %s returned a duplicate location; skipping state update.", name)
-                self.increment_stat("skipped_duplicates")
-            else:
-                # Commit to cache. `update_device_cache` ensures `last_updated` and stats.
-                slot = dict(location_data)
-                slot.setdefault("last_updated", time.time())
+            # Prepare a copy for gating/cooldown application
+            slot = dict(location_data)
+            slot.setdefault("last_updated", time.time())
 
-                # Apply type-aware cooldowns based on internal hint (if any), then strip it.
-                hint = slot.get("_report_hint")
-                self._apply_report_type_cooldown(device_id, hint)
-                if hint:
-                    self.increment_stat("crowd_sourced_updates")
-                slot.pop("_report_hint", None)
+            # Apply type-aware cooldowns based on internal hint (if any), then strip it.
+            self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+            slot.pop("_report_hint", None)
 
-                self.update_device_cache(device_id, slot)
+            # Significance gate also for manual locate to avoid churn.
+            if not self._is_significant_update(device_id, slot):
+                self.increment_stat("non_significant_dropped")
+                return {}
+
+            # Commit to cache. `update_device_cache` ensures `last_updated` and stats.
+            self.update_device_cache(device_id, slot)
 
             # Successful manual locate:
             # - reset poll baseline,
