@@ -228,6 +228,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Lecturas de baja precisión descartadas"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Actualizaciones no significativas descartadas"
       }
     }
   }
