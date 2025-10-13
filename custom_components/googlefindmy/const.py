@@ -1,4 +1,4 @@
-# /custom_components/googlefindmy/const.py
+# custom_components/googlefindmy/const.py
 """Constants for Google Find My Device integration.
 
 All constants defined here are intended to be import-safe across the integration.
@@ -24,7 +24,7 @@ DATA_SECRET_BUNDLE: str = "secrets_data"       # full GoogleFindMyTools secrets.
 DATA_AUTH_METHOD: str = "auth_method"          # "secrets_json" | "individual_tokens"
 
 # Options (user-changeable): stored in config_entry.options
-OPT_TRACKED_DEVICES: str = "tracked_devices"
+# (tracked_devices removed in Step 2; device inclusion is managed via HA device enable/disable)
 OPT_LOCATION_POLL_INTERVAL: str = "location_poll_interval"
 OPT_DEVICE_POLL_DELAY: str = "device_poll_delay"
 OPT_MIN_POLL_INTERVAL: str = "min_poll_interval"
@@ -37,9 +37,8 @@ OPT_GOOGLE_HOME_FILTER_KEYWORDS: str = "google_home_filter_keywords"
 OPT_MAP_VIEW_TOKEN_EXPIRATION: str = "map_view_token_expiration"
 OPT_IGNORED_DEVICES: str = "ignored_devices"
 
-# Canonical list of option keys supported by the integration
+# Canonical list of option keys supported by the integration (without tracked_devices)
 OPTION_KEYS: tuple[str, ...] = (
-    OPT_TRACKED_DEVICES,
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
@@ -89,7 +88,7 @@ DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
 
 # Aggregate defaults dictionary for option-first reading patterns
 DEFAULT_OPTIONS: dict[str, object] = {
-    OPT_TRACKED_DEVICES: [],
+    # OPT_IGNORED_DEVICES is intentionally not pre-populated here to avoid bloating storage.
     OPT_IGNORED_DEVICES: [],
     OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
@@ -101,6 +100,61 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_GOOGLE_HOME_FILTER_KEYWORDS: DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+}
+
+# --------------------------------------------------------------------------------------
+# CONFIG_FIELDS — server-side validation contract for config/options flows
+# --------------------------------------------------------------------------------------
+# Used by config_flow.py to apply strong validators (type/min/max/step) for known keys.
+# Keep keys in sync with OPTION_KEYS and default ranges used in schemas.
+CONFIG_FIELDS: dict[str, dict[str, object]] = {
+    OPT_LOCATION_POLL_INTERVAL: {
+        "type": "int",
+        "min": 60,
+        "max": 3600,
+        "step": 1,
+    },
+    OPT_DEVICE_POLL_DELAY: {
+        "type": "int",
+        "min": 1,
+        "max": 60,
+        "step": 1,
+    },
+    OPT_MIN_POLL_INTERVAL: {
+        "type": "int",
+        "min": 30,
+        "max": 3600,
+        "step": 1,
+    },
+    OPT_MIN_ACCURACY_THRESHOLD: {
+        "type": "int",
+        "min": 25,
+        "max": 500,
+        "step": 1,
+    },
+    OPT_MOVEMENT_THRESHOLD: {
+        "type": "int",
+        "min": 10,
+        "max": 200,
+        "step": 1,
+    },
+    OPT_ALLOW_HISTORY_FALLBACK: {
+        "type": "bool",
+    },
+    OPT_ENABLE_STATS_ENTITIES: {
+        "type": "bool",
+    },
+    OPT_GOOGLE_HOME_FILTER_ENABLED: {
+        "type": "bool",
+    },
+    OPT_GOOGLE_HOME_FILTER_KEYWORDS: {
+        "type": "str",
+    },
+    OPT_MAP_VIEW_TOKEN_EXPIRATION: {
+        "type": "bool",
+    },
+    # OPT_IGNORED_DEVICES is intentionally omitted: it is managed by a dedicated
+    # visibility flow and not edited as a raw field (list of ids).
 }
 
 # --------------------------------------------------------------------------------------
@@ -163,7 +217,6 @@ __all__ = [
     "CONF_GOOGLE_EMAIL",
     "DATA_SECRET_BUNDLE",
     "DATA_AUTH_METHOD",
-    "OPT_TRACKED_DEVICES",
     "OPT_IGNORED_DEVICES",
     "OPT_LOCATION_POLL_INTERVAL",
     "OPT_DEVICE_POLL_DELAY",
@@ -191,6 +244,7 @@ __all__ = [
     "GOOGLE_HOME_SPAM_THRESHOLD_MINUTES",
     "DEFAULT_MAP_VIEW_TOKEN_EXPIRATION",
     "DEFAULT_OPTIONS",
+    "CONFIG_FIELDS",
     "SERVICE_LOCATE_DEVICE",
     "SERVICE_PLAY_SOUND",
     "SERVICE_STOP_SOUND",
