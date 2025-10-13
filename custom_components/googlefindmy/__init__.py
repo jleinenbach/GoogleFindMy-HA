@@ -49,14 +49,13 @@ from .const import (
     DATA_AUTH_METHOD,
     # Options keys & canonical list
     OPTION_KEYS,
-    OPT_TRACKED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL,
     OPT_MIN_ACCURACY_THRESHOLD,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_IGNORED_DEVICES,  # NEW: persist user's delete decision
+    OPT_IGNORED_DEVICES,  # persist user's delete decision
     # Defaults
     DEFAULT_OPTIONS,
     DEFAULT_LOCATION_POLL_INTERVAL,
@@ -67,7 +66,7 @@ from .const import (
     # Services
     SERVICE_LOCATE_DEVICE,
     SERVICE_PLAY_SOUND,
-    SERVICE_STOP_SOUND,  # <-- added
+    SERVICE_STOP_SOUND,
     SERVICE_LOCATE_EXTERNAL,
     SERVICE_REFRESH_DEVICE_URLS,
     SERVICE_REBUILD_REGISTRY,
@@ -363,7 +362,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = GoogleFindMyCoordinator(
         hass,
         cache=cache,
-        tracked_devices=_opt(entry, OPT_TRACKED_DEVICES, DEFAULT_OPTIONS.get(OPT_TRACKED_DEVICES, [])),
+        # tracked_devices removed: device inclusion via HA device enable/disable.
         location_poll_interval=_opt(entry, OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL),
         device_poll_delay=_opt(entry, OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
         min_poll_interval=_opt(entry, OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
@@ -835,7 +834,6 @@ async def async_remove_config_entry_device(
     - Only act on devices owned by this integration/entry (identifier domain matches and
       the device is linked to this config entry).
     - Purge in-memory caches for the device via the coordinator (keeps UI/state clean).
-    - Remove the id from `tracked_devices` options if present (user chose to delete).
     - Add the id to `ignored_devices` to prevent automatic re-creation.
     - Return True to allow HA to remove the device record and its entities.
     - Never allow removing the integration's own "service" device (ident = 'integration').
@@ -864,23 +862,13 @@ async def async_remove_config_entry_device(
     except Exception as err:
         _LOGGER.debug("Coordinator purge failed for %s: %s", dev_id, err)
 
-    # Persist user's delete decision:
-    #  - Remove from tracked_devices (polling) if present.
-    #  - Add to ignored_devices (visibility) to prevent automatic re-creation.
+    # Persist user's delete decision: add to ignored_devices (idempotent + stable ordering)
     try:
         opts = dict(entry.options)
-
-        # 1) Remove from tracked_devices if present
-        tracked = opts.get(OPT_TRACKED_DEVICES)
-        if isinstance(tracked, list) and dev_id in tracked:
-            opts[OPT_TRACKED_DEVICES] = [x for x in tracked if x != dev_id]
-
-        # 2) Add to ignored_devices (idempotent + sorted for stable diffs)
         ignored = set(opts.get(OPT_IGNORED_DEVICES, [])) if isinstance(opts.get(OPT_IGNORED_DEVICES), list) else set()
         ignored.add(dev_id)
         opts[OPT_IGNORED_DEVICES] = sorted(ignored)
 
-        # Commit options if anything changed
         if opts != entry.options:
             hass.config_entries.async_update_entry(entry, options=opts)
             _LOGGER.info("Marked device %s as ignored for entry '%s'", dev_id, entry.title)
