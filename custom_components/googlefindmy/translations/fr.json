@@ -228,6 +228,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Positions à faible précision écartées"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Mises à jour non significatives écartées"
       }
     }
   }
