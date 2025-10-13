@@ -5,11 +5,13 @@ Discovery vs. polling semantics:
 - Every coordinator tick fetches the lightweight **full** Google device list.
 - Presence and name/capability caches are updated for all devices.
 - The published snapshot (`self.data`) contains **all** devices (for dynamic entity creation).
-- The sequential **polling cycle** still respects `tracked_devices` (if non-empty).
+- The sequential **polling cycle** polls **only devices that are enabled** in Home Assistant's
+  Device Registry (devices with `disabled_by is None`). Devices explicitly ignored via options
+  are filtered out as well.
 
 Google Home semantic locations (note):
 - When the Google Home filter identifies a "Google Home-like" semantic location,
-  we now substitute **Home zone coordinates** (lat/lon[/radius]) instead of forcing
+  we substitute **Home zone coordinates** (lat/lon[/radius]) instead of forcing
   a zone label. This lets HA Core's zone engine set the state to `home`, which
   aligns with best practices.
 
@@ -46,6 +48,7 @@ from homeassistant.components.recorder import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr
 # HA session is provided by the integration and reused across I/O
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -170,7 +173,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self,
         hass: HomeAssistant,
         cache: CacheProtocol,
-        tracked_devices: Optional[List[str]] = None,
+        *,
         location_poll_interval: int = 300,
         device_poll_delay: int = 5,
         min_poll_interval: int = DEFAULT_MIN_POLL_INTERVAL,
@@ -190,7 +193,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         Args:
             hass: The Home Assistant instance.
             cache: An object implementing the CacheProtocol for persistent storage.
-            tracked_devices: A list of device IDs to be tracked.
             location_poll_interval: The interval in seconds between polling cycles.
             device_poll_delay: The delay in seconds between polling individual devices.
             min_poll_interval: The minimum allowed interval between polling cycles.
@@ -206,7 +208,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self.api = GoogleFindMyAPI(cache=self._cache, session=self._session)
 
         # Configuration (user options; updated via update_settings())
-        self.tracked_devices = list(tracked_devices or [])
         self.location_poll_interval = int(location_poll_interval)
         self.device_poll_delay = int(device_poll_delay)
         self.min_poll_interval = int(min_poll_interval)  # hard lower bound between cycles
@@ -460,7 +461,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         - Always fetch the **full** lightweight device list (no executor).
         - Update presence and metadata caches for **all** devices.
         - The published snapshot (`self.data`) contains **all** devices (for dynamic entity creation).
-        - The sequential **polling cycle** still respects `tracked_devices` (if non-empty).
+        - The sequential **polling cycle** polls devices that are enabled in HA's Device Registry
+          and not explicitly ignored in integration options.
 
         Returns:
             A list of dictionaries, where each dictionary represents a device's state.
@@ -495,13 +497,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             now_mono = time.monotonic()
             effective_interval = max(self.location_poll_interval, self.min_poll_interval)
 
-            # Devices to POLL: respect tracked_devices if explicitly set, else poll all (ignore-filter applied)
-            if self.tracked_devices:
-                devices_to_poll = [
-                    d for d in all_devices if d["id"] in self.tracked_devices and d["id"] not in ignored
-                ]
-            else:
-                devices_to_poll = [d for d in all_devices if d["id"] not in ignored]
+            # Build list of devices to POLL:
+            # - must not be ignored
+            # - must be enabled in Device Registry (disabled_by is None)
+            dev_reg = dr.async_get(self.hass)
+
+            def _is_enabled_in_registry(dev_id: str) -> bool:
+                device = dev_reg.async_get_device(identifiers={(DOMAIN, dev_id)})
+                # If no registry entry yet, allow polling (entity creation path). If present and disabled, skip.
+                return device is None or device.disabled_by is None
+
+            devices_to_poll = [
+                d for d in all_devices
+                if d["id"] not in ignored and _is_enabled_in_registry(d["id"])
+            ]
 
             # Apply per-device poll cooldowns (owner locate purge window + type-aware cooldowns)
             if self._device_poll_cooldown_until and devices_to_poll:
@@ -1211,9 +1220,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def is_device_present(self, device_id: str) -> bool:
         """Return True if the given device_id is present in the latest device list.
 
-        Presence is derived from the most recent lightweight list returned by the API
-        (no filtering by `tracked_devices`). Entities should consult this in their
-        `available` property to reflect removal from the Google network.
+        Presence is derived from the most recent lightweight list returned by the API.
         """
         return device_id in self._present_device_ids
 
@@ -1425,7 +1432,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def update_settings(
         self,
         *,
-        tracked_devices: Optional[List[str]] = None,
         ignored_devices: Optional[List[str]] = None,
         location_poll_interval: Optional[int] = None,
         device_poll_delay: Optional[int] = None,
@@ -1440,7 +1446,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         regardless of where the values came from.
 
         Args:
-            tracked_devices: A list of device IDs to track.
             ignored_devices: A list of device IDs to hide from snapshots/polling.
             location_poll_interval: The interval in seconds for location polling.
             device_poll_delay: The delay in seconds between polling devices.
@@ -1449,8 +1454,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             movement_threshold: The spatial delta (meters) required to treat updates as significant.
             allow_history_fallback: Whether to allow falling back to Recorder history.
         """
-        if tracked_devices is not None:
-            self.tracked_devices = list(tracked_devices)
         if ignored_devices is not None:
             # This attribute is only used as a fallback when config_entry is not available.
             self.ignored_devices = list(ignored_devices)
