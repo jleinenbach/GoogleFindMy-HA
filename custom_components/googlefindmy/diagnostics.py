@@ -15,6 +15,7 @@ Privacy note:
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -157,6 +158,119 @@ def _coerce_pos_int(value: Any, default: int) -> int:
         return default
 
 
+def _iso_utc(ts: Optional[float]) -> Optional[str]:
+    """Render epoch seconds as ISO 8601 UTC string, or None."""
+    if not isinstance(ts, (int, float)) or ts <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _safe_truncate(text: Any, limit: int = 160) -> str:
+    """Return a short, non-sensitive representation of a value."""
+    try:
+        s = str(text)
+    except Exception:
+        return ""
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)] + "…"
+
+
+def _perf_durations(perf: dict[str, Any]) -> dict[str, Any]:
+    """Compute stable setup durations (seconds) from monotonic stamps if present."""
+    try:
+        start = float(perf.get("setup_start_monotonic", 0) or 0)
+        end = float(perf.get("setup_end_monotonic", 0) or 0)
+        fcm = float(perf.get("fcm_acquired_monotonic", 0) or 0)
+    except Exception:
+        return {}
+
+    out: dict[str, Any] = {}
+    if start > 0 and end > 0 and end >= start:
+        out["total_setup_duration_seconds"] = round(end - start, 3)
+    if start > 0 and fcm >= start:
+        out["fcm_acquisition_duration_seconds"] = round(fcm - start, 3)
+    return out
+
+
+def _concurrency_block(hass: HomeAssistant) -> dict[str, int]:
+    """Return contention counters collected during setup/runtime."""
+    bucket = hass.data.get(DOMAIN, {}) or {}
+    return {
+        "fcm_lock_contention_count": int(bucket.get("fcm_lock_contention_count", 0) or 0),
+        "services_lock_contention_count": int(bucket.get("services_lock_contention_count", 0) or 0),
+    }
+
+
+def _fcm_receiver_state(hass: HomeAssistant) -> Optional[dict[str, Any]]:
+    """Summarize FCM receiver runtime health without leaking internals."""
+    bucket = hass.data.get(DOMAIN, {}) or {}
+    rcvr = bucket.get("fcm_receiver")
+    if not rcvr:
+        return None
+
+    def _get(attr: str, default: Any = None) -> Any:
+        try:
+            return getattr(rcvr, attr, default)
+        except Exception:
+            return default
+
+    # run_state may be an enum; prefer .name, fallback to str(value)
+    run_state = None
+    try:
+        pc = getattr(rcvr, "pc", None)
+        rs = getattr(pc, "run_state", None)
+        run_state = getattr(rs, "name", None) or (str(rs) if rs is not None else None)
+    except Exception:
+        run_state = None
+
+    last_start = _get("last_start_monotonic", 0.0)
+    seconds_since_last_start = None
+    try:
+        if isinstance(last_start, (int, float)) and last_start > 0:
+            seconds_since_last_start = round(time.monotonic() - float(last_start), 2)
+    except Exception:
+        seconds_since_last_start = None
+
+    return {
+        "is_listening": bool(_get("_listening", False)),
+        "run_state": run_state,
+        "ref_count": int(bucket.get("fcm_refcount", 0) or 0),
+        "start_count": int(_get("start_count", 0) or 0),
+        "seconds_since_last_start": seconds_since_last_start,
+    }
+
+
+def _recent_errors_block(coordinator: Any) -> Optional[list[dict[str, Any]]]:
+    """Convert coordinator.recent_errors (deque) to a redacted list."""
+    try:
+        recent = getattr(coordinator, "recent_errors", None)
+    except Exception:
+        recent = None
+    if not recent:
+        return None
+
+    items: list[dict[str, Any]] = []
+    # recent is expected to be a deque of (ts, type, msg)
+    for row in list(recent):
+        try:
+            ts, etype, msg = row
+        except Exception:
+            # Be defensive with unknown tuple shapes
+            ts, etype, msg = (None, None, None)
+        items.append(
+            {
+                "timestamp": _iso_utc(ts),
+                "error_type": _safe_truncate(etype, 64),
+                "message": _safe_truncate(msg, 160),
+            }
+        )
+    return items or None
+
+
 # ---------------------------------------------------------------------------
 # Diagnostics entrypoint
 # ---------------------------------------------------------------------------
@@ -202,7 +316,7 @@ async def async_get_config_entry_diagnostics(
     # --- Build a compact, anonymized options snapshot (no raw strings that could contain PII) ---
     opt = entry.options
     ignored_raw = opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
-    
+
     # Coerce to handle legacy list[str] format gracefully
     if isinstance(ignored_raw, list):
         ignored_count = len(ignored_raw)
@@ -276,6 +390,13 @@ async def async_get_config_entry_diagnostics(
         except (AttributeError, TypeError):
             stats = {}
 
+        # Performance metrics (optional; only durations)
+        perf_metrics = getattr(coordinator, "performance_metrics", {}) or {}
+        setup_perf = _perf_durations(perf_metrics)
+
+        # Recent, redacted non-fatal errors (bounded)
+        recent_errors = _recent_errors_block(coordinator)
+
         coordinator_block = {
             "is_polling": bool(getattr(coordinator, "_is_polling", False)),
             "known_devices_count": known_devices_count,
@@ -283,6 +404,14 @@ async def async_get_config_entry_diagnostics(
             "last_poll_wall_ts": last_poll_wall,  # seconds since epoch (UTC)
             "stats": stats,
         }
+        if setup_perf:
+            coordinator_block["setup_performance"] = setup_perf
+        if recent_errors:
+            coordinator_block["recent_errors"] = recent_errors
+
+    # Concurrency & FCM receiver (global, not per-entry)
+    concurrency = _concurrency_block(hass)
+    fcm_state = _fcm_receiver_state(hass)
 
     # --- Assemble payload (without secrets) ---
     payload: dict[str, Any] = {
@@ -298,9 +427,12 @@ async def async_get_config_entry_diagnostics(
             "device": device_registry_counts,
             "entity": entity_registry_counts,
         },
+        "concurrency": concurrency,
     }
     if coordinator_block:
         payload["coordinator"] = coordinator_block
+    if fcm_state:
+        payload["fcm_receiver_state"] = fcm_state
 
     # --- Final safety net: redact known secret-like keys anywhere in the payload ---
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
