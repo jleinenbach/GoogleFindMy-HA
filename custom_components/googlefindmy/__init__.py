@@ -8,6 +8,7 @@ Version: 2.5 — Storage refactor & lifecycle hardening
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -49,14 +50,13 @@ from .const import (
     DATA_AUTH_METHOD,
     # Options keys & canonical list
     OPTION_KEYS,
-    OPT_TRACKED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL,
     OPT_MIN_ACCURACY_THRESHOLD,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_IGNORED_DEVICES,  # NEW: persist user's delete decision
+    OPT_IGNORED_DEVICES,  # persist user's delete decision
     # Defaults
     DEFAULT_OPTIONS,
     DEFAULT_LOCATION_POLL_INTERVAL,
@@ -67,7 +67,7 @@ from .const import (
     # Services
     SERVICE_LOCATE_DEVICE,
     SERVICE_PLAY_SOUND,
-    SERVICE_STOP_SOUND,  # <-- added
+    SERVICE_STOP_SOUND,
     SERVICE_LOCATE_EXTERNAL,
     SERVICE_REFRESH_DEVICE_URLS,
     SERVICE_REBUILD_REGISTRY,
@@ -77,6 +77,8 @@ from .const import (
     MODE_REBUILD,
     MODE_MIGRATE,
     REBUILD_REGISTRY_MODES,
+    OPT_OPTIONS_SCHEMA_VERSION,
+    coerce_ignored_mapping,
 )
 from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
@@ -91,6 +93,9 @@ from .api import (
     register_fcm_receiver_provider as api_register_fcm_provider,
     unregister_fcm_receiver_provider as api_unregister_fcm_provider,
 )
+# Eagerly import diagnostics to prevent blocking calls on-demand
+from . import diagnostics
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -211,7 +216,13 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
 # --------------------------- Shared FCM provider ---------------------------
 
 async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
-    """Get or create the shared FCM receiver for this HA instance."""
+    """Get or create the shared FCM receiver for this HA instance.
+
+    Behavior:
+        - Creates and initializes the singleton if missing.
+        - Registers provider callbacks for API and LocateTracker once.
+        - Maintains a reference counter to support multiple entries.
+    """
     bucket = hass.data.setdefault(DOMAIN, {})
     refcount = int(bucket.get("fcm_refcount", 0))
     fcm: FcmReceiverHA | None = bucket.get("fcm_receiver")
@@ -225,7 +236,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         bucket["fcm_receiver"] = fcm
         _LOGGER.info("Shared FCM receiver initialized")
 
-        # Register provider for both consumer modules (API + LocateTracker)
+        # Register provider for both consumer modules (exactly once on first acquire)
         loc_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
         api_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
 
@@ -275,15 +286,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
       4) Build coordinator, register views/services, forward platforms.
       5) Schedule initial refresh after HA is fully started.
 
-    Args:
-        hass: The Home Assistant instance.
-        entry: The config entry being set up.
-
-    Returns:
-        True if the setup was successful, False otherwise.
-
-    Raises:
-        ConfigEntryNotReady: If a required setup step fails.
+    Notes:
+        * FCM acquisition/registration now happens through a single deterministic path.
+          The startup barrier is set immediately after a successful acquire, avoiding
+          duplicate provider registrations or refcount bumps.
     """
     # Detect cold start vs. reload (survives reloads within the same HA runtime)
     domain_bucket = hass.data.setdefault(DOMAIN, {})
@@ -307,15 +313,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # 2) Optional: register HA-managed aiohttp session for Nova API (defer import)
     try:
-        from .NovaApi import nova_request as nova  # defer heavy import to setup
+        from .NovaApi import nova_request as nova
         reg = getattr(nova, "register_hass", None)
         unreg = getattr(nova, "unregister_session_provider", None)
         if callable(reg):
             reg(hass)
             if callable(unreg):
                 entry.async_on_unload(unreg)
-            else:
-                _LOGGER.debug("Nova API unregister hook not present; continuing without unload hook.")
         else:
             _LOGGER.debug("Nova API register_hass() not available; continuing with module defaults.")
     except Exception as err:  # Defensive: Nova module may not expose hooks in some builds
@@ -324,8 +328,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 3) Soft-migrate mutable settings from data -> options (never secrets)
     await _async_soft_migrate_data_to_options(hass, entry)
 
-    # 4) Acquire shared FCM and keep it alive while this entry exists
+    # 4) Acquire shared FCM and create a startup barrier for the first poll cycle.
+    fcm_ready_event = asyncio.Event()
+    # Single acquisition path: acquire and register providers once, then set the barrier.
     fcm = await _async_acquire_shared_fcm(hass)
+    fcm_ready_event.set()
 
     # NOTE (lifecycle): Do not await long-running shutdowns inside async_on_unload.
     # We only *signal* the FCM receiver to stop here (non-blocking). The awaited
@@ -363,7 +370,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = GoogleFindMyCoordinator(
         hass,
         cache=cache,
-        tracked_devices=_opt(entry, OPT_TRACKED_DEVICES, DEFAULT_OPTIONS.get(OPT_TRACKED_DEVICES, [])),
+        # tracked_devices removed: device inclusion via HA device enable/disable.
         location_poll_interval=_opt(entry, OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL),
         device_poll_delay=_opt(entry, OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
         min_poll_interval=_opt(entry, OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
@@ -373,6 +380,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ),
     )
     coordinator.config_entry = entry  # convenience for platforms
+
+    # Hand over the barrier without changing the coordinator's signature.
+    # Event is already set after successful FCM acquisition to avoid startup races.
+    setattr(coordinator, "fcm_ready_event", fcm_ready_event)
 
     # Register the coordinator with the shared FCM receiver (clear synchronous contract).
     fcm.register_coordinator(coordinator)
@@ -465,13 +476,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
           The awaited stop and refcount release are handled here to avoid long
           awaits inside `async_on_unload`.
         - TokenCache is explicitly closed here to flush and mark the cache closed.
-
-    Args:
-        hass: The Home Assistant instance.
-        entry: The config entry to unload.
-
-    Returns:
-        True if the unload was successful.
     """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
@@ -835,7 +839,6 @@ async def async_remove_config_entry_device(
     - Only act on devices owned by this integration/entry (identifier domain matches and
       the device is linked to this config entry).
     - Purge in-memory caches for the device via the coordinator (keeps UI/state clean).
-    - Remove the id from `tracked_devices` options if present (user chose to delete).
     - Add the id to `ignored_devices` to prevent automatic re-creation.
     - Return True to allow HA to remove the device record and its entities.
     - Never allow removing the integration's own "service" device (ident = 'integration').
@@ -864,26 +867,34 @@ async def async_remove_config_entry_device(
     except Exception as err:
         _LOGGER.debug("Coordinator purge failed for %s: %s", dev_id, err)
 
-    # Persist user's delete decision:
-    #  - Remove from tracked_devices (polling) if present.
-    #  - Add to ignored_devices (visibility) to prevent automatic re-creation.
+    # Persist user's delete decision: add to ignored_devices mapping (idempotent, lossless)
     try:
         opts = dict(entry.options)
+        # Coerce legacy shapes (list / dict[str,str]) to v2 mapping
+        current_raw = opts.get(OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES))
+        ignored_map, migrated = coerce_ignored_mapping(current_raw)
 
-        # 1) Remove from tracked_devices if present
-        tracked = opts.get(OPT_TRACKED_DEVICES)
-        if isinstance(tracked, list) and dev_id in tracked:
-            opts[OPT_TRACKED_DEVICES] = [x for x in tracked if x != dev_id]
+        # Determine the best human name at deletion time
+        name_to_store = device_entry.name_by_user or device_entry.name or dev_id
 
-        # 2) Add to ignored_devices (idempotent + sorted for stable diffs)
-        ignored = set(opts.get(OPT_IGNORED_DEVICES, [])) if isinstance(opts.get(OPT_IGNORED_DEVICES), list) else set()
-        ignored.add(dev_id)
-        opts[OPT_IGNORED_DEVICES] = sorted(ignored)
+        meta = ignored_map.get(dev_id, {})
+        prev_name = meta.get("name")
+        aliases = list(meta.get("aliases") or [])
+        if prev_name and prev_name != name_to_store and prev_name not in aliases:
+            aliases.append(prev_name)  # keep history as alias
 
-        # Commit options if anything changed
+        ignored_map[dev_id] = {
+            "name": name_to_store,
+            "aliases": aliases,
+            "ignored_at": int(time.time()),
+            "source": "registry",
+        }
+        opts[OPT_IGNORED_DEVICES] = ignored_map
+        opts[OPT_OPTIONS_SCHEMA_VERSION] = 2
+
         if opts != entry.options:
             hass.config_entries.async_update_entry(entry, options=opts)
-            _LOGGER.info("Marked device %s as ignored for entry '%s'", dev_id, entry.title)
+            _LOGGER.info("Marked device '%s' (%s) as ignored for entry '%s'", name_to_store, dev_id, entry.title)
     except Exception as err:
         _LOGGER.debug("Persisting delete decision failed for %s: %s", dev_id, err)
 

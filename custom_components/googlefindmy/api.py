@@ -36,12 +36,14 @@ _LOGGER = logging.getLogger(__name__)
 @runtime_checkable
 class FcmReceiverProtocol(Protocol):
     """Minimal protocol for the shared FCM receiver used by this module."""
+
     def get_fcm_token(self) -> Optional[str]: ...
 
 
 @runtime_checkable
 class CacheProtocol(Protocol):
     """Entry-scoped cache protocol (TokenCache instance)."""
+
     async def async_get_cached_value(self, key: str) -> Any: ...
     async def async_set_cached_value(self, key: str, value: Any) -> None: ...
 
@@ -52,6 +54,10 @@ _FCM_ReceiverGetter: Optional[Callable[[], FcmReceiverProtocol]] = None
 
 def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
     """Register a getter that returns the shared FCM receiver (HA-managed).
+
+    The provider is a zero-arg callable that returns the current receiver instance.
+    We keep this indirection to avoid importing heavy modules at import time and
+    to stay resilient to reloads (the callable resolves the live object on access).
 
     Args:
         getter: A callable that returns the singleton FcmReceiverProtocol instance.
@@ -330,6 +336,33 @@ class GoogleFindMyAPI:
             return None
         return token
 
+    def _peek_fcm_token_quietly(self) -> Optional[str]:
+        """Best-effort token probe for readiness checks (no ERROR-level log spam).
+
+        Returns:
+            Token string when obtainable; otherwise None. All failures are logged at DEBUG.
+        """
+        if _FCM_ReceiverGetter is None:
+            _LOGGER.debug("FCM readiness probe: no provider registered.")
+            return None
+        try:
+            receiver = _FCM_ReceiverGetter()
+        except Exception as err:
+            _LOGGER.debug("FCM readiness probe: provider callable failed: %s", err)
+            return None
+        if receiver is None:
+            _LOGGER.debug("FCM readiness probe: provider returned None.")
+            return None
+        try:
+            token = receiver.get_fcm_token()
+        except Exception as err:
+            _LOGGER.debug("FCM readiness probe: get_fcm_token failed: %s", err)
+            return None
+        if not token or not isinstance(token, str) or len(token) < 10:
+            _LOGGER.debug("FCM readiness probe: token missing or too short.")
+            return None
+        return token
+
     # ----------------------------- Device enumeration ----------------------------
     async def async_get_basic_device_list(
         self, username: Optional[str] = None
@@ -452,6 +485,23 @@ class GoogleFindMyAPI:
                 err,
             )
             return {}
+        except RuntimeError as err:
+            # Startup safety net: during cold boot, the FCM provider may not yet be registered.
+            # Downgrade this expected transient to DEBUG and retry on the next cycle.
+            if "FCM receiver provider has not been registered" in str(err):
+                _LOGGER.debug(
+                    "Startup race: FCM provider not ready for %s (%s). Will retry on next cycle.",
+                    device_name,
+                    device_id,
+                )
+                return {}
+            _LOGGER.error(
+                "Runtime error while getting async location for %s (%s): %s",
+                device_name,
+                device_id,
+                err,
+            )
+            return {}
         except Exception as err:
             _LOGGER.error(
                 "Failed to get async location for %s (%s): %s",
@@ -498,8 +548,44 @@ class GoogleFindMyAPI:
 
     # ------------------------ Play/Stop Sound / Push readiness -------------------
     def is_push_ready(self) -> bool:
-        """Return True if the push transport (FCM) is initialized and has a usable token."""
-        return self._get_fcm_token_for_action() is not None
+        """Return True if the push transport (FCM) appears initialized and ready.
+
+        Heuristics (no I/O, no blocking):
+          1) Use receiver-level readiness flags when available (is_ready/ready).
+          2) Inspect push client state on the receiver (pc.run_state == STARTED and pc.do_listen).
+          3) Fall back to token presence via a quiet probe (no ERROR-level spam).
+
+        This keeps API- and coordinator-level gating consistent while avoiding tight
+        coupling to specific FCM client classes and enums.
+        """
+        # No provider registered?
+        if _FCM_ReceiverGetter is None:
+            return False
+
+        # Resolve live receiver (may change across reloads)
+        try:
+            receiver = _FCM_ReceiverGetter()
+        except Exception:
+            return False
+        if receiver is None:
+            return False
+
+        # 1) Receiver-level booleans
+        for attr in ("is_ready", "ready"):
+            val = getattr(receiver, attr, None)
+            if isinstance(val, bool):
+                return val
+
+        # 2) Push client heuristic: tolerate enum or string for run_state
+        pc = getattr(receiver, "pc", None)
+        if pc is not None:
+            state = getattr(pc, "run_state", None)
+            state_name = getattr(state, "name", state)  # enum.name or raw
+            if state_name == "STARTED" and bool(getattr(pc, "do_listen", False)):
+                return True
+
+        # 3) Quiet token probe as last resort
+        return self._peek_fcm_token_quietly() is not None
 
     @property
     def push_ready(self) -> bool:

@@ -26,9 +26,8 @@
       },
       "device_selection": {
         "title": "Selezione dispositivi e polling",
-        "description": "Seleziona i dispositivi da monitorare e configura i parametri di polling:\n• Intervallo di polling posizione: frequenza di avvio di un nuovo ciclo (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per ciascun dispositivo all’interno di un ciclo (1–60 secondi)\n\nL’integrazione scorre i dispositivi in sequenza e richiede i dati di posizione per ciascuno con il ritardo specificato.",
+        "description": "I nuovi dispositivi rilevati appaiono disattivati e possono essere attivati nelle impostazioni del dispositivo. Configura qui i parametri generali di polling:\n• Intervallo di polling posizione: frequenza di avvio di un nuovo ciclo (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per ciascun dispositivo all’interno di un ciclo (1–60 secondi)",
         "data": {
-          "tracked_devices": "Dispositivi monitorati",
           "location_poll_interval": "Intervallo di polling posizione (s)",
           "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
           "min_accuracy_threshold": "Accuratezza minima (m)",
@@ -85,9 +84,8 @@
       },
       "settings": {
         "title": "Opzioni",
-        "description": "Modifica le impostazioni di monitoraggio:\n• Intervallo di polling posizione: frequenza di interrogazione delle posizioni (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Accuratezza minima: ignora posizioni peggiori di questo valore (25–500 metri)\n• Soglia di movimento: movimento minimo per generare un aggiornamento di posizione (10–200 metri)\n\nFiltro Google Home:\n• Abilita per raggruppare i rilevamenti Google Home nella zona ‘Casa’\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: ‘nest’ corrisponde a ‘Kitchen Nest Mini’",
+        "description": "Modifica le impostazioni di localizzazione:\n• Intervallo di polling posizione: frequenza di interrogazione delle posizioni (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Accuratezza minima: ignora posizioni peggiori di questo valore (25–500 metri)\n• Soglia di movimento: movimento minimo per generare un aggiornamento di posizione (10–200 metri)\n\nFiltro Google Home:\n• Abilita per associare i rilevamenti Google Home alla zona ‘Casa’\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: ‘nest’ corrisponde a ‘Kitchen Nest Mini’",
         "data": {
-          "tracked_devices": "Dispositivi monitorati",
           "location_poll_interval": "Intervallo di polling posizione (s)",
           "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
           "min_accuracy_threshold": "Accuratezza minima (m)",

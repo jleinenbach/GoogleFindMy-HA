@@ -146,24 +146,6 @@ async def async_setup_entry(
                 known_ids.add(dev_id)
             else:
                 _LOGGER.debug("Skipping device without id/name: %s", device)
-    else:
-        # Cold boot: create skeletons from tracked IDs without writing placeholder names
-        tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
-        for dev_id in tracked_ids:
-            # Do not create skeletons for ignored devices
-            try:
-                if hasattr(coordinator, "is_ignored") and coordinator.is_ignored(dev_id):
-                    _LOGGER.debug("Skipping ignored device skeleton sensor: %s", dev_id)
-                    continue
-            except Exception:
-                pass
-            entities.append(GoogleFindMyLastSeenSensor(coordinator, {"id": dev_id}))
-            known_ids.add(dev_id)
-        if tracked_ids:
-            _LOGGER.debug(
-                "Created %d skeleton last_seen sensors for restore (no live data yet)",
-                len(tracked_ids),
-            )
 
     if entities:
         async_add_entities(entities, True)
@@ -262,6 +244,8 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     # Best practice: let HA compose "<Device Name> <translated entity name>"
     _attr_has_entity_name = True
+    # Default to disabled in the registry for per-device sensors
+    _attr_entity_registry_enabled_default = False
     entity_description = LAST_SEEN_DESCRIPTION
 
     def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:

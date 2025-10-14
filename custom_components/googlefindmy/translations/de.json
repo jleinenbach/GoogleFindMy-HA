@@ -26,9 +26,8 @@
       },
       "device_selection": {
         "title": "Geräte und Abfrageintervall",
-        "description": "Wähle die zu verfolgenden Geräte und konfiguriere die Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden)\n\nDie Integration fragt die Geräte nacheinander ab und fordert für jedes Gerät mit der angegebenen Verzögerung Positionsdaten an.",
+        "description": "Neu erkannte Geräte erscheinen deaktiviert und können in den Geräteeinstellungen aktiviert werden. Konfiguriere hier die allgemeinen Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden)",
         "data": {
-          "tracked_devices": "Verfolgte Geräte",
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
           "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",
           "min_accuracy_threshold": "Mindestgenauigkeit (m)",
@@ -87,7 +86,6 @@
         "title": "Optionen",
         "description": "Einstellungen für die Ortung anpassen:\n• Positionsabfrage-Intervall: Wie häufig Positionen abgefragt werden (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte (1–60 Sekunden)\n• Mindestgenauigkeit: Positionen mit einer größeren Ungenauigkeit als dieser Wert werden ignoriert (25–500 Meter)\n• Bewegungsschwelle: Mindestbewegung, um eine Positionsaktualisierung auszulösen (10–200 Meter)\n\nGoogle-Home-Filter:\n• Aktivieren, um Ortungen durch Google-Home-Geräte der „Zuhause“-Zone zuzuordnen\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt)\n• Beispiel: „nest“ passt zu „Küche Nest Mini“",
         "data": {
-          "tracked_devices": "Verfolgte Geräte",
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
           "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",
           "min_accuracy_threshold": "Mindestgenauigkeit (m)",

@@ -27,7 +27,6 @@ from homeassistant.helpers import entity_registry as er
 from .const import (
     DOMAIN,
     # user-facing options (non-secret)
-    OPT_TRACKED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_ACCURACY_THRESHOLD,
@@ -185,7 +184,7 @@ async def async_get_config_entry_diagnostics(
         # Name and version from manifest; both are safe to expose
         integration_meta = {
             "name": integ.name,
-            "version": integ.version,
+            "version": str(integ.version),
         }
     except Exception:
         # Stay resilient if loader fails in custom environments
@@ -202,9 +201,15 @@ async def async_get_config_entry_diagnostics(
 
     # --- Build a compact, anonymized options snapshot (no raw strings that could contain PII) ---
     opt = entry.options
-    ignored_list = opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or []
-    if not isinstance(ignored_list, list):
-        ignored_list = []
+    ignored_raw = opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
+    
+    # Coerce to handle legacy list[str] format gracefully
+    if isinstance(ignored_raw, list):
+        ignored_count = len(ignored_raw)
+    elif isinstance(ignored_raw, dict):
+        ignored_count = len(ignored_raw)
+    else:
+        ignored_count = 0
 
     config_summary = {
         # Durations and numeric thresholds
@@ -215,14 +220,11 @@ async def async_get_config_entry_diagnostics(
         # Feature toggles
         "google_home_filter_enabled": bool(opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, False)),
         "enable_stats_entities": bool(opt.get(OPT_ENABLE_STATS_ENTITIES, True)),
-        # Token lifetime: store numeric value if available; do not expose strings
-        "map_view_token_expiration_seconds": _coerce_pos_int(
-            opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, 0), 0
-        ),
+        # Token lifetime: store boolean value
+        "map_view_token_expiration": bool(opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, False)),
         # Counts only (never expose strings/IDs)
         "google_home_filter_keywords_count": _count_keywords(opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS)),
-        "tracked_devices_count": len(opt.get(OPT_TRACKED_DEVICES, []) or []),
-        "ignored_devices_count": len(ignored_list),
+        "ignored_devices_count": ignored_count,
     }
 
     # --- Device & entity registry counts (anonymized) ---

@@ -141,6 +141,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
 
     # Best practice: let HA compose "<Device Name> <translated entity name>"
     _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
     _attr_should_poll = False
     entity_description = PLAY_SOUND_DESCRIPTION
 
@@ -303,6 +304,7 @@ class GoogleFindMyStopSoundButton(CoordinatorEntity, ButtonEntity):
     """Button to trigger 'Stop Sound' on a Google Find My Device."""
 
     _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
     _attr_should_poll = False
     entity_description = STOP_SOUND_DESCRIPTION
 
@@ -460,6 +462,7 @@ class GoogleFindMyLocateButton(CoordinatorEntity, ButtonEntity):
     """Button to trigger an immediate 'Locate now' request (manual location update)."""
 
     _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
     _attr_should_poll = False
     entity_description = LOCATE_DEVICE_DESCRIPTION
 

@@ -15,6 +15,11 @@ Invariants (why this looks the way it does):
   logging secrets.
 - For `secrets.json`, we support multiple token sources and **fail over**:
   prefer `aas_token`, then `fcm_credentials.installation.token`, then legacy keys.
+
+Change (Step 1): Remove legacy `tracked_devices` UI from both the initial setup
+and the options flow, without altering authentication behaviour or the online
+connection test. Device inclusion/exclusion will be handled by native HA device
+enable/disable in later steps.
 """
 from __future__ import annotations
 
@@ -50,7 +55,7 @@ from .const import (
     DATA_SECRET_BUNDLE,  # kept for compatibility in translations; not stored anymore
     DATA_AUTH_METHOD,
     # Options (user-changeable)
-    OPT_TRACKED_DEVICES,
+    # OPT_TRACKED_DEVICES,  # (removed from UI in Step 1; left import commented for clarity)
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_ACCURACY_THRESHOLD,
@@ -69,6 +74,10 @@ from .const import (
     DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     DEFAULT_ENABLE_STATS_ENTITIES,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_OPTIONS,
+    OPT_OPTIONS_SCHEMA_VERSION,
+    coerce_ignored_mapping,
+    ignored_choices_for_ui,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -414,9 +423,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
         return api, email
 
-    # ---------- Device selection ----------
+    # ---------- Device selection (now: connection test + non-secret settings) ----------
     async def async_step_device_selection(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Select tracked devices and set poll intervals (initial create)."""
+        """Finalize initial setup.
+
+        Step 1 change: This form no longer contains the `tracked_devices` multi-select.
+        We keep the **online validation** (device list fetch) and the remaining options.
+        """
         errors: Dict[str, str] = {}
 
         # Ensure unique_id per Google account to avoid duplicate entries
@@ -425,7 +438,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"{DOMAIN}:{email_for_uid}")
             self._abort_if_unique_id_configured()
 
-        # Populate device choices once (also serves as online validation)
+        # Online validation: fetch devices once (fail → cannot_connect)
         if not self._available_devices:
             try:
                 api, username = await self._async_build_api_and_username()
@@ -433,22 +446,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if not devices:
                     errors["base"] = "no_devices"
                 else:
-                    # store as (name, id)
+                    # store as (name, id) for potential future use (kept for parity)
                     self._available_devices = [(d["name"], d["id"]) for d in devices]
             except Exception as err:  # noqa: BLE001 - API/transport errors
                 _LOGGER.error("Failed to fetch devices during setup: %s", err)
                 errors["base"] = "cannot_connect"
 
         if errors:
+            # Keep the step to show an error, but with an empty schema.
             return self.async_show_form(step_id="device_selection", data_schema=vol.Schema({}), errors=errors)
 
-        # Build a multi-select; keep cv.multi_select for wide compatibility
-        options_map = {dev_id: dev_name for (dev_name, dev_id) in self._available_devices}
+        # Schema **without** OPT_TRACKED_DEVICES (removed in Step 1)
         schema = vol.Schema(
             {
-                vol.Optional(OPT_TRACKED_DEVICES, default=list(options_map.keys())): vol.All(
-                    cv.multi_select(options_map), vol.Length(min=1)
-                ),
                 vol.Optional(OPT_LOCATION_POLL_INTERVAL, default=DEFAULT_LOCATION_POLL_INTERVAL): vol.All(
                     vol.Coerce(int), vol.Range(min=60, max=3600)
                 ),
@@ -476,9 +486,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_GOOGLE_EMAIL: self._auth_data.get(CONF_GOOGLE_EMAIL),
             }
 
-            # Options
+            # Options (no OPT_TRACKED_DEVICES anymore)
             options_payload: Dict[str, Any] = {
-                OPT_TRACKED_DEVICES: user_input.get(OPT_TRACKED_DEVICES, []),
                 OPT_LOCATION_POLL_INTERVAL: user_input.get(
                     OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
                 ),
@@ -584,11 +593,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     """Options flow to update non-secret settings and optionally refresh credentials.
 
-    NOTE: Home Assistant injects the config entry automatically.
-    Do NOT set self.config_entry manually.
+    NOTE: Step 1 change: `tracked_devices` has been removed from the Settings UI.
+    Home Assistant's native device enable/disable will control tracking going forward.
     """
-
-    # no __init__: HA provides self.config_entry
 
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -646,15 +653,14 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
 
     # ---------- Settings (non-secret) ----------
     async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Update non-secret options."""
+        """Update non-secret options (without `tracked_devices`)."""
         errors: Dict[str, str] = {}
 
         entry = self.config_entry
         opt = entry.options
         dat = entry.data
 
-        # Current values with safe fallbacks
-        current_tracked = opt.get(OPT_TRACKED_DEVICES, dat.get(OPT_TRACKED_DEVICES, []))
+        # Current values with safe fallbacks (tracked_devices removed in Step 1)
         current_interval = opt.get(
             OPT_LOCATION_POLL_INTERVAL,
             dat.get(OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL),
@@ -679,26 +685,9 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             dat.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
         )
 
-        # Build device options (robust against temporary API failures)
-        device_options: Dict[str, str] = {}
-        try:
-            api = await self._async_build_api_from_entry(entry)
-            devices = await api.async_get_basic_device_list(entry.data.get(CONF_GOOGLE_EMAIL))
-            device_options = {dev["id"]: dev["name"] for dev in devices}
-        except Exception as err:  # noqa: BLE001 - keep options usable
-            _LOGGER.warning(
-                "Could not fetch a fresh device list for options; using existing tracked devices as fallback. Error: %s",
-                err,
-            )
-
-        # Ensure already-tracked IDs remain valid choices even if fetch failed
-        for dev_id in current_tracked or []:
-            device_options.setdefault(dev_id, dev_id)
-
-        # Base schema without defaults; suggested values will be injected
+        # Base schema *without* tracked_devices
         base_schema = vol.Schema(
             {
-                vol.Optional(OPT_TRACKED_DEVICES): vol.All(cv.multi_select(device_options), vol.Length(min=0)),
                 vol.Optional(OPT_LOCATION_POLL_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
                 vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
                 vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
@@ -712,7 +701,6 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
 
         if user_input is not None:
             new_options = {
-                OPT_TRACKED_DEVICES: user_input.get(OPT_TRACKED_DEVICES, current_tracked),
                 OPT_LOCATION_POLL_INTERVAL: user_input.get(OPT_LOCATION_POLL_INTERVAL, current_interval),
                 OPT_DEVICE_POLL_DELAY: user_input.get(OPT_DEVICE_POLL_DELAY, current_delay),
                 OPT_MIN_ACCURACY_THRESHOLD: user_input.get(OPT_MIN_ACCURACY_THRESHOLD, current_min_acc),
@@ -727,7 +715,6 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             return self.async_create_entry(title="", data=new_options)
 
         suggested_values = {
-            OPT_TRACKED_DEVICES: current_tracked,
             OPT_LOCATION_POLL_INTERVAL: current_interval,
             OPT_DEVICE_POLL_DELAY: current_delay,
             OPT_MIN_ACCURACY_THRESHOLD: current_min_acc,
@@ -749,34 +736,15 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         """Show and restore ignored devices by removing them from OPT_IGNORED_DEVICES."""
         entry = self.config_entry
         options = dict(entry.options)
-        ignored = options.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or []
-        if not isinstance(ignored, list):
-            ignored = []
+        raw = options.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
+        ignored_map, _migrated = coerce_ignored_mapping(raw)
 
         # Abort early if nothing to restore
-        if not ignored:
+        if not ignored_map:
             return self.async_abort(reason="no_ignored_devices")
 
-        # Build display map: "<friendly> (<id>)"
-        dev_reg = dr.async_get(self.hass)
-        choices: Dict[str, str] = {}
-        for dev_id in ignored:
-            friendly = dev_id
-            try:
-                # Try to resolve a device by identifier (DOMAIN, dev_id)
-                device = next(
-                    (
-                        d
-                        for d in dev_reg.devices.values()
-                        if any(ident for ident in d.identifiers if ident == (DOMAIN, dev_id))
-                    ),
-                    None,
-                )
-                if device:
-                    friendly = device.name_by_user or device.name or dev_id
-            except Exception:  # pragma: no cover - defensive
-                pass
-            choices[dev_id] = f"{friendly} ({dev_id})"
+        # Directly use stored names for choices
+        choices = ignored_choices_for_ui(ignored_map)
 
         schema = vol.Schema({vol.Optional("unignore_devices", default=[]): cv.multi_select(choices)})
 
@@ -785,11 +753,15 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             if not isinstance(to_restore, list):
                 to_restore = list(to_restore)  # in case of set/tuple
 
-            new_ignored = [x for x in ignored if x not in to_restore]
-            new_options = dict(entry.options)
-            new_options[OPT_IGNORED_DEVICES] = new_ignored
+            # Remove selected ids from the mapping
+            for dev_id in to_restore:
+                ignored_map.pop(dev_id, None)
 
-            # Trigger automatic reload via OptionsFlowWithReload
+            new_options = dict(entry.options)
+            new_options[OPT_IGNORED_DEVICES] = ignored_map
+            new_options[OPT_OPTIONS_SCHEMA_VERSION] = 2
+
+            # Trigger automatic reload via OptionsFlowWithReload by returning a create_entry result.
             return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(step_id="visibility", data_schema=schema)

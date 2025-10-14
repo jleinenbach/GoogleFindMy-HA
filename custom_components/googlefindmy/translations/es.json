@@ -26,9 +26,8 @@
       },
       "device_selection": {
         "title": "Selección de dispositivos y sondeo",
-        "description": "Selecciona los dispositivos a seguir y configura los parámetros de sondeo:\n• Intervalo de sondeo de ubicación: con qué frecuencia iniciar un nuevo ciclo (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre las consultas de cada dispositivo dentro de un ciclo (1–60 segundos)\n\nLa integración recorre los dispositivos de forma secuencial y solicita datos de ubicación para cada uno con el retardo indicado.",
+        "description": "Los dispositivos descubiertos recientemente aparecen desactivados y se pueden activar en la configuración del dispositivo. Configura aquí los parámetros generales de sondeo:\n• Intervalo de sondeo de ubicación: con qué frecuencia iniciar un nuevo ciclo de sondeo (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre las consultas de cada dispositivo dentro de un ciclo (1–60 segundos)",
         "data": {
-          "tracked_devices": "Dispositivos seguidos",
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
           "device_poll_delay": "Retardo entre sondeos de dispositivos (s)",
           "min_accuracy_threshold": "Precisión mínima (m)",
@@ -85,9 +84,8 @@
       },
       "settings": {
         "title": "Opciones",
-        "description": "Modificar la configuración de seguimiento:\n• Intervalo de sondeo de ubicación: frecuencia de consulta de ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Precisión mínima: ignorar ubicaciones peores que este valor (25–500 metros)\n• Umbral de movimiento: movimiento mínimo que desencadena una actualización de ubicación (10–200 metros)\n\nFiltro de Google Home:\n• Activar para agrupar las detecciones de Google Home en la zona ‘Hogar’\n• Las palabras clave aceptan coincidencias parciales (separadas por comas)\n• Ejemplo: ‘nest’ coincide con ‘Kitchen Nest Mini’",
+        "description": "Ajustar la configuración de localización:\n• Intervalo de sondeo de ubicación: frecuencia con la que se consultan ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Precisión mínima: ignorar ubicaciones peores que este valor (25–500 metros)\n• Umbral de movimiento: movimiento mínimo necesario para activar una actualización de ubicación (10–200 metros)\n\nFiltro de Google Home:\n• Activar para asociar las detecciones de Google Home con la zona «Hogar»\n• Las palabras clave admiten coincidencias parciales (separadas por comas)\n• Ejemplo: «nest» coincide con «Kitchen Nest Mini»",
         "data": {
-          "tracked_devices": "Dispositivos seguidos",
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
           "device_poll_delay": "Retardo entre sondeos de dispositivos (s)",
           "min_accuracy_threshold": "Precisión mínima (m)",
