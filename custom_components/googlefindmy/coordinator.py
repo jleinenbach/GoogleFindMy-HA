@@ -997,14 +997,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self.safe_update_metric("last_poll_start_mono", time.monotonic())
             _LOGGER.debug("Starting sequential poll of %d devices", len(devices))
 
-            # Push an immediate "baseline" snapshot so UI reflects that a poll cycle began.
-            try:
-                start_snapshot = self._build_snapshot_from_cache(devices, wall_now=time.time())
-                self.async_set_updated_data(start_snapshot)
-            except Exception:
-                # Non-fatal; continue polling.
-                pass
-
             try:
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
