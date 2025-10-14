@@ -457,7 +457,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """Handle Device Registry changes by rebuilding poll targets (rare)."""
         self._reindex_poll_targets_from_device_registry()
         # After changes, request a refresh so the next tick uses the new target sets.
-        async self.async_request_refresh()
+        # Compatibility: async_request_refresh is a plain def on most cores, but an
+        # async coroutine on some versions. Handle both safely.
+        fn = getattr(self, "async_request_refresh", None)
+        if callable(fn):
+            try:
+                if asyncio.iscoroutinefunction(fn):
+                    await fn()  # type: ignore[misc]
+                else:
+                    res = fn()
+                    # If a coroutine slips through (rare), schedule it to avoid warnings.
+                    if asyncio.iscoroutine(res):
+                        self.hass.async_create_task(res, name=f"{DOMAIN}.dr_event_refresh")
+            except Exception as err:
+                _LOGGER.debug("async_request_refresh dispatch failed (DR event): %s", err)
 
     # ---------------------------- Cooldown helpers (server-aware) -----------
     def _compute_type_cooldown_seconds(self, report_hint: Optional[str]) -> int:
