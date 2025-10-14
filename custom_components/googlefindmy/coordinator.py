@@ -739,9 +739,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     self._clear_fcm_deferral()
 
             self._is_polling = True
-            # Push a snapshot from cache to signal "polling" state to listeners
-            start_snapshot = self._build_snapshot_from_cache(devices, wall_now=time.time())
-            self.async_set_updated_data(start_snapshot)
             _LOGGER.info("Starting sequential poll of %d devices", len(devices))
 
             try:
