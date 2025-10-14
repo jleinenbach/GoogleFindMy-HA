@@ -114,12 +114,12 @@ def _sync_get_last_gps_from_history(
     hass: HomeAssistant, entity_id: str
 ) -> Optional[Dict[str, Any]]:
     """Fetch the last state with GPS coordinates from Recorder History.
-    
+
     IMPORTANT:
         This function is synchronous and performs database I/O. It MUST be
         run in a worker thread (e.g., the Recorder's executor) to avoid
         blocking the Home Assistant event loop.
-    
+
     Args:
         hass: The Home Assistant instance.
         entity_id: The entity ID of the device_tracker to query.
@@ -408,8 +408,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         enabled: Set[str] = set()
         present: Set[str] = set()
-        # Mini patch: collect devices that belong to the same domain but NOT to this entry,
-        # purely for transparency in multi-account setups (informational log; no functional effect).
+        # Collect devices belonging to the same domain but different entries (informational only).
         other_account: List[tuple[str, str]] = []
 
         for device in list(dev_reg.devices.values()):
@@ -442,7 +441,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             len(self._enabled_poll_device_ids),
         )
 
-        # Mini patch (informational): show that some devices are managed by other entries.
+        # Informational: show that some devices are managed by other entries.
         if other_account:
             sample = ", ".join(f"{did} ({nm})" for did, nm in other_account[:5])
             _LOGGER.info(
@@ -464,14 +463,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def _compute_type_cooldown_seconds(self, report_hint: Optional[str]) -> int:
         """Return a server-aware cooldown duration in seconds for a crowdsourced report type.
 
-        We derive cooldowns from POPETS'25 observations:
+        Derived from POPETS'25 observations:
         - "in_all_areas": ~10 min throttle window (minimum).
         - "high_traffic": ~5 min throttle window (minimum).
 
         IMPORTANT:
         - To guarantee effect, the applied cooldown is **never shorter than** the
           configured `location_poll_interval`. This ensures at least one scheduled
-          poll cycle is skipped in practice (see review note).
+          poll cycle is skipped in practice.
         """
         if not report_hint:
             return 0
@@ -901,7 +900,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     self._clear_fcm_deferral()
 
             self._is_polling = True
-            _LOGGER.info("Starting sequential poll of %d devices", len(devices))
+            _LOGGER.debug("Starting sequential poll of %d devices", len(devices))
 
             # Push an immediate "baseline" snapshot so UI reflects that a poll cycle began.
             try:
@@ -915,7 +914,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "Sequential poll: requesting location for %s (%d/%d)",
                         dev_name,
                         idx + 1,
@@ -934,7 +933,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             continue
 
                         # --- Apply Google Home filter (keep parity with FCM push path) ---
-                        # Patch: consume coordinate substitution from the filter.
+                        # Consume coordinate substitution from the filter when needed.
                         semantic_name = location.get("semantic_name")
                         if semantic_name and hasattr(self, "google_home_filter"):
                             try:
@@ -1052,8 +1051,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         self._device_location_data[dev_id] = location
                         self.increment_stat("polled_updates")
 
-                        # NEW (quality improvement): push an immediate per-device update
-                        # for more responsive UI during long poll cycles.
+                        # Immediate per-device update for more responsive UI during long poll cycles.
                         self.push_updated([dev_id])
 
                     except asyncio.TimeoutError:
@@ -1382,7 +1380,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug("Ignored cache update for %s: payload is not a dict", device_id)
             return
 
-        # NEW: Discard stale updates that would regress time (push can arrive late).
+        # Discard stale updates that would regress time (push can arrive late).
         existing_data = self._device_location_data.get(device_id)
         new_seen = location_data.get("last_seen")
         if existing_data is not None and new_seen is not None:
@@ -1596,7 +1594,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self.async_set_updated_data(self.data)
 
     # ---------------------------- Push updates ------------------------------
-    def push_updated(self, device_ids: Optional[List[str]] = None) -> None:
+    def push_updated(self, device_ids: Optional[List[str]] = None, *, reset_baseline: bool = True) -> None:
         """Publish a fresh snapshot to listeners after push (FCM) cache updates.
 
         Thread-safe: may be called from any thread. This method ensures all state
@@ -1604,18 +1602,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         This **does not** trigger a poll. It:
         - Immediately pushes cache state to entities via `async_set_updated_data()`.
-        - Resets the internal poll baseline to 'now' to prevent an immediate re-poll.
+        - Optionally resets the internal poll baseline to 'now' to prevent an immediate
+          re-poll when push-driven updates arrive (`reset_baseline=True` by default).
         - Optionally limits the snapshot to `device_ids`; otherwise includes all known devices.
 
         Args:
             device_ids: An optional list of device IDs to include in the update.
+            reset_baseline: If True (default), reset the scheduler baseline to now.
         """
         if not self._is_on_hass_loop():
-            self._run_on_hass_loop(self.push_updated, device_ids)
+            self._run_on_hass_loop(self.push_updated, device_ids, reset_baseline=reset_baseline)
             return
 
         wall_now = time.time()
-        self._last_poll_mono = time.monotonic()  # reset poll timer
+        if reset_baseline:
+            self._last_poll_mono = time.monotonic()  # optional: reset poll timer
 
         # Choose device ids for the snapshot
         if device_ids:
@@ -1900,7 +1901,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 return {}
 
             # --- Parity with polling path: Google Home semantic spam filter --------
-            # Patch: consume coordinate substitution from the filter.
+            # Consume coordinate substitution from the filter when needed.
             semantic_name = location_data.get("semantic_name")
             if semantic_name and hasattr(self, "google_home_filter"):
                 try:
