@@ -1,4 +1,4 @@
-# tests/test_config_flow.py
+# custom_components/googlefindmy/tests/test_config_flow.py
 """Tests for the Google Find My Device config/option flows (Platinum-ready).
 
 Covers:
@@ -13,6 +13,7 @@ Covers:
   * JSON vs. format errors (invalid_json / invalid_token)
   * Online validation before storing
 - Options flow:
+  * Settings update (no tracked_devices UI anymore)
   * Credentials update (manual + secrets)
   * Visibility management (restore ignored devices)
 - Error handling:
@@ -41,7 +42,6 @@ except Exception:  # pytest-homeassistant-custom-component environment
 DOMAIN = "googlefindmy"
 
 # Option keys (keep string-literals here for test stability)
-OPT_TRACKED_DEVICES = "tracked_devices"
 OPT_LOCATION_POLL_INTERVAL = "location_poll_interval"
 OPT_DEVICE_POLL_DELAY = "device_poll_delay"
 OPT_MIN_ACCURACY_THRESHOLD = "min_accuracy_threshold"
@@ -63,10 +63,9 @@ def _device_list() -> list[Dict[str, Any]]:
     return [{"name": "Pixel 8", "id": "dev1"}]
 
 
-def _options_payload_defaults(dev_ids: List[str]) -> Dict[str, Any]:
-    """Build a valid options payload for the device_selection step."""
+def _device_selection_options_payload() -> Dict[str, Any]:
+    """Build a valid options payload for the device_selection step (no tracked_devices)."""
     return {
-        OPT_TRACKED_DEVICES: dev_ids,
         OPT_LOCATION_POLL_INTERVAL: 120,
         OPT_DEVICE_POLL_DELAY: 2,
         OPT_MIN_ACCURACY_THRESHOLD: 50,
@@ -103,9 +102,9 @@ async def test_user_flow_secrets_only_success(hass: HomeAssistant) -> None:
         )
         assert step["type"] == "form" and step["step_id"] == "device_selection"
 
-        # Finish setup
+        # Finish setup (no tracked_devices in payload)
         step = await hass.config_entries.flow.async_configure(
-            step["flow_id"], _options_payload_defaults(["dev1"])
+            step["flow_id"], _device_selection_options_payload()
         )
         assert step["type"] == "create_entry"
         assert step["title"] == "Google Find My Device"
@@ -138,7 +137,7 @@ async def test_user_flow_manual_only_success(hass: HomeAssistant) -> None:
         assert step["type"] == "form" and step["step_id"] == "device_selection"
 
         step = await hass.config_entries.flow.async_configure(
-            step["flow_id"], _options_payload_defaults(["dev1"])
+            step["flow_id"], _device_selection_options_payload()
         )
         assert step["type"] == "create_entry"
         entry = hass.config_entries.async_entries(DOMAIN)[0]
@@ -215,7 +214,7 @@ async def test_token_failover_prefers_first_working_candidate(hass: HomeAssistan
         assert step["type"] == "form" and step["step_id"] == "device_selection"
 
         step = await hass.config_entries.flow.async_configure(
-            step["flow_id"], _options_payload_defaults(["dev1"])
+            step["flow_id"], _device_selection_options_payload()
         )
         assert step["type"] == "create_entry"
         entry = hass.config_entries.async_entries(DOMAIN)[0]
@@ -400,7 +399,7 @@ async def test_options_credentials_update_manual_success(hass: HomeAssistant) ->
         data={CONF_GOOGLE_EMAIL: "old@example.com", CONF_OAUTH_TOKEN: "O" * 32},
         unique_id=f"{DOMAIN}:old@example.com",
         title="Google Find My Device",
-        options=_options_payload_defaults([]),
+        options=_device_selection_options_payload(),
     )
     entry.add_to_hass(hass)
 
@@ -436,7 +435,7 @@ async def test_options_credentials_update_invalid_json(hass: HomeAssistant) -> N
         data={CONF_GOOGLE_EMAIL: "old@example.com", CONF_OAUTH_TOKEN: "O" * 32},
         unique_id=f"{DOMAIN}:old@example.com",
         title="Google Find My Device",
-        options=_options_payload_defaults([]),
+        options=_device_selection_options_payload(),
     )
     entry.add_to_hass(hass)
 
@@ -457,7 +456,7 @@ async def test_options_credentials_update_choose_one(hass: HomeAssistant) -> Non
         data={CONF_GOOGLE_EMAIL: "old@example.com", CONF_OAUTH_TOKEN: "O" * 32},
         unique_id=f"{DOMAIN}:old@example.com",
         title="Google Find My Device",
-        options=_options_payload_defaults([]),
+        options=_device_selection_options_payload(),
     )
     entry.add_to_hass(hass)
 
@@ -483,7 +482,8 @@ async def test_options_visibility_restore_devices_success(hass: HomeAssistant) -
         data={CONF_GOOGLE_EMAIL: "user@example.com", CONF_OAUTH_TOKEN: "O" * 32},
         unique_id=f"{DOMAIN}:user@example.com",
         title="Google Find My Device",
-        options={**_options_payload_defaults([]), OPT_IGNORED_DEVICES: ["devA", "devB", "devC"]},
+        # Old list form is accepted and migrated internally to a mapping
+        options={**_device_selection_options_payload(), OPT_IGNORED_DEVICES: ["devA", "devB", "devC"]},
     )
     entry.add_to_hass(hass)
 
@@ -498,7 +498,11 @@ async def test_options_visibility_restore_devices_success(hass: HomeAssistant) -
     )
     assert step["type"] == "create_entry"
     data = step["data"]
-    assert data[OPT_IGNORED_DEVICES] == ["devC"]
+    # New format is a mapping; ensure only devC remains
+    assert isinstance(data[OPT_IGNORED_DEVICES], dict)
+    assert "devC" in data[OPT_IGNORED_DEVICES]
+    assert "devA" not in data[OPT_IGNORED_DEVICES]
+    assert "devB" not in data[OPT_IGNORED_DEVICES]
 
 
 @pytest.mark.asyncio
@@ -509,7 +513,7 @@ async def test_options_visibility_no_ignored_devices_abort(hass: HomeAssistant) 
         data={CONF_GOOGLE_EMAIL: "user@example.com", CONF_OAUTH_TOKEN: "O" * 32},
         unique_id=f"{DOMAIN}:user@example.com",
         title="Google Find My Device",
-        options=_options_payload_defaults([]),
+        options=_device_selection_options_payload(),
     )
     entry.add_to_hass(hass)
 

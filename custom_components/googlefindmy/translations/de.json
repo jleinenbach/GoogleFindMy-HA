@@ -206,9 +206,6 @@
       "last_seen": {
         "name": "Zuletzt gesehen"
       },
-      "stat_skipped_duplicates": {
-        "name": "Übersprungene Duplikate"
-      },
       "stat_background_updates": {
         "name": "Hintergrund-Aktualisierungen"
       },
