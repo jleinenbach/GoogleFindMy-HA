@@ -225,7 +225,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_location_data: Dict[str, Dict[str, Any]] = {}  # device_id -> location dict
         self._device_names: Dict[str, str] = {}  # device_id -> human name
         self._device_caps: Dict[str, Dict[str, Any]] = {}  # device_id -> caps (e.g., {"can_ring": True})
-        self._present_device_ids: Set[str] = set()  # ids from latest full device list (unfiltered)
+        self._present_device_ids: Set[str] = set()  # diagnostics-only set from latest non-empty list
+
+        # Presence smoothing (NEW):
+        # - Per-device "last seen in full list" timestamp (monotonic)
+        # - Cold-start marker: timestamp of last non-empty list (monotonic)
+        # - Presence TTL in seconds (derived from poll interval, min 120s)
+        self._present_last_seen: Dict[str, float] = {}
+        self._last_nonempty_wall: float = 0.0
+        self._presence_ttl_s: int = 120
 
         # Minimal hardening state (empty-list quorum)
         self._last_device_list: List[Dict[str, Any]] = []
@@ -606,7 +614,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             UpdateFailed: For other transient or unexpected errors.
         """
         try:
-            # --- START PATCH: UNIFIED POLLING LOGIC ---
+            # --- START PATCH: UNIFIED POLLING LOGIC + PRESENCE TTL ---
             # One-time wait for FCM on first run.
             if not self._startup_complete:
                 fcm_evt = getattr(self, "fcm_ready_event", None)
@@ -623,7 +631,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             all_devices = await self.api.async_get_basic_device_list()
             all_devices = all_devices or []
 
-            # Minimal hardening against false empties:
+            # Minimal hardening against false empties (keep prior behaviour)
             if not all_devices:
                 self._empty_list_streak += 1
                 if self._empty_list_streak < _EMPTY_LIST_QUORUM and self._last_device_list:
@@ -646,12 +654,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 self._empty_list_streak = 0
                 self._last_device_list = list(all_devices)
 
+            # Presence TTL derives from the effective poll cadence
+            effective_interval = max(self.location_poll_interval, self.min_poll_interval)
+            self._presence_ttl_s = max(2 * effective_interval, 120)
+            now_mono = time.monotonic()
+
+            # Cold-start guard: if the very first seen list is empty, treat it as transient
+            if not all_devices and self._last_nonempty_wall == 0.0:
+                raise UpdateFailed("Cold start: empty device list; treating as transient.")
+
             ignored = self._get_ignored_set()
 
-            # Record presence from the full list (unfiltered by ignore for accuracy).
-            self._present_device_ids = {
-                d["id"] for d in all_devices if isinstance(d.get("id"), str)
-            }
+            # Record presence timestamps from the full list (unfiltered by ignore)
+            if all_devices:
+                for d in all_devices:
+                    dev_id = d.get("id")
+                    if isinstance(dev_id, str):
+                        self._present_last_seen[dev_id] = now_mono
+                # Keep a diagnostics-only set mirroring the latest non-empty list
+                self._present_device_ids = {
+                    d["id"] for d in all_devices if isinstance(d.get("id"), str)
+                }
+                self._last_nonempty_wall = now_mono
+            # If the list is empty, leave _present_last_seen untouched; TTL will decide availability.
 
             # 2) Update internal name/capability caches for ALL devices
             for dev in all_devices:
@@ -665,9 +690,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     slot["can_ring"] = can_ring
 
             # 3) Decide whether to trigger a poll cycle (monotonic clock)
-            now_mono = time.monotonic()
-            effective_interval = max(self.location_poll_interval, self.min_poll_interval)
-
+            # (now_mono & effective_interval already computed above)
             # Build list of devices to POLL:
             dev_reg = dr.async_get(self.hass)
 
@@ -1407,19 +1430,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     # ---------------------------- Presence & Purge API ----------------------------
     def is_device_present(self, device_id: str) -> bool:
-        """Return True if the given device_id is present in the latest device list.
+        """Return True if the given device_id is present (TTL-smoothed).
 
-        Presence is derived from the most recent lightweight list returned by the API.
+        Presence is determined by the last time the device appeared in the full list
+        and a time-to-live (`_presence_ttl_s`). This avoids availability flips on
+        transient empty lists.
         """
-        return device_id in self._present_device_ids
+        ts = self._present_last_seen.get(device_id, 0.0)
+        if not ts:
+            return False
+        return (time.monotonic() - float(ts)) <= float(self._presence_ttl_s)
 
     def get_absent_device_ids(self) -> List[str]:
-        """Return ids known by name/cache that are NOT present in the latest device list.
+        """Return ids known by name/cache that are **expired** under the presence TTL.
 
         Useful for diagnostics. This does not imply automatic removal.
         """
+        now_mono = time.monotonic()
+
+        def expired(dev_id: str) -> bool:
+            ts = self._present_last_seen.get(dev_id, 0.0)
+            return (not ts) or ((now_mono - float(ts)) > float(self._presence_ttl_s))
+
         known = set(self._device_names) | set(self._device_location_data)
-        return sorted(list(known - set(self._present_device_ids)))
+        return sorted([d for d in known if expired(d)])
 
     def purge_device(self, device_id: str) -> None:
         """Remove all cached data and cooldown state for a device (thread-safe publish).
@@ -1438,6 +1472,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._locate_cooldown_until.pop(device_id, None)
         self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
+        self._present_last_seen.pop(device_id, None)
         # Push a minimal update so listeners can refresh availability quickly
         self.async_set_updated_data(self.data)
 
@@ -1469,6 +1504,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         else:
             # union of all known names and cached locations
             ids = list({*self._device_names.keys(), *self._device_location_data.keys()})
+
+        # Touch presence timestamps for pushed devices (keeps presence stable)
+        now_mono = time.monotonic()
+        for dev_id in ids:
+            self._present_last_seen[dev_id] = now_mono
 
         # Apply ignore filter to prevent resurfacing ignored devices via push path.
         ignored = self._get_ignored_set()
@@ -1836,6 +1876,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self._locate_cooldown_until[device_id] = max(
                 self._locate_cooldown_until.get(device_id, 0.0), owner_deadline
             )
+
+            # Touch presence for the device (a fresh interaction implies it exists)
+            self._present_last_seen[device_id] = now_mono
 
             self.push_updated([device_id])
             return location_data or {}
