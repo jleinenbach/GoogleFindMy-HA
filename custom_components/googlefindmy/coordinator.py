@@ -81,6 +81,13 @@ _COOLDOWN_OWNER_MAX_S = 900      # 15 min
 _COOLDOWN_MIN_IN_ALL_AREAS_S = 600  # 10 min
 _COOLDOWN_MIN_HIGH_TRAFFIC_S  = 300  # 5 min
 
+# -------------------------------------------------------------------------
+# Minimal hardening: accept a *successful* empty device list only after a
+# small quorum of consecutive empties. This avoids reacting to rare, short
+# upstream anomalies as if the user had deleted all devices.
+# -------------------------------------------------------------------------
+_EMPTY_LIST_QUORUM = 2  # require N consecutive *successful* empties before clearing
+
 
 def _clamp(val: float, lo: float, hi: float) -> float:
     """Return val clamped into [lo, hi]."""
@@ -219,6 +226,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_names: Dict[str, str] = {}  # device_id -> human name
         self._device_caps: Dict[str, Dict[str, Any]] = {}  # device_id -> caps (e.g., {"can_ring": True})
         self._present_device_ids: Set[str] = set()  # ids from latest full device list (unfiltered)
+
+        # Minimal hardening state (empty-list quorum)
+        self._last_device_list: List[Dict[str, Any]] = []
+        self._empty_list_streak: int = 0
 
         # Polling state
         self._poll_lock = asyncio.Lock()
@@ -611,6 +622,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # 1) Always fetch the lightweight FULL device list using native async API
             all_devices = await self.api.async_get_basic_device_list()
             all_devices = all_devices or []
+
+            # Minimal hardening against false empties:
+            if not all_devices:
+                self._empty_list_streak += 1
+                if self._empty_list_streak < _EMPTY_LIST_QUORUM and self._last_device_list:
+                    # Defer clearing once; keep previous view stable.
+                    _LOGGER.debug(
+                        "Successful empty device list received (%d/%d). Deferring clear until quorum is met.",
+                        self._empty_list_streak,
+                        _EMPTY_LIST_QUORUM,
+                    )
+                    all_devices = list(self._last_device_list)
+                else:
+                    _LOGGER.debug(
+                        "Accepting empty device list after %d consecutive empties.",
+                        self._empty_list_streak,
+                    )
+                    # Once accepted, forget any prior list so snapshot becomes empty below.
+                    self._last_device_list = []
+            else:
+                # Non-empty result: reset streak and remember latest good list.
+                self._empty_list_streak = 0
+                self._last_device_list = list(all_devices)
+
             ignored = self._get_ignored_set()
 
             # Record presence from the full list (unfiltered by ignore for accuracy).
