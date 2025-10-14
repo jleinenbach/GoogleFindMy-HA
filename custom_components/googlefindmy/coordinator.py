@@ -408,10 +408,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         enabled: Set[str] = set()
         present: Set[str] = set()
+        # Mini patch: collect devices that belong to the same domain but NOT to this entry,
+        # purely for transparency in multi-account setups (informational log; no functional effect).
+        other_account: List[tuple[str, str]] = []
 
         for device in list(dev_reg.devices.values()):
             # Consider only devices linked to *this* config entry.
             if entry_id not in device.config_entries:
+                # If it's our domain but linked to another entry, remember a few as examples.
+                if any(domain == DOMAIN for domain, _ in device.identifiers):
+                    dev_id = next((ident for domain, ident in device.identifiers if domain == DOMAIN), None)
+                    if isinstance(dev_id, str) and dev_id:
+                        other_account.append((dev_id, device.name_by_user or device.name or dev_id))
                 continue
             try:
                 # Find the first identifier of our integration: (DOMAIN, <device_id>).
@@ -433,6 +441,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             len(self._devices_with_entry),
             len(self._enabled_poll_device_ids),
         )
+
+        # Mini patch (informational): show that some devices are managed by other entries.
+        if other_account:
+            sample = ", ".join(f"{did} ({nm})" for did, nm in other_account[:5])
+            _LOGGER.info(
+                "Entry filter active: %d Google Find My device(s) belong to other config entries "
+                "and won't be polled by '%s'. Examples: %s%s",
+                len(other_account),
+                (entry.title if entry else entry_id),
+                sample,
+                "…" if len(other_account) > 5 else "",
+            )
 
     async def _handle_dr_event(self, _event) -> None:
         """Handle Device Registry changes by rebuilding poll targets (rare)."""
@@ -883,6 +903,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self._is_polling = True
             _LOGGER.info("Starting sequential poll of %d devices", len(devices))
 
+            # Push an immediate "baseline" snapshot so UI reflects that a poll cycle began.
+            try:
+                start_snapshot = self._build_snapshot_from_cache(devices, wall_now=time.time())
+                self.async_set_updated_data(start_snapshot)
+            except Exception:
+                # Non-fatal; continue polling.
+                pass
+
             try:
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
@@ -1024,6 +1052,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         self._device_location_data[dev_id] = location
                         self.increment_stat("polled_updates")
 
+                        # NEW (quality improvement): push an immediate per-device update
+                        # for more responsive UI during long poll cycles.
+                        self.push_updated([dev_id])
+
                     except asyncio.TimeoutError:
                         _LOGGER.info(
                             "Location request timed out for %s after %s seconds",
@@ -1031,6 +1063,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             LOCATION_REQUEST_TIMEOUT_S,
                         )
                         self.increment_stat("timeouts")
+                    except ConfigEntryAuthFailed:
+                        # Escalate auth failures to HA; abort remaining devices
+                        raise
                     except Exception as err:
                         _LOGGER.error("Failed to get location for %s: %s", dev_name, err)
 
