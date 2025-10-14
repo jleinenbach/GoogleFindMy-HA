@@ -31,10 +31,11 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 ## Installation
 
 ### HACS (Recommended)
-1. Add this repository to HACS as a custom repository
-2. Install "Google Find My Device" from HACS
-3. Restart Home Assistant
-4. Add the integration through the UI
+1. Click the button below to add this repository as a custom repository in HACS\
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?category=integration&repository=GoogleFindMy-HA&owner=BSkando)
+3. Install "Google Find My Device" from HACS
+4. Restart Home Assistant
+5. Add the integration through the UI
 
 ### Manual Installation
 1. Download this repository
