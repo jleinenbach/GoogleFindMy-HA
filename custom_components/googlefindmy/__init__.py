@@ -225,6 +225,9 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
     """
     bucket = hass.data.setdefault(DOMAIN, {})
     fcm_lock = bucket.setdefault("fcm_lock", asyncio.Lock())
+    # Contention monitoring: increment if someone else holds the lock right now
+    if fcm_lock.locked():
+        bucket["fcm_lock_contention_count"] = int(bucket.get("fcm_lock_contention_count", 0)) + 1
     async with fcm_lock:
         refcount = int(bucket.get("fcm_refcount", 0))
         fcm: FcmReceiverHA | None = bucket.get("fcm_receiver")
@@ -297,6 +300,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
           The startup barrier is set immediately after a successful acquire, avoiding
           duplicate provider registrations or refcount bumps.
     """
+    # Monotonic performance markers (captured even before coordinator exists)
+    pm_setup_start = time.monotonic()
+
     # Detect cold start vs. reload (survives reloads within the same HA runtime)
     domain_bucket = hass.data.setdefault(DOMAIN, {})
     is_reload = bool(domain_bucket.get("initial_setup_complete", False))
@@ -338,6 +344,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     fcm_ready_event = asyncio.Event()
     # Single acquisition path: acquire and register providers once, then set the barrier.
     fcm = await _async_acquire_shared_fcm(hass)
+    pm_fcm_acquired = time.monotonic()
     fcm_ready_event.set()
 
     # NOTE (lifecycle): Do not await long-running shutdowns inside async_on_unload.
@@ -386,6 +393,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ),
     )
     coordinator.config_entry = entry  # convenience for platforms
+
+    # --- Performance metrics injection (coordinator-owned dictionary) ---
+    try:
+        perf = getattr(coordinator, "performance_metrics", None)
+        if not isinstance(perf, dict):
+            perf = {}
+            setattr(coordinator, "performance_metrics", perf)
+        # Persist the earlier captured times (pre-coordinator phases included)
+        perf["setup_start_monotonic"] = pm_setup_start
+        perf["fcm_acquired_monotonic"] = pm_fcm_acquired
+    except Exception as err:
+        _LOGGER.debug("Failed to set performance metrics on coordinator: %s", err)
+    # ---------------------------------------------------------------------
 
     # Hand over the barrier without changing the coordinator's signature.
     # Event is already set after successful FCM acquisition to avoid startup races.
@@ -472,6 +492,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Mark initial setup complete (used to distinguish cold start vs. reload)
     domain_bucket["initial_setup_complete"] = True
 
+    # Final performance marker
+    try:
+        perf = getattr(coordinator, "performance_metrics", None)
+        if isinstance(perf, dict):
+            perf["setup_end_monotonic"] = time.monotonic()
+    except Exception as err:
+        _LOGGER.debug("Failed to set setup_end_monotonic: %s", err)
+
     # IMPORTANT: Do NOT add update listeners when using OptionsFlowWithReload.
     # Options changes will reload the entry automatically, rebuilding the coordinator.
 
@@ -544,6 +572,11 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
     """Register services for the integration (idempotent per-HA instance, race-free)."""
     domain_bucket = hass.data.setdefault(DOMAIN, {})
     services_lock = domain_bucket.setdefault("services_lock", asyncio.Lock())
+    # Contention monitoring: increment if services_lock already held
+    if services_lock.locked():
+        domain_bucket["services_lock_contention_count"] = int(
+            domain_bucket.get("services_lock_contention_count", 0)
+        ) + 1
     async with services_lock:
         if domain_bucket.get("services_registered"):
             return
