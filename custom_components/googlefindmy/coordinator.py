@@ -104,16 +104,13 @@ class CacheProtocol(Protocol):
 def _sync_get_last_gps_from_history(
     hass: HomeAssistant, entity_id: str
 ) -> Optional[Dict[str, Any]]:
-    """Fetch last state change with GPS coordinates via Recorder History (sync).
-
-    This function is designed to be run in a worker thread (specifically the
-    Home Assistant Recorder's executor) to avoid blocking the event loop with
-    database queries.
-
+    """Fetch the last state with GPS coordinates from Recorder History.
+    
     IMPORTANT:
-    - Must run in a worker (Recorder executor). Do not call asyncio APIs here.
-    - Keep queries minimal to avoid heavy DB load.
-
+        This function is synchronous and performs database I/O. It MUST be
+        run in a worker thread (e.g., the Recorder's executor) to avoid
+        blocking the Home Assistant event loop.
+    
     Args:
         hass: The Home Assistant instance.
         entity_id: The entity ID of the device_tracker to query.
@@ -247,7 +244,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
-            "skipped_duplicates": 0,
             "background_updates": 0,  # FCM/push-driven updates + manual commits
             "polled_updates": 0,      # sequential poll-driven updates
             "crowd_sourced_updates": 0,
@@ -1202,10 +1198,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         - Strips `_report_hint` from the cached payload to avoid exposing internal fields.
         - Runs significance gating to prevent redundant cache churn. The cooldown still applies
           even if the update is dropped as non-significant (server-friendly behaviour).
-
-        Args:
-            device_id: The canonical ID of the device.
-            location_data: The new location data dictionary.
         """
         if not self._is_on_hass_loop():
             # Marshal entire update onto the HA loop to avoid cross-thread mutations.
@@ -1215,6 +1207,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         if not isinstance(location_data, dict):
             _LOGGER.debug("Ignored cache update for %s: payload is not a dict", device_id)
             return
+
+        # NEW: Discard stale updates that would regress time (push can arrive late).
+        existing_data = self._device_location_data.get(device_id)
+        new_seen = location_data.get("last_seen")
+        if existing_data is not None and new_seen is not None:
+            try:
+                existing_seen = float(existing_data.get("last_seen", 0.0))
+                if float(new_seen) < existing_seen:
+                    _LOGGER.debug(
+                        "Discarding stale push update for %s (new last_seen=%s < existing=%s)",
+                        device_id, new_seen, existing_seen
+                    )
+                    return
+            except (TypeError, ValueError):
+                # If timestamps are malformed, we cannot compare; let significance gate handle it.
+                pass
 
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
@@ -1266,17 +1274,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     def _is_significant_update(self, device_id: str, new_data: Dict[str, Any]) -> bool:
         """Return True if the update carries meaningful new information.
 
-        Criteria (coarse → fine):
-          1) No previous data -> significant.
-          2) Newer `last_seen` -> significant.
-          3) Same `last_seen` but:
-             3a) Position changed more than `self._movement_threshold` meters, or
-             3b) Accuracy improved by ≥20% (smaller is better), or
-             3c) Source/status changed (e.g., own → crowdsourced or semantic changes).
+        This function acts as the primary gate to prevent redundant or low-value
+        updates from churning the state machine and recorder.
+
+        Criteria (in order of evaluation):
+          1. No previous data exists for the device.
+          2. The `last_seen` timestamp of the new data is newer than the existing one.
+          3. If timestamps are identical, an update is significant if:
+             a) The position has moved more than `self._movement_threshold` meters, OR
+             b) The accuracy has improved by at least 20% (smaller radius is better), OR
+             c) The qualitative data has changed (source, status, or semantic name).
 
         Notes:
-          * This replaces the old "same last_seen == duplicate" heuristic.
-          * Movement threshold is user-configurable (options) and defaults to 50 m.
+          * This replaces a simple "same last_seen == duplicate" heuristic with a more
+            intelligent assessment of data quality.
+          * It is assumed that a staleness guard has already discarded updates where
+            `new_seen < existing_seen`.
         """
         existing = self._device_location_data.get(device_id)
         if not existing:
@@ -1313,8 +1326,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 except Exception:
                     pass
 
-        # Source or semantic change can still be valuable.
+        # Source or qualitative changes can still be valuable.
         if new_data.get("is_own_report") != existing.get("is_own_report"):
+            return True
+        if new_data.get("status") != existing.get("status"):
             return True
         if new_data.get("semantic_name") != existing.get("semantic_name"):
             return True
