@@ -9,6 +9,7 @@ import asyncio
 import datetime
 import hashlib
 import logging
+import math
 from typing import Optional, List, Dict, Any
 
 from google.protobuf.message import DecodeError
@@ -32,8 +33,14 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
 
 _LOGGER = logging.getLogger(__name__)
 
+# Soft limit to avoid pathological payloads; large batches are unusual and heavy.
+_MAX_REPORTS: int = 500
 
-# ---- Exceptions (specific, but compatible by inheriting from RuntimeError) ----
+# Strict length of Ephemeral Identity Key (bytes). Paper and ecosystem practice expect 32 bytes.
+_EIK_LEN: int = 32
+
+
+# ---- Exceptions (specific, compatible via RuntimeError) -----------------------
 class DecryptionError(RuntimeError):
     """Raised when decryption fails for reasons other than stale owner key."""
 
@@ -43,76 +50,81 @@ class StaleOwnerKeyError(DecryptionError):
 
 
 def create_google_maps_link(latitude: float, longitude: float) -> Optional[str]:
-    """
-    Create a standard Google Maps link for given coordinates.
+    """Return a Google Maps link for valid coordinates, otherwise None.
 
     Contract:
-        Returns a valid URL string, or None if coordinates are invalid.
-        Using None avoids mixing error strings with URLs.
+    - Returns a valid URL string, or None if coordinates are invalid.
+    - Avoids mixing error strings with URLs at call sites.
 
-    This preserves call sites that only log the link; they can handle None safely.
+    Note: Keep this for developer diagnostics (debug level only elsewhere).
     """
     try:
-        latitude = float(latitude)
-        longitude = float(longitude)
+        lat_f = float(latitude)
+        lon_f = float(longitude)
     except (TypeError, ValueError):
-        _LOGGER.warning("Invalid coordinate types for Maps link: lat=%r, lon=%r", latitude, longitude)
+        _LOGGER.debug("Invalid coordinate types for Maps link; skipping link generation")
         return None
 
-    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
-        _LOGGER.warning("Invalid coordinate values for Maps link: lat=%s, lon=%s", latitude, longitude)
+    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+        _LOGGER.debug("Out-of-bounds coordinates for Maps link; skipping link generation")
         return None
 
-    return f"https://www.google.com/maps/search/?api=1&query={latitude},{longitude}"
+    return f"https://www.google.com/maps/search/?api=1&query={lat_f},{lon_f}"
 
 
-# Indicates if the device is a custom microcontroller
 def is_mcu_tracker(device_registration: DeviceRegistration) -> bool:
+    """Return True if device appears to be our custom MCU tracker."""
     return device_registration.fastPairModelId == mcu_fast_pair_model_id
 
 
 async def async_retrieve_identity_key(device_registration: DeviceRegistration) -> bytes:
-    """
-    Derive the device identity key (async):
-      - Flip bits (MCU quirk) and decrypt the Encrypted Identity Key (EIK) with the owner key.
-      - On failure, raise a specific exception (no prints/exits).
+    """Retrieve the device Ephemeral Identity Key (EIK) asynchronously.
 
-    Heavy crypto operations are offloaded to a worker thread.
+    Flow (async-first, HA-friendly):
+    - Apply MCU bit-flip quirk to the encrypted EIK blob.
+    - Obtain owner key (async).
+    - Decrypt EIK (CPU-bound → offload to thread).
+    - Strictly validate length to avoid silent misuse downstream.
+
+    Raises:
+        StaleOwnerKeyError: if tracker is encrypted with an older owner key.
+        DecryptionError: for generic decryption failures.
+        SpotApiEmptyResponseError: propagated if EID info trailers-only response indicates auth/session issue.
     """
     is_mcu = is_mcu_tracker(device_registration)
     encrypted_user_secrets = device_registration.encryptedUserSecrets
 
     encrypted_identity_key = flip_bits(
         encrypted_user_secrets.encryptedIdentityKey,
-        is_mcu
+        is_mcu,
     )
 
     owner_key = await async_get_owner_key()
 
     try:
-        # decrypt_eik may be CPU-bound → offload to thread
-        identity_key = await asyncio.to_thread(decrypt_eik, owner_key, encrypted_identity_key)
-        return identity_key
+        # CPU-heavy → do not block the event loop
+        eik_bytes = await asyncio.to_thread(decrypt_eik, owner_key, encrypted_identity_key)
+        # Strict sanity: EIK must be exactly 32 bytes
+        if not isinstance(eik_bytes, (bytes, bytearray)) or len(eik_bytes) != _EIK_LEN:
+            raise DecryptionError(f"Ephemeral identity key invalid (expected {_EIK_LEN} bytes).")
+        return bytes(eik_bytes)
     except Exception as e:
-        # Try to fetch E2EE metadata to explain likely cause (key-version mismatch vs. auth issues)
         current_owner_key_version = None
         try:
-            e2eeData = await async_get_eid_info()
-            current_owner_key_version = e2eeData.encryptedOwnerKeyAndMetadata.ownerKeyVersion
+            e2ee_data = await async_get_eid_info()
+            current_owner_key_version = e2ee_data.encryptedOwnerKeyAndMetadata.ownerKeyVersion
             _LOGGER.debug("E2EE metadata: current ownerKeyVersion=%s", current_owner_key_version)
         except SpotApiEmptyResponseError:
-            # Auth/session issue upstream (trailers-only). Propagate with context.
             _LOGGER.error(
                 "Failed to decrypt identity key due to empty trailers-only EID info response "
                 "(authentication/session). Please re-authenticate and retry."
             )
             raise
-        except Exception as meta_exc:
+        except Exception as meta_exc:  # best-effort diagnostics
             _LOGGER.warning("Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc)
 
         old_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
         if current_owner_key_version is not None and old_ver is not None and old_ver < current_owner_key_version:
-            # Version mismatch → tracker cannot be decrypted anymore
             _LOGGER.error(
                 "Owner key version mismatch: tracker=%s, current=%s. "
                 "This typically occurs after resetting E2EE data. "
@@ -130,16 +142,125 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
         raise DecryptionError("Identity key decryption failed.") from e
 
 
-async def async_decrypt_location_response_locations(device_update_protobuf) -> List[Dict[str, Any]]:
+def _normalize_ts_seconds(ts_obj: Any) -> int:
+    """Return a non-negative UNIX timestamp (seconds) from diverse inputs.
+
+    Accepts:
+    - Protobuf Timestamp-like objects with attribute `seconds`
+    - Numeric seconds (float/int)
+    - Milliseconds are heuristically detected and converted to seconds
     """
-    Decrypt and normalize location reports into structured dicts for Home Assistant (async).
-    - Robust against partial/invalid reports: logs and continues.
-    - No prints and no process termination; all errors bubble up or are logged.
-    - CPU-bound crypto (AES/GCM, ECC) is offloaded to worker threads.
-    """
-    # Defensive guards on presence of required metadata
     try:
-        device_registration = device_update_protobuf.deviceMetadata.information.deviceRegistration
+        # Prefer protobuf-style attribute if available
+        secs_attr = getattr(ts_obj, "seconds", None)
+        if secs_attr is not None:
+            v = float(secs_attr)
+        else:
+            v = float(ts_obj)
+    except Exception:
+        return 0
+
+    # Heuristic: extremely large numbers are likely milliseconds
+    if v > 1e12:
+        v = v / 1000.0
+    if v < 0:
+        v = 0
+    return int(v)
+
+
+async def _offload_decrypt_aes(identity_key: bytes, encrypted_location: bytes) -> bytes:
+    """Offload AES-GCM decryption; derive key hash cheaply on event loop."""
+    identity_key_hash = hashlib.sha256(identity_key).digest()  # cheap hash → OK on loop
+    return await asyncio.to_thread(decrypt_aes_gcm, identity_key_hash, encrypted_location)
+
+
+async def _offload_decrypt_foreign(
+    identity_key: bytes,
+    encrypted_location: bytes,
+    public_key_random: bytes,
+    time_offset: int,
+) -> bytes:
+    """Offload ECC-based decryption for foreign reports."""
+    return await asyncio.to_thread(decrypt, identity_key, encrypted_location, public_key_random, time_offset)
+
+
+# ----------------------------- Validation helpers -----------------------------
+def _is_valid_latlon(lat: float, lon: float) -> bool:
+    """Validate latitude/longitude are finite and within geographic bounds.
+
+    POPETS'25 notes integer-scaled coordinates (±90/±180 after scaling by 1e7).
+    We validate after scaling here and fail fast on out-of-range/NaN/Inf.
+    """
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
+        return False
+    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+        return False
+    return True
+
+
+def _infer_report_hint(status_value: Any) -> Optional[str]:
+    """Infer a throttling hint from the protobuf Status.
+
+    Strategy:
+    1) Prefer **explicit enum comparisons** (robust across locales).
+    2) Fall back to **name substring checks** if enums are unavailable
+       in the environment/build (defensive coding for older protobufs).
+
+    Hints:
+        - "high_traffic"  → aggregated server-side reports typically throttled more aggressively.
+        - "in_all_areas"  → crowdsourced reports available broadly; back off for longer.
+        - None            → unknown/irrelevant; coordinator applies no type-specific cooldown.
+    """
+    # --- Explicit enum mapping (robust path) -----------------------
+    try:
+        if int(status_value) == getattr(Common_pb2.Status, "CROWDSOURCED"):
+            return "in_all_areas"
+    except Exception:
+        pass
+    try:
+        if int(status_value) == getattr(Common_pb2.Status, "AGGREGATED"):
+            return "high_traffic"
+    except Exception:
+        pass
+
+    # --- Conservative fallback based on enum name -------------------
+    try:
+        name = Common_pb2.Status.Name(int(status_value)).lower()
+    except Exception:
+        return None
+
+    if "high" in name and "traffic" in name:
+        return "high_traffic"
+    if "in" in name and "all" in name and "areas" in name:
+        return "in_all_areas"
+    return None
+
+
+# ----------------------------- Main decryptor ---------------------------------
+async def async_decrypt_location_response_locations(
+    device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
+) -> List[Dict[str, Any]]:
+    """Decrypt and normalize location reports into HA-friendly dicts (async).
+
+    Guarantees:
+    - Event loop remains responsive: CPU-heavy crypto is offloaded via asyncio.to_thread().
+    - Fail-fast: malformed coordinates are dropped at the decryption boundary,
+      preventing bad data from leaking into higher layers (HA Platinum quality).
+    - Robust against partial/invalid reports (log and continue).
+    - No prints or process termination; errors bubble or are logged with context.
+
+    POPETS'25 reference (Böttger et al., 2025):
+      - Integer-scaled coordinates and validation: §4
+      - "High Traffic" vs. "In All Areas" throttling semantics: §4–5
+    """
+    # Defensive guards on required metadata
+    try:
+        device_registration: DeviceRegistration = device_update_protobuf.deviceMetadata.information.deviceRegistration
     except Exception as exc:
         _LOGGER.error("Device registration metadata missing or invalid: %s", exc)
         raise
@@ -147,83 +268,86 @@ async def async_decrypt_location_response_locations(device_update_protobuf) -> L
     identity_key = await async_retrieve_identity_key(device_registration)
 
     try:
-        locations_proto = device_update_protobuf.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
+        locations_proto = (
+            device_update_protobuf.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
+        )
     except Exception as exc:
         _LOGGER.error("Location information missing or invalid: %s", exc)
         raise
 
     is_mcu = is_mcu_tracker(device_registration)
 
-    # At All Areas Reports or Own Reports
+    # Assemble reports (preserve semantics; own report is appended if present)
     recent_location = locations_proto.recentLocation
     recent_location_time = locations_proto.recentLocationTimestamp
-
-    # High Traffic Reports
-    network_locations = list(locations_proto.networkLocations)
-    network_locations_time = list(locations_proto.networkLocationTimestamps)
-
+    network_locations: List[Any] = list(locations_proto.networkLocations)
+    network_locations_time: List[Any] = list(locations_proto.networkLocationTimestamps)
     if locations_proto.HasField("recentLocation"):
         network_locations.append(recent_location)
         network_locations_time.append(recent_location_time)
 
-    location_time_array: List[WrappedLocation] = []
+    # Optional hard cap (defense-in-depth against pathological inputs)
+    if len(network_locations) > _MAX_REPORTS:
+        _LOGGER.warning("Truncating reports: %s → %s", len(network_locations), _MAX_REPORTS)
+        network_locations = network_locations[:_MAX_REPORTS]
+        network_locations_time = network_locations_time[:_MAX_REPORTS]
+
+    wrapped: List[WrappedLocation] = []
     for loc, time_ts in zip(network_locations, network_locations_time):
         try:
+            ts = _normalize_ts_seconds(time_ts)
+
             if loc.status == Common_pb2.Status.SEMANTIC:
-                _LOGGER.debug("Semantic Location Report")
-
-                wrapped_location = WrappedLocation(
-                    decrypted_location=b'',
-                    time=int(time_ts.seconds),
-                    accuracy=0,
-                    status=loc.status,
-                    is_own_report=True,
-                    name=loc.semanticLocation.locationName
+                wrapped.append(
+                    WrappedLocation(
+                        decrypted_location=b"",
+                        time=ts,
+                        accuracy=0,
+                        status=loc.status,
+                        is_own_report=True,
+                        name=loc.semanticLocation.locationName,
+                    )
                 )
-                location_time_array.append(wrapped_location)
+                continue
+
+            enc = loc.geoLocation.encryptedReport
+            encrypted_location: bytes = enc.encryptedLocation
+            public_key_random: bytes = enc.publicKeyRandom
+
+            if public_key_random == b"":  # Own report
+                decrypted_location = await _offload_decrypt_aes(identity_key, encrypted_location)
             else:
-                encrypted_location = loc.geoLocation.encryptedReport.encryptedLocation
-                public_key_random = loc.geoLocation.encryptedReport.publicKeyRandom
+                time_offset = 0 if is_mcu else loc.geoLocation.deviceTimeOffset
+                decrypted_location = await _offload_decrypt_foreign(
+                    identity_key, encrypted_location, public_key_random, time_offset
+                )
 
-                if public_key_random == b"":  # Own Report
-                    # Hash is cheap; ok on event loop
-                    identity_key_hash = hashlib.sha256(identity_key).digest()
-                    # AES/GCM decryption can be CPU-bound → offload
-                    decrypted_location = await asyncio.to_thread(decrypt_aes_gcm, identity_key_hash, encrypted_location)
-                else:
-                    time_offset = 0 if is_mcu else loc.geoLocation.deviceTimeOffset
-                    # ECC-based decrypt can be CPU-bound → offload
-                    decrypted_location = await asyncio.to_thread(decrypt, identity_key, encrypted_location, public_key_random, time_offset)
-
-                wrapped_location = WrappedLocation(
+            wrapped.append(
+                WrappedLocation(
                     decrypted_location=decrypted_location,
-                    time=int(time_ts.seconds),
+                    time=ts,
                     accuracy=loc.geoLocation.accuracy,
                     status=loc.status,
-                    is_own_report=loc.geoLocation.encryptedReport.isOwnReport,
-                    name=""
+                    is_own_report=enc.isOwnReport,
+                    name="",
                 )
-                location_time_array.append(wrapped_location)
+            )
         except Exception as one_exc:
-            # Keep processing other reports if a single report fails (resilience)
-            _LOGGER.warning("Failed to process one location report: %s", one_exc)
+            # Continue with other reports (per-item resilience; avoid warn spam)
+            _LOGGER.debug("Failed to process one location report: %s", one_exc)
 
-    _LOGGER.debug("-" * 40)
-    _LOGGER.debug("[DecryptLocations] Decrypted Locations:")
-
-    if not location_time_array:
-        _LOGGER.debug("No locations found.")
+    if not wrapped:
+        _LOGGER.debug("[DecryptLocations] No locations found.")
         return []
 
-    # Convert to structured data for Home Assistant
-    structured_locations: List[Dict[str, Any]] = []
-
-    for loc in location_time_array:
+    # Convert to structured payloads for HA entities (with fail-fast validation)
+    structured: List[Dict[str, Any]] = []
+    for loc in wrapped:
         try:
-            if loc.status == Common_pb2.Status.SEMANTIC:
-                _LOGGER.debug("Semantic Location: %s", loc.name)
+            report_hint = _infer_report_hint(loc.status)  # may be None (conservative)
 
-                location_data: Dict[str, Any] = {
+            if loc.status == Common_pb2.Status.SEMANTIC:
+                payload: Dict[str, Any] = {
                     "latitude": None,
                     "longitude": None,
                     "altitude": None,
@@ -231,30 +355,39 @@ async def async_decrypt_location_response_locations(device_update_protobuf) -> L
                     "last_seen": loc.time,
                     "status": str(loc.status),
                     "is_own_report": loc.is_own_report,
-                    "semantic_name": loc.name
+                    "semantic_name": loc.name,
                 }
-
+                # Internal hint helps the coordinator schedule throttling-aware cooldowns.
+                if report_hint:
+                    payload["_report_hint"] = report_hint
             else:
                 proto_loc = DeviceUpdate_pb2.Location()
                 try:
-                    # Protobuf parse is relatively fast; do inline
+                    # Protobuf parsing is relatively cheap → inline
                     proto_loc.ParseFromString(loc.decrypted_location)
                 except DecodeError as de:
-                    _LOGGER.warning("Failed to parse Location protobuf: %s", de)
+                    _LOGGER.debug("Failed to parse Location protobuf; dropping one report: %s", de)
                     continue
 
+                # --- Fail-fast coordinate validation (POPETS'25 §4) -----------------
+                # The protocol uses integer-scaled lat/lon (1e7). We validate *after* scaling.
                 latitude = proto_loc.latitude / 1e7
                 longitude = proto_loc.longitude / 1e7
+                if not _is_valid_latlon(latitude, longitude):
+                    # Keep the message non-sensitive: do not print raw coordinates.
+                    _LOGGER.debug("Dropping invalid/out-of-bounds coordinates from one report")
+                    continue
+                # ---------------------------------------------------------------------
+
                 altitude = proto_loc.altitude
 
-                _LOGGER.debug("Latitude: %s", latitude)
-                _LOGGER.debug("Longitude: %s", longitude)
-                _LOGGER.debug("Altitude: %s", altitude)
-                maps_link = create_google_maps_link(latitude, longitude)
-                if maps_link:
-                    _LOGGER.debug("Google Maps Link: %s", maps_link)
+                if _LOGGER.isEnabledFor(logging.DEBUG):
+                    _LOGGER.debug("Parsed valid coordinates (altitude present: %s)", altitude is not None)
+                    maps_link = create_google_maps_link(latitude, longitude)
+                    if maps_link:
+                        _LOGGER.debug("Google Maps Link: %s", maps_link)
 
-                location_data = {
+                payload = {
                     "latitude": latitude,
                     "longitude": longitude,
                     "altitude": altitude,
@@ -262,51 +395,61 @@ async def async_decrypt_location_response_locations(device_update_protobuf) -> L
                     "last_seen": loc.time,
                     "status": str(loc.status),
                     "is_own_report": loc.is_own_report,
-                    "semantic_name": None
+                    "semantic_name": None,
                 }
+                if report_hint:
+                    payload["_report_hint"] = report_hint
 
-            _LOGGER.debug(
-                "Time: %s | Status: %s | Is Own Report: %s",
-                datetime.datetime.fromtimestamp(loc.time).strftime('%Y-%m-%d %H:%M:%S'),
-                loc.status,
-                loc.is_own_report,
-            )
-            _LOGGER.debug("-" * 40)
+            # Log with timezone-awareness if HA util is available (debug only)
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                try:
+                    from homeassistant.util import dt as dt_util  # lazy import (keeps __main__ dev check usable)
+                    ts_local = dt_util.as_local(datetime.datetime.fromtimestamp(loc.time, tz=datetime.timezone.utc))
+                    _LOGGER.debug("Time (local): %s | Status: %s | Own: %s", ts_local, loc.status, loc.is_own_report)
+                except Exception:
+                    _LOGGER.debug(
+                        "Time (epoch): %s | Status: %s | Own: %s",
+                        loc.time,
+                        loc.status,
+                        loc.is_own_report,
+                    )
 
-            structured_locations.append(location_data)
+            structured.append(payload)
         except Exception as one_exc:
-            _LOGGER.warning("Failed to convert one WrappedLocation to structured payload: %s", one_exc)
+            _LOGGER.debug("Failed to convert one WrappedLocation to structured payload: %s", one_exc)
 
-    return structured_locations
+    return structured
 
 
-def decrypt_location_response_locations(device_update_protobuf) -> List[Dict[str, Any]]:
-    """
-    Legacy synchronous facade for environments without asyncio.
+def decrypt_location_response_locations(
+    device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
+) -> List[Dict[str, Any]]:
+    """Synchronous legacy facade.
 
     IMPORTANT:
-        Do NOT call this from within Home Assistant's event loop.
-        Use:  `await async_decrypt_location_response_locations(...)` instead.
+    - MUST NOT be called from inside Home Assistant's running event loop.
+    - Prefer: `await async_decrypt_location_response_locations(...)`.
 
-    Implementation detail:
-        Runs the async implementation in a fresh event loop in this thread.
+    Implementation:
+    - Runs the async implementation via `asyncio.run` only if no loop is running
+      in this thread. Otherwise, raises a clear RuntimeError.
     """
-    # Fail-fast when called from a running loop in the current thread
     try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            raise RuntimeError(
-                "Sync decrypt_location_response_locations() used inside event loop. "
-                "Use `await async_decrypt_location_response_locations(...)` instead."
-            )
+        asyncio.get_running_loop()  # raises RuntimeError if no loop in this thread
     except RuntimeError:
         # No running loop in this thread → safe to use asyncio.run
-        pass
+        return asyncio.run(async_decrypt_location_response_locations(device_update_protobuf))
+    else:
+        # A loop is running in this thread → don't deadlock
+        raise RuntimeError(
+            "Sync decrypt_location_response_locations() used inside a running event loop. "
+            "Use `await async_decrypt_location_response_locations(...)` instead."
+        )
 
-    return asyncio.run(async_decrypt_location_response_locations(device_update_protobuf))
 
-
-if __name__ == '__main__':
-    # Developer self-check (runs sync facade in a standalone interpreter)
-    res = parse_device_update_protobuf("")
-    decrypt_location_response_locations(res)
+if __name__ == "__main__":  # Developer self-check only; not used by Home Assistant
+    res = parse_device_update_protobuf("")  # type: ignore[arg-type]
+    try:
+        decrypt_location_response_locations(res)
+    except Exception as exc:
+        print(f"Self-check encountered exception (expected outside HA runtime): {exc}")

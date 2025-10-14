@@ -46,7 +46,7 @@
     },
     "error": {
       "auth_failed": "Error de autenticación. Vuelve a intentarlo.",
-      "invalid_token": "Token no válido o faltan campos obligatorios.",
+      "invalid_token": "Credenciales no válidas (token/correo) o faltan campos obligatorios.",
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
       "no_devices": "No se han encontrado dispositivos. Asegúrate de que ‘Encontrar mi dispositivo’ esté activado en tu cuenta de Google.",
       "cannot_connect": "No se pudo conectar con la API de Google. Puede ser un problema temporal: inténtalo de nuevo más tarde.",
@@ -114,7 +114,8 @@
       "invalid": "Falló la validación. Revisa tus datos.",
       "cannot_connect": "No se pudo conectar con la API de Google.",
       "choose_one": "Proporciona exactamente un método de credenciales.",
-      "required": "Este campo es obligatorio."
+      "required": "Este campo es obligatorio.",
+      "invalid_token": "Credenciales no válidas (token/correo). Comprueba el formato y el contenido."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguración correcta.",
@@ -227,6 +228,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Lecturas de baja precisión descartadas"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Actualizaciones no significativas descartadas"
       }
     }
   }

@@ -14,6 +14,17 @@ Design notes
 * The receiver never triggers UI or ChromeDriver flows; it only consumes credentials
   from the cache and updates them when the server requests re-registration.
 * All potentially blocking work (protobuf decoding, user callbacks) runs in executors.
+
+Push-path debouncing
+--------------------
+* Multiple FCM messages for the same device can arrive in bursts. To avoid churning the
+  coordinator and entities, we **debounce per device** in this receiver:
+    - `_pending[device_id]` holds the latest decoded payload.
+    - `_schedule_flush(device_id)` (re)starts a short timer (default 250 ms).
+    - `_flush(device_id)` fans the single coalesced payload out to **all** registered
+      coordinators (per-coordinator Google Home filtering is applied here).
+* The receiver remains thin: significance gating and cooldown application are the
+  coordinator’s responsibility.
 """
 
 from __future__ import annotations
@@ -101,6 +112,14 @@ class FcmReceiverHA:
         self.app_id = "1:289722593072:android:3cfcf5bc359f0308"
         self.api_key = "AIzaSyD_gko3P392v6how2H7UpdeXQ0v2HLettc"
         self.message_sender_id = "289722593072"
+
+        # ---------------- Debounce state (push path) ----------------
+        # Latest pending payload per device; flushed after short debounce.
+        self._pending: dict[str, dict] = {}
+        # Flush tasks per device (cancel/recreate on new updates).
+        self._flush_tasks: dict[str, asyncio.Task] = {}
+        # Debounce window in milliseconds (small enough to feel real-time).
+        self._debounce_ms: int = 250
 
     # -------------------- Lifecycle --------------------
 
@@ -369,26 +388,21 @@ class FcmReceiverHA:
                 asyncio.create_task(self._run_callback_async(cb, canonic_id, hex_string))
                 return
 
-            # Background path via registered coordinators (iterate over a copy to avoid races)
+            # Check if any coordinator would process this device (ignore-aware).
+            any_tracked = False
             for coordinator in self.coordinators.copy():
                 if self._is_tracked(coordinator, canonic_id):
-                    name = getattr(coordinator, "_device_names", {}).get(canonic_id, canonic_id[:8])
-                    _LOGGER.info("Processing background FCM update for %s", name)
-                    asyncio.create_task(self._process_background_update(coordinator, canonic_id, hex_string))
-                    return
+                    any_tracked = True
                 else:
                     _LOGGER.debug("Skipping FCM update for ignored device %s", canonic_id[:8])
 
-            # Not matched to any waiting callback or coordinator
-            if self.location_update_callbacks:
-                waiting = [d[:8] + "…" for d in self.location_update_callbacks.keys()]
-                _LOGGER.debug(
-                    "FCM response for %s… not matched; currently waiting for: %s",
-                    canonic_id[:8],
-                    waiting,
-                )
-            else:
-                _LOGGER.debug("FCM response for %s… (no registered coordinators or callbacks)", canonic_id[:8])
+            if not any_tracked:
+                # None of the registered coordinators will accept this device → drop.
+                _LOGGER.debug("No registered coordinator will process %s; dropping FCM update", canonic_id[:8])
+                return
+
+            # Decode + enqueue; per-coordinator filtering and cache updates happen on flush.
+            asyncio.create_task(self._process_background_update(canonic_id, hex_string))
 
         except Exception as err:  # noqa: BLE001
             # Final guard to avoid crashing the receiver callback
@@ -462,8 +476,16 @@ class FcmReceiverHA:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, callback, canonic_id, hex_string)
 
-    async def _process_background_update(self, coordinator: Any, canonic_id: str, hex_string: str) -> None:
-        """Decode and inject location into coordinator cache, then push-update entities."""
+    # -------------------- Push-path decode → debounce → flush --------------------
+
+    async def _process_background_update(self, canonic_id: str, hex_string: str) -> None:
+        """Decode location, enqueue for debounce, and schedule a flush.
+
+        This method performs CPU-bound protobuf decryption in a thread executor,
+        enriches diagnostics, and then **does not** touch coordinator state
+        directly. Instead it stores the latest payload in `_pending` and triggers
+        a debounced flush for the corresponding device id.
+        """
         try:
             location_data = await asyncio.get_event_loop().run_in_executor(
                 None, self._decode_background_location, hex_string
@@ -472,75 +494,150 @@ class FcmReceiverHA:
                 _LOGGER.debug("No location data in background update for %s", canonic_id)
                 return
 
-            device_name = getattr(coordinator, "_device_names", {}).get(canonic_id, canonic_id[:8])
+            # Enrich with a wall-clock 'last_updated' for UX parity with poll path.
+            payload = dict(location_data)
+            payload.setdefault("last_updated", time.time())
 
-            # Optional Google Home filter
-            semantic_name = location_data.get("semantic_name")
-            ghf = getattr(coordinator, "google_home_filter", None)
-            if semantic_name and ghf is not None:
-                should_filter, replacement = ghf.should_filter_detection(canonic_id, semantic_name)
-                if should_filter:
-                    _LOGGER.debug("Filtered Google Home detection for %s", device_name)
-                    return
-                if replacement:
-                    location_data = {**location_data, "semantic_name": replacement}
-                    _LOGGER.info(
-                        "Google Home filter: %s detected at '%s' -> using '%s'",
-                        device_name,
-                        semantic_name,
-                        replacement,
-                    )
-
-            # De-duplicate by last_seen
-            current_last_seen = location_data.get("last_seen")
-            existing = getattr(coordinator, "_device_location_data", {}).get(canonic_id, {})
-            if existing.get("last_seen") == current_last_seen and current_last_seen:
-                _LOGGER.debug("Duplicate background update for %s (last_seen=%s)", device_name, current_last_seen)
-                # The coordinator is now responsible for incrementing this stat.
-                # The coordinator can check if the data has truly changed before incrementing.
-                return
-
-            # Commit to coordinator cache via public API if available (encapsulation)
-            slot = dict(location_data)
-            slot["last_updated"] = time.time()
-
-            update_cache = getattr(coordinator, "update_device_cache", None)
-            if callable(update_cache):
-                update_cache(canonic_id, slot)
-            else:
-                # Transitional fallback for older coordinators (to be removed once all callers updated)
-                try:
-                    coordinator._device_location_data[canonic_id] = slot  # noqa: SLF001
-                    _LOGGER.debug(
-                        "Fallback: wrote to coordinator._device_location_data directly (consider upgrading coordinator)"
-                    )
-                    # Manually increment stats if using fallback path
-                    coordinator.increment_stat("background_updates")
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.error("Coordinator cache update failed for %s: %s", canonic_id, err)
-                    return
-
-            _LOGGER.info("Stored NEW background location update for %s (last_seen=%s)", device_name, current_last_seen)
-
-            if location_data.get("is_own_report") is False:
-                # Crowd-sourced classification is still useful to track here,
-                # as only the receiver has access to this detail from the raw report.
-                coordinator.increment_stat("crowd_sourced_updates")
-                _LOGGER.info("Crowd-sourced update detected for %s via FCM", device_name)
-
-            # Push entities immediately (no poll). Prefer dedicated push method if available.
-            push = getattr(coordinator, "push_updated", None)
-            if callable(push):
-                # Push a minimal snapshot to reduce UI churn and work.
-                push([canonic_id])
-            else:
-                await coordinator.async_request_refresh()
+            # Replace any older pending payload for this device with the newest one.
+            self._pending[canonic_id] = payload
+            self._schedule_flush(canonic_id)
 
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Error processing background update for %s: %s", canonic_id, err)
 
+    def _schedule_flush(self, device_id: str) -> None:
+        """(Re)schedule a short debounce before fanning out updates to coordinators.
+
+        Implementation details:
+        - Cancels any running flush timer for this device.
+        - Starts a new timer task that waits `_debounce_ms` and then calls `_flush()`.
+        - Uses asyncio.create_task because the receiver is managed on the HA loop.
+        """
+        # Cancel any existing scheduled flush for this device
+        existing = self._flush_tasks.pop(device_id, None)
+        if existing and not existing.done():
+            existing.cancel()
+
+        async def _delayed() -> None:
+            try:
+                await asyncio.sleep(self._debounce_ms / 1000.0)
+                await self._flush(device_id)
+            except asyncio.CancelledError:
+                # Expected when new updates arrive within the debounce window.
+                return
+            except Exception as err:
+                _LOGGER.error("Flush task for %s failed: %s", device_id, err)
+
+        task = asyncio.create_task(_delayed(), name=f"{DOMAIN}.fcm_flush[{device_id[:8]}]")
+        self._flush_tasks[device_id] = task
+
+    async def _flush(self, device_id: str) -> None:
+        """Flush the latest pending payload to **all** registered coordinators.
+
+        Per-coordinator steps:
+          1) Skip if coordinator would ignore the device.
+          2) Apply that coordinator's Google Home filter (if available):
+             - If `should_filter` → drop for this coordinator only.
+             - If replacement attributes are provided → substitute coordinates and
+               clear `semantic_name` (so HA Core's zone engine drives state).
+          3) Call `update_device_cache(device_id, payload)` on the coordinator.
+          4) Push a minimal snapshot via `push_updated([device_id])` when available,
+             otherwise fall back to `async_request_refresh()`.
+
+        Notes:
+            * Significance gating and type-aware cooldowns are applied **inside**
+              the coordinator (`update_device_cache`), not here.
+            * We do not strip internal `_report_hint`; the coordinator will.
+        """
+        payload = self._pending.pop(device_id, None)
+        # Remove the stored task (it is this method's responsibility to clear it).
+        self._flush_tasks.pop(device_id, None)
+
+        if not payload:
+            return
+
+        # Iterate over a copy to avoid mutation issues if a coordinator unregisters mid-flight.
+        for coordinator in self.coordinators.copy():
+            try:
+                if not self._is_tracked(coordinator, device_id):
+                    continue
+
+                # Prepare a per-coordinator copy (filters may mutate the payload)
+                coordinator_payload = dict(payload)
+
+                # Apply Google Home filter per coordinator (if available)
+                semantic_name = coordinator_payload.get("semantic_name")
+                ghf = getattr(coordinator, "google_home_filter", None)
+                if semantic_name and ghf is not None:
+                    try:
+                        should_filter, replacement_attrs = ghf.should_filter_detection(device_id, semantic_name)
+                    except Exception as gf_err:
+                        _LOGGER.debug("Google Home filter error for %s: %s", device_id[:8], gf_err)
+                        should_filter, replacement_attrs = False, None
+
+                    if should_filter:
+                        _LOGGER.debug("Filtered Google Home detection for %s (push path)", device_id[:8])
+                        # Skip this coordinator only
+                        continue
+
+                    if replacement_attrs:
+                        # Substitute coordinates; derive accuracy from radius if available
+                        if "latitude" in replacement_attrs and "longitude" in replacement_attrs:
+                            coordinator_payload["latitude"] = replacement_attrs.get("latitude")
+                            coordinator_payload["longitude"] = replacement_attrs.get("longitude")
+                        if "radius" in replacement_attrs and replacement_attrs.get("radius") is not None:
+                            coordinator_payload["accuracy"] = replacement_attrs.get("radius")
+                        # Clear semantic_name so HA zone engine determines final state
+                        coordinator_payload["semantic_name"] = None
+
+                # Commit to coordinator cache via its public API
+                update_cache = getattr(coordinator, "update_device_cache", None)
+                if callable(update_cache):
+                    update_cache(device_id, coordinator_payload)
+                else:
+                    # Transitional fallback for older coordinators (to be removed once all callers updated)
+                    try:
+                        coordinator._device_location_data[device_id] = coordinator_payload  # noqa: SLF001
+                        _LOGGER.debug(
+                            "Fallback: wrote to coordinator._device_location_data directly (consider upgrading coordinator)"
+                        )
+                        coordinator.increment_stat("background_updates")
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.error("Coordinator cache update failed for %s: %s", device_id, err)
+                        continue
+
+                # Crowd-sourced classification remains useful for stats visibility.
+                if coordinator_payload.get("is_own_report") is False:
+                    try:
+                        coordinator.increment_stat("crowd_sourced_updates")
+                    except Exception:
+                        pass
+
+                # Push entities immediately (no poll). Prefer dedicated push method if available.
+                push = getattr(coordinator, "push_updated", None)
+                if callable(push):
+                    # Push a minimal snapshot to reduce UI churn and work.
+                    push([device_id])
+                else:
+                    await coordinator.async_request_refresh()
+
+            except Exception as err:
+                _LOGGER.debug("Failed to fan-out push update for %s to one coordinator: %s", device_id[:8], err)
+
+    # -------------------- Decode helper --------------------
+
     def _decode_background_location(self, hex_string: str) -> dict:
-        """Decode background location using our protobuf decoders (CPU-bound)."""
+        """Decode background location using our protobuf decoders (CPU-bound).
+
+        Implementation detail:
+        - Calls the **sync** facade `decrypt_location_response_locations(...)` from a worker
+          thread via `run_in_executor` (see caller). This guarantees we never call the
+          sync facade while a running event loop exists in the same thread (see its contract).
+        - The decoder layer is responsible for:
+            * fail-fast validation of coordinates,
+            * attaching an internal `_report_hint` based on report type (if known),
+            * returning a normalized payload dictionary suitable for HA entities.
+        """
         try:
             from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf  # type: ignore
             from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (  # type: ignore

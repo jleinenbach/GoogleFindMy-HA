@@ -46,7 +46,7 @@
     },
     "error": {
       "auth_failed": "Uwierzytelnianie nie powiodło się. Spróbuj ponownie.",
-      "invalid_token": "Podano nieprawidłowy token lub brakuje wymaganych pól.",
+      "invalid_token": "Nieprawidłowy token/e-mail lub brakuje wymaganych pól.",
       "invalid_json": "Nieprawidłowy format JSON w zawartości pliku secrets.json.",
       "no_devices": "Nie znaleziono urządzeń. Upewnij się, że „Znajdź moje urządzenie” jest włączone na Twoim koncie Google.",
       "cannot_connect": "Nie udało się połączyć z interfejsem Google API. Może to być problem tymczasowy — spróbuj ponownie później.",
@@ -114,7 +114,8 @@
       "invalid": "Walidacja nie powiodła się. Sprawdź swoje dane.",
       "cannot_connect": "Nie udało się połączyć z interfejsem Google API.",
       "choose_one": "Podaj dokładnie jedną metodę poświadczeń.",
-      "required": "To pole jest wymagane."
+      "required": "To pole jest wymagane.",
+      "invalid_token": "Nieprawidłowe dane logowania (token/e-mail). Sprawdź format i zawartość."
     },
     "abort": {
       "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie.",
@@ -227,6 +228,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Odrzucono zbyt niską dokładność"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Odrzucone nieistotne aktualizacje"
       }
     }
   }

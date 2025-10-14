@@ -12,6 +12,24 @@ Google Home semantic locations (note):
   we now substitute **Home zone coordinates** (lat/lon[/radius]) instead of forcing
   a zone label. This lets HA Core's zone engine set the state to `home`, which
   aligns with best practices.
+
+Thread-safety and quality goals:
+- All state mutations and task creations occur on HA's event loop thread.
+- Public methods that may be invoked from background threads marshal execution
+  onto the loop using a single hop (no chained hops).
+- Owner-driven locates introduce a server-side purge/cooldown window; we respect
+  this via **per-device poll cooldowns** with **dynamic guardrails** (min/max bounds),
+  without changing any external API or entity fields.
+
+Implementation notes (server behaviour, POPETS'25):
+- The network applies *type-specific throttling* to crowdsourced reports:
+  "In All Areas" reports are effectively throttled for ~10 minutes,
+  "High Traffic" reports for ~5 minutes. We respect this by applying
+  per-device cooldowns derived from an internal `_report_hint` (set by the
+  decrypt/parse layer) without changing public APIs or entity attributes.
+- The well-known "~9h" rate limit discussed in the paper applies to *finder*
+  devices contributing reports, not to the owner pulling locations. We **document**
+  this here for maintainers but do **not** enforce it client-side.
 """
 from __future__ import annotations
 
@@ -45,6 +63,24 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# -------------------------------------------------------------------------
+# Internal guardrails for dynamic cooldowns (module-local on purpose)
+# Rationale: Only used by this coordinator; keep const.py focused on cross-cutting constants.
+# Values are *bounds* that clamp dynamic guesses; they are not fixed thresholds.
+# -------------------------------------------------------------------------
+_COOLDOWN_OWNER_MIN_S = 300      # 5 min
+_COOLDOWN_OWNER_MAX_S = 900      # 15 min
+
+# Server-informed minimum cooldowns per report type (POPETS'25)
+# We never go below these values; actual applied cooldown also respects the user poll interval.
+_COOLDOWN_MIN_IN_ALL_AREAS_S = 600  # 10 min
+_COOLDOWN_MIN_HIGH_TRAFFIC_S  = 300  # 5 min
+
+
+def _clamp(val: float, lo: float, hi: float) -> float:
+    """Return val clamped into [lo, hi]."""
+    return max(lo, min(hi, val))
+
 
 class CacheProtocol(Protocol):
     """Defines the interface for a cache that the coordinator can use.
@@ -52,6 +88,7 @@ class CacheProtocol(Protocol):
     This protocol ensures that any cache object passed to the coordinator
     provides the necessary asynchronous methods for getting and setting values.
     """
+
     async def async_get_cached_value(self, key: str) -> Any: ...
     async def async_set_cached_value(self, key: str, value: Any) -> None: ...
 
@@ -106,7 +143,27 @@ def _sync_get_last_gps_from_history(
 
 
 class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
-    """Coordinator that manages polling, cache, and push updates for Google Find My Device."""
+    """Coordinator that manages polling, cache, and push updates for Google Find My Device.
+
+    Thread-safety & event loop rules (IMPORTANT):
+    - All interactions that create HA tasks or publish state must occur on the HA event loop.
+    - This class provides small helpers to "hop" from any background thread into the loop
+      using `loop.call_soon_threadsafe(...)` before touching HA APIs.
+
+    Pitfalls & mitigations (general guidance for future reviewers):
+    - Pitfall 1 – return values with `call_soon_threadsafe`:
+      `call_soon_threadsafe` does not propagate return values to the calling thread.
+      **Mitigation:** All methods we marshal to the loop in this module (e.g. `increment_stat`,
+      `update_device_cache`, `push_updated`, `purge_device`) are consciously `None`-returning.
+    - Pitfall 2 – excessive thread hops:
+      Unnecessary hops add overhead if used for micro-operations.
+      **Mitigation:** We hop **once at the public method boundary**, then execute the
+      complete logic on the HA loop (single-threaded, deterministic).
+    - Pitfall 3 – complex external locks:
+      Using extra `threading.Lock`s for shared state increases complexity and risk.
+      **Mitigation:** We **serialize** state changes by marshalling to the **single-threaded**
+      HA event loop – the loop itself is the synchronization primitive.
+    """
 
     # ---------------------------- Lifecycle ---------------------------------
     def __init__(
@@ -118,6 +175,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         device_poll_delay: int = 5,
         min_poll_interval: int = DEFAULT_MIN_POLL_INTERVAL,
         min_accuracy_threshold: int = 100,
+        movement_threshold: int = 50,
         allow_history_fallback: bool = False,
     ) -> None:
         """Initialize the coordinator.
@@ -137,6 +195,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             device_poll_delay: The delay in seconds between polling individual devices.
             min_poll_interval: The minimum allowed interval between polling cycles.
             min_accuracy_threshold: The minimum GPS accuracy in meters to accept a location.
+            movement_threshold: Movement delta in meters for significance gating (default 50 m).
             allow_history_fallback: Whether to fall back to Recorder history for location.
         """
         self.hass = hass
@@ -152,6 +211,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self.device_poll_delay = int(device_poll_delay)
         self.min_poll_interval = int(min_poll_interval)  # hard lower bound between cycles
         self._min_accuracy_threshold = int(min_accuracy_threshold)  # quality filter (meters)
+        self._movement_threshold = int(movement_threshold)  # meters; used by significance gate
         self.allow_history_fallback = bool(allow_history_fallback)
 
         # Internal caches & bookkeeping
@@ -174,6 +234,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._locate_inflight: Set[str] = set()                # device_id -> in-flight flag
         self._locate_cooldown_until: Dict[str, float] = {}     # device_id -> mono deadline
 
+        # NEW: Per-device poll cooldowns after owner reports and type-hinted crowdsourced reports.
+        # Only affects internal scheduling; no external API changes.
+        self._device_poll_cooldown_until: Dict[str, float] = {}
+
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
             "skipped_duplicates": 0,
@@ -184,6 +248,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             "timeouts": 0,
             "invalid_coords": 0,
             "low_quality_dropped": 0,
+            "non_significant_dropped": 0,
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
@@ -192,7 +257,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._stats_debounce_seconds: float = 5.0
 
         # Load persistent statistics asynchronously (name the task for better debugging)
-        hass.async_create_task(self._async_load_stats(), name=f"{DOMAIN}.load_stats")
+        self.hass.async_create_task(self._async_load_stats(), name=f"{DOMAIN}.load_stats")
 
         super().__init__(
             hass,
@@ -200,6 +265,79 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             name=DOMAIN,
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
+
+    # ---------------------------- Event loop helpers ------------------------
+    def _is_on_hass_loop(self) -> bool:
+        """Return True if currently executing on the HA event loop thread."""
+        loop = self.hass.loop
+        try:
+            return asyncio.get_running_loop() is loop
+        except RuntimeError:
+            return False
+
+    def _run_on_hass_loop(self, func, *args) -> None:
+        """Schedule a plain callable to run on the HA loop thread ASAP.
+
+        Note:
+        - This is intentionally **fire-and-forget**; `call_soon_threadsafe` does not
+          return the callable's result to the caller. Only use with functions that
+          **return None** and are safe to run on the HA loop.
+        """
+        self.hass.loop.call_soon_threadsafe(func, *args)
+
+    # ---------------------------- Cooldown helpers (server-aware) -----------
+    def _compute_type_cooldown_seconds(self, report_hint: Optional[str]) -> int:
+        """Return a server-aware cooldown duration in seconds for a crowdsourced report type.
+
+        We derive cooldowns from POPETS'25 observations:
+        - "in_all_areas": ~10 min throttle window (minimum).
+        - "high_traffic": ~5 min throttle window (minimum).
+
+        IMPORTANT:
+        - To guarantee effect, the applied cooldown is **never shorter than** the
+          configured `location_poll_interval`. This ensures at least one scheduled
+          poll cycle is skipped in practice (see review note).
+        """
+        if not report_hint:
+            return 0
+
+        # Guarantee the cooldown always spans at least one poll interval
+        effective_poll = max(1, int(self.location_poll_interval))
+        if report_hint == "in_all_areas":
+            base_cooldown = _COOLDOWN_MIN_IN_ALL_AREAS_S
+        elif report_hint == "high_traffic":
+            base_cooldown = _COOLDOWN_MIN_HIGH_TRAFFIC_S
+        else:
+            return 0
+
+        return max(base_cooldown, effective_poll)
+
+    def _apply_report_type_cooldown(self, device_id: str, report_hint: Optional[str]) -> None:
+        """Apply a per-device **poll** cooldown based on the crowdsourced report type.
+
+        - Does nothing for None/unknown hints.
+        - Uses monotonic time, and **extends** any existing cooldown (takes the max).
+        - Internal only; does not touch public APIs or entity attributes.
+        """
+        try:
+            seconds = int(self._compute_type_cooldown_seconds(report_hint))
+        except Exception:  # defensive
+            seconds = 0
+        if seconds <= 0:
+            return
+
+        now_mono = time.monotonic()
+        new_deadline = now_mono + float(seconds)
+        prev_deadline = self._device_poll_cooldown_until.get(device_id, 0.0)
+        if new_deadline > prev_deadline:
+            self._device_poll_cooldown_until[device_id] = new_deadline
+            _LOGGER.debug(
+                "Applied %ss poll cooldown for %s (hint='%s', poll_interval=%ss)",
+                seconds,
+                device_id,
+                report_hint,
+                self.location_poll_interval,
+            )
 
     # ---------------------------- Coordinate normalization ------------------
     def _normalize_coords(
@@ -365,6 +503,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             else:
                 devices_to_poll = [d for d in all_devices if d["id"] not in ignored]
 
+            # Apply per-device poll cooldowns (owner locate purge window + type-aware cooldowns)
+            if self._device_poll_cooldown_until and devices_to_poll:
+                filtered: List[Dict[str, Any]] = []
+                skipped = 0
+                for d in devices_to_poll:
+                    until = self._device_poll_cooldown_until.get(d["id"], 0.0)
+                    if until and now_mono < until:
+                        skipped += 1
+                        continue
+                    filtered.append(d)
+                if skipped:
+                    _LOGGER.debug(
+                        "Per-device poll cooldown active; skipping %d device(s) this cycle",
+                        skipped,
+                    )
+                devices_to_poll = filtered
+
             if not self._startup_complete:
                 # Defer the first poll to avoid startup load; it will run after the first interval.
                 self._startup_complete = True
@@ -378,6 +533,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         len(devices_to_poll),
                         effective_interval,
                     )
+                    # Always create tasks from the HA loop thread
                     self.hass.async_create_task(
                         self._async_start_poll_cycle(devices_to_poll),
                         name=f"{DOMAIN}.poll_cycle",
@@ -418,6 +574,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         This runs with a lock to avoid overlapping cycles, updates the
         internal cache, and pushes snapshots at start and end.
+
+        Throttling awareness:
+        - If a device returns a crowdsourced location with `_report_hint` equal to
+          "in_all_areas" (~10 min throttle) or "high_traffic" (~5 min throttle),
+          we apply a per-device cooldown so subsequent polls avoid the throttled window.
+          (See POPETS'25 for measured behaviour.)
+        - The cooldown is at least the server minimum and at least one user poll interval.
 
         Args:
             devices: A list of device dictionaries to poll.
@@ -511,14 +674,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     dev_name,
                                 )
                             # Nothing to commit/update in cache
+                            # Strip any internal hint before dropping to avoid accidental exposure
+                            location.pop("_report_hint", None)
                             continue
 
-                        lat = location.get("latitude")
-                        lon = location.get("longitude")
-                        acc = location.get("accuracy")
-                        last_seen = location.get("last_seen", 0)
-
                         # Accuracy quality filter
+                        acc = location.get("accuracy")
                         if (
                             isinstance(self._min_accuracy_threshold, int)
                             and self._min_accuracy_threshold > 0
@@ -532,18 +693,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                 self._min_accuracy_threshold,
                             )
                             self.increment_stat("low_quality_dropped")
+                            # Strip any internal hint before dropping to avoid accidental exposure
+                            location.pop("_report_hint", None)
                             continue
 
-                        # De-duplicate by identical last_seen
-                        existing = self._device_location_data.get(dev_id, {})
-                        existing_last_seen = existing.get("last_seen")
-                        if existing_last_seen == last_seen and last_seen:
+                        # De-duplicate replaced by significance gate
+                        last_seen = location.get("last_seen", 0)
+                        if not self._is_significant_update(dev_id, location):
                             _LOGGER.debug(
-                                "Skipping duplicate location for %s (last_seen=%s)",
+                                "Skipping non-significant update for %s (last_seen=%s)",
                                 dev_name,
                                 last_seen,
                             )
-                            self.increment_stat("skipped_duplicates")
+                            self.increment_stat("non_significant_dropped")
+                            # Strip internal hint before dropping to avoid accidental exposure
+                            location.pop("_report_hint", None)
                             continue
 
                         # Age diagnostics (informational)
@@ -562,6 +726,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     dev_name,
                                     age_hours,
                                 )
+
+                        # Apply type-aware cooldowns based on internal hint (if any).
+                        report_hint = location.get("_report_hint")
+                        self._apply_report_type_cooldown(dev_id, report_hint)
+
+                        # Ensure we don't leak the internal hint into public snapshots/entities.
+                        location.pop("_report_hint", None)
 
                         # Commit to cache and bump statistics
                         location["last_updated"] = wall_now  # wall-clock for UX
@@ -770,7 +941,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
 
     async def _debounced_save_stats(self) -> None:
-        """Debounce wrapper to coalesce frequent stat updates into a single write."""
+        """Debounce wrapper to coalesce frequent stat updates into a single write.
+
+        This coroutine MUST run on the HA event loop. It is scheduled safely via
+        `_schedule_stats_persist()` which ensures loop-thread execution.
+        """
         try:
             await asyncio.sleep(self._stats_debounce_seconds)
             await self._async_save_stats()
@@ -781,20 +956,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug("Debounced stats save failed: %s", err)
 
     def _schedule_stats_persist(self) -> None:
-        """(Re)schedule a debounced persistence task for statistics."""
-        # Cancel a pending writer, if any, and schedule a fresh one.
-        if self._stats_save_task and not self._stats_save_task.done():
-            self._stats_save_task.cancel()
-        self._stats_save_task = self.hass.async_create_task(
-            self._debounced_save_stats(), name=f"{DOMAIN}.save_stats_debounced"
-        )
+        """(Re)schedule a debounced persistence task for statistics.
 
-    def increment_stat(self, stat_name: str) -> None:
-        """Increment a statistic counter and schedule debounced persistence.
-
-        Args:
-            stat_name: The name of the statistic to increment.
+        Thread-safe: may be called from any thread. Ensures cancellation and creation
+        of the debounced task happen on the HA loop.
         """
+        def _do_schedule() -> None:
+            # Cancel a pending writer, if any, and schedule a fresh one (loop-local).
+            if self._stats_save_task and not self._stats_save_task.done():
+                self._stats_save_task.cancel()
+            self._stats_save_task = self.hass.loop.create_task(
+                self._debounced_save_stats(), name=f"{DOMAIN}.save_stats_debounced"
+            )
+
+        if self._is_on_hass_loop():
+            _do_schedule()
+        else:
+            self._run_on_hass_loop(_do_schedule)
+
+    def _increment_stat_on_loop(self, stat_name: str) -> None:
+        """Increment a statistic on the HA loop and schedule persistence."""
         if stat_name in self.stats:
             before = self.stats[stat_name]
             self.stats[stat_name] = before + 1
@@ -806,8 +987,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
                 stat_name,
-                list(self.stats.keys()),
+                list(self.stats.keys() ),
             )
+
+    def increment_stat(self, stat_name: str) -> None:
+        """Increment a statistic counter (thread-safe).
+
+        May be called from any thread. The actual mutation and scheduling are
+        marshalled onto the HA event loop.
+
+        Note on performance:
+        - The "hop" to the loop occurs exactly once here (constant per call).
+          We avoid repeated hops for inner micro-operations.
+        """
+        if self._is_on_hass_loop():
+            self._increment_stat_on_loop(stat_name)
+        else:
+            self._run_on_hass_loop(self._increment_stat_on_loop, stat_name)
 
     # ---------------------------- Public platform API -----------------------
     def get_device_location_data(self, device_id: str) -> Optional[Dict[str, Any]]:
@@ -846,14 +1042,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         slot.setdefault("last_seen", float(ts_epoch))
 
     def update_device_cache(self, device_id: str, location_data: Dict[str, Any]) -> None:
-        """Public, encapsulated update of the internal location cache for one device.
+        """Public, encapsulated update of the internal location cache for one device (thread-safe).
 
-        Used by the FCM receiver (push path). Expects validated fields.
+        Used by the FCM receiver (push path) and by internal manual-commit call sites.
+        Expects validated fields (decrypt layer performs fail-fast checks).
+
+        Internal rules:
+        - Applies type-aware **poll** cooldowns based on an internal `_report_hint` (if present).
+        - Strips `_report_hint` from the cached payload to avoid exposing internal fields.
+        - Runs significance gating to prevent redundant cache churn. The cooldown still applies
+          even if the update is dropped as non-significant (server-friendly behaviour).
 
         Args:
             device_id: The canonical ID of the device.
             location_data: The new location data dictionary.
         """
+        if not self._is_on_hass_loop():
+            # Marshal entire update onto the HA loop to avoid cross-thread mutations.
+            self._run_on_hass_loop(self.update_device_cache, device_id, location_data)
+            return
+
         if not isinstance(location_data, dict):
             _LOGGER.debug("Ignored cache update for %s: payload is not a dict", device_id)
             return
@@ -861,9 +1069,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
 
+        # Apply type-aware **poll** cooldowns (if decrypt layer provided a hint),
+        # then drop the hint to keep internal-only.
+        self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+        slot.pop("_report_hint", None)
+
         # Normalize coordinates (best-effort) if present; do not spam warnings here.
         # The push path may deliver semantic-only updates (no coordinates), which is valid.
         self._normalize_coords(slot, device_label=device_id, warn_on_invalid=False)
+
+        # Significance gate (prevents redundant churn while still respecting cooldowns)
+        if not self._is_significant_update(device_id, slot):
+            self.increment_stat("non_significant_dropped")
+            return
 
         # Ensure last_updated is present
         slot.setdefault("last_updated", time.time())
@@ -876,6 +1094,82 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_location_data[device_id] = slot
         # Increment background updates to account for push/manual commits.
         self.increment_stat("background_updates")
+
+    # ---------------------------- Significance / gating ----------------------
+    def _haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Return distance in meters between two WGS84 coordinates.
+
+        Implementation note:
+            Kept lightweight and allocation-free; called per candidate update only.
+        """
+        from math import radians, sin, cos, sqrt, atan2
+
+        R = 6371000.0  # Earth radius in meters
+        lat1_r, lon1_r = radians(float(lat1)), radians(float(lon1))
+        lat2_r, lon2_r = radians(float(lat2)), radians(float(lon2))
+        dlat = lat2_r - lat1_r
+        dlon = lon2_r - lon1_r
+        a = sin(dlat / 2.0) ** 2 + cos(lat1_r) * cos(lat2_r) * sin(dlon / 2.0) ** 2
+        c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a))
+        return R * c
+
+    def _is_significant_update(self, device_id: str, new_data: Dict[str, Any]) -> bool:
+        """Return True if the update carries meaningful new information.
+
+        Criteria (coarse → fine):
+          1) No previous data -> significant.
+          2) Newer `last_seen` -> significant.
+          3) Same `last_seen` but:
+             3a) Position changed more than `self._movement_threshold` meters, or
+             3b) Accuracy improved by ≥20% (smaller is better), or
+             3c) Source/status changed (e.g., own → crowdsourced or semantic changes).
+
+        Notes:
+          * This replaces the old "same last_seen == duplicate" heuristic.
+          * Movement threshold is user-configurable (options) and defaults to 50 m.
+        """
+        existing = self._device_location_data.get(device_id)
+        if not existing:
+            return True
+
+        n_seen = new_data.get("last_seen")
+        e_seen = existing.get("last_seen")
+        try:
+            if n_seen is not None and e_seen is not None and float(n_seen) > float(e_seen):
+                return True
+        except Exception:
+            # If timestamps are non-numeric, fall through to other checks.
+            pass
+
+        # Same timestamp? Check for spatial delta and accuracy improvement.
+        if n_seen == e_seen:
+            n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
+            e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
+            if all(isinstance(v, (int, float)) for v in (n_lat, n_lon, e_lat, e_lon)):
+                try:
+                    dist = self._haversine_distance(e_lat, e_lon, n_lat, n_lon)
+                    if dist > float(self._movement_threshold):
+                        return True
+                except Exception:
+                    # Ignore distance errors and continue checks.
+                    pass
+
+            n_acc = new_data.get("accuracy")
+            e_acc = existing.get("accuracy")
+            if isinstance(n_acc, (int, float)) and isinstance(e_acc, (int, float)):
+                try:
+                    if float(n_acc) < float(e_acc) * 0.8:  # ≥20% better accuracy
+                        return True
+                except Exception:
+                    pass
+
+        # Source or semantic change can still be valuable.
+        if new_data.get("is_own_report") != existing.get("is_own_report"):
+            return True
+        if new_data.get("semantic_name") != existing.get("semantic_name"):
+            return True
+
+        return False
 
     def get_device_last_seen(self, device_id: str) -> Optional[datetime]:
         """Return last_seen as timezone-aware datetime (UTC) if cached.
@@ -932,16 +1226,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         return sorted(list(known - set(self._present_device_ids)))
 
     def purge_device(self, device_id: str) -> None:
-        """Remove all cached data and cooldown state for a device.
+        """Remove all cached data and cooldown state for a device (thread-safe publish).
 
         Called from the config-entry device deletion flow. This does not trigger a poll,
         but it immediately publishes an updated snapshot so UI can refresh.
         """
+        if not self._is_on_hass_loop():
+            self._run_on_hass_loop(self.purge_device, device_id)
+            return
+
         self._device_location_data.pop(device_id, None)
         self._device_names.pop(device_id, None)
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
+        self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
         # Push a minimal update so listeners can refresh availability quickly
         self.async_set_updated_data(self.data)
@@ -949,6 +1248,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     # ---------------------------- Push updates ------------------------------
     def push_updated(self, device_ids: Optional[List[str]] = None) -> None:
         """Publish a fresh snapshot to listeners after push (FCM) cache updates.
+
+        Thread-safe: may be called from any thread. This method ensures all state
+        publishing happens on the HA event loop.
 
         This **does not** trigger a poll. It:
         - Immediately pushes cache state to entities via `async_set_updated_data()`.
@@ -958,6 +1260,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         Args:
             device_ids: An optional list of device IDs to include in the update.
         """
+        if not self._is_on_hass_loop():
+            self._run_on_hass_loop(self.push_updated, device_ids)
+            return
+
         wall_now = time.time()
         self._last_poll_mono = time.monotonic()  # reset poll timer
 
@@ -1106,8 +1412,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             return False
         if device_id in self._locate_inflight:
             return False
-        until = self._locate_cooldown_until.get(device_id, 0.0)
-        if until and time.monotonic() < until:
+        # Respect both manual-locate and poll cooldowns for the device
+        now_mono = time.monotonic()
+        until_manual = self._locate_cooldown_until.get(device_id, 0.0)
+        if until_manual and now_mono < until_manual:
+            return False
+        until_poll = self._device_poll_cooldown_until.get(device_id, 0.0)
+        if until_poll and now_mono < until_poll:
             return False
         return True
 
@@ -1120,6 +1431,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         device_poll_delay: Optional[int] = None,
         min_poll_interval: Optional[int] = None,
         min_accuracy_threshold: Optional[int] = None,
+        movement_threshold: Optional[int] = None,
         allow_history_fallback: Optional[bool] = None,
     ) -> None:
         """Apply updated user settings provided by the config entry (options-first).
@@ -1134,6 +1446,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             device_poll_delay: The delay in seconds between polling devices.
             min_poll_interval: The minimum polling interval in seconds.
             min_accuracy_threshold: The minimum accuracy in meters.
+            movement_threshold: The spatial delta (meters) required to treat updates as significant.
             allow_history_fallback: Whether to allow falling back to Recorder history.
         """
         if tracked_devices is not None:
@@ -1170,6 +1483,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     "Ignoring invalid min_accuracy_threshold=%r", min_accuracy_threshold
                 )
 
+        if movement_threshold is not None:
+            try:
+                self._movement_threshold = max(0, int(movement_threshold))
+            except (TypeError, ValueError):
+                _LOGGER.warning("Ignoring invalid movement_threshold=%r", movement_threshold)
+
         if allow_history_fallback is not None:
             self.allow_history_fallback = bool(allow_history_fallback)
 
@@ -1187,12 +1506,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
           - Reject immediately if `can_request_location()` is False.
           - Mark request as in-flight and (optimistically) start a cooldown that
             equals `DEFAULT_MIN_POLL_INTERVAL`. This disables repeated clicks.
-          - On success: reset the polling baseline and clear the cooldown early
-            to re-enable the button once we got a response.
+          - On success: reset the polling baseline and set a **per-device cooldown**
+            (owner-report purge window) by clamping a dynamic guess.
           - Always notify listeners via `async_set_updated_data(self.data)`.
 
+        POPETS'25-informed behaviour:
+          - If the returned payload carries an internal `_report_hint` of
+            "in_all_areas" (~10 min throttle) or "high_traffic" (~5 min throttle),
+            we additionally apply a type-aware cooldown (at least server minimum
+            and at least one user poll interval). This stacks with the owner cooldown.
+
         Args:
-            device_id: The canonical ID of the device to locate.
+            device_id: The canonical ID of the device.
 
         Returns:
             A dictionary containing the location data (empty dict on gating).
@@ -1285,20 +1610,41 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 self.increment_stat("low_quality_dropped")
                 return {}
 
-            # De-duplicate by `last_seen` timestamp.
+            # De-duplicate replaced by significance gate
             existing_data = self._device_location_data.get(device_id, {})
-            if existing_data.get("last_seen") and existing_data.get("last_seen") == location_data.get("last_seen"):
-                _LOGGER.debug("Manual locate for %s returned a duplicate location; skipping state update.", name)
-                self.increment_stat("skipped_duplicates")
-            else:
-                # Commit to cache. `update_device_cache` ensures `last_updated` and stats.
-                slot = dict(location_data)
-                slot.setdefault("last_updated", time.time())
-                self.update_device_cache(device_id, slot)
+            # Prepare a copy for gating/cooldown application
+            slot = dict(location_data)
+            slot.setdefault("last_updated", time.time())
 
-            # Successful manual locate: reset poll baseline, clear cooldown, push a fresh snapshot.
+            # Apply type-aware cooldowns based on internal hint (if any), then strip it.
+            self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+            slot.pop("_report_hint", None)
+
+            # Significance gate also for manual locate to avoid churn.
+            if not self._is_significant_update(device_id, slot):
+                self.increment_stat("non_significant_dropped")
+                return {}
+
+            # Commit to cache. `update_device_cache` ensures `last_updated` and stats.
+            self.update_device_cache(device_id, slot)
+
+            # Successful manual locate:
+            # - reset poll baseline,
+            # - set a per-device poll cooldown (owner purge window) using a dynamic guess
+            #   clamped into guardrails,
+            # - set the same cooldown for manual locate button to avoid spamming.
             self._last_poll_mono = time.monotonic()
-            self._locate_cooldown_until.pop(device_id, None)
+            dynamic_guess = max(float(DEFAULT_MIN_POLL_INTERVAL), float(self.location_poll_interval))
+            owner_cooldown = _clamp(dynamic_guess, _COOLDOWN_OWNER_MIN_S, _COOLDOWN_OWNER_MAX_S)
+            now_mono = time.monotonic()
+            # Extend (not overwrite) any type-aware cooldown applied above
+            existing_deadline = self._device_poll_cooldown_until.get(device_id, 0.0)
+            owner_deadline = now_mono + owner_cooldown
+            self._device_poll_cooldown_until[device_id] = max(existing_deadline, owner_deadline)
+            self._locate_cooldown_until[device_id] = max(
+                self._locate_cooldown_until.get(device_id, 0.0), owner_deadline
+            )
+
             self.push_updated([device_id])
             return location_data or {}
         except Exception as err:

@@ -11,7 +11,7 @@
       },
       "secrets_json": {
         "title": "Methode 1: GoogleFindMyTools secrets.json",
-        "description": "Führe GoogleFindMyTools (Chrome) aus, um Authentifizierungs-Token zu erzeugen, und füge unten den vollständigen Inhalt der Datei Auth/secrets.json ein.",
+        "description": "Führe GoogleFindMyTools (Chrome) aus, um Authentifizierungs-Tokens zu erzeugen, und füge unten den vollständigen Inhalt der Datei Auth/secrets.json ein.",
         "data": {
           "secrets_json": "Inhalt der secrets.json"
         }
@@ -26,7 +26,7 @@
       },
       "device_selection": {
         "title": "Geräte und Abfrageintervall",
-        "description": "Wähle die zu verfolgenden Geräte und konfiguriere die Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden).\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden).\n\nDie Integration fragt die Geräte nacheinander ab und fordert für jedes Gerät mit der angegebenen Verzögerung Positionsdaten an.",
+        "description": "Wähle die zu verfolgenden Geräte und konfiguriere die Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden)\n\nDie Integration fragt die Geräte nacheinander ab und fordert für jedes Gerät mit der angegebenen Verzögerung Positionsdaten an.",
         "data": {
           "tracked_devices": "Verfolgte Geräte",
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
@@ -36,7 +36,7 @@
           "google_home_filter_enabled": "Google-Home-Geräte filtern",
           "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
           "enable_stats_entities": "Statistik-Entitäten erstellen",
-          "map_view_token_expiration": "Ablauf von Kartenansicht-Token aktivieren"
+          "map_view_token_expiration": "Ablauf von Kartenansicht-Tokens aktivieren"
         }
       },
       "reauth_confirm": {
@@ -46,9 +46,9 @@
     },
     "error": {
       "auth_failed": "Authentifizierung fehlgeschlagen. Bitte versuche es erneut.",
-      "invalid_token": "Ungültiger Token oder erforderliche Felder fehlen.",
+      "invalid_token": "Ungültige E-Mail/Token oder erforderliche Felder fehlen.",
       "invalid_json": "Ungültiges JSON-Format im Inhalt der secrets.json.",
-      "no_devices": "Keine Geräte gefunden. Bitte stelle sicher, dass ‚Mein Gerät finden‘ in deinem Google-Konto aktiviert ist.",
+      "no_devices": "Keine Geräte gefunden. Bitte stelle sicher, dass „Mein Gerät finden“ in deinem Google-Konto aktiviert ist.",
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen. Dies ist möglicherweise ein vorübergehendes Problem – bitte versuche es später erneut.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
@@ -85,7 +85,7 @@
       },
       "settings": {
         "title": "Optionen",
-        "description": "Einstellungen für die Ortung anpassen:\n• Positionsabfrage-Intervall: Wie häufig Positionen abgefragt werden (60–3600 Sekunden).\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte (1–60 Sekunden).\n• Mindestgenauigkeit: Positionen mit einer größeren Ungenauigkeit als dieser Wert werden ignoriert (25–500 Meter).\n• Bewegungsschwelle: Mindestbewegung, um eine Positionsaktualisierung auszulösen (10–200 Meter).\n\nGoogle-Home-Filter:\n• Aktivieren, um Ortungen durch Google-Home-Geräte der ‚Zuhause‘-Zone zuzuordnen.\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt).\n• Beispiel: ‚nest‘ passt zu ‚Küche Nest Mini‘.",
+        "description": "Einstellungen für die Ortung anpassen:\n• Positionsabfrage-Intervall: Wie häufig Positionen abgefragt werden (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte (1–60 Sekunden)\n• Mindestgenauigkeit: Positionen mit einer größeren Ungenauigkeit als dieser Wert werden ignoriert (25–500 Meter)\n• Bewegungsschwelle: Mindestbewegung, um eine Positionsaktualisierung auszulösen (10–200 Meter)\n\nGoogle-Home-Filter:\n• Aktivieren, um Ortungen durch Google-Home-Geräte der „Zuhause“-Zone zuzuordnen\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt)\n• Beispiel: „nest“ passt zu „Küche Nest Mini“",
         "data": {
           "tracked_devices": "Verfolgte Geräte",
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
@@ -95,10 +95,10 @@
           "google_home_filter_enabled": "Google-Home-Geräte filtern",
           "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
           "enable_stats_entities": "Statistik-Entitäten erstellen",
-          "map_view_token_expiration": "Ablauf von Kartenansicht-Token aktivieren"
+          "map_view_token_expiration": "Ablauf von Kartenansicht-Tokens aktivieren"
         },
         "data_description": {
-          "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach einer Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab."
+          "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab."
         }
       },
       "visibility": {
@@ -114,7 +114,8 @@
       "invalid": "Validierung fehlgeschlagen. Bitte überprüfe deine Eingabe.",
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
-      "required": "Dieses Feld ist erforderlich."
+      "required": "Dieses Feld ist erforderlich.",
+      "invalid_token": "Ungültige Anmeldedaten (Token/E-Mail). Bitte prüfe Format und Inhalt."
     },
     "abort": {
       "reconfigure_successful": "Neukonfiguration erfolgreich.",
@@ -177,7 +178,7 @@
       "fields": {
         "mode": {
           "name": "Modus",
-          "description": "‚Rebuild‘ entfernt Entitäten/Geräte und lädt neu; ‚Migrate‘ wendet nur die Übertragung der Einstellungen an."
+          "description": "„Rebuild“ entfernt Entitäten/Geräte und lädt neu; „Migrate“ wendet nur die Übertragung der Einstellungen an."
         },
         "device_ids": {
           "name": "Geräte (optional)",
@@ -227,6 +228,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Verworfene Standorte (geringe Genauigkeit)"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Unwesentliche Aktualisierungen verworfen"
       }
     }
   }
