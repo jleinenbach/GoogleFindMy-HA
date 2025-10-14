@@ -410,6 +410,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     bucket = hass.data.setdefault(DOMAIN, {})
     bucket[entry.entry_id] = coordinator
 
+    # IMPORTANT: register DR listener & perform initial DR index
+    # (precondition for registry-driven polling targets)
+    await coordinator.async_setup()
+
     # Register map views (idempotent across multi-entry)
     if not bucket.get("views_registered"):
         hass.http.register_view(GoogleFindMyMapView(hass))
@@ -477,6 +481,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
           awaits inside `async_on_unload`.
         - TokenCache is explicitly closed here to flush and mark the cache closed.
     """
+    # First, shut down coordinator lifecycle (unsubscribe DR listener, timers)
+    try:
+        coordinator: GoogleFindMyCoordinator | None = (
+            hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            or getattr(entry, "runtime_data", None)
+        )
+        if coordinator:
+            await coordinator.async_shutdown()
+    except Exception as err:
+        _LOGGER.debug("Coordinator async_shutdown raised during unload: %s", err)
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     # Release shared FCM (decrement refcount and await bounded shutdown if it reaches zero)
