@@ -25,6 +25,12 @@ Push-path debouncing
       coordinators (per-coordinator Google Home filtering is applied here).
 * The receiver remains thin: significance gating and cooldown application are the
   coordinator’s responsibility.
+
+Runtime telemetry (for diagnostics)
+-----------------------------------
+* `last_start_monotonic`: monotonic timestamp just before the client (re)starts.
+* `last_stop_monotonic`: monotonic timestamp at the end of `async_stop()`.
+* `start_count`: number of times the client was started by the supervisor.
 """
 
 from __future__ import annotations
@@ -120,6 +126,30 @@ class FcmReceiverHA:
         self._flush_tasks: dict[str, asyncio.Task] = {}
         # Debounce window in milliseconds (small enough to feel real-time).
         self._debounce_ms: int = 250
+
+        # ---------------- Telemetry (diagnostics) -------------------
+        # Set/updated by the supervisor loop and async_stop().
+        self.last_start_monotonic: float = 0.0
+        self.last_stop_monotonic: float = 0.0
+        self.start_count: int = 0
+
+    # -------------------- Convenience readiness --------------------
+
+    @property
+    def is_ready(self) -> bool:
+        """Best-effort readiness signal for quick checks/diagnostics."""
+        pc = self.pc
+        if not (self._listening and pc):
+            return False
+        state = getattr(pc, "run_state", None)
+        do_listen = getattr(pc, "do_listen", False)
+        if FcmPushClientRunState is not None:
+            return bool(state == FcmPushClientRunState.STARTED and do_listen)
+        # Fallback if enum is unavailable
+        return bool(do_listen)
+
+    # Alias sometimes used by callers
+    ready = is_ready
 
     # -------------------- Lifecycle --------------------
 
@@ -291,6 +321,10 @@ class FcmReceiverHA:
                     await asyncio.sleep(delay)
                     backoff = min(backoff * 2, 60.0)
                     continue
+
+                # ---- Telemetry: mark a (re)start event before client.start() ----
+                self.last_start_monotonic = time.monotonic()
+                self.start_count += 1
 
                 # Start client (non-blocking; it launches internal tasks) and monitor
                 try:
@@ -721,6 +755,9 @@ class FcmReceiverHA:
                 _LOGGER.debug("FCM push client stop unexpected error: %s", err)
             finally:
                 self.pc = None
+
+        # ---- Telemetry: mark last stop moment for diagnostics ----
+        self.last_stop_monotonic = time.monotonic()
 
         _LOGGER.info("FCM receiver stopped")
 
