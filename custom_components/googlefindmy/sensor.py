@@ -56,13 +56,8 @@ LAST_SEEN_DESCRIPTION = SensorEntityDescription(
 
 # NOTE: HA Quality Scale (Platinum): entity descriptions define translation_key,
 # icon and state_class; keys must match coordinator.stats counters exactly.
+# `skipped_duplicates` was removed from the coordinator and is intentionally absent here.
 STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
-    "skipped_duplicates": SensorEntityDescription(
-        key="skipped_duplicates",
-        translation_key="stat_skipped_duplicates",
-        icon="mdi:cancel",
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
     "background_updates": SensorEntityDescription(
         key="background_updates",
         translation_key="stat_background_updates",
