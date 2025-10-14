@@ -54,13 +54,10 @@ LAST_SEEN_DESCRIPTION = SensorEntityDescription(
     device_class=SensorDeviceClass.TIMESTAMP,
 )
 
+# NOTE: HA Quality Scale (Platinum): entity descriptions define translation_key,
+# icon and state_class; keys must match coordinator.stats counters exactly.
+# `skipped_duplicates` was removed from the coordinator and is intentionally absent here.
 STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
-    "skipped_duplicates": SensorEntityDescription(
-        key="skipped_duplicates",
-        translation_key="stat_skipped_duplicates",
-        icon="mdi:cancel",
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
     "background_updates": SensorEntityDescription(
         key="background_updates",
         translation_key="stat_background_updates",
@@ -71,6 +68,13 @@ STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
         key="crowd_sourced_updates",
         translation_key="stat_crowd_sourced_updates",
         icon="mdi:account-group",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    # Unified counter for all updates dropped by the significance filter.
+    "non_significant_dropped": SensorEntityDescription(
+        key="non_significant_dropped",
+        translation_key="stat_non_significant_dropped",
+        icon="mdi:filter-variant-remove",
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
 }
@@ -120,8 +124,12 @@ async def async_setup_entry(
         entry.data.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES),
     )
     if enable_stats:
+        created_stats = []
         for stat_key, desc in STATS_DESCRIPTIONS.items():
             entities.append(GoogleFindMyStatsSensor(coordinator, stat_key, desc))
+            created_stats.append(stat_key)
+        # Helpful debug to verify which stats sensors are created at setup time.
+        _LOGGER.debug("Stats sensors created: %s", ", ".join(created_stats))
 
     # Per-device last_seen sensors from current snapshot
     if coordinator.data:
@@ -133,17 +141,6 @@ async def async_setup_entry(
                 known_ids.add(dev_id)
             else:
                 _LOGGER.debug("Skipping device without id/name: %s", device)
-    else:
-        # Cold boot: create skeletons from tracked IDs without writing placeholder names
-        tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
-        for dev_id in tracked_ids:
-            entities.append(GoogleFindMyLastSeenSensor(coordinator, {"id": dev_id}))
-            known_ids.add(dev_id)
-        if tracked_ids:
-            _LOGGER.debug(
-                "Created %d skeleton last_seen sensors for restore (no live data yet)",
-                len(tracked_ids),
-            )
 
     if entities:
         async_add_entities(entities, True)
@@ -179,29 +176,30 @@ async def async_setup_entry(
 class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
     """Diagnostic counters for the integration.
 
-    Values are provided by coordinator.stats and persisted debounced by the coordinator.
+    Naming policy (HA Quality Scale – Platinum):
+    - Do **not** set a hard-coded `_attr_name`. We rely on `entity_description.translation_key`
+      and `_attr_has_entity_name = True` so HA composes the visible name as
+      "<device name> <translated entity name>". This ensures locale-correct UI strings.
     """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_has_entity_name = False  # standalone (not per-device)
+    _attr_has_entity_name = True  # allow translated entity name to be used
 
     def __init__(
         self, coordinator: GoogleFindMyCoordinator, stat_key: str, description: SensorEntityDescription
     ) -> None:
-        """Initialize the stats sensor."""
+        """Initialize the stats sensor.
+
+        Args:
+            coordinator: The integration's data coordinator.
+            stat_key: Name of the counter in coordinator.stats.
+            description: Home Assistant entity description (icon, translation_key, etc.).
+        """
         super().__init__(coordinator)
         self._stat_key = stat_key
         self.entity_description = description
         self._attr_unique_id = f"{DOMAIN}_{stat_key}"
-        # Fallback name in case translations are missing
-        fallback_names = {
-            "skipped_duplicates": "Skipped Duplicates",
-            "background_updates": "Background Updates",
-            "crowd_sourced_updates": "Crowd-sourced Updates",
-        }
-        self._attr_name = (
-            f"Google Find My {fallback_names.get(stat_key, stat_key.replace('_', ' ').title())}"
-        )
+        # Intentionally no `_attr_name` here; translations drive the visible name.
         self._attr_native_unit_of_measurement = "updates"
 
     @property
@@ -241,6 +239,8 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     # Best practice: let HA compose "<Device Name> <translated entity name>"
     _attr_has_entity_name = True
+    # Default to disabled in the registry for per-device sensors
+    _attr_entity_registry_enabled_default = False
     entity_description = LAST_SEEN_DESCRIPTION
 
     def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:

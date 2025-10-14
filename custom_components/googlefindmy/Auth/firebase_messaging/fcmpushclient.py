@@ -141,6 +141,9 @@ class FcmPushClientConfig:  # pylint:disable=too-many-instance-attributes
     log_debug_verbose: bool = False
     """Set to True to log all message info including tokens."""
 
+    # NEW: bounded writer shutdown (seconds) to avoid hanging on TLS close
+    writer_close_timeout: float = 2.0
+
 
 class FcmPushClient:  # pylint:disable=too-many-instance-attributes
     """Worker-only FCM client.
@@ -220,28 +223,58 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
     # ---- Connection helpers ----
 
     async def _do_writer_close(self) -> None:
+        """Close the stream writer with a bounded wait; abort transport on timeout."""
         writer = self.writer
         self.writer = None
-        if writer:
+        if not writer:
+            return
+        try:
             try:
                 writer.close()
-                await writer.wait_closed()
-            except TimeoutError:
-                # TLS shutdown timed out: force-close the transport and continue.
-                self.logger.debug("SSL shutdown timed out; force-closing transport")
-                transport = getattr(writer, "transport", None)
-                if transport is not None:
-                    transport.close()
             except Exception:
-                # Keep old behavior: swallow all errors on close.
+                # defensive: ignore close() errors
                 pass
+            try:
+                # Bounded, graceful shutdown window
+                await asyncio.wait_for(
+                    writer.wait_closed(), timeout=self.config.writer_close_timeout
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                # TLS shutdown timed out: hard-close
+                self.logger.debug("SSL shutdown timed out; aborting transport")
+                transport = writer.transport if hasattr(writer, "transport") else None
+                if transport is not None:
+                    try:
+                        transport.abort()  # Immediate abort preferred
+                    except Exception:
+                        try:
+                            transport.close()
+                        except Exception:
+                            pass
+        except asyncio.CancelledError:
+            # On cancel, still hard-close before propagating
+            transport = writer.transport if hasattr(writer, "transport") else None
+            if transport is not None:
+                try:
+                    transport.abort()
+                except Exception:
+                    try:
+                        transport.close()
+                    except Exception:
+                        pass
+            raise
+        except Exception:
+            # Keep old behavior: swallow all other errors on close.
+            pass
 
     # protobuf varint32 helpers
     async def _read_varint32(self) -> int:
+        reader = self.reader
+        assert reader is not None, "StreamReader is not initialized"
         res = 0
         shift = 0
         while True:
-            r = await self.reader.readexactly(1)  # type: ignore[union-attr]
+            r = await reader.readexactly(1)
             (b,) = struct.unpack("B", r)
             res |= (b & 0x7F) << shift
             if (b & 0x80) == 0:
@@ -274,32 +307,33 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
     async def _send_msg(self, msg: Message) -> None:
         self._log_verbose("Sending packet to server: %s", self._msg_str(msg))
         buf = FcmPushClient._make_packet(msg, self.first_message)
-        self.writer.write(buf)  # type: ignore[union-attr]
-        await self.writer.drain()  # type: ignore[union-attr]
+        writer = self.writer
+        assert writer is not None, "StreamWriter is not initialized"
+        writer.write(buf)
+        await writer.drain()
 
     async def _receive_msg(self) -> Message | None:
+        reader = self.reader
+        assert reader is not None, "StreamReader is not initialized"
+
         if self.first_message:
-            r = await self.reader.readexactly(2)  # type: ignore[union-attr]
+            r = await reader.readexactly(2)
             version, tag = struct.unpack("BB", r)
             if version < MCS_VERSION and version != 38:
                 raise RuntimeError(f"protocol version {version} unsupported")
             self.first_message = False
         else:
-            r = await self.reader.readexactly(1)  # type: ignore[union-attr]
+            r = await reader.readexactly(1)
             (tag,) = struct.unpack("B", r)
         size = await self._read_varint32()
 
-        self._log_verbose(
-            "Received message with tag %s and size %s",
-            tag,
-            size,
-        )
+        self._log_verbose("Received message with tag %s and size %s", tag, size)
 
         if not size >= 0:
             self._log_warn_with_limit("Unexpected message size %s", size)
             return None
 
-        buf = await self.reader.readexactly(size)  # type: ignore[union-attr]
+        buf = await reader.readexactly(size)
 
         msg_class = next(iter([c for c, t in MCS_MESSAGE_TAG.items() if t == tag]))
         if not msg_class:
@@ -538,6 +572,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         if error_type not in self.sequential_error_counters:
             self.sequential_error_counters[error_type] = 0
 
+    # NOTE: returns True to keep going, False when we've decided to stop
         self.sequential_error_counters[error_type] += 1
 
         if (

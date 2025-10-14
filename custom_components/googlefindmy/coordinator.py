@@ -5,15 +5,44 @@ Discovery vs. polling semantics:
 - Every coordinator tick fetches the lightweight **full** Google device list.
 - Presence and name/capability caches are updated for all devices.
 - The published snapshot (`self.data`) contains **all** devices (for dynamic entity creation).
-- The sequential **polling cycle** still respects `tracked_devices` (if non-empty).
+- The sequential **polling cycle** polls **only devices that are enabled** in Home Assistant's
+  Device Registry (devices with `disabled_by is None`) for **this** config entry. Devices explicitly
+  ignored via options are filtered out as well. Devices without a Device Registry entry yet are
+  included to allow initial discovery.
+
+Google Home semantic locations (note):
+- When the Google Home filter identifies a "Google Home-like" semantic location,
+  we substitute **Home zone coordinates** (lat/lon[/radius]) instead of forcing
+  a zone label. This lets HA Core's zone engine set the state to `home`, which
+  aligns with best practices.
+
+Thread-safety and quality goals:
+- All state mutations and task creations occur on HA's event loop thread.
+- Public methods that may be invoked from background threads marshal execution
+  onto the loop using a single hop (no chained hops).
+- Owner-driven locates introduce a server-side purge/cooldown window; we respect
+  this via **per-device poll cooldowns** with **dynamic guardrails** (min/max bounds),
+  without changing any external API or entity fields.
+
+Implementation notes (server behaviour, POPETS'25):
+- The network applies *type-specific throttling* to crowdsourced reports:
+  "In All Areas" reports are effectively throttled for ~10 minutes,
+  "High Traffic" reports for ~5 minutes. We respect this by applying
+  per-device cooldowns derived from an internal `_report_hint` (set by the
+  decrypt/parse layer) without changing public APIs or entity attributes.
+- The well-known "~9h" rate limit discussed in the paper applies to *finder*
+  devices contributing reports, not to the owner pulling locations. We **document**
+  this here for maintainers but do **not** enforce it client-side.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Protocol, Set
+from typing import Any, Dict, List, Optional, Protocol, Set, Callable
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -21,9 +50,12 @@ from homeassistant.components.recorder import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
-    # HA session is provided by the integration and reused across I/O
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import EVENT_DEVICE_REGISTRY_UPDATED
+# HA session is provided by the integration and reused across I/O
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.event import async_call_later
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .api import GoogleFindMyAPI
@@ -32,9 +64,37 @@ from .const import (
     UPDATE_INTERVAL,
     LOCATION_REQUEST_TIMEOUT_S,
     DEFAULT_MIN_POLL_INTERVAL,
+    OPT_IGNORED_DEVICES,
+    DEFAULT_OPTIONS,
+    coerce_ignored_mapping,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# -------------------------------------------------------------------------
+# Internal guardrails for dynamic cooldowns (module-local on purpose)
+# Rationale: Only used by this coordinator; keep const.py focused on cross-cutting constants.
+# Values are *bounds* that clamp dynamic guesses; they are not fixed thresholds.
+# -------------------------------------------------------------------------
+_COOLDOWN_OWNER_MIN_S = 300      # 5 min
+_COOLDOWN_OWNER_MAX_S = 900      # 15 min
+
+# Server-informed minimum cooldowns per report type (POPETS'25)
+# We never go below these values; actual applied cooldown also respects the user poll interval.
+_COOLDOWN_MIN_IN_ALL_AREAS_S = 600  # 10 min
+_COOLDOWN_MIN_HIGH_TRAFFIC_S  = 300  # 5 min
+
+# -------------------------------------------------------------------------
+# Minimal hardening: accept a *successful* empty device list only after a
+# small quorum of consecutive empties. This avoids reacting to rare, short
+# upstream anomalies as if the user had deleted all devices.
+# -------------------------------------------------------------------------
+_EMPTY_LIST_QUORUM = 2  # require N consecutive *successful* empties before clearing
+
+
+def _clamp(val: float, lo: float, hi: float) -> float:
+    """Return val clamped into [lo, hi]."""
+    return max(lo, min(hi, val))
 
 
 class CacheProtocol(Protocol):
@@ -43,6 +103,7 @@ class CacheProtocol(Protocol):
     This protocol ensures that any cache object passed to the coordinator
     provides the necessary asynchronous methods for getting and setting values.
     """
+
     async def async_get_cached_value(self, key: str) -> Any: ...
     async def async_set_cached_value(self, key: str, value: Any) -> None: ...
 
@@ -53,15 +114,12 @@ class CacheProtocol(Protocol):
 def _sync_get_last_gps_from_history(
     hass: HomeAssistant, entity_id: str
 ) -> Optional[Dict[str, Any]]:
-    """Fetch last state change with GPS coordinates via Recorder History (sync).
-
-    This function is designed to be run in a worker thread (specifically the
-    Home Assistant Recorder's executor) to avoid blocking the event loop with
-    database queries.
+    """Fetch the last state with GPS coordinates from Recorder History.
 
     IMPORTANT:
-    - Must run in a worker (Recorder executor). Do not call asyncio APIs here.
-    - Keep queries minimal to avoid heavy DB load.
+        This function is synchronous and performs database I/O. It MUST be
+        run in a worker thread (e.g., the Recorder's executor) to avoid
+        blocking the Home Assistant event loop.
 
     Args:
         hass: The Home Assistant instance.
@@ -97,18 +155,39 @@ def _sync_get_last_gps_from_history(
 
 
 class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
-    """Coordinator that manages polling, cache, and push updates for Google Find My Device."""
+    """Coordinator that manages polling, cache, and push updates for Google Find My Device.
+
+    Thread-safety & event loop rules (IMPORTANT):
+    - All interactions that create HA tasks or publish state must occur on the HA event loop thread.
+    - This class provides small helpers to "hop" from any background thread into the loop
+      using `loop.call_soon_threadsafe(...)` before touching HA APIs.
+
+    Pitfalls & mitigations (general guidance for future reviewers):
+    - Pitfall 1 – return values with `call_soon_threadsafe`:
+      `call_soon_threadsafe` does not propagate return values to the calling thread.
+      **Mitigation:** All methods we marshal to the loop in this module (e.g. `increment_stat`,
+      `update_device_cache`, `push_updated`, `purge_device`) are consciously `None`-returning.
+    - Pitfall 2 – excessive thread hops:
+      Unnecessary hops add overhead if used for micro-operations.
+      **Mitigation:** We hop **once at the public method boundary**, then execute the
+      complete logic on the HA loop (single-threaded, deterministic).
+    - Pitfall 3 – complex external locks:
+      Using extra `threading.Lock`s for shared state increases complexity and risk.
+      **Mitigation:** We **serialize** state changes by marshalling to the **single-threaded**
+      HA event loop – the loop itself is the synchronization primitive.
+    """
 
     # ---------------------------- Lifecycle ---------------------------------
     def __init__(
         self,
         hass: HomeAssistant,
         cache: CacheProtocol,
-        tracked_devices: Optional[List[str]] = None,
+        *,
         location_poll_interval: int = 300,
         device_poll_delay: int = 5,
-        min_poll_interval: int = 1,
+        min_poll_interval: int = DEFAULT_MIN_POLL_INTERVAL,
         min_accuracy_threshold: int = 100,
+        movement_threshold: int = 50,
         allow_history_fallback: bool = False,
     ) -> None:
         """Initialize the coordinator.
@@ -123,12 +202,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         Args:
             hass: The Home Assistant instance.
             cache: An object implementing the CacheProtocol for persistent storage.
-            tracked_devices: A list of device IDs to be tracked.
             location_poll_interval: The interval in seconds between polling cycles.
             device_poll_delay: The delay in seconds between polling individual devices.
             min_poll_interval: The minimum allowed interval between polling cycles.
             min_accuracy_threshold: The minimum GPS accuracy in meters to accept a location.
-            allow_history_fallback: Whether to fall back to recorder history for location.
+            movement_threshold: Movement delta in meters for significance gating (default 50 m).
+            allow_history_fallback: Whether to fall back to Recorder history for location.
         """
         self.hass = hass
         self._cache = cache
@@ -138,24 +217,40 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self.api = GoogleFindMyAPI(cache=self._cache, session=self._session)
 
         # Configuration (user options; updated via update_settings())
-        self.tracked_devices = list(tracked_devices or [])
         self.location_poll_interval = int(location_poll_interval)
         self.device_poll_delay = int(device_poll_delay)
         self.min_poll_interval = int(min_poll_interval)  # hard lower bound between cycles
         self._min_accuracy_threshold = int(min_accuracy_threshold)  # quality filter (meters)
+        self._movement_threshold = int(movement_threshold)  # meters; used by significance gate
         self.allow_history_fallback = bool(allow_history_fallback)
 
         # Internal caches & bookkeeping
         self._device_location_data: Dict[str, Dict[str, Any]] = {}  # device_id -> location dict
         self._device_names: Dict[str, str] = {}  # device_id -> human name
         self._device_caps: Dict[str, Dict[str, Any]] = {}  # device_id -> caps (e.g., {"can_ring": True})
-        self._present_device_ids: Set[str] = set()  # ids from latest full device list (unfiltered)
+        self._present_device_ids: Set[str] = set()  # diagnostics-only set from latest non-empty list
+
+        # Presence smoothing (TTL):
+        # - Per-device "last seen in full list" timestamp (monotonic)
+        # - Cold-start marker: timestamp of last non-empty list (monotonic)
+        # - Presence TTL in seconds (derived from poll interval, min 120s)
+        self._present_last_seen: Dict[str, float] = {}
+        self._last_nonempty_wall: float = 0.0
+        self._presence_ttl_s: int = 120
+
+        # Minimal hardening state (empty-list quorum)
+        self._last_device_list: List[Dict[str, Any]] = []
+        self._empty_list_streak: int = 0
 
         # Polling state
         self._poll_lock = asyncio.Lock()
         self._is_polling = False
         self._startup_complete = False
         self._last_poll_mono: float = 0.0  # monotonic timestamp for scheduling
+
+        # Push readiness deferral/escalation bookkeeping
+        self._fcm_defer_started_mono: float = 0.0
+        self._fcm_last_stage: int = 0  # 0=none, 1=warned, 2=errored
 
         # Push readiness memoization and cooldown after transport errors
         self._push_ready_memo: Optional[bool] = None
@@ -165,25 +260,40 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._locate_inflight: Set[str] = set()                # device_id -> in-flight flag
         self._locate_cooldown_until: Dict[str, float] = {}     # device_id -> mono deadline
 
+        # Per-device poll cooldowns after owner/crowdsourced reports.
+        self._device_poll_cooldown_until: Dict[str, float] = {}
+
+        # DR-driven poll targeting
+        self._enabled_poll_device_ids: Set[str] = set()
+        self._devices_with_entry: Set[str] = set()
+        self._dr_unsub: Optional[Callable] = None
+
         # Statistics (extend as needed)
         self.stats: Dict[str, int] = {
-            "skipped_duplicates": 0,
-            "background_updates": 0,  # FCM/push-driven updates
+            "background_updates": 0,  # FCM/push-driven updates + manual commits
             "polled_updates": 0,      # sequential poll-driven updates
             "crowd_sourced_updates": 0,
             "history_fallback_used": 0,
             "timeouts": 0,
             "invalid_coords": 0,
             "low_quality_dropped": 0,
+            "non_significant_dropped": 0,
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
+
+        # NEW: Performance metrics (timestamps, durations) & recent errors (bounded)
+        self.performance_metrics: Dict[str, float] = {}
+        self.recent_errors = deque(maxlen=5)  # entries: (epoch_ts, error_type, short_message)
 
         # Debounced stats persistence (avoid flushing on every increment)
         self._stats_save_task: Optional[asyncio.Task] = None
         self._stats_debounce_seconds: float = 5.0
 
         # Load persistent statistics asynchronously (name the task for better debugging)
-        hass.async_create_task(self._async_load_stats(), name=f"{DOMAIN}.load_stats")
+        self.hass.async_create_task(self._async_load_stats(), name=f"{DOMAIN}.load_stats")
+
+        # Short-retry scheduling handle (coalesced)
+        self._short_retry_cancel: Optional[Callable[[], None]] = None
 
         super().__init__(
             hass,
@@ -191,6 +301,338 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             name=DOMAIN,
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
+
+    async def async_setup(self) -> None:
+        """One-time async setup called from __init__.py (entry setup).
+
+        - Loads stats (already scheduled in __init__, so this is idempotent).
+        - Indexes poll targets from the Device Registry.
+        - Subscribes to DR updates (unsubscribed in `async_shutdown()`).
+        """
+        # Initial index (works even if config_entry is not yet bound; will re-run on DR event)
+        self._reindex_poll_targets_from_device_registry()
+        if self._dr_unsub is None:
+            self._dr_unsub = self.hass.bus.async_listen(
+                EVENT_DEVICE_REGISTRY_UPDATED, self._handle_dr_event
+            )
+
+    async def async_shutdown(self) -> None:
+        """Clean up listeners and timers on entry unload to avoid leaks."""
+        # Unsubscribe DR listener
+        if self._dr_unsub is not None:
+            try:
+                self._dr_unsub()
+            except Exception:
+                pass
+            self._dr_unsub = None
+        # Cancel short-retry callback if scheduled
+        if self._short_retry_cancel is not None:
+            try:
+                self._short_retry_cancel()
+            except Exception:
+                pass
+            self._short_retry_cancel = None
+        # Cancel pending debounced stats write
+        if self._stats_save_task and not self._stats_save_task.done():
+            self._stats_save_task.cancel()
+
+    # ---------------------------- Event loop helpers ------------------------
+    def _is_on_hass_loop(self) -> bool:
+        """Return True if currently executing on the HA event loop thread."""
+        loop = self.hass.loop
+        try:
+            return asyncio.get_running_loop() is loop
+        except RuntimeError:
+            return False
+
+    def _run_on_hass_loop(self, func, *args) -> None:
+        """Schedule a plain callable to run on the HA loop thread ASAP.
+
+        Note:
+        - This is intentionally **fire-and-forget**; `call_soon_threadsafe` does not
+          return the callable's result to the caller. Only use with functions that
+          **return None** and are safe to run on the HA loop.
+        """
+        self.hass.loop.call_soon_threadsafe(func, *args)
+
+    def _schedule_short_retry(self, delay_s: float = 5.0) -> None:
+        """Schedule a short, coalesced refresh instead of shifting the poll baseline.
+
+        Rationale:
+        - When FCM/push is not ready, we *do not* advance `_last_poll_mono`.
+          Advancing the baseline hides readiness transitions and can put the
+          scheduler to "sleep". Instead, we request a short follow-up refresh.
+
+        Behavior:
+        - Coalesces multiple calls by cancelling a pending callback first.
+        - Always runs on the HA event loop.
+
+        Args:
+            delay_s: Delay in seconds before requesting a coordinator refresh.
+        """
+        def _do_schedule() -> None:
+            # Cancel a pending short retry (coalesce)
+            if self._short_retry_cancel is not None:
+                try:
+                    self._short_retry_cancel()
+                except Exception:  # defensive
+                    pass
+                finally:
+                    self._short_retry_cancel = None
+
+            def _cb(_now) -> None:
+                # Clear handle and request a refresh (non-blocking)
+                self._short_retry_cancel = None
+                self.async_request_refresh()
+
+            self._short_retry_cancel = async_call_later(
+                self.hass, max(0.0, float(delay_s)), _cb
+            )
+
+        if self._is_on_hass_loop():
+            _do_schedule()
+        else:
+            self._run_on_hass_loop(_do_schedule)
+
+    # ---------------------------- Device Registry helpers -------------------
+    def _reindex_poll_targets_from_device_registry(self) -> None:
+        """Rebuild internal poll target sets from the Device Registry.
+
+        This runs on the HA loop and is called rarely (startup and on DR updates).
+        We **only** index devices that belong to *this* config entry to avoid
+        cross-account leakage in multi-entry setups.
+        """
+        dev_reg = dr.async_get(self.hass)
+        entry = getattr(self, "config_entry", None)
+        entry_id = getattr(entry, "entry_id", None)
+        if not entry_id:
+            _LOGGER.debug("Skipping DR reindex: no config_entry bound yet")
+            self._devices_with_entry = set()
+            self._enabled_poll_device_ids = set()
+            return
+
+        enabled: Set[str] = set()
+        present: Set[str] = set()
+        # Collect devices belonging to the same domain but different entries (informational only).
+        other_account: List[tuple[str, str]] = []
+
+        for device in list(dev_reg.devices.values()):
+            # Consider only devices linked to *this* config entry.
+            if entry_id not in device.config_entries:
+                # If it's our domain but linked to another entry, remember a few as examples.
+                if any(domain == DOMAIN for domain, _ in device.identifiers):
+                    dev_id = next((ident for domain, ident in device.identifiers if domain == DOMAIN), None)
+                    if isinstance(dev_id, str) and dev_id:
+                        other_account.append((dev_id, device.name_by_user or device.name or dev_id))
+                continue
+            try:
+                # Find the first identifier of our integration: (DOMAIN, <device_id>).
+                for domain, dev_id in device.identifiers:
+                    if domain == DOMAIN and isinstance(dev_id, str) and dev_id:
+                        present.add(dev_id)
+                        if device.disabled_by is None:
+                            enabled.add(dev_id)
+                        break  # stop after the first matching identifier
+            except Exception as err:
+                _LOGGER.debug("Device registry scan error: %s", err)
+                continue
+
+        self._devices_with_entry = present
+        self._enabled_poll_device_ids = enabled
+        _LOGGER.debug(
+            "Reindexed Device Registry targets for entry %s: %d present / %d enabled",
+            entry_id,
+            len(self._devices_with_entry),
+            len(self._enabled_poll_device_ids),
+        )
+
+        # Informational: show that some devices are managed by other entries.
+        if other_account:
+            sample = ", ".join(f"{did} ({nm})" for did, nm in other_account[:5])
+            _LOGGER.info(
+                "Entry filter active: %d Google Find My device(s) belong to other config entries "
+                "and won't be polled by '%s'. Examples: %s%s",
+                len(other_account),
+                (entry.title if entry else entry_id),
+                sample,
+                "…" if len(other_account) > 5 else "",
+            )
+
+    async def _handle_dr_event(self, _event) -> None:
+        """Handle Device Registry changes by rebuilding poll targets (rare)."""
+        self._reindex_poll_targets_from_device_registry()
+        # After changes, request a refresh so the next tick uses the new target sets.
+        # Compatibility: async_request_refresh is a plain def on most cores, but an
+        # async coroutine on some versions. Handle both safely.
+        fn = getattr(self, "async_request_refresh", None)
+        if callable(fn):
+            try:
+                if asyncio.iscoroutinefunction(fn):
+                    await fn()  # type: ignore[misc]
+                else:
+                    res = fn()
+                    # If a coroutine slips through (rare), schedule it to avoid warnings.
+                    if asyncio.iscoroutine(res):
+                        self.hass.async_create_task(res, name=f"{DOMAIN}.dr_event_refresh")
+            except Exception as err:
+                _LOGGER.debug("async_request_refresh dispatch failed (DR event): %s", err)
+
+    # ---------------------------- Cooldown helpers (server-aware) -----------
+    def _compute_type_cooldown_seconds(self, report_hint: Optional[str]) -> int:
+        """Return a server-aware cooldown duration in seconds for a crowdsourced report type.
+
+        Derived from POPETS'25 observations:
+        - "in_all_areas": ~10 min throttle window (minimum).
+        - "high_traffic": ~5 min throttle window (minimum).
+
+        IMPORTANT:
+        - To guarantee effect, the applied cooldown is **never shorter than** the
+          configured `location_poll_interval`. This ensures at least one scheduled
+          poll cycle is skipped in practice.
+        """
+        if not report_hint:
+            return 0
+
+        # Guarantee the cooldown always spans at least one poll interval
+        effective_poll = max(1, int(self.location_poll_interval))
+        if report_hint == "in_all_areas":
+            base_cooldown = _COOLDOWN_MIN_IN_ALL_AREAS_S
+        elif report_hint == "high_traffic":
+            base_cooldown = _COOLDOWN_MIN_HIGH_TRAFFIC_S
+        else:
+            return 0
+
+        return max(base_cooldown, effective_poll)
+
+    def _apply_report_type_cooldown(self, device_id: str, report_hint: Optional[str]) -> None:
+        """Apply a per-device **poll** cooldown based on the crowdsourced report type.
+
+        - Does nothing for None/unknown hints.
+        - Uses monotonic time, and **extends** any existing cooldown (takes the max).
+        - Internal only; does not touch public APIs or entity attributes.
+        """
+        try:
+            seconds = int(self._compute_type_cooldown_seconds(report_hint))
+        except Exception:  # defensive
+            seconds = 0
+        if seconds <= 0:
+            return
+
+        now_mono = time.monotonic()
+        new_deadline = now_mono + float(seconds)
+        prev_deadline = self._device_poll_cooldown_until.get(device_id, 0.0)
+        if new_deadline > prev_deadline:
+            self._device_poll_cooldown_until[device_id] = new_deadline
+            _LOGGER.debug(
+                "Applied %ss poll cooldown for %s (hint='%s', poll_interval=%ss)",
+                seconds,
+                device_id,
+                report_hint,
+                self.location_poll_interval,
+            )
+
+    # ---------------------------- Coordinate normalization ------------------
+    def _normalize_coords(
+        self,
+        payload: Dict[str, Any],
+        *,
+        device_label: Optional[str] = None,
+        warn_on_invalid: bool = True,
+    ) -> bool:
+        """Validate and normalize latitude/longitude (and optionally accuracy).
+
+        - Accepts numeric-like strings and converts them to floats.
+        - Rejects NaN/Inf and out-of-range values.
+        - Writes normalized floats back into `payload` when valid.
+        - Normalizes `accuracy` to a finite float if present (best-effort).
+
+        Returns:
+            True if latitude/longitude are present and valid after normalization.
+            False if coordinates are missing or invalid.
+
+        Side effects:
+            - Increments `invalid_coords` on invalid input.
+            - Logs warnings for invalid data (unless warn_on_invalid=False).
+        """
+        lat = payload.get("latitude")
+        lon = payload.get("longitude")
+        if lat is None or lon is None:
+            # Missing coordinates is not an error per se (semantic-only is valid).
+            return False
+
+        try:
+            lat_f, lon_f = float(lat), float(lon)
+        except (TypeError, ValueError):
+            self.increment_stat("invalid_coords")
+            if warn_on_invalid:
+                _LOGGER.warning(
+                    "Ignoring invalid (non-numeric) coordinates%s: lat=%r, lon=%r",
+                    f" for {device_label}" if device_label else "",
+                    lat,
+                    lon,
+                )
+            return False
+
+        if not (
+            math.isfinite(lat_f)
+            and math.isfinite(lon_f)
+            and -90.0 <= lat_f <= 90.0
+            and -180.0 <= lon_f <= 180.0
+        ):
+            self.increment_stat("invalid_coords")
+            if warn_on_invalid:
+                _LOGGER.warning(
+                    "Ignoring out-of-range/invalid coordinates%s: lat=%s, lon=%s",
+                    f" for {device_label}" if device_label else "",
+                    lat,
+                    lon,
+                )
+            return False
+
+        # Write back normalized floats
+        payload["latitude"] = lat_f
+        payload["longitude"] = lon_f
+
+        # Best-effort normalize accuracy (if present)
+        acc = payload.get("accuracy")
+        if acc is not None:
+            try:
+                acc_f = float(acc)
+                if math.isfinite(acc_f):
+                    payload["accuracy"] = acc_f
+            except (TypeError, ValueError):
+                # Accuracy can be absent or malformed; not critical enough for a warning.
+                pass
+
+        return True
+
+    # ---------------------------- Ignore helpers ----------------------------
+    def _get_ignored_set(self) -> Set[str]:
+        """Return the set of device IDs the user chose to ignore (options-first).
+
+        Notes:
+            - Uses config_entry.options if available; falls back to an attribute
+              'ignored_devices' when set through update_settings().
+            - Intentionally simple equality (no normalization) to avoid surprises.
+        """
+        try:
+            entry = getattr(self, "config_entry", None)
+            if entry is not None:
+                raw = entry.options.get(OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES, {}))
+                # Accept list[str] (legacy) or mapping (current)
+                mapping, _migrated = coerce_ignored_mapping(raw)
+                if mapping:
+                    return set(mapping.keys())
+        except Exception:  # defensive
+            pass
+        raw_attr = getattr(self, "ignored_devices", None)
+        if isinstance(raw_attr, list):
+            return set(x for x in raw_attr if isinstance(x, str))
+        return set()
+
+    def is_ignored(self, device_id: str) -> bool:
+        """Return True if the device is currently ignored by user choice."""
+        return device_id in self._get_ignored_set()
 
     # Public read-only state for diagnostics/UI
     @property
@@ -202,15 +644,169 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """
         return self._is_polling
 
+    # ---------------------------- NEW: Metrics & errors helpers -------------
+    def safe_update_metric(self, key: str, value: float) -> None:
+        """Safely set a numeric performance metric (float-coerced)."""
+        try:
+            self.performance_metrics[str(key)] = float(value)
+        except Exception:
+            # Never raise from diagnostics helpers
+            pass
+
+    def _short_error_message(self, exc: Exception | str) -> str:
+        """Return a compact, single-line error string (no PII redaction beyond truncation)."""
+        msg = str(exc)
+        # collapse newlines/whitespace
+        msg = " ".join(msg.split())
+        # bound message length
+        if len(msg) > 180:
+            msg = msg[:177] + "..."
+        return msg
+
+    def _append_recent_error(self, err_type: str, message: str) -> None:
+        """Append a (timestamp, type, message) triple to the bounded deque."""
+        try:
+            self.recent_errors.append((time.time(), err_type, self._short_error_message(message)))
+        except Exception:
+            pass
+
+    def note_error(self, exc: Exception, *, where: str = "", device: Optional[str] = None) -> None:
+        """Public helper to record non-fatal errors with minimal context."""
+        prefix = where or "coordinator"
+        if device:
+            prefix += f"({device})"
+        err_type = type(exc).__name__
+        self._append_recent_error(err_type, f"{prefix}: {exc}")
+
+    # Safe getters for durations based on keys that __init__.py may set.
+    def get_metric(self, key: str) -> Optional[float]:
+        val = self.performance_metrics.get(key)
+        return float(val) if isinstance(val, (int, float)) else None
+
+    def _get_duration(self, start_key: str, end_key: str) -> Optional[float]:
+        start = self.get_metric(start_key)
+        end = self.get_metric(end_key)
+        if start is None or end is None:
+            return None
+        try:
+            return max(0.0, float(end) - float(start))
+        except Exception:
+            return None
+
+    def get_setup_duration_seconds(self) -> Optional[float]:
+        """Duration between 'setup_start_monotonic' and 'setup_end_monotonic'."""
+        return self._get_duration("setup_start_monotonic", "setup_end_monotonic")
+
+    def get_fcm_acquire_duration_seconds(self) -> Optional[float]:
+        """Duration between 'setup_start_monotonic' and 'fcm_acquired_monotonic'."""
+        start = self.get_metric("setup_start_monotonic")
+        fcm = self.get_metric("fcm_acquired_monotonic")
+        if start is None or fcm is None:
+            return None
+        try:
+            return max(0.0, float(fcm) - float(start))
+        except Exception:
+            return None
+
+    def get_last_poll_duration_seconds(self) -> Optional[float]:
+        """Duration of the most recent sequential polling cycle (if recorded)."""
+        return self._get_duration("last_poll_start_mono", "last_poll_end_mono")
+
+    def get_recent_errors(self) -> List[Dict[str, Any]]:
+        """Return a JSON-friendly copy of recent error triples."""
+        out: List[Dict[str, Any]] = []
+        for ts, et, msg in list(self.recent_errors):
+            out.append({"timestamp": ts, "error_type": et, "message": msg})
+        return out
+
     # ---------------------------- HA Coordinator ----------------------------
+    def _is_fcm_ready_soft(self) -> bool:
+        """Return True if push transport appears ready (no awaits, no I/O).
+
+        Priority order:
+          1) Ask API (single source of truth if available).
+          2) Receiver-level booleans.
+          3) Push-client heuristic (run_state + do_listen).
+          4) Token presence as last resort.
+        """
+        try:
+            # 1) API knowledge (preferred)
+            try:
+                fn = getattr(self.api, "is_push_ready", None)
+                if callable(fn):
+                    return bool(fn())
+            except Exception:
+                pass
+
+            # 2) Receiver-level flags
+            fcm = self.hass.data.get(DOMAIN, {}).get("fcm_receiver")
+            if not fcm:
+                return False
+            for attr in ("is_ready", "ready"):
+                val = getattr(fcm, attr, None)
+                if isinstance(val, bool):
+                    return val
+
+            # 3) Heuristic: push client state (no enum import)
+            pc = getattr(fcm, "pc", None)
+            if pc is not None:
+                state = getattr(pc, "run_state", None)
+                state_name = getattr(state, "name", state)
+                if state_name == "STARTED" and bool(getattr(pc, "do_listen", False)):
+                    return True
+
+            # 4) Token as last resort
+            try:
+                token = fcm.get_fcm_token()
+                if isinstance(token, str) and len(token) >= 10:
+                    return True
+            except Exception:
+                pass
+
+            return False
+        except Exception:
+            return False
+
+    def _note_fcm_deferral(self, now_mono: float) -> None:
+        """Advance a quiet escalation timeline while FCM is not ready.
+
+        Emits at most:
+            - one WARNING after ~60s
+            - one ERROR   after ~300s
+        Resets when readiness returns.
+        """
+        if self._fcm_defer_started_mono == 0.0:
+            self._fcm_defer_started_mono = now_mono
+            self._fcm_last_stage = 0
+            return
+        elapsed = now_mono - self._fcm_defer_started_mono
+        if elapsed >= 60 and self._fcm_last_stage < 1:
+            self._fcm_last_stage = 1
+            _LOGGER.warning(
+                "Polling deferred: FCM/push not ready 60s after (re)start. Polls and actions remain gated."
+            )
+        if elapsed >= 300 and self._fcm_last_stage < 2:
+            self._fcm_last_stage = 2
+            _LOGGER.error(
+                "Polling still deferred: FCM/push not ready after 5 minutes. Check credentials/network."
+            )
+
+    def _clear_fcm_deferral(self) -> None:
+        """Clear the escalation timeline once FCM becomes ready (log once)."""
+        if self._fcm_defer_started_mono:
+            _LOGGER.info("FCM/push is ready; resuming scheduled polling.")
+        self._fcm_defer_started_mono = 0.0
+        self._fcm_last_stage = 0
+
     async def _async_update_data(self) -> List[Dict[str, Any]]:
         """Provide cached device data; trigger background poll if due.
 
         Discovery semantics:
         - Always fetch the **full** lightweight device list (no executor).
         - Update presence and metadata caches for **all** devices.
-        - Publish a snapshot for **all** devices so platforms can add entities dynamically.
-        - Limit the sequential poll to `tracked_devices` if the user configured a subset.
+        - The published snapshot (`self.data`) contains **all** devices (for dynamic entity creation).
+        - The sequential **polling cycle** polls devices that are enabled in HA's Device Registry
+          **for this config entry** and not explicitly ignored in integration options.
 
         Returns:
             A list of dictionaries, where each dictionary represents a device's state.
@@ -220,14 +816,68 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             UpdateFailed: For other transient or unexpected errors.
         """
         try:
+            # One-time wait for FCM on first run.
+            if not self._startup_complete:
+                fcm_evt = getattr(self, "fcm_ready_event", None)
+                if isinstance(fcm_evt, asyncio.Event) and not fcm_evt.is_set():
+                    _LOGGER.debug("First run: waiting for FCM provider to become ready...")
+                    try:
+                        await asyncio.wait_for(fcm_evt.wait(), timeout=15.0)
+                        _LOGGER.debug("FCM provider is ready; proceeding.")
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning("FCM provider not ready after 15s; proceeding anyway.")
+                self._startup_complete = True
+
             # 1) Always fetch the lightweight FULL device list using native async API
             all_devices = await self.api.async_get_basic_device_list()
             all_devices = all_devices or []
 
-            # Record presence from the full list (no tracking filter here).
-            self._present_device_ids = {
-                d["id"] for d in all_devices if isinstance(d.get("id"), str)
-            }
+            # Minimal hardening against false empties (keep prior behaviour)
+            if not all_devices:
+                self._empty_list_streak += 1
+                if self._empty_list_streak < _EMPTY_LIST_QUORUM and self._last_device_list:
+                    # Defer clearing once; keep previous view stable.
+                    _LOGGER.debug(
+                        "Successful empty device list received (%d/%d). Deferring clear until quorum is met.",
+                        self._empty_list_streak,
+                        _EMPTY_LIST_QUORUM,
+                    )
+                    all_devices = list(self._last_device_list)
+                else:
+                    _LOGGER.debug(
+                        "Accepting empty device list after %d consecutive empties.",
+                        self._empty_list_streak,
+                    )
+                    # Once accepted, forget any prior list so snapshot becomes empty below.
+                    self._last_device_list = []
+            else:
+                # Non-empty result: reset streak and remember latest good list.
+                self._empty_list_streak = 0
+                self._last_device_list = list(all_devices)
+
+            # Presence TTL derives from the effective poll cadence
+            effective_interval = max(self.location_poll_interval, self.min_poll_interval)
+            self._presence_ttl_s = max(2 * effective_interval, 120)
+            now_mono = time.monotonic()
+
+            # Cold-start guard: if the very first seen list is empty, treat it as transient
+            if not all_devices and self._last_nonempty_wall == 0.0:
+                raise UpdateFailed("Cold start: empty device list; treating as transient.")
+
+            ignored = self._get_ignored_set()
+
+            # Record presence timestamps from the full list (unfiltered by ignore)
+            if all_devices:
+                for d in all_devices:
+                    dev_id = d.get("id")
+                    if isinstance(dev_id, str):
+                        self._present_last_seen[dev_id] = now_mono
+                # Keep a diagnostics-only set mirroring the latest non-empty list
+                self._present_device_ids = {
+                    d["id"] for d in all_devices if isinstance(d.get("id"), str)
+                }
+                self._last_nonempty_wall = now_mono
+            # If the list is empty, leave _present_last_seen untouched; TTL will decide availability.
 
             # 2) Update internal name/capability caches for ALL devices
             for dev in all_devices:
@@ -241,23 +891,32 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     slot["can_ring"] = can_ring
 
             # 3) Decide whether to trigger a poll cycle (monotonic clock)
-            now_mono = time.monotonic()
-            effective_interval = max(self.location_poll_interval, self.min_poll_interval)
+            # Build list of devices to POLL:
+            # Poll devices that have at least one enabled DR entry for this config entry;
+            # if a device has no DR entry yet, include it to allow initial discovery.
+            devices_to_poll = [
+                d for d in all_devices
+                if (d["id"] not in ignored) and (
+                    d["id"] in self._enabled_poll_device_ids or d["id"] not in self._devices_with_entry
+                )
+            ]
 
-            # Devices to POLL: respect tracked_devices if explicitly set, else poll all
-            if self.tracked_devices:
-                devices_to_poll = [d for d in all_devices if d["id"] in self.tracked_devices]
-            else:
-                devices_to_poll = list(all_devices)
+            # Apply per-device poll cooldowns
+            if self._device_poll_cooldown_until and devices_to_poll:
+                devices_to_poll = [
+                    d for d in devices_to_poll
+                    if now_mono >= self._device_poll_cooldown_until.get(d["id"], 0.0)
+                ]
 
-            if not self._startup_complete:
-                # Defer the first poll to avoid startup load; it will run after the first interval.
-                self._startup_complete = True
-                self._last_poll_mono = now_mono
-                _LOGGER.debug("First startup - set poll baseline; next poll follows normal schedule")
-            else:
-                due = (now_mono - self._last_poll_mono) >= effective_interval
-                if due and not self._is_polling and devices_to_poll:
+            due = (now_mono - self._last_poll_mono) >= effective_interval
+            if due and not self._is_polling and devices_to_poll:
+                if not self._is_fcm_ready_soft():
+                    # No baseline jump; schedule a short retry and escalate politely.
+                    self._note_fcm_deferral(now_mono)
+                    self._schedule_short_retry(min(5.0, effective_interval / 2.0))
+                else:
+                    if self._fcm_defer_started_mono:
+                        self._clear_fcm_deferral()
                     _LOGGER.debug(
                         "Scheduling background polling cycle (devices=%d, interval=%ds)",
                         len(devices_to_poll),
@@ -267,16 +926,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         self._async_start_poll_cycle(devices_to_poll),
                         name=f"{DOMAIN}.poll_cycle",
                     )
-                else:
-                    _LOGGER.debug(
-                        "Poll not due (elapsed=%.1fs/%ss) or already running=%s",
-                        now_mono - self._last_poll_mono,
-                        effective_interval,
-                        self._is_polling,
-                    )
+            else:
+                _LOGGER.debug(
+                    "Poll not due (elapsed=%.1fs/%ss) or already running=%s",
+                    now_mono - self._last_poll_mono,
+                    effective_interval,
+                    self._is_polling,
+                )
 
-            # 4) Build data snapshot for ALL devices (enables dynamic entity creation)
-            snapshot = await self._async_build_device_snapshot_with_fallbacks(all_devices)
+            # 4) Build data snapshot for devices visible to the user (ignore-filter applied)
+            visible_devices = [d for d in all_devices if d["id"] not in ignored]
+            snapshot = await self._async_build_device_snapshot_with_fallbacks(visible_devices)
             _LOGGER.debug(
                 "Returning %d device entries; next poll in ~%ds",
                 len(snapshot),
@@ -293,7 +953,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # Let pre-wrapped UpdateFailed bubble as-is
             raise
         except Exception as exc:
-            # Coordinator contract: raise UpdateFailed on unexpected errors
+            # Record and raise as UpdateFailed per coordinator contract
+            self.note_error(exc, where="_async_update_data")
             raise UpdateFailed(exc) from exc
 
     # ---------------------------- Polling Cycle -----------------------------
@@ -302,6 +963,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         This runs with a lock to avoid overlapping cycles, updates the
         internal cache, and pushes snapshots at start and end.
+
+        Throttling awareness:
+        - If a device returns a crowdsourced location with `_report_hint` equal to
+          "in_all_areas" (~10 min throttle) or "high_traffic" (~5 min throttle),
+          we apply a per-device cooldown so subsequent polls avoid the throttled window.
+          (See POPETS'25 for measured behaviour.)
+        - The cooldown is at least the server minimum and at least one user poll interval.
 
         Args:
             devices: A list of device dictionaries to poll.
@@ -313,17 +981,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             if self._is_polling:
                 return
 
+            # Double-check FCM readiness inside the lock to avoid a narrow race:
+            # if readiness regressed between scheduling and execution, skip cleanly.
+            if not self._is_fcm_ready_soft():
+                # No baseline jump; schedule a short retry and keep escalation ticking.
+                self._note_fcm_deferral(time.monotonic())
+                self._schedule_short_retry(5.0)
+                return
+            else:
+                # If we were deferring previously, clear the escalation timeline.
+                if self._fcm_defer_started_mono:
+                    self._clear_fcm_deferral()
+
             self._is_polling = True
-            # Push a snapshot from cache to signal "polling" state to listeners
-            start_snapshot = self._build_snapshot_from_cache(devices, wall_now=time.time())
-            self.async_set_updated_data(start_snapshot)
-            _LOGGER.info("Starting sequential poll of %d devices", len(devices))
+            self.safe_update_metric("last_poll_start_mono", time.monotonic())
+            _LOGGER.debug("Starting sequential poll of %d devices", len(devices))
 
             try:
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "Sequential poll: requesting location for %s (%d/%d)",
                         dev_name,
                         idx + 1,
@@ -342,10 +1020,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             continue
 
                         # --- Apply Google Home filter (keep parity with FCM push path) ---
+                        # Consume coordinate substitution from the filter when needed.
                         semantic_name = location.get("semantic_name")
                         if semantic_name and hasattr(self, "google_home_filter"):
                             try:
-                                should_filter, replacement_location = self.google_home_filter.should_filter_detection(
+                                should_filter, replacement_attrs = self.google_home_filter.should_filter_detection(
                                     dev_id, semantic_name
                                 )
                             except Exception as gf_err:
@@ -358,24 +1037,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                         "Filtering out Google Home spam detection for %s", dev_name
                                     )
                                     continue
-                                if replacement_location:
+                                if replacement_attrs:
                                     _LOGGER.info(
-                                        "Google Home filter: %s detected at '%s', using '%s'",
+                                        "Google Home filter: %s detected at '%s', substituting with Home coordinates",
                                         dev_name,
                                         semantic_name,
-                                        replacement_location,
                                     )
                                     location = dict(location)
-                                    location["semantic_name"] = replacement_location
+                                    # Update coordinates and derive accuracy from radius (if present).
+                                    if "latitude" in replacement_attrs and "longitude" in replacement_attrs:
+                                        location["latitude"] = replacement_attrs.get("latitude")
+                                        location["longitude"] = replacement_attrs.get("longitude")
+                                    if "radius" in replacement_attrs and replacement_attrs.get("radius") is not None:
+                                        location["accuracy"] = replacement_attrs.get("radius")
+                                    # Clear semantic name so HA Core's zone engine determines the final state.
+                                    location["semantic_name"] = None
                         # ------------------------------------------------------------------
 
-                        lat = location.get("latitude")
-                        lon = location.get("longitude")
-                        acc = location.get("accuracy")
-                        last_seen = location.get("last_seen", 0)
-
                         # If we only got a semantic location, preserve previous coordinates.
-                        if (lat is None or lon is None) and location.get("semantic_name"):
+                        if (location.get("latitude") is None or location.get("longitude") is None) and location.get("semantic_name"):
                             prev = self._device_location_data.get(dev_id, {})
                             if prev:
                                 location["latitude"] = prev.get("latitude")
@@ -385,25 +1065,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     "Semantic location; preserving previous coordinates"
                                 )
 
-                        # Validate coordinates
-                        lat = location.get("latitude")
-                        lon = location.get("longitude")
-                        if not (
-                            isinstance(lat, (int, float))
-                            and isinstance(lon, (int, float))
-                            and -90 <= lat <= 90
-                            and -180 <= lon <= 180
-                        ):
-                            _LOGGER.warning(
-                                "Invalid or out-of-range coordinates for %s: lat=%s, lon=%s",
-                                dev_name,
-                                lat,
-                                lon,
-                            )
-                            self.increment_stat("invalid_coords")
+                        # Validate/normalize coordinates (and accuracy if present).
+                        if not self._normalize_coords(location, device_label=dev_name):
+                            if not location.get("semantic_name"):
+                                _LOGGER.debug(
+                                    "No location data (coordinates or semantic name) available for %s in this update.",
+                                    dev_name,
+                                )
+                            # Nothing to commit/update in cache
+                            # Strip any internal hint before dropping to avoid accidental exposure
+                            location.pop("_report_hint", None)
                             continue
 
                         # Accuracy quality filter
+                        acc = location.get("accuracy")
                         if (
                             isinstance(self._min_accuracy_threshold, int)
                             and self._min_accuracy_threshold > 0
@@ -417,18 +1092,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                 self._min_accuracy_threshold,
                             )
                             self.increment_stat("low_quality_dropped")
+                            # Strip any internal hint before dropping to avoid accidental exposure
+                            location.pop("_report_hint", None)
                             continue
 
-                        # De-duplicate by identical last_seen
-                        existing = self._device_location_data.get(dev_id, {})
-                        existing_last_seen = existing.get("last_seen")
-                        if existing_last_seen == last_seen and last_seen:
+                        # Significance gate (replaces naive duplicate check)
+                        last_seen = location.get("last_seen", 0)
+                        if not self._is_significant_update(dev_id, location):
                             _LOGGER.debug(
-                                "Skipping duplicate location for %s (last_seen=%s)",
+                                "Skipping non-significant update for %s (last_seen=%s)",
                                 dev_name,
                                 last_seen,
                             )
-                            self.increment_stat("skipped_duplicates")
+                            self.increment_stat("non_significant_dropped")
+                            # Strip internal hint before dropping to avoid accidental exposure
+                            location.pop("_report_hint", None)
                             continue
 
                         # Age diagnostics (informational)
@@ -448,20 +1126,35 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                                     age_hours,
                                 )
 
+                        # Apply type-aware cooldowns based on internal hint (if any).
+                        report_hint = location.get("_report_hint")
+                        self._apply_report_type_cooldown(dev_id, report_hint)
+
+                        # Ensure we don't leak the internal hint into public snapshots/entities.
+                        location.pop("_report_hint", None)
+
                         # Commit to cache and bump statistics
                         location["last_updated"] = wall_now  # wall-clock for UX
                         self._device_location_data[dev_id] = location
                         self.increment_stat("polled_updates")
 
-                    except asyncio.TimeoutError:
+                        # Immediate per-device update for more responsive UI during long poll cycles.
+                        self.push_updated([dev_id])
+
+                    except asyncio.TimeoutError as terr:
                         _LOGGER.info(
                             "Location request timed out for %s after %s seconds",
                             dev_name,
                             LOCATION_REQUEST_TIMEOUT_S,
                         )
                         self.increment_stat("timeouts")
+                        self.note_error(terr, where="poll_timeout", device=dev_name)
+                    except ConfigEntryAuthFailed:
+                        # Escalate auth failures to HA; abort remaining devices
+                        raise
                     except Exception as err:
                         _LOGGER.error("Failed to get location for %s: %s", dev_name, err)
+                        self.note_error(err, where="poll_exception", device=dev_name)
 
                     # Inter-device delay (except after the last one)
                     if idx < len(devices) - 1 and self.device_poll_delay > 0:
@@ -472,6 +1165,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 # Update scheduling baseline and clear flag, then push end snapshot
                 self._last_poll_mono = time.monotonic()
                 self._is_polling = False
+                self.safe_update_metric("last_poll_end_mono", time.monotonic())
                 end_snapshot = self._build_snapshot_from_cache(
                     devices, wall_now=time.time()
                 )
@@ -557,7 +1251,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     async def _async_build_device_snapshot_with_fallbacks(
         self, devices: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Build a snapshot using cache, HA state and (optionally) loud history fallback.
+        """Build a snapshot using cache, HA state and (optionally) history fallback.
 
         Args:
             devices: A list of device dictionaries to build the snapshot for.
@@ -608,7 +1302,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     snapshot.append(entry)
                     continue
 
-            # Optional loud history fallback
+            # Optional history fallback
             if self.allow_history_fallback:
                 _LOGGER.warning(
                     "No live state for %s (entity_id=%s); attempting history fallback via Recorder.",
@@ -655,7 +1349,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
 
     async def _debounced_save_stats(self) -> None:
-        """Debounce wrapper to coalesce frequent stat updates into a single write."""
+        """Debounce wrapper to coalesce frequent stat updates into a single write.
+
+        This coroutine MUST run on the HA event loop. It is scheduled safely via
+        `_schedule_stats_persist()` which ensures loop-thread execution.
+        """
         try:
             await asyncio.sleep(self._stats_debounce_seconds)
             await self._async_save_stats()
@@ -666,20 +1364,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug("Debounced stats save failed: %s", err)
 
     def _schedule_stats_persist(self) -> None:
-        """(Re)schedule a debounced persistence task for statistics."""
-        # Cancel a pending writer, if any, and schedule a fresh one.
-        if self._stats_save_task and not self._stats_save_task.done():
-            self._stats_save_task.cancel()
-        self._stats_save_task = self.hass.async_create_task(
-            self._debounced_save_stats(), name=f"{DOMAIN}.save_stats_debounced"
-        )
+        """(Re)schedule a debounced persistence task for statistics.
 
-    def increment_stat(self, stat_name: str) -> None:
-        """Increment a statistic counter and schedule debounced persistence.
-
-        Args:
-            stat_name: The name of the statistic to increment.
+        Thread-safe: may be called from any thread. Ensures cancellation and creation
+        of the debounced task happen on the HA loop.
         """
+        def _do_schedule() -> None:
+            # Cancel a pending writer, if any, and schedule a fresh one (loop-local).
+            if self._stats_save_task and not self._stats_save_task.done():
+                self._stats_save_task.cancel()
+            self._stats_save_task = self.hass.loop.create_task(
+                self._debounced_save_stats(), name=f"{DOMAIN}.save_stats_debounced"
+            )
+
+        if self._is_on_hass_loop():
+            _do_schedule()
+        else:
+            self._run_on_hass_loop(_do_schedule)
+
+    def _increment_stat_on_loop(self, stat_name: str) -> None:
+        """Increment a statistic on the HA loop and schedule persistence."""
         if stat_name in self.stats:
             before = self.stats[stat_name]
             self.stats[stat_name] = before + 1
@@ -693,6 +1397,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 stat_name,
                 list(self.stats.keys() ),
             )
+
+    def increment_stat(self, stat_name: str) -> None:
+        """Increment a statistic counter (thread-safe).
+
+        May be called from any thread. The actual mutation and scheduling are
+        marshalled onto the HA event loop.
+
+        Note on performance:
+        - The "hop" to the loop occurs exactly once here (constant per call).
+          We avoid repeated hops for inner micro-operations.
+        """
+        if self._is_on_hass_loop():
+            self._increment_stat_on_loop(stat_name)
+        else:
+            self._run_on_hass_loop(self._increment_stat_on_loop, stat_name)
 
     # ---------------------------- Public platform API -----------------------
     def get_device_location_data(self, device_id: str) -> Optional[Dict[str, Any]]:
@@ -731,20 +1450,59 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         slot.setdefault("last_seen", float(ts_epoch))
 
     def update_device_cache(self, device_id: str, location_data: Dict[str, Any]) -> None:
-        """Public, encapsulated update of the internal location cache for one device.
+        """Public, encapsulated update of the internal location cache for one device (thread-safe).
 
-        Used by the FCM receiver (push path). Expects validated fields.
+        Used by the FCM receiver (push path) and by internal manual-commit call sites.
+        Expects validated fields (decrypt layer performs fail-fast checks).
 
-        Args:
-            device_id: The canonical ID of the device.
-            location_data: The new location data dictionary.
+        Internal rules:
+        - Applies type-aware **poll** cooldowns based on an internal `_report_hint` (if present).
+        - Strips `_report_hint` from the cached payload to avoid exposing internal fields.
+        - Runs significance gating to prevent redundant cache churn. The cooldown still applies
+          even if the update is dropped as non-significant (server-friendly behaviour).
         """
+        if not self._is_on_hass_loop():
+            # Marshal entire update onto the HA loop to avoid cross-thread mutations.
+            self._run_on_hass_loop(self.update_device_cache, device_id, location_data)
+            return
+
         if not isinstance(location_data, dict):
             _LOGGER.debug("Ignored cache update for %s: payload is not a dict", device_id)
             return
 
+        # Discard stale updates that would regress time (push can arrive late).
+        existing_data = self._device_location_data.get(device_id)
+        new_seen = location_data.get("last_seen")
+        if existing_data is not None and new_seen is not None:
+            try:
+                existing_seen = float(existing_data.get("last_seen", 0.0))
+                if float(new_seen) < existing_seen:
+                    _LOGGER.debug(
+                        "Discarding stale push update for %s (new last_seen=%s < existing=%s)",
+                        device_id, new_seen, existing_seen
+                    )
+                    return
+            except (TypeError, ValueError):
+                # If timestamps are malformed, comparison is not possible.
+                # The update will proceed to the significance gate, which will handle it.
+                pass
+
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
+
+        # Apply type-aware **poll** cooldowns (if decrypt layer provided a hint),
+        # then drop the hint to keep internal-only.
+        self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+        slot.pop("_report_hint", None)
+
+        # Normalize coordinates (best-effort) if present; do not spam warnings here.
+        # The push path may deliver semantic-only updates (no coordinates), which is valid.
+        self._normalize_coords(slot, device_label=device_id, warn_on_invalid=False)
+
+        # Significance gate (prevents redundant churn while still respecting cooldowns)
+        if not self._is_significant_update(device_id, slot):
+            self.increment_stat("non_significant_dropped")
+            return
 
         # Ensure last_updated is present
         slot.setdefault("last_updated", time.time())
@@ -755,6 +1513,91 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             self._device_names[device_id] = name
 
         self._device_location_data[device_id] = slot
+        # Increment background updates to account for push/manual commits.
+        self.increment_stat("background_updates")
+
+    # ---------------------------- Significance / gating ----------------------
+    def _haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Return distance in meters between two WGS84 coordinates.
+
+        Implementation note:
+            Kept lightweight and allocation-free; called per candidate update only.
+        """
+        from math import radians, sin, cos, sqrt, atan2
+
+        R = 6371000.0  # Earth radius in meters
+        lat1_r, lon1_r = radians(float(lat1)), radians(float(lon1))
+        lat2_r, lon2_r = radians(float(lat2)), radians(float(lon2))
+        dlat = lat2_r - lat1_r
+        dlon = lon2_r - lon1_r
+        a = sin(dlat / 2.0) ** 2 + cos(lat1_r) * cos(lat2_r) * sin(dlon / 2.0) ** 2
+        c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a))
+        return R * c
+
+    def _is_significant_update(self, device_id: str, new_data: Dict[str, Any]) -> bool:
+        """Return True if the update carries meaningful new information.
+
+        This function acts as the primary gate to prevent redundant or low-value
+        updates from churning the state machine and recorder.
+
+        Criteria (in order of evaluation):
+          1. No previous data exists for the device.
+          2. The `last_seen` timestamp of the new data is newer than the existing one.
+          3. If timestamps are identical, an update is significant if:
+             a) The position has moved more than `self._movement_threshold` meters, OR
+             b) The accuracy has improved by at least 20% (smaller radius is better), OR
+             c) The qualitative data has changed (source, status, or semantic name).
+
+        Notes:
+          * This replaces a simple "same last_seen == duplicate" heuristic with a more
+            intelligent assessment of data quality.
+          * It is assumed that a staleness guard has already discarded updates where
+            `new_seen < existing_seen`.
+        """
+        existing = self._device_location_data.get(device_id)
+        if not existing:
+            return True
+
+        n_seen = new_data.get("last_seen")
+        e_seen = existing.get("last_seen")
+        try:
+            if n_seen is not None and e_seen is not None and float(n_seen) > float(e_seen):
+                return True
+        except Exception:
+            # If timestamps are malformed, comparison is not possible; fall through.
+            pass
+
+        # Same timestamp? Check for spatial delta and accuracy improvement.
+        if n_seen == e_seen:
+            n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
+            e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
+            if all(isinstance(v, (int, float)) for v in (n_lat, n_lon, e_lat, e_lon)):
+                try:
+                    dist = self._haversine_distance(e_lat, e_lon, n_lat, n_lon)
+                    if dist > float(self._movement_threshold):
+                        return True
+                except Exception:
+                    # Ignore distance errors and continue checks.
+                    pass
+
+            n_acc = new_data.get("accuracy")
+            e_acc = existing.get("accuracy")
+            if isinstance(n_acc, (int, float)) and isinstance(e_acc, (int, float)):
+                try:
+                    if float(n_acc) < float(e_acc) * 0.8:  # ≥20% better accuracy
+                        return True
+                except Exception:
+                    pass
+
+        # Source or qualitative changes can still be valuable.
+        if new_data.get("is_own_report") != existing.get("is_own_report"):
+            return True
+        if new_data.get("status") != existing.get("status"):
+            return True
+        if new_data.get("semantic_name") != existing.get("semantic_name"):
+            return True
+
+        return False
 
     def get_device_last_seen(self, device_id: str) -> Optional[datetime]:
         """Return last_seen as timezone-aware datetime (UTC) if cached.
@@ -794,51 +1637,76 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     # ---------------------------- Presence & Purge API ----------------------------
     def is_device_present(self, device_id: str) -> bool:
-        """Return True if the given device_id is present in the latest device list.
+        """Return True if the given device_id is present (TTL-smoothed).
 
-        Presence is derived from the most recent lightweight list returned by the API
-        (no filtering by `tracked_devices`). Entities should consult this in their
-        `available` property to reflect removal from the Google network.
+        Presence is determined by the last time the device appeared in the full list
+        and a time-to-live (`_presence_ttl_s`). This avoids availability flips on
+        transient empty lists.
         """
-        return device_id in self._present_device_ids
+        ts = self._present_last_seen.get(device_id, 0.0)
+        if not ts:
+            return False
+        return (time.monotonic() - float(ts)) <= float(self._presence_ttl_s)
 
     def get_absent_device_ids(self) -> List[str]:
-        """Return ids known by name/cache that are NOT present in the latest device list.
+        """Return ids known by name/cache that are **expired** under the presence TTL.
 
         Useful for diagnostics. This does not imply automatic removal.
         """
+        now_mono = time.monotonic()
+
+        def expired(dev_id: str) -> bool:
+            ts = self._present_last_seen.get(dev_id, 0.0)
+            return (not ts) or ((now_mono - float(ts)) > float(self._presence_ttl_s))
+
         known = set(self._device_names) | set(self._device_location_data)
-        return sorted(list(known - set(self._present_device_ids)))
+        return sorted([d for d in known if expired(d)])
 
     def purge_device(self, device_id: str) -> None:
-        """Remove all cached data and cooldown state for a device.
+        """Remove all cached data and cooldown state for a device (thread-safe publish).
 
         Called from the config-entry device deletion flow. This does not trigger a poll,
         but it immediately publishes an updated snapshot so UI can refresh.
         """
+        if not self._is_on_hass_loop():
+            self._run_on_hass_loop(self.purge_device, device_id)
+            return
+
         self._device_location_data.pop(device_id, None)
         self._device_names.pop(device_id, None)
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
+        self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
+        self._present_last_seen.pop(device_id, None)
         # Push a minimal update so listeners can refresh availability quickly
         self.async_set_updated_data(self.data)
 
     # ---------------------------- Push updates ------------------------------
-    def push_updated(self, device_ids: Optional[List[str]] = None) -> None:
+    def push_updated(self, device_ids: Optional[List[str]] = None, *, reset_baseline: bool = True) -> None:
         """Publish a fresh snapshot to listeners after push (FCM) cache updates.
+
+        Thread-safe: may be called from any thread. This method ensures all state
+        publishing happens on the HA event loop.
 
         This **does not** trigger a poll. It:
         - Immediately pushes cache state to entities via `async_set_updated_data()`.
-        - Resets the internal poll baseline to 'now' to prevent an immediate re-poll.
+        - Optionally resets the internal poll baseline to 'now' to prevent an immediate
+          re-poll when push-driven updates arrive (`reset_baseline=True` by default).
         - Optionally limits the snapshot to `device_ids`; otherwise includes all known devices.
 
         Args:
             device_ids: An optional list of device IDs to include in the update.
+            reset_baseline: If True (default), reset the scheduler baseline to now.
         """
+        if not self._is_on_hass_loop():
+            self._run_on_hass_loop(self.push_updated, device_ids, reset_baseline=reset_baseline)
+            return
+
         wall_now = time.time()
-        self._last_poll_mono = time.monotonic()  # reset poll timer
+        if reset_baseline:
+            self._last_poll_mono = time.monotonic()  # optional: reset poll timer
 
         # Choose device ids for the snapshot
         if device_ids:
@@ -847,11 +1715,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # union of all known names and cached locations
             ids = list({*self._device_names.keys(), *self._device_location_data.keys()})
 
-        # Respect tracked_devices semantics only for POLLING, not for discovery/snapshot
-        # (we still filter here if a user explicitly configured a subset for visibility).
-        # If you want snapshots to always include all, comment out the block below.
-        # if self.tracked_devices:
-        #     ids = [d for d in ids if d in self.tracked_devices]
+        # Touch presence timestamps for pushed devices (keeps presence stable)
+        now_mono = time.monotonic()
+        for dev_id in ids:
+            self._present_last_seen[dev_id] = now_mono
+
+        # Apply ignore filter to prevent resurfacing ignored devices via push path.
+        ignored = self._get_ignored_set()
+        ids = [d for d in ids if d not in ignored]
 
         # Build "devices" stubs from id->name mapping
         devices_stub: List[Dict[str, Any]] = [
@@ -978,25 +1849,34 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
           - no in-flight locate for the device,
           - per-device cooldown (lower-bounded by DEFAULT_MIN_POLL_INTERVAL) not active.
         """
+        # Block manual locate for ignored devices.
+        if self.is_ignored(device_id):
+            return False
         if not self._api_push_ready():
             return False
         if self._is_polling:
             return False
         if device_id in self._locate_inflight:
             return False
-        until = self._locate_cooldown_until.get(device_id, 0.0)
-        if until and time.monotonic() < until:
+        # Respect both manual-locate and poll cooldowns for the device
+        now_mono = time.monotonic()
+        until_manual = self._locate_cooldown_until.get(device_id, 0.0)
+        if until_manual and now_mono < until_manual:
+            return False
+        until_poll = self._device_poll_cooldown_until.get(device_id, 0.0)
+        if until_poll and now_mono < until_poll:
             return False
         return True
 
     def update_settings(
         self,
         *,
-        tracked_devices: Optional[List[str]] = None,
+        ignored_devices: Optional[List[str]] = None,
         location_poll_interval: Optional[int] = None,
         device_poll_delay: Optional[int] = None,
         min_poll_interval: Optional[int] = None,
         min_accuracy_threshold: Optional[int] = None,
+        movement_threshold: Optional[int] = None,
         allow_history_fallback: Optional[bool] = None,
     ) -> None:
         """Apply updated user settings provided by the config entry (options-first).
@@ -1005,15 +1885,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         regardless of where the values came from.
 
         Args:
-            tracked_devices: A list of device IDs to track.
+            ignored_devices: A list of device IDs to hide from snapshots/polling.
             location_poll_interval: The interval in seconds for location polling.
             device_poll_delay: The delay in seconds between polling devices.
             min_poll_interval: The minimum polling interval in seconds.
             min_accuracy_threshold: The minimum accuracy in meters.
-            allow_history_fallback: Whether to allow falling back to recorder history.
+            movement_threshold: The spatial delta (meters) required to treat updates as significant.
+            allow_history_fallback: Whether to allow falling back to Recorder history.
         """
-        if tracked_devices is not None:
-            self.tracked_devices = list(tracked_devices)
+        if ignored_devices is not None:
+            # This attribute is only used as a fallback when config_entry is not available.
+            self.ignored_devices = list(ignored_devices)
 
         if location_poll_interval is not None:
             try:
@@ -1043,6 +1925,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     "Ignoring invalid min_accuracy_threshold=%r", min_accuracy_threshold
                 )
 
+        if movement_threshold is not None:
+            try:
+                self._movement_threshold = max(0, int(movement_threshold))
+            except (TypeError, ValueError):
+                _LOGGER.warning("Ignoring invalid movement_threshold=%r", movement_threshold)
+
         if allow_history_fallback is not None:
             self.allow_history_fallback = bool(allow_history_fallback)
 
@@ -1060,15 +1948,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
           - Reject immediately if `can_request_location()` is False.
           - Mark request as in-flight and (optimistically) start a cooldown that
             equals `DEFAULT_MIN_POLL_INTERVAL`. This disables repeated clicks.
-          - On success: reset the polling baseline and clear the cooldown early
-            to re-enable the button once we got a response.
+          - On success: reset the polling baseline and set a **per-device cooldown**
+            (owner-report purge window) by clamping a dynamic guess.
           - Always notify listeners via `async_set_updated_data(self.data)`.
 
+        POPETS'25-informed behaviour:
+          - If the returned payload carries an internal `_report_hint` of
+            "in_all_areas" (~10 min throttle) or "high_traffic" (~5 min throttle),
+            we additionally apply a type-aware cooldown (at least server minimum
+            and at least one user poll interval). This stacks with the owner cooldown.
+
         Args:
-            device_id: The canonical ID of the device to locate.
+            device_id: The canonical ID of the device.
 
         Returns:
             A dictionary containing the location data (empty dict on gating).
+
+        Corrections:
+            - Persist the received location data into the coordinator cache.
+            - Mirror the Google Home spam filter used by the polling path.
+            - Preserve previous coordinates for semantic-only locations.
+            - Validate coordinates/accuracy and apply significance gating.
+            - Push a fresh snapshot via `push_updated([device_id])`.
         """
         name = self.get_device_display_name(device_id) or device_id
 
@@ -1086,13 +1987,112 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         try:
             location_data = await self.api.async_get_device_location(device_id, name)
-            if location_data:
-                # Successful manual locate: reset automatic poll timer and clear cooldown early
-                self._last_poll_mono = time.monotonic()
-                self._locate_cooldown_until.pop(device_id, None)
+            if not location_data:
+                return {}
+
+            # --- Parity with polling path: Google Home semantic spam filter --------
+            # Consume coordinate substitution from the filter when needed.
+            semantic_name = location_data.get("semantic_name")
+            if semantic_name and hasattr(self, "google_home_filter"):
+                try:
+                    should_filter, replacement_attrs = self.google_home_filter.should_filter_detection(
+                        device_id, semantic_name
+                    )
+                except Exception as gf_err:
+                    _LOGGER.debug("Google Home filter error for %s: %s", name, gf_err)
+                else:
+                    if should_filter:
+                        _LOGGER.debug("Filtering out Google Home spam detection for %s (manual locate)", name)
+                        # Successful but filtered: reset baseline, clear cooldown, and refresh UI.
+                        self._last_poll_mono = time.monotonic()
+                        self._locate_cooldown_until.pop(device_id, None)
+                        self.push_updated([device_id])
+                        return {}
+                    if replacement_attrs:
+                        location_data = dict(location_data)
+                        if "latitude" in replacement_attrs and "longitude" in replacement_attrs:
+                            location_data["latitude"] = replacement_attrs.get("latitude")
+                            location_data["longitude"] = replacement_attrs.get("longitude")
+                        if "radius" in replacement_attrs and replacement_attrs.get("radius") is not None:
+                            location_data["accuracy"] = replacement_attrs.get("radius")
+                        # Clear semantic name so HA Core's zone engine determines the final state.
+                        location_data["semantic_name"] = None
+            # ----------------------------------------------------------------------
+
+            # Preserve previous coordinates if only semantic location is provided.
+            if (location_data.get("latitude") is None or location_data.get("longitude") is None) and location_data.get("semantic_name"):
+                prev = self._device_location_data.get(device_id, {})
+                if prev:
+                    location_data.setdefault("latitude", prev.get("latitude"))
+                    location_data.setdefault("longitude", prev.get("longitude"))
+                    location_data.setdefault("accuracy", prev.get("accuracy"))
+                    location_data["status"] = "Semantic location; preserving previous coordinates"
+
+            # Validate/normalize coordinates (and accuracy if present).
+            if not self._normalize_coords(location_data, device_label=name):
+                if not location_data.get("semantic_name"):
+                    _LOGGER.debug(
+                        "No location data (coordinates or semantic name) available for %s in manual locate.",
+                        name,
+                    )
+                return {}
+
+            acc = location_data.get("accuracy")
+
+            # Accuracy quality filter
+            if (
+                isinstance(self._min_accuracy_threshold, int)
+                and self._min_accuracy_threshold > 0
+                and isinstance(acc, (int, float))
+                and float(acc) > float(self._min_accuracy_threshold)
+            ):
+                _LOGGER.debug(
+                    "Dropping low-quality fix for %s (accuracy=%sm > %sm)", name, acc, self._min_accuracy_threshold
+                )
+                self.increment_stat("low_quality_dropped")
+                return {}
+
+            # Prepare a copy for gating/cooldown application
+            slot = dict(location_data)
+            slot.setdefault("last_updated", time.time())
+
+            # Apply type-aware cooldowns based on internal hint (if any), then strip it.
+            self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+            slot.pop("_report_hint", None)
+
+            # Significance gate also for manual locate to avoid churn.
+            if not self._is_significant_update(device_id, slot):
+                self.increment_stat("non_significant_dropped")
+                return {}
+
+            # Commit to cache (update_device_cache ensures last_updated and stats)
+            self.update_device_cache(device_id, slot)
+
+            # Successful manual locate:
+            # - reset poll baseline,
+            # - set a per-device poll cooldown (owner purge window) using a dynamic guess
+            #   clamped into guardrails,
+            # - set the same cooldown for manual locate button to avoid spamming.
+            self._last_poll_mono = time.monotonic()
+            dynamic_guess = max(float(DEFAULT_MIN_POLL_INTERVAL), float(self.location_poll_interval))
+            owner_cooldown = _clamp(dynamic_guess, _COOLDOWN_OWNER_MIN_S, _COOLDOWN_OWNER_MAX_S)
+            now_mono = time.monotonic()
+            # Extend (not overwrite) any type-aware cooldown applied above
+            existing_deadline = self._device_poll_cooldown_until.get(device_id, 0.0)
+            owner_deadline = now_mono + owner_cooldown
+            self._device_poll_cooldown_until[device_id] = max(existing_deadline, owner_deadline)
+            self._locate_cooldown_until[device_id] = max(
+                self._locate_cooldown_until.get(device_id, 0.0), owner_deadline
+            )
+
+            # Touch presence for the device (a fresh interaction implies it exists)
+            self._present_last_seen[device_id] = now_mono
+
+            self.push_updated([device_id])
             return location_data or {}
         except Exception as err:
             _LOGGER.error("Manual locate for %s failed: %s", name, err)
+            self.note_error(err, where="async_locate_device", device=name)
             raise
         finally:
             self._locate_inflight.discard(device_id)
@@ -1125,5 +2125,35 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug(
                 "async_play_sound raised for %s: %s; entering cooldown", device_id, err
             )
+            self.note_error(err, where="async_play_sound", device=device_id)
+            self._note_push_transport_problem()
+            return False
+
+    async def async_stop_sound(self, device_id: str) -> bool:
+        """Stop sound on a device using the native async API (no executor).
+
+        Args:
+            device_id: The canonical ID of the device.
+
+        Returns:
+            True if the command was submitted successfully, False otherwise.
+        """
+        # Less strict than can_play_sound(): stopping is harmless but still requires push readiness.
+        if not self._api_push_ready():
+            _LOGGER.debug(
+                "Suppressing stop_sound call for %s: push not ready",
+                device_id,
+            )
+            return False
+        try:
+            ok = await self.api.async_stop_sound(device_id)
+            if not ok:
+                self._note_push_transport_problem()
+            return bool(ok)
+        except Exception as err:
+            _LOGGER.debug(
+                "async_stop_sound raised for %s: %s; entering cooldown", device_id, err
+            )
+            self.note_error(err, where="async_stop_sound", device=device_id)
             self._note_push_transport_problem()
             return False

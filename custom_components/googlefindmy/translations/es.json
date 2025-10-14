@@ -26,9 +26,8 @@
       },
       "device_selection": {
         "title": "Selección de dispositivos y sondeo",
-        "description": "Selecciona los dispositivos a seguir y configura los parámetros de sondeo:\n• Intervalo de sondeo de ubicación: con qué frecuencia iniciar un nuevo ciclo (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre las consultas de cada dispositivo dentro de un ciclo (1–60 segundos)\n\nLa integración recorre los dispositivos de forma secuencial y solicita datos de ubicación para cada uno con el retardo indicado.",
+        "description": "Los dispositivos descubiertos recientemente aparecen desactivados y se pueden activar en la configuración del dispositivo. Configura aquí los parámetros generales de sondeo:\n• Intervalo de sondeo de ubicación: con qué frecuencia iniciar un nuevo ciclo de sondeo (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre las consultas de cada dispositivo dentro de un ciclo (1–60 segundos)",
         "data": {
-          "tracked_devices": "Dispositivos seguidos",
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
           "device_poll_delay": "Retardo entre sondeos de dispositivos (s)",
           "min_accuracy_threshold": "Precisión mínima (m)",
@@ -46,7 +45,7 @@
     },
     "error": {
       "auth_failed": "Error de autenticación. Vuelve a intentarlo.",
-      "invalid_token": "Token no válido o faltan campos obligatorios.",
+      "invalid_token": "Credenciales no válidas (token/correo) o faltan campos obligatorios.",
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
       "no_devices": "No se han encontrado dispositivos. Asegúrate de que ‘Encontrar mi dispositivo’ esté activado en tu cuenta de Google.",
       "cannot_connect": "No se pudo conectar con la API de Google. Puede ser un problema temporal: inténtalo de nuevo más tarde.",
@@ -67,7 +66,8 @@
         "description": "¿Qué te gustaría configurar?",
         "menu_options": {
           "credentials": "Actualizar credenciales",
-          "settings": "Modificar ajustes"
+          "settings": "Modificar ajustes",
+          "visibility": "Visibilidad de dispositivos"
         }
       },
       "credentials": {
@@ -84,9 +84,8 @@
       },
       "settings": {
         "title": "Opciones",
-        "description": "Modificar la configuración de seguimiento:\n• Intervalo de sondeo de ubicación: frecuencia de consulta de ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Precisión mínima: ignorar ubicaciones peores que este valor (25–500 metros)\n• Umbral de movimiento: movimiento mínimo que desencadena una actualización de ubicación (10–200 metros)\n\nFiltro de Google Home:\n• Activar para agrupar las detecciones de Google Home en la zona ‘Hogar’\n• Las palabras clave aceptan coincidencias parciales (separadas por comas)\n• Ejemplo: ‘nest’ coincide con ‘Kitchen Nest Mini’",
+        "description": "Ajustar la configuración de localización:\n• Intervalo de sondeo de ubicación: frecuencia con la que se consultan ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Precisión mínima: ignorar ubicaciones peores que este valor (25–500 metros)\n• Umbral de movimiento: movimiento mínimo necesario para activar una actualización de ubicación (10–200 metros)\n\nFiltro de Google Home:\n• Activar para asociar las detecciones de Google Home con la zona «Hogar»\n• Las palabras clave admiten coincidencias parciales (separadas por comas)\n• Ejemplo: «nest» coincide con «Kitchen Nest Mini»",
         "data": {
-          "tracked_devices": "Dispositivos seguidos",
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
           "device_poll_delay": "Retardo entre sondeos de dispositivos (s)",
           "min_accuracy_threshold": "Precisión mínima (m)",
@@ -99,6 +98,13 @@
         "data_description": {
           "map_view_token_expiration": "Si está activado, los tokens de la vista de mapa caducan tras 1 semana. Si está desactivado (por defecto), no caducan."
         }
+      },
+      "visibility": {
+        "title": "Visibilidad de dispositivos",
+        "description": "Restaura dispositivos previamente ignorados para que vuelvan a ser visibles. Selecciona uno o varios dispositivos y guarda.",
+        "data": {
+          "unignore_devices": "Restaurar dispositivos"
+        }
       }
     },
     "error": {
@@ -106,10 +112,12 @@
       "invalid": "Falló la validación. Revisa tus datos.",
       "cannot_connect": "No se pudo conectar con la API de Google.",
       "choose_one": "Proporciona exactamente un método de credenciales.",
-      "required": "Este campo es obligatorio."
+      "required": "Este campo es obligatorio.",
+      "invalid_token": "Credenciales no válidas (token/correo). Comprueba el formato y el contenido."
     },
     "abort": {
-      "reconfigure_successful": "Reconfiguración correcta."
+      "reconfigure_successful": "Reconfiguración correcta.",
+      "no_ignored_devices": "No hay dispositivos ignorados para restaurar."
     }
   },
   "services": {
@@ -133,14 +141,24 @@
         }
       }
     },
+    "stop_sound": {
+      "name": "Detener sonido",
+      "description": "Detiene el sonido en un dispositivo de Google Find My.",
+      "fields": {
+        "device_id": {
+          "name": "Dispositivo",
+          "description": "Selecciona un dispositivo de Google Find My (o pasa un ID canónico desde Herramientas para desarrolladores)."
+        }
+      }
+    },
     "refresh_device_urls": {
       "name": "Actualizar URL de los dispositivos",
       "description": "Actualiza las URL de configuración de los dispositivos de Google Find My para que apunten a la vista de mapa integrada.",
       "fields": {}
     },
-    "locate_external": {
+    "locate_device_external": {
       "name": "Localizar dispositivo (externo)",
-      "description": "Localiza un dispositivo usando el servicio externo (delegado a la localización normal).",
+      "description": "Localiza un dispositivo usando el asistente externo; delega en la localización normal.",
       "fields": {
         "device_id": {
           "name": "Dispositivo",
@@ -172,6 +190,9 @@
       "play_sound": {
         "name": "Reproducir sonido"
       },
+      "stop_sound": {
+        "name": "Detener sonido"
+      },
       "locate_device": {
         "name": "Localizar ahora"
       }
@@ -184,9 +205,6 @@
     "sensor": {
       "last_seen": {
         "name": "Visto por última vez"
-      },
-      "stat_skipped_duplicates": {
-        "name": "Duplicados omitidos"
       },
       "stat_background_updates": {
         "name": "Actualizaciones en segundo plano"
@@ -208,6 +226,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Lecturas de baja precisión descartadas"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Actualizaciones no significativas descartadas"
       }
     }
   }

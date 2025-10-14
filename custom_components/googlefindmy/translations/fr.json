@@ -26,9 +26,8 @@
       },
       "device_selection": {
         "title": "Sélection des appareils et interrogation",
-        "description": "Sélectionnez les appareils à suivre et configurez les paramètres d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)\n\nL’intégration interroge les appareils de manière séquentielle et demande les données de position pour chaque appareil avec le délai spécifié.",
+        "description": "Les nouveaux appareils détectés apparaissent désactivés et peuvent être activés dans les paramètres de l’appareil. Configurez ici les paramètres généraux d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)",
         "data": {
-          "tracked_devices": "Appareils suivis",
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d’appareil (s)",
           "min_accuracy_threshold": "Précision minimale (m)",
@@ -46,7 +45,7 @@
     },
     "error": {
       "auth_failed": "Échec de l’authentification. Veuillez réessayer.",
-      "invalid_token": "Jeton invalide ou champs requis manquants.",
+      "invalid_token": "Identifiants invalides (jeton/e-mail) ou champs requis manquants.",
       "invalid_json": "Format JSON invalide dans le contenu de secrets.json.",
       "no_devices": "Aucun appareil trouvé. Assurez-vous que « Localiser mon appareil » est activé sur votre compte Google.",
       "cannot_connect": "Échec de la connexion à l’API Google. Il peut s’agir d’un problème temporaire — réessayez plus tard.",
@@ -67,7 +66,8 @@
         "description": "Que souhaitez-vous configurer ?",
         "menu_options": {
           "credentials": "Mettre à jour les identifiants",
-          "settings": "Modifier les paramètres"
+          "settings": "Modifier les paramètres",
+          "visibility": "Visibilité des appareils"
         }
       },
       "credentials": {
@@ -84,9 +84,8 @@
       },
       "settings": {
         "title": "Options",
-        "description": "Modifier les paramètres de suivi :\n• Intervalle d’interrogation de position : fréquence des requêtes de position (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes par appareil (1–60 secondes)\n• Précision minimale : ignorer les positions moins précises que cette valeur (25–500 mètres)\n• Seuil de mouvement : mouvement minimal déclenchant une mise à jour de la position (10–200 mètres)\n\nFiltre Google Home :\n• Activer pour regrouper les détections Google Home dans la zone « Domicile »\n• Les mots-clés acceptent les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
+        "description": "Ajuster les paramètres de localisation :\n• Intervalle d’interrogation de position : fréquence des requêtes de position (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes par appareil (1–60 secondes)\n• Précision minimale : ignorer les positions moins précises que cette valeur (25–500 mètres)\n• Seuil de mouvement : mouvement minimal déclenchant une mise à jour de la position (10–200 mètres)\n\nFiltre Google Home :\n• Activer pour associer les détections Google Home à la zone « Domicile »\n• Les mots-clés acceptent les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
         "data": {
-          "tracked_devices": "Appareils suivis",
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d’appareil (s)",
           "min_accuracy_threshold": "Précision minimale (m)",
@@ -99,6 +98,13 @@
         "data_description": {
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas."
         }
+      },
+      "visibility": {
+        "title": "Visibilité des appareils",
+        "description": "Restaurez des appareils précédemment ignorés pour les rendre à nouveau visibles. Sélectionnez un ou plusieurs appareils puis enregistrez.",
+        "data": {
+          "unignore_devices": "Restaurer des appareils"
+        }
       }
     },
     "error": {
@@ -106,10 +112,12 @@
       "invalid": "Échec de la validation. Veuillez vérifier vos saisies.",
       "cannot_connect": "Échec de la connexion à l’API Google.",
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
-      "required": "Ce champ est obligatoire."
+      "required": "Ce champ est obligatoire.",
+      "invalid_token": "Identifiants invalides (jeton/e-mail). Veuillez vérifier le format et le contenu."
     },
     "abort": {
-      "reconfigure_successful": "Reconfiguration réussie."
+      "reconfigure_successful": "Reconfiguration réussie.",
+      "no_ignored_devices": "Aucun appareil ignoré à restaurer."
     }
   },
   "services": {
@@ -133,14 +141,24 @@
         }
       }
     },
+    "stop_sound": {
+      "name": "Arrêter le son",
+      "description": "Arrêter le son sur un appareil Google Find My.",
+      "fields": {
+        "device_id": {
+          "name": "Appareil",
+          "description": "Sélectionnez un appareil Google Find My (ou transmettez un ID canonique via les Outils de développement)."
+        }
+      }
+    },
     "refresh_device_urls": {
       "name": "Actualiser les URL des appareils",
       "description": "Actualise les URL de configuration des appareils Google Find My pour qu’elles pointent vers la vue carte intégrée.",
       "fields": {}
     },
-    "locate_external": {
+    "locate_device_external": {
       "name": "Localiser l’appareil (externe)",
-      "description": "Localiser un appareil en utilisant le service externe (délègue à la localisation normale).",
+      "description": "Localiser un appareil à l’aide de l’assistant externe ; délègue à la localisation normale.",
       "fields": {
         "device_id": {
           "name": "Appareil",
@@ -172,6 +190,9 @@
       "play_sound": {
         "name": "Émettre un son"
       },
+      "stop_sound": {
+        "name": "Arrêter le son"
+      },
       "locate_device": {
         "name": "Localiser maintenant"
       }
@@ -184,9 +205,6 @@
     "sensor": {
       "last_seen": {
         "name": "Vu pour la dernière fois"
-      },
-      "stat_skipped_duplicates": {
-        "name": "Doublons ignorés"
       },
       "stat_background_updates": {
         "name": "Mises à jour en arrière-plan"
@@ -208,6 +226,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Positions à faible précision écartées"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Mises à jour non significatives écartées"
       }
     }
   }

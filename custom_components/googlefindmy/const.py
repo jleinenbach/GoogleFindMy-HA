@@ -1,4 +1,4 @@
-# /custom_components/googlefindmy/const.py
+# custom_components/googlefindmy/const.py
 """Constants for Google Find My Device integration.
 
 All constants defined here are intended to be import-safe across the integration.
@@ -7,11 +7,14 @@ Keep comments and docstrings in English; user-facing strings belong in translati
 
 from __future__ import annotations
 
+import time
+from typing import Any
+
 # --------------------------------------------------------------------------------------
 # Core identifiers
 # --------------------------------------------------------------------------------------
 DOMAIN: str = "googlefindmy"
-INTEGRATION_VERSION: str = "1.5.6-1"
+INTEGRATION_VERSION: str = "1.6"
 
 # --------------------------------------------------------------------------------------
 # Configuration keys (data vs. options separation)
@@ -24,7 +27,7 @@ DATA_SECRET_BUNDLE: str = "secrets_data"       # full GoogleFindMyTools secrets.
 DATA_AUTH_METHOD: str = "auth_method"          # "secrets_json" | "individual_tokens"
 
 # Options (user-changeable): stored in config_entry.options
-OPT_TRACKED_DEVICES: str = "tracked_devices"
+# (tracked_devices removed in Step 2; device inclusion is managed via HA device enable/disable)
 OPT_LOCATION_POLL_INTERVAL: str = "location_poll_interval"
 OPT_DEVICE_POLL_DELAY: str = "device_poll_delay"
 OPT_MIN_POLL_INTERVAL: str = "min_poll_interval"
@@ -35,10 +38,11 @@ OPT_ENABLE_STATS_ENTITIES: str = "enable_stats_entities"
 OPT_GOOGLE_HOME_FILTER_ENABLED: str = "google_home_filter_enabled"
 OPT_GOOGLE_HOME_FILTER_KEYWORDS: str = "google_home_filter_keywords"
 OPT_MAP_VIEW_TOKEN_EXPIRATION: str = "map_view_token_expiration"
+OPT_IGNORED_DEVICES: str = "ignored_devices"
 
-# Canonical list of option keys supported by the integration
+# Canonical list of option keys supported by the integration (without tracked_devices)
 OPTION_KEYS: tuple[str, ...] = (
-    OPT_TRACKED_DEVICES,
+    OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL,
@@ -87,7 +91,9 @@ DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
 
 # Aggregate defaults dictionary for option-first reading patterns
 DEFAULT_OPTIONS: dict[str, object] = {
-    OPT_TRACKED_DEVICES: [],
+    # Store ignored devices as mapping {device_id: {"name": str, "aliases": [str], "ignored_at": int, "source": str}}
+    # Backwards-compatible: old list[str] or dict[str,str] is auto-migrated on first write.
+    OPT_IGNORED_DEVICES: {},
     OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL: DEFAULT_MIN_POLL_INTERVAL,
@@ -100,11 +106,136 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
 }
 
+# -------------------- Options schema versioning (lightweight) --------------------
+# Used to mark that OPT_IGNORED_DEVICES is in "v2" (mapping with metadata).
+OPT_OPTIONS_SCHEMA_VERSION = "options_schema_version"
+_IGN_KEY_NAME = "name"
+_IGN_KEY_ALIASES = "aliases"
+_IGN_KEY_IGNORED_AT = "ignored_at"
+_IGN_KEY_SOURCE = "source"
+
+def _now_epoch() -> int:
+    """Return current epoch timestamp as an integer."""
+    return int(time.time())
+
+def coerce_ignored_mapping(raw: object) -> tuple[dict[str, dict], bool]:
+    """Coerce various legacy shapes into v2 mapping.
+    Accepted inputs:
+      v0: list[str]                   -> ids only
+      v1: dict[str, str]             -> id -> name
+      v2: dict[str, dict[str, Any]]  -> id -> metadata
+    Returns (mapping, changed_flag).
+    """
+    changed = False
+    out: dict[str, dict] = {}
+    if isinstance(raw, list):
+        # v0 -> v2
+        for dev_id in raw:
+            if isinstance(dev_id, str):
+                out[dev_id] = {
+                    _IGN_KEY_NAME: dev_id,
+                    _IGN_KEY_ALIASES: [],
+                    _IGN_KEY_IGNORED_AT: _now_epoch(),
+                    _IGN_KEY_SOURCE: "migrated_v0",
+                }
+        changed = True
+    elif isinstance(raw, dict):
+        # str->str ? (v1)
+        if all(isinstance(v, str) for v in raw.values()):
+            for dev_id, name in raw.items():  # type: ignore[assignment]
+                if isinstance(dev_id, str):
+                    out[dev_id] = {
+                        _IGN_KEY_NAME: name,
+                        _IGN_KEY_ALIASES: [],
+                        _IGN_KEY_IGNORED_AT: _now_epoch(),
+                        _IGN_KEY_SOURCE: "migrated_v1",
+                    }
+            changed = True
+        else:
+            # assume v2-ish; normalize keys
+            for dev_id, meta in raw.items():  # type: ignore[assignment]
+                if not isinstance(dev_id, str):
+                    continue
+                if not isinstance(meta, dict):
+                    meta = {_IGN_KEY_NAME: str(meta)}
+                out[dev_id] = {
+                    _IGN_KEY_NAME: meta.get(_IGN_KEY_NAME) or dev_id,
+                    _IGN_KEY_ALIASES: list(meta.get(_IGN_KEY_ALIASES) or []),
+                    _IGN_KEY_IGNORED_AT: int(meta.get(_IGN_KEY_IGNORED_AT) or _now_epoch()),
+                    _IGN_KEY_SOURCE: meta.get(_IGN_KEY_SOURCE) or "registry",
+                }
+    else:
+        out = {}
+    return out, changed
+
+def ignored_choices_for_ui(ignored_map: dict[str, dict]) -> dict[str, str]:
+    """Build UI labels 'Name (id)' directly from the stored mapping."""
+    return {
+        dev_id: f"{(meta.get(_IGN_KEY_NAME) or dev_id)} ({dev_id})"
+        for dev_id, meta in ignored_map.items()
+    }
+
+# --------------------------------------------------------------------------------------
+# CONFIG_FIELDS — server-side validation contract for config/options flows
+# --------------------------------------------------------------------------------------
+# Used by config_flow.py to apply strong validators (type/min/max/step) for known keys.
+# Keep keys in sync with OPTION_KEYS and default ranges used in schemas.
+CONFIG_FIELDS: dict[str, dict[str, object]] = {
+    OPT_LOCATION_POLL_INTERVAL: {
+        "type": "int",
+        "min": 60,
+        "max": 3600,
+        "step": 1,
+    },
+    OPT_DEVICE_POLL_DELAY: {
+        "type": "int",
+        "min": 1,
+        "max": 60,
+        "step": 1,
+    },
+    OPT_MIN_POLL_INTERVAL: {
+        "type": "int",
+        "min": 30,
+        "max": 3600,
+        "step": 1,
+    },
+    OPT_MIN_ACCURACY_THRESHOLD: {
+        "type": "int",
+        "min": 25,
+        "max": 500,
+        "step": 1,
+    },
+    OPT_MOVEMENT_THRESHOLD: {
+        "type": "int",
+        "min": 10,
+        "max": 200,
+        "step": 1,
+    },
+    OPT_ALLOW_HISTORY_FALLBACK: {
+        "type": "bool",
+    },
+    OPT_ENABLE_STATS_ENTITIES: {
+        "type": "bool",
+    },
+    OPT_GOOGLE_HOME_FILTER_ENABLED: {
+        "type": "bool",
+    },
+    OPT_GOOGLE_HOME_FILTER_KEYWORDS: {
+        "type": "str",
+    },
+    OPT_MAP_VIEW_TOKEN_EXPIRATION: {
+        "type": "bool",
+    },
+    # OPT_IGNORED_DEVICES is intentionally omitted: it is managed by a dedicated
+    # visibility flow and not edited as a raw field (list of ids).
+}
+
 # --------------------------------------------------------------------------------------
 # Services (align with services.yaml and translations)
 # --------------------------------------------------------------------------------------
 SERVICE_LOCATE_DEVICE: str = "locate_device"
 SERVICE_PLAY_SOUND: str = "play_sound"
+SERVICE_STOP_SOUND: str = "stop_sound"
 SERVICE_LOCATE_EXTERNAL: str = "locate_device_external"
 
 SERVICE_REFRESH_DEVICE_URLS: str = "refresh_device_urls"
@@ -159,7 +290,7 @@ __all__ = [
     "CONF_GOOGLE_EMAIL",
     "DATA_SECRET_BUNDLE",
     "DATA_AUTH_METHOD",
-    "OPT_TRACKED_DEVICES",
+    "OPT_IGNORED_DEVICES",
     "OPT_LOCATION_POLL_INTERVAL",
     "OPT_DEVICE_POLL_DELAY",
     "OPT_MIN_POLL_INTERVAL",
@@ -186,8 +317,10 @@ __all__ = [
     "GOOGLE_HOME_SPAM_THRESHOLD_MINUTES",
     "DEFAULT_MAP_VIEW_TOKEN_EXPIRATION",
     "DEFAULT_OPTIONS",
+    "CONFIG_FIELDS",
     "SERVICE_LOCATE_DEVICE",
     "SERVICE_PLAY_SOUND",
+    "SERVICE_STOP_SOUND",
     "SERVICE_LOCATE_EXTERNAL",
     "SERVICE_REFRESH_DEVICE_URLS",
     "SERVICE_REFRESH_URLS",
@@ -207,4 +340,6 @@ __all__ = [
     "FCM_ABORT_ON_SEQ_ERROR_COUNT",
     "STORAGE_KEY",
     "STORAGE_VERSION",
+    "coerce_ignored_mapping",
+    "ignored_choices_for_ui",
 ]

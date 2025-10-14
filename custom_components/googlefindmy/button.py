@@ -1,9 +1,21 @@
 # custom_components/googlefindmy/button.py
 """Button platform for Google Find My Device.
 
-Changes:
-- Availability now also reflects device presence from the coordinator (absent -> unavailable).
-- DeviceInfo no longer writes placeholder names into the registry; only real labels are used.
+This module exposes per-device buttons that trigger actions on Google Find My
+devices via the integration coordinator:
+
+- **Play Sound**: request the device to play a sound.
+- **Stop Sound**: request the device to stop a playing sound.
+- **Locate now**: trigger an immediate manual locate through the integration's
+  service call.
+
+Quality & design notes (HA Platinum guidelines)
+-----------------------------------------------
+* Async-first: no blocking calls on the event loop.
+* Availability mirrors device presence and capability gates from the coordinator.
+* Device registry naming respects user overrides; we never write placeholders.
+* Entity names are composed by Home Assistant using `has_entity_name=True`;
+  translations are provided via `translation_key`.
 """
 from __future__ import annotations
 
@@ -32,6 +44,13 @@ PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
     key="play_sound",
     translation_key="play_sound",
     icon="mdi:volume-high",
+)
+
+# New entity description for stopping a sound manually
+STOP_SOUND_DESCRIPTION = ButtonEntityDescription(
+    key="stop_sound",
+    translation_key="stop_sound",
+    icon="mdi:volume-off",
 )
 
 # New entity description for the manual "Locate now" action
@@ -88,6 +107,7 @@ async def async_setup_entry(
         name = device.get("name")
         if dev_id and name and dev_id not in known_ids:
             entities.append(GoogleFindMyPlaySoundButton(coordinator, device))
+            entities.append(GoogleFindMyStopSoundButton(coordinator, device))  # NEW
             entities.append(GoogleFindMyLocateButton(coordinator, device))
             known_ids.add(dev_id)
 
@@ -104,6 +124,7 @@ async def async_setup_entry(
             name = device.get("name")
             if dev_id and name and dev_id not in known_ids:
                 new_entities.append(GoogleFindMyPlaySoundButton(coordinator, device))
+                new_entities.append(GoogleFindMyStopSoundButton(coordinator, device))  # NEW
                 new_entities.append(GoogleFindMyLocateButton(coordinator, device))
                 known_ids.add(dev_id)
 
@@ -120,6 +141,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
 
     # Best practice: let HA compose "<Device Name> <translated entity name>"
     _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
     _attr_should_poll = False
     entity_description = PLAY_SOUND_DESCRIPTION
 
@@ -141,7 +163,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         """
         dev_id = self._device["id"]
         try:
-            # Presence gate (new)
+            # Presence gate
             if hasattr(self.coordinator, "is_device_present") and not self.coordinator.is_device_present(dev_id):
                 return False
             # Capability / push readiness gate (existing)
@@ -221,7 +243,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
-            serial_number=self._device["id"],  # technical id in the proper field
+            serial_number=self._device["id"],
             **info_kwargs,
         )
 
@@ -238,7 +260,6 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         if config_entry:
             # Helper defined in __init__.py for options-first reading
             from . import _opt
-
             token_expiration_enabled = _opt(
                 config_entry, "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             )
@@ -274,18 +295,174 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
             if result:
                 _LOGGER.info("Successfully submitted Play Sound request for %s", device_name)
             else:
-                _LOGGER.warning(
-                    "Failed to play sound on %s (request may have been rejected)",
-                    device_name,
-                )
-        except Exception as err:  # Avoid crashing the update loop
+                _LOGGER.warning("Failed to play sound on %s (request may have been rejected)", device_name)
+        except Exception as err: # Avoid crashing the update loop
             _LOGGER.error("Error playing sound on %s: %s", device_name, err)
+
+
+class GoogleFindMyStopSoundButton(CoordinatorEntity, ButtonEntity):
+    """Button to trigger 'Stop Sound' on a Google Find My Device."""
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
+    _attr_should_poll = False
+    entity_description = STOP_SOUND_DESCRIPTION
+
+    def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:
+        """Initialize the stop-sound button."""
+        super().__init__(coordinator)
+        self._device = device
+        dev_id = device["id"]
+        self._attr_unique_id = f"{DOMAIN}_{dev_id}_stop_sound"
+
+    @property
+    def available(self) -> bool:
+        """Return True if the device is present; do not couple to Play gating.
+
+        Rationale:
+        - The Play button may be intentionally unavailable during in-flight/cooldown.
+        - Stopping must remain possible in that phase.
+        We therefore:
+          1) require presence, and
+          2) prefer a dedicated `can_stop_sound()` if provided by the coordinator,
+             otherwise assume stopping is allowed when the device is present.
+        """
+        dev_id = self._device["id"]
+        try:
+            if hasattr(self.coordinator, "is_device_present") and not self.coordinator.is_device_present(dev_id):
+                return False
+            can_stop = getattr(self.coordinator, "can_stop_sound", None)
+            if callable(can_stop):
+                return bool(can_stop(dev_id))
+            # Do NOT fall back to can_play_sound(): Stop should stay available even if Play is gated.
+            return True
+        except (AttributeError, TypeError) as err:
+            _LOGGER.debug(
+                "StopSound availability check for %s (%s) raised %s; defaulting to True",
+                self._device.get("name", dev_id),
+                dev_id,
+                err,
+            )
+            return True
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """React to coordinator updates (availability and device name may change)."""
+        try:
+            data = getattr(self.coordinator, "data", None) or []
+            my_id = self._device["id"]
+            for dev in data:
+                if dev.get("id") == my_id:
+                    new_name = dev.get("name")
+                    if (
+                        new_name
+                        and new_name != "Google Find My Device"
+                        and new_name != self._device.get("name")
+                    ):
+                        old = self._device.get("name")
+                        self._device["name"] = new_name
+                        _maybe_update_device_registry_name(self.hass, self.entity_id, new_name)
+                        _LOGGER.debug(
+                            "StopSound button device label refreshed for %s: '%s' -> '%s'",
+                            my_id,
+                            old,
+                            new_name,
+                        )
+                    break
+        except (AttributeError, TypeError):
+            pass
+
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return DeviceInfo identical to Play Sound for consistent grouping."""
+        try:
+            base_url = get_url(
+                self.hass,
+                prefer_external=True,
+                allow_cloud=True,
+                allow_external=True,
+                allow_internal=True,
+            )
+        except HomeAssistantError:
+            base_url = "http://homeassistant.local:8123"
+
+        auth_token = self._get_map_token()
+        path = self._build_map_path(self._device["id"], auth_token, redirect=False)
+
+        raw_name = (self._device.get("name") or "").strip()
+        use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
+
+        info_kwargs: dict[str, Any] = {}
+        if use_name:
+            info_kwargs["name"] = use_name
+
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._device["id"])},
+            manufacturer="Google",
+            model="Find My Device",
+            configuration_url=f"{base_url}{path}",
+            serial_number=self._device["id"],
+            **info_kwargs,
+        )
+
+    @staticmethod
+    def _build_map_path(device_id: str, token: str, *, redirect: bool = False) -> str:
+        """Return the map URL *path* (no scheme/host)."""
+        if redirect:
+            return f"/api/googlefindmy/redirect_map/{device_id}?token={token}"
+        return f"/api/googlefindmy/map/{device_id}?token={token}"
+
+    def _get_map_token(self) -> str:
+        """Generate a simple map token (options-first; weekly/static)."""
+        config_entry = getattr(self.coordinator, "config_entry", None)
+        if config_entry:
+            from . import _opt
+            token_expiration_enabled = _opt(
+                config_entry, "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            )
+        else:
+            token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+
+        ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
+        if token_expiration_enabled:
+            week = str(int(time.time() // 604800))  # 7-day bucket
+            token_src = f"{ha_uuid}:{week}"
+        else:
+            token_src = f"{ha_uuid}:static"
+
+        return hashlib.md5(token_src.encode()).hexdigest()[:16]
+
+    async def async_press(self) -> None:
+        """Handle the button press (stop sound)."""
+        device_id = self._device["id"]
+        device_name = self._device.get("name", device_id)
+
+        if not self.available:
+            _LOGGER.warning(
+                "Stop Sound not available for %s (%s) — device absent or not eligible",
+                device_name,
+                device_id,
+            )
+            return
+
+        _LOGGER.debug("Stop Sound: attempting on %s (%s)", device_name, device_id)
+        try:
+            result = await self.coordinator.async_stop_sound(device_id)
+            if result:
+                _LOGGER.info("Successfully submitted Stop Sound request for %s", device_name)
+            else:
+                _LOGGER.warning("Failed to stop sound on %s (request may have been rejected)", device_name)
+        except Exception as err:
+            _LOGGER.error("Error stopping sound on %s: %s", device_name, err)
 
 
 class GoogleFindMyLocateButton(CoordinatorEntity, ButtonEntity):
     """Button to trigger an immediate 'Locate now' request (manual location update)."""
 
     _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False
     _attr_should_poll = False
     entity_description = LOCATE_DEVICE_DESCRIPTION
 
@@ -397,7 +574,6 @@ class GoogleFindMyLocateButton(CoordinatorEntity, ButtonEntity):
         config_entry = getattr(self.coordinator, "config_entry", None)
         if config_entry:
             from . import _opt  # lazy import to avoid HA startup overhead
-
             token_expiration_enabled = _opt(
                 config_entry, "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             )

@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/device_tracker.py
 """Device tracker platform for Google Find My Device."""
 from __future__ import annotations
 
@@ -74,8 +75,6 @@ async def async_setup_entry(
 
     Design:
     - Entities are created from the coordinator snapshot if available.
-    - On cold start, create "skeleton" entities from tracked IDs to enable RestoreEntity,
-      **without** writing any placeholder name to the device registry.
     - Add entities dynamically for devices discovered later.
     """
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][config_entry.entry_id]
@@ -93,18 +92,6 @@ async def async_setup_entry(
                 entities.append(GoogleFindMyDeviceTracker(coordinator, device))
             else:
                 _LOGGER.debug("Skipping device without id/name: %s", device)
-    else:
-        # No live data yet: create skeletons for configured tracked IDs (restore-friendly).
-        tracked_ids: list[str] = getattr(coordinator, "tracked_devices", []) or []
-        for dev_id in tracked_ids:
-            # IMPORTANT: no placeholder name here (avoids polluting the device registry).
-            known_ids.add(dev_id)
-            entities.append(GoogleFindMyDeviceTracker(coordinator, {"id": dev_id}))
-        if tracked_ids:
-            _LOGGER.debug(
-                "Created %d skeleton device_tracker entities for restore (no live data yet)",
-                len(tracked_ids),
-            )
 
     if entities:
         async_add_entities(entities, True)
@@ -148,6 +135,8 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     _attr_has_entity_name = False
     _attr_source_type = SourceType.GPS
     _attr_entity_category = None  # ensure tracker is not diagnostic
+    # Default to disabled in the registry (user must enable the device/entities)
+    _attr_entity_registry_enabled_default = False
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----
     @staticmethod

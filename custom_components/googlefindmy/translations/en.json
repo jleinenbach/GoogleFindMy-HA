@@ -26,9 +26,8 @@
       },
       "device_selection": {
         "title": "Select Devices and Polling",
-        "description": "Select the devices to track and configure the polling parameters:\n• Location poll interval: How often to start a new polling cycle (60–3600 seconds)\n• Device poll delay: Delay between individual device polls within a cycle (1–60 seconds)\n\nThe integration cycles through devices sequentially, requesting location data for each device with the specified delay.",
+        "description": "Newly discovered devices appear disabled and can be enabled in device settings. Configure the general polling parameters:\n• Location poll interval: How often to start a new polling cycle (60–3600 seconds)\n• Device poll delay: Delay between individual device polls within a cycle (1–60 seconds)",
         "data": {
-          "tracked_devices": "Tracked devices",
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
           "min_accuracy_threshold": "Minimum accuracy (m)",
@@ -46,7 +45,7 @@
     },
     "error": {
       "auth_failed": "Authentication failed. Please try again.",
-      "invalid_token": "Invalid token provided or required fields are missing.",
+      "invalid_token": "Invalid token/email provided or required fields are missing.",
       "invalid_json": "Invalid JSON format in secrets.json content.",
       "no_devices": "No devices found. Please ensure that Find My Device is enabled on your Google account.",
       "cannot_connect": "Failed to connect to the Google API. This may be temporary — please try again later.",
@@ -67,7 +66,8 @@
         "description": "What would you like to configure?",
         "menu_options": {
           "credentials": "Update credentials",
-          "settings": "Modify settings"
+          "settings": "Modify settings",
+          "visibility": "Device visibility"
         }
       },
       "credentials": {
@@ -84,9 +84,8 @@
       },
       "settings": {
         "title": "Options",
-        "description": "Modify tracking settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Min accuracy threshold: Ignore locations worse than this (25–500 meters)\n• Movement threshold: Minimum movement to trigger a location update (10–200 meters)\n\nGoogle Home Filter:\n• Enable to group Google Home detections into the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: 'nest' matches 'Kitchen Nest Mini'",
+        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Minimum accuracy: Ignore locations with an accuracy worse than this value (25–500 meters)\n• Movement threshold: Minimum movement required to trigger a location update (10–200 meters)\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: “nest” matches “Kitchen Nest Mini”",
         "data": {
-          "tracked_devices": "Tracked devices",
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
           "min_accuracy_threshold": "Minimum accuracy (m)",
@@ -99,6 +98,13 @@
         "data_description": {
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire."
         }
+      },
+      "visibility": {
+        "title": "Device Visibility",
+        "description": "Restore previously ignored devices to make them visible again. Select one or more devices to restore and save.",
+        "data": {
+          "unignore_devices": "Devices to restore"
+        }
       }
     },
     "error": {
@@ -106,10 +112,12 @@
       "invalid": "Validation failed. Please check your input.",
       "cannot_connect": "Failed to connect to the Google API.",
       "choose_one": "Please provide exactly one credential method.",
-      "required": "This field is required."
+      "required": "This field is required.",
+      "invalid_token": "Invalid credentials (token/email). Please check format and content."
     },
     "abort": {
-      "reconfigure_successful": "Reconfiguration successful."
+      "reconfigure_successful": "Reconfiguration successful.",
+      "no_ignored_devices": "There are no ignored devices to restore."
     }
   },
   "services": {
@@ -133,12 +141,22 @@
         }
       }
     },
+    "stop_sound": {
+      "name": "Stop Sound",
+      "description": "Stop the sound on a Google Find My device.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Select a Google Find My device (or pass a canonical ID via Developer Tools)."
+        }
+      }
+    },
     "refresh_device_urls": {
       "name": "Refresh Device URLs",
       "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view.",
       "fields": {}
     },
-    "locate_external": {
+    "locate_device_external": {
       "name": "Locate Device (External)",
       "description": "Locate a device using the external helper; delegates to the normal locate operation.",
       "fields": {
@@ -154,7 +172,7 @@
     },
     "rebuild_registry": {
       "name": "Rebuild / Migrate Registry",
-      "description": "Maintenance: run a soft data→options migration or rebuild entities/devices for this integration.",
+      "description": "Maintenance: Run a soft data→options migration or rebuild entities/devices for this integration.",
       "fields": {
         "mode": {
           "name": "Mode",
@@ -172,6 +190,9 @@
       "play_sound": {
         "name": "Play sound"
       },
+      "stop_sound": {
+        "name": "Stop sound"
+      },
       "locate_device": {
         "name": "Locate now"
       }
@@ -184,9 +205,6 @@
     "sensor": {
       "last_seen": {
         "name": "Last Seen"
-      },
-      "stat_skipped_duplicates": {
-        "name": "Skipped duplicates"
       },
       "stat_background_updates": {
         "name": "Background updates"
@@ -208,6 +226,9 @@
       },
       "stat_low_quality_dropped": {
         "name": "Low-accuracy dropped"
+      },
+      "stat_non_significant_dropped": {
+        "name": "Non-significant updates dropped"
       }
     }
   }

@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/map_view.py
 """Map view for Google Find My Device locations."""
 from __future__ import annotations
 
@@ -13,7 +14,11 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -137,6 +142,10 @@ class GoogleFindMyMapView(HomeAssistantView):
                 except ValueError:
                     pass  # keep default
 
+            # If user swapped values (or end < start), clamp to a sane 7-day window ending at end_time.
+            if end_time < start_time:
+                start_time = end_time - timedelta(days=7)
+
             try:
                 accuracy_filter = max(0, min(300, int(accuracy_param)))
             except (ValueError, TypeError):
@@ -153,9 +162,14 @@ class GoogleFindMyMapView(HomeAssistantView):
             if entity_id in history:
                 last_seen = None
                 for state in history[entity_id]:
-                    lat = state.attributes.get("latitude")
-                    lon = state.attributes.get("longitude")
-                    if lat is None or lon is None:
+                    lat_raw = state.attributes.get("latitude")
+                    lon_raw = state.attributes.get("longitude")
+                    if lat_raw is None or lon_raw is None:
+                        continue
+                    try:
+                        lat = float(lat_raw)
+                        lon = float(lon_raw)
+                    except (TypeError, ValueError):
                         continue
 
                     current_last_seen = state.attributes.get("last_seen")
@@ -164,11 +178,17 @@ class GoogleFindMyMapView(HomeAssistantView):
                         continue
                     last_seen = current_last_seen
 
+                    acc_raw = state.attributes.get("gps_accuracy", 0)
+                    try:
+                        acc = max(0.0, float(acc_raw))
+                    except (TypeError, ValueError):
+                        acc = 0.0
+
                     locations.append(
                         {
                             "lat": lat,
                             "lon": lon,
-                            "accuracy": state.attributes.get("gps_accuracy", 0),
+                            "accuracy": acc,
                             "timestamp": state.last_updated.isoformat(),
                             "last_seen": current_last_seen,
                             "entity_id": entity_id,
@@ -293,7 +313,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         # Generate markers JavaScript
         markers_js: list[str] = []
         for i, loc in enumerate(locations):
-            accuracy = loc.get("accuracy", 0)
+            accuracy = float(loc.get("accuracy", 0.0))
 
             # Color based on accuracy
             if accuracy <= 5:
@@ -304,7 +324,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                 color = "red"
 
             # Convert UTC timestamp to Home Assistant timezone
-            timestamp_utc = datetime.fromisoformat(loc["timestamp"].replace("Z", "+00:00"))
+            timestamp_utc = datetime.fromisoformat(str(loc["timestamp"]).replace("Z", "+00:00"))
             timestamp_local = dt_util.as_local(timestamp_utc)
 
             # Determine report source
@@ -528,7 +548,7 @@ class GoogleFindMyMapView(HomeAssistantView):
 
                     allCircles.forEach(function(circle) {{
                         if (maxAccuracy === 0 || circle.accuracy <= maxAccuracy) {{
-                            if (!map.hasLayer(circle)) {{ circle.addTo(map); }}
+                            if (map.hasLayer(circle)) {{ circle.addTo(map); }}
                         }} else {{
                             if (map.hasLayer(circle)) {{ map.removeLayer(circle); }}
                         }}
@@ -602,18 +622,18 @@ class GoogleFindMyMapView(HomeAssistantView):
         """
         import hashlib
         import time
-        from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
         config_entries = self.hass.config_entries.async_entries(DOMAIN)
         token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
         if config_entries:
             entry = config_entries[0]
             token_expiration_enabled = entry.options.get(
-                "map_view_token_expiration",
-                entry.data.get("map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
+                OPT_MAP_VIEW_TOKEN_EXPIRATION,
+                entry.data.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
             )
 
-        ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
+        # Prefer HA's instance UUID if present; fall back to a benign constant.
+        ha_uuid = str(self.hass.data.get("core.uuid") or "ha")
 
         if token_expiration_enabled:
             week = str(int(time.time() // 604800))  # 7-day bucket

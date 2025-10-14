@@ -24,6 +24,19 @@ play_sound:
         device:
           integration: googlefindmy
 
+stop_sound:
+  name: Stop Sound
+  description: "Stop the sound on a Google Find My device"
+  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
+  fields:
+    device_id:
+      name: Device
+      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
+      required: true
+      selector:
+        device:
+          integration: googlefindmy
+
 locate_device_external:
   name: Locate Device (External)
   description: "Get current location using an external GoogleFindMyTools helper (workaround for FCM issues)"

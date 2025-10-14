@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/binary_sensor.py
 """Binary sensor entities for Google Find My Device integration."""
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers import device_registry as dr  # Needed for DeviceEntryType
 
 from .const import DOMAIN, INTEGRATION_VERSION
 from .coordinator import GoogleFindMyCoordinator
