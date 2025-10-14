@@ -1221,7 +1221,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     )
                     return
             except (TypeError, ValueError):
-                # If timestamps are malformed, we cannot compare; let significance gate handle it.
+                # If timestamps are malformed, comparison is not possible.
+                # The update will proceed to the significance gate, which will handle it.
                 pass
 
         # Shallow copy to avoid caller-side mutation
@@ -1301,7 +1302,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             if n_seen is not None and e_seen is not None and float(n_seen) > float(e_seen):
                 return True
         except Exception:
-            # If timestamps are non-numeric, fall through to other checks.
+            # If timestamps are malformed, comparison is not possible; fall through.
             pass
 
         # Same timestamp? Check for spatial delta and accuracy improvement.
