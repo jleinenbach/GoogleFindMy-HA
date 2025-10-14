@@ -40,6 +40,7 @@ import asyncio
 import logging
 import math
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Protocol, Set, Callable
 
@@ -279,6 +280,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             "non_significant_dropped": 0,
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
+
+        # NEW: Performance metrics (timestamps, durations) & recent errors (bounded)
+        self.performance_metrics: Dict[str, float] = {}
+        self.recent_errors = deque(maxlen=5)  # entries: (epoch_ts, error_type, short_message)
 
         # Debounced stats persistence (avoid flushing on every increment)
         self._stats_save_task: Optional[asyncio.Task] = None
@@ -639,6 +644,81 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """
         return self._is_polling
 
+    # ---------------------------- NEW: Metrics & errors helpers -------------
+    def safe_update_metric(self, key: str, value: float) -> None:
+        """Safely set a numeric performance metric (float-coerced)."""
+        try:
+            self.performance_metrics[str(key)] = float(value)
+        except Exception:
+            # Never raise from diagnostics helpers
+            pass
+
+    def _short_error_message(self, exc: Exception | str) -> str:
+        """Return a compact, single-line error string (no PII redaction beyond truncation)."""
+        msg = str(exc)
+        # collapse newlines/whitespace
+        msg = " ".join(msg.split())
+        # bound message length
+        if len(msg) > 180:
+            msg = msg[:177] + "..."
+        return msg
+
+    def _append_recent_error(self, err_type: str, message: str) -> None:
+        """Append a (timestamp, type, message) triple to the bounded deque."""
+        try:
+            self.recent_errors.append((time.time(), err_type, self._short_error_message(message)))
+        except Exception:
+            pass
+
+    def note_error(self, exc: Exception, *, where: str = "", device: Optional[str] = None) -> None:
+        """Public helper to record non-fatal errors with minimal context."""
+        prefix = where or "coordinator"
+        if device:
+            prefix += f"({device})"
+        err_type = type(exc).__name__
+        self._append_recent_error(err_type, f"{prefix}: {exc}")
+
+    # Safe getters for durations based on keys that __init__.py may set.
+    def get_metric(self, key: str) -> Optional[float]:
+        val = self.performance_metrics.get(key)
+        return float(val) if isinstance(val, (int, float)) else None
+
+    def _get_duration(self, start_key: str, end_key: str) -> Optional[float]:
+        start = self.get_metric(start_key)
+        end = self.get_metric(end_key)
+        if start is None or end is None:
+            return None
+        try:
+            return max(0.0, float(end) - float(start))
+        except Exception:
+            return None
+
+    def get_setup_duration_seconds(self) -> Optional[float]:
+        """Duration between 'setup_start_monotonic' and 'setup_end_monotonic'."""
+        return self._get_duration("setup_start_monotonic", "setup_end_monotonic")
+
+    def get_fcm_acquire_duration_seconds(self) -> Optional[float]:
+        """Duration between 'setup_start_monotonic' and 'fcm_acquired_monotonic'."""
+        start = self.get_metric("setup_start_monotonic")
+        fcm = self.get_metric("fcm_acquired_monotonic")
+        if start is None or fcm is None:
+            return None
+        try:
+            return max(0.0, float(fcm) - float(start))
+        except Exception:
+            return None
+
+    def get_last_poll_duration_seconds(self) -> Optional[float]:
+        """Duration of the most recent sequential polling cycle (if recorded)."""
+        return self._get_duration("last_poll_start_mono", "last_poll_end_mono")
+
+    def get_recent_errors(self) -> List[Dict[str, Any]]:
+        """Return a JSON-friendly copy of recent error triples."""
+        out: List[Dict[str, Any]] = []
+        for ts, et, msg in list(self.recent_errors):
+            out.append({"timestamp": ts, "error_type": et, "message": msg})
+        return out
+
     # ---------------------------- HA Coordinator ----------------------------
     def _is_fcm_ready_soft(self) -> bool:
         """Return True if push transport appears ready (no awaits, no I/O).
@@ -873,7 +953,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # Let pre-wrapped UpdateFailed bubble as-is
             raise
         except Exception as exc:
-            # Coordinator contract: raise UpdateFailed on unexpected errors
+            # Record and raise as UpdateFailed per coordinator contract
+            self.note_error(exc, where="_async_update_data")
             raise UpdateFailed(exc) from exc
 
     # ---------------------------- Polling Cycle -----------------------------
@@ -913,6 +994,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     self._clear_fcm_deferral()
 
             self._is_polling = True
+            self.safe_update_metric("last_poll_start_mono", time.monotonic())
             _LOGGER.debug("Starting sequential poll of %d devices", len(devices))
 
             # Push an immediate "baseline" snapshot so UI reflects that a poll cycle began.
@@ -1067,18 +1149,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         # Immediate per-device update for more responsive UI during long poll cycles.
                         self.push_updated([dev_id])
 
-                    except asyncio.TimeoutError:
+                    except asyncio.TimeoutError as terr:
                         _LOGGER.info(
                             "Location request timed out for %s after %s seconds",
                             dev_name,
                             LOCATION_REQUEST_TIMEOUT_S,
                         )
                         self.increment_stat("timeouts")
+                        self.note_error(terr, where="poll_timeout", device=dev_name)
                     except ConfigEntryAuthFailed:
                         # Escalate auth failures to HA; abort remaining devices
                         raise
                     except Exception as err:
                         _LOGGER.error("Failed to get location for %s: %s", dev_name, err)
+                        self.note_error(err, where="poll_exception", device=dev_name)
 
                     # Inter-device delay (except after the last one)
                     if idx < len(devices) - 1 and self.device_poll_delay > 0:
@@ -1089,6 +1173,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 # Update scheduling baseline and clear flag, then push end snapshot
                 self._last_poll_mono = time.monotonic()
                 self._is_polling = False
+                self.safe_update_metric("last_poll_end_mono", time.monotonic())
                 end_snapshot = self._build_snapshot_from_cache(
                     devices, wall_now=time.time()
                 )
@@ -2015,6 +2100,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             return location_data or {}
         except Exception as err:
             _LOGGER.error("Manual locate for %s failed: %s", name, err)
+            self.note_error(err, where="async_locate_device", device=name)
             raise
         finally:
             self._locate_inflight.discard(device_id)
@@ -2047,6 +2133,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug(
                 "async_play_sound raised for %s: %s; entering cooldown", device_id, err
             )
+            self.note_error(err, where="async_play_sound", device=device_id)
             self._note_push_transport_problem()
             return False
 
@@ -2075,5 +2162,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.debug(
                 "async_stop_sound raised for %s: %s; entering cooldown", device_id, err
             )
+            self.note_error(err, where="async_stop_sound", device=device_id)
             self._note_push_transport_problem()
             return False
