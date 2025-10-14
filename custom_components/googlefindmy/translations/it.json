@@ -192,6 +192,9 @@
       "play_sound": {
         "name": "Riproduci suono"
       },
+      "stop_sound": {
+        "name": "Interrompi suono"
+      },
       "locate_device": {
         "name": "Localizza ora"
       }
