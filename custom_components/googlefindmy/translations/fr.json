@@ -206,9 +206,6 @@
       "last_seen": {
         "name": "Vu pour la dernière fois"
       },
-      "stat_skipped_duplicates": {
-        "name": "Doublons ignorés"
-      },
       "stat_background_updates": {
         "name": "Mises à jour en arrière-plan"
       },
