@@ -268,18 +268,20 @@ class GoogleFindMyAPI:
         """
         extended: List[Dict[str, Any]] = []
         for base in items:
-            dev = {
-                **base,
-                "latitude": None,
-                "longitude": None,
-                "altitude": None,
-                "accuracy": None,
-                "last_seen": None,
-                "status": "No location data (requires individual request)",
-                "is_own_report": None,
-                "semantic_name": None,
-                "battery_level": None,
-            }
+            dev = (
+                {
+                    **base,
+                    "latitude": None,
+                    "longitude": None,
+                    "altitude": None,
+                    "accuracy": None,
+                    "last_seen": None,
+                    "status": "No location data (requires individual request)",
+                    "is_own_report": None,
+                    "semantic_name": None,
+                    "battery_level": None,
+                }
+            )
             extended.append(dev)
         return extended
 
@@ -377,11 +379,10 @@ class GoogleFindMyAPI:
 
         Returns:
             A list of minimal device dicts (id, name, optional can_ring).
-            Returns an empty list on errors (graceful degradation).
 
         Raises:
             ConfigEntryAuthFailed: If authentication fails.
-            UpdateFailed: If the API is rate-limited or returns a server error.
+            UpdateFailed: If the API is rate-limited, returns a server error, or a network/other error occurs.
         """
         try:
             if not username:
@@ -405,11 +406,13 @@ class GoogleFindMyAPI:
             _LOGGER.error("Authentication failed while listing devices: %s", err)
             raise ConfigEntryAuthFailed(str(err)) from err
         except ClientError as err:
-            _LOGGER.error("Failed to get basic device list (async, network): %s", err)
-            return []
+            # Minimal-invasive change: do not degrade to empty success; signal transient failure.
+            _LOGGER.warning("Failed to get basic device list (async, network): %s", err)
+            raise UpdateFailed(f"Network error fetching device list: {err}") from err
         except Exception as err:
+            # Do not mask unexpected errors as an empty list; let the coordinator keep last good data.
             _LOGGER.error("Failed to get basic device list (async): %s", err)
-            return []
+            raise UpdateFailed(f"Unexpected error fetching device list: {err}") from err
 
     def get_basic_device_list(self) -> List[Dict[str, Any]]:
         """Thin sync wrapper around async_get_basic_device_list for non-HA contexts.
