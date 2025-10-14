@@ -458,7 +458,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """Handle Device Registry changes by rebuilding poll targets (rare)."""
         self._reindex_poll_targets_from_device_registry()
         # After changes, request a refresh so the next tick uses the new target sets.
-        self.async_request_refresh()
+        async self.async_request_refresh()
 
     # ---------------------------- Cooldown helpers (server-aware) -----------
     def _compute_type_cooldown_seconds(self, report_hint: Optional[str]) -> int:
