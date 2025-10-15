@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/Auth/adm_token_retrieval.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
@@ -16,6 +17,7 @@ Key points
 - Async-first: `async_get_adm_token()` is the primary API.
 - Legacy sync facade: `get_adm_token()` is provided for CLI/offline usage only
   and will raise a RuntimeError if called from within the HA event loop.
+
 Cache keys
 ----------
 - adm_token_<email>                  -> str : the ADM token
@@ -29,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Optional, Awaitable, Callable, Any
 
 import gpsoauth
 
@@ -84,6 +86,114 @@ async def _perform_oauth_with_aas(username: str) -> str:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _run)
 
+
+# -------------------- Isolated / flow-local exchange helpers --------------------
+
+async def _perform_oauth_with_provided_aas(username: str, aas_token: str) -> str:
+    """Like _perform_oauth_with_aas, but uses a caller-provided AAS token (no globals)."""
+    def _run() -> str:
+        resp = gpsoauth.perform_oauth(
+            username,
+            aas_token,
+            _ANDROID_ID,
+            service="oauth2:https://www.googleapis.com/auth/android_device_manager",
+            app=_APP_ID,
+            client_sig=_CLIENT_SIG,
+        )
+        if not resp or "Auth" not in resp:
+            raise RuntimeError(f"gpsoauth.perform_oauth returned invalid response: {resp}")
+        return resp["Auth"]
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _run)
+
+
+async def async_get_adm_token_isolated(
+    username: str,
+    *,
+    # One of the following must be provided to allow an isolated exchange:
+    aas_token: Optional[str] = None,
+    secrets_bundle: Optional[dict[str, Any]] = None,
+    # Optional, flow-local TTL metadata storage (to keep validation fully isolated)
+    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
+    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
+    retries: int = 1,
+    backoff: float = 1.0,
+) -> str:
+    """
+    Perform a *real* AAS→ADM exchange **without touching the global cache**.
+
+    Usage:
+      - Provide `aas_token` directly, or include it in `secrets_bundle['aas_token']`.
+      - Optionally pass `cache_get` / `cache_set` to record TTL metadata in a
+        flow-local ephemeral cache (used by Nova TTL policy during validation).
+
+    Returns:
+      ADM token string.
+
+    Raises:
+      RuntimeError if input is insufficient or exchange fails after retries.
+    """
+    if not isinstance(username, str) or not username:
+        raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token (isolated).")
+
+    # Prefer explicit parameter; otherwise look into the provided secrets bundle.
+    src_aas = aas_token
+    if src_aas is None and isinstance(secrets_bundle, dict):
+        candidate = secrets_bundle.get("aas_token")
+        if isinstance(candidate, str) and candidate.strip():
+            src_aas = candidate.strip()
+
+    if not src_aas:
+        raise RuntimeError(
+            "Isolated ADM exchange requires an AAS token (pass `aas_token` or include `aas_token` in `secrets_bundle`)."
+        )
+
+    last_exc: Optional[Exception] = None
+    attempts = max(1, retries + 1)
+    for attempt in range(attempts):
+        try:
+            tok = await _perform_oauth_with_provided_aas(username, src_aas)
+
+            # Best-effort: persist TTL metadata *only* via provided flow-local cache.
+            if cache_set is not None:
+                try:
+                    await cache_set(f"adm_token_{username}", tok)
+                    await cache_set(f"adm_token_issued_at_{username}", time.time())
+                    needs_bootstrap = True
+                    if cache_get is not None:
+                        try:
+                            existing = await cache_get(f"adm_probe_startup_left_{username}")
+                            needs_bootstrap = not bool(existing)
+                        except Exception:  # defensive
+                            needs_bootstrap = True
+                    if needs_bootstrap:
+                        await cache_set(f"adm_probe_startup_left_{username}", 3)
+                except Exception as meta_exc:  # never fail the exchange on metadata issues
+                    _LOGGER.debug("Isolated TTL metadata write skipped: %s", meta_exc)
+
+            return tok
+
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < attempts - 1:
+                sleep_s = backoff * (2**attempt)
+                _LOGGER.info(
+                    "Isolated ADM exchange failed (attempt %s/%s): %s — retrying in %.1fs",
+                    attempt + 1,
+                    attempts,
+                    exc,
+                    sleep_s,
+                )
+                await asyncio.sleep(sleep_s)
+                continue
+            _LOGGER.error("Isolated ADM exchange failed after %s attempts: %s", attempts, exc)
+
+    assert last_exc is not None
+    raise last_exc
+
+
+# --------------------- Standard async API (global cache) ---------------------
 
 async def async_get_adm_token(
     username: Optional[str] = None,
