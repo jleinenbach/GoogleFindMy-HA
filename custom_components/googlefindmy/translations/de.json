@@ -156,7 +156,7 @@
       "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
       "fields": {}
     },
-    "locate_device_external": {
+    "locate_external": {
       "name": "Gerät orten (extern)",
       "description": "Ortung über den externen Helfer; delegiert an die normale Ortung.",
       "fields": {
@@ -230,6 +230,20 @@
       "stat_non_significant_dropped": {
         "name": "Unwesentliche Aktualisierungen verworfen"
       }
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "Gerät '{device_id}' wurde nicht gefunden oder gehört nicht zu dieser Integration."
+    },
+    "locate_failed": {
+      "message": "Ortung für Gerät '{device_id}' fehlgeschlagen: {error}"
+    },
+    "play_sound_failed": {
+      "message": "Tonwiedergabe auf '{device_id}' fehlgeschlagen: {error}"
+    },
+    "stop_sound_failed": {
+      "message": "Tonstopp auf '{device_id}' fehlgeschlagen: {error}"
     }
   }
 }
