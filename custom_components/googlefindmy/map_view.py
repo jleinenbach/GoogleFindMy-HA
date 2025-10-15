@@ -173,6 +173,13 @@ class GoogleFindMyMapView(HomeAssistantView):
                         continue
 
                     current_last_seen = state.attributes.get("last_seen")
+                    try:
+                        # Fallback for invalid or missing last_seen in old recorder data
+                        if not (current_last_seen and float(current_last_seen) > 0):
+                            current_last_seen = state.last_updated.timestamp()
+                    except (ValueError, TypeError):
+                        current_last_seen = state.last_updated.timestamp()
+                        
                     if current_last_seen and current_last_seen == last_seen:
                         # de-dupe by identical last_seen
                         continue
