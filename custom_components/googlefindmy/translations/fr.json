@@ -156,7 +156,7 @@
       "description": "Actualise les URL de configuration des appareils Google Find My pour qu’elles pointent vers la vue carte intégrée.",
       "fields": {}
     },
-    "locate_device_external": {
+    "locate_external": {
       "name": "Localiser l’appareil (externe)",
       "description": "Localiser un appareil à l’aide de l’assistant externe ; délègue à la localisation normale.",
       "fields": {
@@ -230,6 +230,20 @@
       "stat_non_significant_dropped": {
         "name": "Mises à jour non significatives écartées"
       }
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "L’appareil '{device_id}' est introuvable ou ne fait pas partie de cette intégration."
+    },
+    "locate_failed": {
+      "message": "Échec de la localisation de l’appareil '{device_id}' : {error}"
+    },
+    "play_sound_failed": {
+      "message": "Échec de la lecture du son sur '{device_id}' : {error}"
+    },
+    "stop_sound_failed": {
+      "message": "Échec de l’arrêt du son sur '{device_id}' : {error}"
     }
   }
 }
