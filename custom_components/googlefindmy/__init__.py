@@ -16,7 +16,7 @@ import logging
 import os
 import socket
 import time
-from typing import Any, Tuple
+from typing import Any, Tuple, Iterable, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import voluptuous as vol
@@ -27,7 +27,11 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import CoreState, HomeAssistant, ServiceCall
-from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
+from homeassistant.exceptions import (
+    ConfigEntryNotReady,
+    HomeAssistantError,
+    ServiceValidationError,
+)
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.network import get_url
@@ -100,6 +104,14 @@ PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
 ]
+
+# ---- Runtime typing helpers -------------------------------------------------
+class RuntimeData:
+    """Container for per-entry runtime structures."""
+    def __init__(self, coordinator: GoogleFindMyCoordinator) -> None:
+        self.coordinator = coordinator
+
+MyConfigEntry = ConfigEntry
 
 
 # --- BEGIN: Helpers for resolution and manual locate ---------------------------
@@ -174,8 +186,8 @@ async def async_handle_manual_locate(
     coord = None
     try:
         canonical_id, friendly = _resolve_canonical_from_any(hass, arg)
-        # Use the renamed coordinator method for clarity
-        await coordinator.async_request_locate(canonical_id)
+        # Use the coordinator method dedicated to locate actions.
+        await coordinator.async_locate_device(canonical_id)
         _LOGGER.info("Successfully submitted manual locate for %s", friendly)
     except HomeAssistantError as err:
         # Redacted, bounded diagnostics record
@@ -392,7 +404,6 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
 
 # --------------------------- Shared FCM provider ---------------------------
 
-
 async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
     """Get or create the shared FCM receiver for this HA instance.
 
@@ -464,16 +475,35 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
 
 
 # ------------------------------ Setup / Unload -----------------------------
+async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+    """Set up the integration namespace and register global services.
+
+    Services must be registered from async_setup so they are always available,
+    even if no config entry is loaded, which enables frontend validation of
+    automations referencing these services.
+    """
+    bucket = hass.data.setdefault(DOMAIN, {})
+    bucket.setdefault("entries", {})  # entry_id -> RuntimeData
+
+    # Use a lock + idempotent flag to avoid double registration on racey startups.
+    services_lock = bucket.setdefault("services_lock", asyncio.Lock())
+    async with services_lock:
+        if not bucket.get("services_registered"):
+            await _async_register_services(hass)
+            bucket["services_registered"] = True
+            _LOGGER.debug("Registered %s services at integration level", DOMAIN)
+
+    return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up the integration from a config entry.
+async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
+    """Set up a config entry.
 
     Order of operations (important):
       1) Initialize and register TokenCache (includes legacy migration).
       2) Soft-migrate options and unique_ids; acquire and wire the shared FCM provider.
       3) Seed token cache from entry data (secrets bundle or individual tokens).
-      4) Build coordinator, register views/services, forward platforms.
+      4) Build coordinator, register views, forward platforms.
       5) Schedule initial refresh after HA is fully started.
 
     Notes:
@@ -617,6 +647,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Expose runtime object for modern consumers (diagnostics, repair, etc.). No secrets.
     entry.runtime_data = coordinator
+    hass.data[DOMAIN].setdefault("entries", {})[entry.entry_id] = RuntimeData(
+        coordinator=coordinator
+    )
 
     # Optional: attach Google Home filter (options-first configuration)
     from .google_home_filter import GoogleHomeFilter
@@ -624,7 +657,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.google_home_filter = GoogleHomeFilter(hass, _effective_config(entry))
     _LOGGER.debug("Initialized Google Home filter (options-first)")
 
-    # Share coordinator in hass.data
+    # Share coordinator in hass.data (legacy location for other modules)
     bucket = hass.data.setdefault(DOMAIN, {})
     bucket[entry.entry_id] = coordinator
 
@@ -638,9 +671,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.http.register_view(GoogleFindMyMapRedirectView(hass))
         bucket["views_registered"] = True
         _LOGGER.debug("Registered map views")
-
-    # Register services (available regardless of data freshness; idempotent)
-    await _async_register_services(hass, coordinator)
 
     # Forward platforms so RestoreEntity can populate immediately
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -706,8 +736,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry and its platforms.
+async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
+    """Unload a config entry.
 
     Notes:
         - FCM stop is *signaled* via the unload hook registered during setup.
@@ -718,14 +748,34 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # First, shut down coordinator lifecycle (unsubscribe DR listener, timers)
     try:
         coordinator: GoogleFindMyCoordinator | None = (
-            hass.data.get(DOMAIN, {}).get(entry.entry_id) or getattr(entry, "runtime_data", None)
+            hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            or getattr(entry, "runtime_data", None)
         )
         if coordinator:
             await coordinator.async_shutdown()
     except Exception as err:
         _LOGGER.debug("Coordinator async_shutdown raised during unload: %s", err)
 
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if ok:
+        # Drop runtime container
+        hass.data.setdefault(DOMAIN, {}).setdefault("entries", {}).pop(
+            entry.entry_id, None
+        )
+
+        # Unregister and close the TokenCache instance
+        cache = _unregister_instance(entry.entry_id)
+        if cache:
+            try:
+                await cache.close()
+                _LOGGER.debug(
+                    "TokenCache for entry '%s' has been flushed and closed.",
+                    entry.entry_id,
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err
+                )
 
     # Release shared FCM (decrement refcount and await bounded shutdown if it reaches zero)
     try:
@@ -733,383 +783,324 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("FCM release during async_unload_entry raised: %s", err)
 
-    # Unregister and close the TokenCache instance
-    cache = _unregister_instance(entry.entry_id)
-    if cache:
-        try:
-            await cache.close()
-            _LOGGER.debug(
-                "TokenCache for entry '%s' has been flushed and closed.", entry.entry_id
-            )
-        except Exception as err:
-            _LOGGER.warning(
-                "Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err
-            )
-
-    if unload_ok:
-        # Drop coordinator from hass.data
+    # Clear legacy pointer
+    if ok:
         hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
-        # Clear runtime_data to avoid holding references after unload.
         try:
             entry.runtime_data = None  # type: ignore[assignment]
         except Exception:
-            # Defensive: older cores may not expose runtime_data; ignore cleanly.
             pass
 
-    return unload_ok
+    return ok
 
 
 # ------------------------------- Services ---------------------------------
+async def _async_register_services(hass: HomeAssistant) -> None:
+    """Register integration-wide services.
 
+    The handlers resolve the correct coordinator per call based on the device_id.
+    They raise translated exceptions on user-facing errors.
+    """
 
-def _get_local_ip_sync() -> str:
-    """Best-effort local IP discovery via UDP connect (executor-only)."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except OSError:
-        return ""
-
-
-async def _async_register_services(
-    hass: HomeAssistant, coordinator: GoogleFindMyCoordinator
-) -> None:
-    """Register services for the integration (idempotent per-HA instance, race-free)."""
-    domain_bucket = hass.data.setdefault(DOMAIN, {})
-    services_lock = domain_bucket.setdefault("services_lock", asyncio.Lock())
-    # Contention monitoring: increment if services_lock already held
-    if services_lock.locked():
-        domain_bucket["services_lock_contention_count"] = (
-            int(domain_bucket.get("services_lock_contention_count", 0)) + 1
+    def _iter_runtimes(hass: HomeAssistant) -> Iterable[RuntimeData]:
+        """Yield all active runtime containers."""
+        entries: dict[str, RuntimeData] = hass.data.setdefault(DOMAIN, {}).setdefault(
+            "entries", {}
         )
-    async with services_lock:
-        if domain_bucket.get("services_registered"):
+        return entries.values()
+
+    async def _resolve_runtime_for_device_id(device_id: str) -> Tuple[RuntimeData, str]:
+        """Return the runtime and canonical_id for a device_id or raise translated error.
+
+        Implementation notes (robustness):
+        - Prefer Device Registry mapping from the provided device_id.
+        - Fall back to scanning active coordinators for the canonical id presence.
+        - Raise a translated ServiceValidationError if no runtime can be determined.
+        """
+        canonical_id, _ = _resolve_canonical_from_any(hass, device_id)
+
+        # 1) Device registry mapping (preferred)
+        dev_reg = dr.async_get(hass)
+        dev: Optional[dr.DeviceEntry] = dev_reg.async_get(device_id)
+        if dev:
+            for entry_id in dev.config_entries:
+                runtime = hass.data[DOMAIN]["entries"].get(entry_id)
+                if runtime:
+                    return runtime, canonical_id
+
+        # 2) Fallback: scan known coordinators for the device's canonical id
+        for runtime in _iter_runtimes(hass):
+            # Coordinator may expose a display/name lookup; use it as existence probe.
+            if hasattr(runtime.coordinator, "get_device_display_name"):
+                try:
+                    if runtime.coordinator.get_device_display_name(canonical_id):
+                        return runtime, canonical_id
+                except Exception:
+                    # Non-fatal probe failure; continue scanning.
+                    pass
+
+        # 3) Not found -> translated error
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="device_not_found",
+            translation_placeholders={"device_id": device_id},
+        )
+
+    async def async_locate_device_service(call: ServiceCall) -> None:
+        """Handle locate device service call."""
+        raw_device_id = call.data["device_id"]
+        try:
+            runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
+            await runtime.coordinator.async_locate_device(canonical_id)
+        except ServiceValidationError as err:
+            _LOGGER.error("Failed to locate device '%s': %s", raw_device_id, err)
+            raise
+        except Exception as err:
+            _LOGGER.error(
+                "An unexpected error occurred while locating device '%s': %s",
+                raw_device_id,
+                err,
+            )
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="locate_failed",
+                translation_placeholders={
+                    "device_id": raw_device_id,
+                    "error": str(err),
+                },
+            ) from err
+
+    async def async_play_sound_service(call: ServiceCall) -> None:
+        """Handle play sound service call."""
+        raw_device_id = call.data["device_id"]
+        try:
+            runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
+            await runtime.coordinator.async_play_sound(canonical_id)
+        except ServiceValidationError as err:
+            _LOGGER.error("Failed to play sound on '%s': %s", raw_device_id, err)
+            raise
+        except Exception as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="play_sound_failed",
+                translation_placeholders={
+                    "device_id": raw_device_id,
+                    "error": str(err),
+                },
+            ) from err
+
+    async def async_stop_sound_service(call: ServiceCall) -> None:
+        """Handle stop sound service call."""
+        raw_device_id = call.data["device_id"]
+        try:
+            runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
+            await runtime.coordinator.async_stop_sound(canonical_id)
+        except ServiceValidationError as err:
+            _LOGGER.error("Failed to stop sound on '%s': %s", raw_device_id, err)
+            raise
+        except Exception as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="stop_sound_failed",
+                translation_placeholders={
+                    "device_id": raw_device_id,
+                    "error": str(err),
+                },
+            ) from err
+
+    async def async_locate_external_service(call: ServiceCall) -> None:
+        """External locate device service (delegates to locate)."""
+        raw_device_id = call.data["device_id"]
+        try:
+            runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
+            await runtime.coordinator.async_locate_device(canonical_id)
+        except ServiceValidationError as err:
+            _LOGGER.error("Failed to execute external locate: %s", err)
+            raise
+        except Exception as err:
+            _LOGGER.error(
+                "Failed to execute external locate for '%s': %s", raw_device_id, err
+            )
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="locate_failed",
+                translation_placeholders={
+                    "device_id": raw_device_id,
+                    "error": str(err),
+                },
+            ) from err
+
+    async def async_refresh_device_urls_service(call: ServiceCall) -> None:
+        """Refresh configuration URLs for integration devices (absolute URL)."""
+        try:
+            base_url = get_url(
+                hass,
+                prefer_external=True,
+                allow_cloud=True,
+                allow_external=True,
+                allow_internal=True,
+            )
+        except HomeAssistantError as err:
+            _LOGGER.error("Could not determine base URL for device refresh: %s", err)
             return
 
-        def _get_coordinator_for_canonical_id(
-            canonical_id: str,
-        ) -> GoogleFindMyCoordinator | None:
-            """Resolve the owning coordinator for a canonical device id via Device Registry."""
-            dev_reg = dr.async_get(hass)
-            for dev in dev_reg.devices.values():
-                if any(
-                    domain == DOMAIN and ident == canonical_id
-                    for domain, ident in dev.identifiers
-                ):
-                    for entry_id in dev.config_entries:
-                        entry = hass.config_entries.async_get_entry(entry_id)
-                        if entry and entry.domain == DOMAIN:
-                            coord = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-                            if coord:
-                                return coord
-            return None
-
-        async def async_locate_device_service(call: ServiceCall) -> None:
-            """Handle locate device service call."""
-            raw = call.data["device_id"]
-            coord = None
-            try:
-                canonical_id, friendly = _resolve_canonical_from_any(hass, str(raw))
-                coord = _get_coordinator_for_canonical_id(canonical_id)
-                if coord is None:
-                    raise ValueError(f"No coordinator found for device '{canonical_id}'")
-
-                await coord.async_locate_device(canonical_id)
-                _LOGGER.info("Successfully submitted manual locate for %s", friendly)
-
-            except (ValueError, HomeAssistantError) as err:
-                _LOGGER.error("Failed to locate device '%s': %s", raw, err)
-                # Propagate to diagnostics buffer
-                if coord and getattr(coord, "_diag", None):
-                    coord._diag.add_error(
-                        code="manual_locate_failed",
-                        context={
-                            "device_id": "",
-                            "arg": str(raw)[:64],
-                            "reason": str(err)[:160],
-                        },
-                    )
-
-        async def async_play_sound_service(call: ServiceCall) -> None:
-            """Handle play sound service call."""
-            raw = call.data["device_id"]
-            try:
-                canonical_id, friendly = _resolve_canonical_from_any(hass, str(raw))
-                coord = _get_coordinator_for_canonical_id(canonical_id)
-                if coord is None:
-                    raise ValueError(f"No coordinator found for device '{canonical_id}'")
-                _LOGGER.info("Play Sound request for %s (%s)", friendly, canonical_id)
-                ok = await coord.async_play_sound(canonical_id)
-                if not ok:
-                    _LOGGER.warning(
-                        "Failed to play sound on %s (request may have been rejected by API)",
-                        friendly,
-                    )
-            except (ValueError, HomeAssistantError) as err:
-                _LOGGER.error("Failed to play sound: %s", err)
-            except Exception as err:
-                _LOGGER.error("Failed to play sound on '%s': %s", raw, err)
-
-        async def async_stop_sound_service(call: ServiceCall) -> None:
-            """Handle stop sound service call."""
-            raw = call.data["device_id"]
-            try:
-                canonical_id, friendly = _resolve_canonical_from_any(hass, str(raw))
-                coord = _get_coordinator_for_canonical_id(canonical_id)
-                if coord is None:
-                    raise ValueError(f"No coordinator found for device '{canonical_id}'")
-                _LOGGER.info("Stop Sound request for %s (%s)", friendly, canonical_id)
-                ok = await coord.async_stop_sound(canonical_id)
-                if not ok:
-                    _LOGGER.warning(
-                        "Failed to stop sound on %s (request may have been rejected by API)",
-                        friendly,
-                    )
-            except (ValueError, HomeAssistantError) as err:
-                _LOGGER.error("Failed to stop sound: %s", err)
-            except Exception as err:
-                _LOGGER.error("Failed to stop sound on '%s': %s", raw, err)
-
-        async def async_locate_external_service(call: ServiceCall) -> None:
-            """External locate device service (delegates to locate)."""
-            raw = call.data["device_id"]
-            provided_name = call.data.get("device_name")
-            try:
-                canonical_id, friendly = _resolve_canonical_from_any(hass, str(raw))
-                coord = _get_coordinator_for_canonical_id(canonical_id)
-                if coord is None:
-                    raise ValueError(f"No coordinator found for device '{canonical_id}'")
-                device_name = provided_name or friendly or canonical_id
-                _LOGGER.info(
-                    "External location request for %s (%s) - delegating to normal locate",
-                    device_name,
-                    canonical_id,
-                )
-                await coord.async_request_locate(canonical_id)
-            except (ValueError, HomeAssistantError) as err:
-                _LOGGER.error("Failed to execute external locate: %s", err)
-            except Exception as err:
-                _LOGGER.error(
-                    "Failed to execute external locate for '%s': %s", raw, err
-                )
-
-        async def async_refresh_device_urls_service(call: ServiceCall) -> None:
-            """Refresh configuration URLs for integration devices (absolute URL)."""
-            try:
-                base_url = get_url(
-                    hass,
-                    prefer_external=True,
-                    allow_cloud=True,
-                    allow_external=True,
-                    allow_internal=True,
-                )
-            except HomeAssistantError as err:
-                _LOGGER.error("Could not determine base URL for device refresh: %s", err)
-                return
-
-            # Token mode: options-first
-            ha_uuid = str(hass.data.get("core.uuid", "ha"))
-            config_entries = hass.config_entries.async_entries(DOMAIN)
-            token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-            if config_entries:
-                e0 = config_entries[0]
-                token_expiration_enabled = _opt(
-                    e0, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-                )
-
-            if token_expiration_enabled:
-                week = str(int(time.time() // 604800))  # weekly rotation bucket
-                auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
-            else:
-                auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
-
-            dev_reg = dr.async_get(hass)
-            updated_count = 0
-            for device in dev_reg.devices.values():
-                if any(identifier[0] == DOMAIN for identifier in device.identifiers):
-                    dev_id = next(
-                        (ident for domain, ident in device.identifiers if domain == DOMAIN),
-                        None,
-                    )
-                    if dev_id:
-                        new_config_url = (
-                            f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
-                        )
-                        dev_reg.async_update_device(
-                            device_id=device.id,
-                            configuration_url=new_config_url,
-                        )
-                        updated_count += 1
-                        _LOGGER.debug(
-                            "Updated URL for device %s: %s",
-                            device.name_by_user or device.name,
-                            _redact_url_token(new_config_url),
-                        )
-
-            _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
-
-        async def async_rebuild_registry_service(call: ServiceCall) -> None:
-            """Migrate soft settings or rebuild the registry (optionally scoped to device_ids).
-
-            Logic:
-                1. Determine target devices (all or a subset).
-                2. Remove all entities associated with these devices.
-                3. Remove orphaned devices (those with no entities left).
-                4. Reload the config entries associated with the affected devices.
-            """
-            mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
-            raw_ids = call.data.get(ATTR_DEVICE_IDS)
-
-            if isinstance(raw_ids, str):
-                target_device_ids = {raw_ids}
-            elif isinstance(raw_ids, (list, tuple, set)):
-                target_device_ids = {str(x) for x in raw_ids}
-            else:
-                target_device_ids = set()
-
-            dev_reg = dr.async_get(hass)
-            ent_reg = er.async_get(hass)
-            entries = hass.config_entries.async_entries(DOMAIN)
-
-            _LOGGER.info(
-                "googlefindmy.rebuild_registry requested: mode=%s, device_ids=%s",
-                mode,
-                "none"
-                if not raw_ids
-                else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
+        # Token mode: options-first, weekly rotation (or static) using HA instance UUID.
+        ha_uuid = str(hass.data.get("core.uuid", "ha"))
+        config_entries = hass.config_entries.async_entries(DOMAIN)
+        token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+        if config_entries:
+            e0 = config_entries[0]
+            token_expiration_enabled = _opt(
+                e0, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             )
 
-            if mode == MODE_MIGRATE:
-                for entry in entries:
-                    try:
-                        await _async_soft_migrate_data_to_options(hass, entry)
-                        await _async_migrate_unique_ids(hass, entry)
-                    except Exception as err:
-                        _LOGGER.error("Soft-migrate failed for entry %s: %s", entry.entry_id, err)
-                _LOGGER.info(
-                    "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
-                    len(entries),
+        if token_expiration_enabled:
+            week = str(int(time.time() // 604800))  # weekly rotation bucket
+            auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
+        else:
+            auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
+
+        dev_reg = dr.async_get(hass)
+        updated_count = 0
+        for device in dev_reg.devices.values():
+            if any(identifier[0] == DOMAIN for identifier in device.identifiers):
+                dev_id = next(
+                    (ident for domain, ident in device.identifiers if domain == DOMAIN),
+                    None,
                 )
-                return
+                if dev_id:
+                    new_config_url = (
+                        f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
+                    )
+                    dev_reg.async_update_device(
+                        device_id=device.id,
+                        configuration_url=new_config_url,
+                    )
+                    updated_count += 1
+                    _LOGGER.debug(
+                        "Updated URL for device %s: %s",
+                        device.name_by_user or device.name,
+                        _redact_url_token(new_config_url),
+                    )
 
-            if mode != MODE_REBUILD:
-                _LOGGER.error(
-                    "Unsupported mode '%s' for rebuild_registry; use one of: %s",
-                    mode,
-                    ", ".join(REBUILD_REGISTRY_MODES),
-                )
-                return
+        _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
-            affected_entry_ids: set[str] = set()
-            if target_device_ids:
-                candidate_devices = set()
-                for d in target_device_ids:
-                    dev = dev_reg.async_get(d)
-                    if dev is not None:
-                        candidate_devices.add(dev.id)
-                        affected_entry_ids.update(dev.config_entries)
-            else:
-                candidate_devices = set()
-                for dev in dev_reg.devices.values():
-                    if any(domain == DOMAIN for domain, _ in dev.identifiers):
-                        candidate_devices.add(dev.id)
-                        affected_entry_ids.update(dev.config_entries)
+    async def async_rebuild_registry_service(call: ServiceCall) -> None:
+        """Migrate soft settings or rebuild the registry (optionally scoped to device_ids).
 
-            if not candidate_devices:
-                _LOGGER.info("googlefindmy.rebuild_registry: no matching devices to rebuild.")
-                return
+        Logic:
+            1. Determine target devices (all or a subset).
+            2. Remove all entities associated with these devices.
+            3. Remove orphaned devices (those with no entities left).
+            4. Reload the config entries associated with the affected devices.
+        """
+        mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
+        raw_ids = call.data.get(ATTR_DEVICE_IDS)
 
-            removed_entities = 0
-            removed_devices = 0
+        if isinstance(raw_ids, str):
+            target_device_ids = {raw_ids}
+        elif isinstance(raw_ids, (list, tuple, set)):
+            target_device_ids = {str(x) for x in raw_ids}
+        else:
+            target_device_ids = set()
 
-            for ent in list(ent_reg.entities.values()):
-                if ent.platform == DOMAIN and ent.device_id in candidate_devices:
-                    try:
-                        ent_reg.async_remove(ent.entity_id)
-                        removed_entities += 1
-                    except Exception as err:
-                        _LOGGER.error("Failed to remove entity %s: %s", ent.entity_id, err)
+        dev_reg = dr.async_get(hass)
+        ent_reg = er.async_get(hass)
+        entries = hass.config_entries.async_entries(DOMAIN)
 
-            for dev_id in list(candidate_devices):
-                dev = dev_reg.async_get(dev_id)
-                if dev is None:
-                    continue
-                has_entities = any(e.device_id == dev_id for e in ent_reg.entities.values())
-                if not has_entities:
-                    try:
-                        dev_reg.async_remove_device(dev_id)
-                        removed_devices += 1
-                    except Exception as err:
-                        _LOGGER.error("Failed to remove device %s: %s", dev_id, err)
+        _LOGGER.info(
+            "googlefindmy.rebuild_registry requested: mode=%s, device_ids=%s",
+            mode,
+            "none"
+            if not raw_ids
+            else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
+        )
 
-            to_reload = [e for e in entries if e.entry_id in affected_entry_ids] or list(entries)
-            for entry in to_reload:
+        if mode == MODE_MIGRATE:
+            for entry in entries:
                 try:
-                    await hass.config_entries.async_reload(entry.entry_id)
+                    await _async_soft_migrate_data_to_options(hass, entry)
+                    await _async_migrate_unique_ids(hass, entry)
                 except Exception as err:
-                    _LOGGER.error("Reload failed for entry %s: %s", entry.entry_id, err)
-
+                    _LOGGER.error(
+                        "Soft-migrate failed for entry %s: %s", entry.entry_id, err
+                    )
             _LOGGER.info(
-                "googlefindmy.rebuild_registry: rebuild finished: removed %d entit(y/ies), %d device(s), entries reloaded=%d",
-                removed_entities,
-                removed_devices,
-                len(to_reload),
+                "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
+                len(entries),
             )
+            return
 
-        # Register all services for the integration under the lock.
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_LOCATE_DEVICE,
-            async_locate_device_service,
-            schema=vol.Schema({vol.Required("device_id"): cv.string}),
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_PLAY_SOUND,
-            async_play_sound_service,
-            schema=vol.Schema({vol.Required("device_id"): cv.string}),
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_STOP_SOUND,
-            async_stop_sound_service,
-            schema=vol.Schema({vol.Required("device_id"): cv.string}),
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_LOCATE_EXTERNAL,
-            async_locate_external_service,
-            schema=vol.Schema(
-                {
-                    vol.Required("device_id"): cv.string,
-                    vol.Optional("device_name"): cv.string,
-                }
-            ),
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_REFRESH_DEVICE_URLS,
-            async_refresh_device_urls_service,
-            schema=vol.Schema({}),
-        )
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_REBUILD_REGISTRY,
-            async_rebuild_registry_service,
-            schema=vol.Schema(
-                {
-                    vol.Optional(ATTR_MODE, default=MODE_REBUILD): vol.In(REBUILD_REGISTRY_MODES),
-                    vol.Optional(ATTR_DEVICE_IDS): vol.Any(cv.string, [cv.string]),
-                }
-            ),
-        )
+        if mode != MODE_REBUILD:
+            _LOGGER.error(
+                "Unsupported mode '%s' for rebuild_registry; use one of: %s",
+                mode,
+                ", ".join(REBUILD_REGISTRY_MODES),
+            )
+            return
 
-        domain_bucket["services_registered"] = True
+        affected_entry_ids: set[str] = set()
+        if target_device_ids:
+            candidate_devices = set()
+            for d in target_device_ids:
+                dev = dev_reg.async_get(d)
+                if dev is not None:
+                    candidate_devices.add(dev.id)
+                    affected_entry_ids.update(dev.config_entries)
+        else:
+            candidate_devices = set()
+            for dev in dev_reg.devices.values():
+                if any(domain == DOMAIN for domain, _ in dev.identifiers):
+                    candidate_devices.add(dev.id)
+                    affected_entry_ids.update(dev.config_entries)
+
+        if not candidate_devices:
+            _LOGGER.info(
+                "googlefindmy.rebuild_registry: no matching devices to rebuild."
+            )
+            return
+
+        removed_entities = 0
+        removed_devices = 0
+
+        for ent in list(ent_reg.entities.values()):
+            if ent.platform == DOMAIN and ent.device_id in candidate_devices:
+                try:
+                    ent_reg.async_remove(ent.entity_id)
+                    removed_entities += 1
+                except Exception as err:
+                    _LOGGER.error("Failed to remove entity %s: %s", ent.entity_id, err)
+
+        for dev_id in list(candidate_devices):
+            dev = dev_reg.async_get(dev_id)
+            if dev is None:
+                continue
+            has_entities = any(e.device_id == dev_id for e in ent_reg.entities.values())
+            if not has_entities:
+                try:
+                    dev_reg.async_remove_device(dev_id)
+                    removed_devices += 1
+                except Exception as err:
+                    _LOGGER.error("Failed to remove device %s: %s", dev_id, err)
+
+        to_reload = [e for e in entries if e.entry_id in affected_entry_ids] or list(
+            entries
+        )
+        for entry in to_reload:
+            try:
+                await hass.config_entries.async_reload(entry.entry_id)
+            except Exception as err:
+                _LOGGER.error("Reload failed for entry %s: %s", entry.entry_id, err)
+
+        _LOGGER.info(
+            "googlefindmy.rebuild_registry: rebuild finished: removed %d entit(y/ies), %d device(s), entries reloaded=%d",
+            removed_entities,
+            removed_devices,
+            len(to_reload),
+        )
 
 
 # ------------------- Device removal (HA "Delete device" hook) -------------------
-
 
 async def async_remove_config_entry_device(
     hass: HomeAssistant,
@@ -1144,7 +1135,9 @@ async def async_remove_config_entry_device(
 
     # Purge coordinator caches (best effort; does not trigger polling)
     try:
-        coordinator: GoogleFindMyCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        coordinator: GoogleFindMyCoordinator | None = hass.data.get(DOMAIN, {}).get(
+            entry.entry_id
+        )
         if coordinator is not None:
             coordinator.purge_device(dev_id)
     except Exception as err:
@@ -1154,7 +1147,9 @@ async def async_remove_config_entry_device(
     try:
         opts = dict(entry.options)
         # Coerce legacy shapes (list / dict[str,str]) to v2 mapping
-        current_raw = opts.get(OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES))
+        current_raw = opts.get(
+            OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES)
+        )
         ignored_map, migrated = coerce_ignored_mapping(current_raw)
 
         # Determine the best human name at deletion time
@@ -1188,3 +1183,15 @@ async def async_remove_config_entry_device(
 
     # Allow HA to delete the device (and its entities) if no other entry still references it
     return True
+
+
+# ------------------------------- Misc helpers ---------------------------------
+
+def _get_local_ip_sync() -> str:
+    """Best-effort local IP discovery via UDP connect (executor-only)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return ""
