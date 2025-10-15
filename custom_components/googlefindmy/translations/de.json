@@ -25,7 +25,7 @@
         }
       },
       "device_selection": {
-        "title": "Geräte und Abfrageintervall",
+        "title": "Abfrageeinstellungen",
         "description": "Neu erkannte Geräte erscheinen deaktiviert und können in den Geräteeinstellungen aktiviert werden. Konfiguriere hier die allgemeinen Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden)",
         "data": {
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
@@ -40,7 +40,12 @@
       },
       "reauth_confirm": {
         "title": "Erneute Authentifizierung",
-        "description": "Deine Anmeldedaten sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben."
+        "description": "Deine Anmeldedaten sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben.",
+        "data": {
+          "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
+          "oauth_token": "Neuer OAuth-Token",
+          "google_email": "Google-E-Mail"
+        }
       }
     },
     "error": {
