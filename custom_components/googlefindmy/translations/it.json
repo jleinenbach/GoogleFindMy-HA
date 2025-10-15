@@ -156,7 +156,7 @@
       "description": "Aggiorna gli URL di configurazione dei dispositivi Google Find My per puntare alla vista mappa integrata.",
       "fields": {}
     },
-    "locate_device_external": {
+    "locate_external": {
       "name": "Localizza dispositivo (esterno)",
       "description": "Localizza un dispositivo utilizzando l’assistente esterno; delega alla localizzazione normale.",
       "fields": {
@@ -230,6 +230,20 @@
       "stat_non_significant_dropped": {
         "name": "Aggiornamenti non significativi scartati"
       }
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "Il dispositivo '{device_id}' non è stato trovato o non fa parte di questa integrazione."
+    },
+    "locate_failed": {
+      "message": "Impossibile localizzare il dispositivo '{device_id}': {error}"
+    },
+    "play_sound_failed": {
+      "message": "Impossibile riprodurre il suono su '{device_id}': {error}"
+    },
+    "stop_sound_failed": {
+      "message": "Impossibile interrompere il suono su '{device_id}': {error}"
     }
   }
 }
