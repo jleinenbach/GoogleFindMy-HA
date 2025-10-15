@@ -1,11 +1,25 @@
+# custom_components/googlefindmy/services.yaml
+# Purpose: Service descriptions aligned 1:1 with integration handlers in __init__.py
+# Notes:
+# - Each device-scoped service offers a broad `target` (entities from domain `device_tracker`
+#   plus optional device/area) to improve UI selection. For backend compatibility, a
+#   dedicated `device_id` field remains REQUIRED and is used by the handlers.
+# - Error messages are not hard-coded here; handlers raise translated exceptions
+#   via `ServiceValidationError` (see translations/*).
+#
+
 locate_device:
   name: Locate Device
-  description: "Get the current location of a Google Find My device"
-  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
+  description: "Request the current location of a Google Find My device."
+  target:
+    entity:
+      domain: device_tracker
+    device: {}
+    area: {}
   fields:
     device_id:
       name: Device
-      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
+      description: "Select a Google Find My device (or pass an entity_id/canonical ID via Developer Tools)."
       required: true
       selector:
         device:
@@ -13,12 +27,16 @@ locate_device:
 
 play_sound:
   name: Play Sound
-  description: "Play a sound on a Google Find My device"
-  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
+  description: "Play a sound on a Google Find My device."
+  target:
+    entity:
+      domain: device_tracker
+    device: {}
+    area: {}
   fields:
     device_id:
       name: Device
-      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
+      description: "Select a Google Find My device (or pass an entity_id/canonical ID via Developer Tools)."
       required: true
       selector:
         device:
@@ -26,31 +44,40 @@ play_sound:
 
 stop_sound:
   name: Stop Sound
-  description: "Stop the sound on a Google Find My device"
-  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
+  description: "Stop the sound on a Google Find My device."
+  target:
+    entity:
+      domain: device_tracker
+    device: {}
+    area: {}
   fields:
     device_id:
       name: Device
-      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
+      description: "Select a Google Find My device (or pass an entity_id/canonical ID via Developer Tools)."
       required: true
       selector:
         device:
           integration: googlefindmy
 
-locate_device_external:
+locate_external:
   name: Locate Device (External)
-  description: "Get current location using an external GoogleFindMyTools helper (workaround for FCM issues)"
+  description: "Request location via an external helper path (delegates to normal locate)."
+  target:
+    entity:
+      domain: device_tracker
+    device: {}
+    area: {}
   fields:
     device_id:
       name: Device
-      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
+      description: "Select a Google Find My device (or pass an entity_id/canonical ID via Developer Tools)."
       required: true
       selector:
         device:
           integration: googlefindmy
     device_name:
       name: Device Name
-      description: "Optional friendly name used only for logs"
+      description: "Optional friendly name used for logging only."
       example: "Keys Tracker"
       required: false
       selector:
@@ -58,16 +85,15 @@ locate_device_external:
 
 refresh_device_urls:
   name: Refresh Device URLs
-  description: "Recompute and update each device's configuration_url to point to the map view (use after base-URL or token policy changes)"
+  description: "Recompute and update each device's configuration_url to point to the map view."
 
 rebuild_registry:
   name: Rebuild / Migrate Registry
-  description: "Maintenance: run a soft data→options migration or rebuild entities/devices for this integration."
+  description: "Maintenance: Perform a soft data→options migration or rebuild entities/devices for this integration."
   fields:
     mode:
       name: Mode
-      description: "Choose 'Rebuild' to remove entities/devices and reload; 'Migrate' only re-applies the soft data→options migration."
-      advanced: true
+      description: "Choose 'Rebuild' (remove entities/devices and reload) or 'Migrate' (re-apply data→options only)."
       required: false
       default: rebuild
       selector:
@@ -79,8 +105,7 @@ rebuild_registry:
               value: migrate
     device_ids:
       name: Devices (optional)
-      description: "Limit the operation to specific devices. Leave empty to target all Google Find My devices. (This selector passes HA device IDs.)"
-      advanced: true
+      description: "Limit operation to specific devices. Leave empty to target all Google Find My devices. (Selector passes HA device IDs.)"
       required: false
       selector:
         device:
