@@ -25,7 +25,7 @@
         }
       },
       "device_selection": {
-        "title": "Sélection des appareils et interrogation",
+        "title": "Paramètres d’interrogation",
         "description": "Les nouveaux appareils détectés apparaissent désactivés et peuvent être activés dans les paramètres de l’appareil. Configurez ici les paramètres généraux d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)",
         "data": {
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
@@ -40,7 +40,12 @@
       },
       "reauth_confirm": {
         "title": "Se réauthentifier",
-        "description": "Vos identifiants semblent invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nAstuce : vous pouvez soit coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail."
+        "description": "Vos identifiants semblent invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nAstuce : vous pouvez soit coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail.",
+        "data": {
+          "secrets_json": "Nouveau secrets.json (contenu complet)",
+          "oauth_token": "Nouveau jeton OAuth",
+          "google_email": "Adresse e-mail Google"
+        }
       }
     },
     "error": {
