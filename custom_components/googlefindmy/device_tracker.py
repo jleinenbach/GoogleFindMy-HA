@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
@@ -44,7 +43,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _maybe_update_device_registry_name(
-    hass: HomeAssistant, entity_id: string, new_name: str
+    hass: HomeAssistant, entity_id: str, new_name: str
 ) -> None:
     """Write the real Google device label into the Device Registry once known.
 
@@ -171,7 +170,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         """Initialize the tracker entity."""
         super().__init__(coordinator)
         self._device = device
-        self._attr_unique_id = f"{DOMAIN}_{device['id']}"
+        # Namespace unique_id by entry to avoid collisions in multi-account setups.
+        entry_id = getattr(getattr(coordinator, "config_entry", None), "entry_id", "default")
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{device['id']}"
         # With has_entity_name=False we must set the entity's name ourselves.
         # If name is missing during cold boot, HA will show the entity_id; that's fine.
         self._attr_name = self._display_name(device.get("name"))
