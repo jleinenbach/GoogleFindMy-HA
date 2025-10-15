@@ -34,14 +34,19 @@ import time
 import random
 import logging
 import threading
-from typing import Callable, Optional
+from typing import Callable, Optional, Awaitable, Any
 from datetime import datetime, timezone
 
 import aiohttp
 import httpx
 
 from custom_components.googlefindmy.Auth.username_provider import get_username, async_get_username
-from custom_components.googlefindmy.Auth.adm_token_retrieval import get_adm_token, async_get_adm_token as async_get_adm_token_api
+from custom_components.googlefindmy.Auth.adm_token_retrieval import (
+    get_adm_token,
+    async_get_adm_token as async_get_adm_token_api,
+    # New: isolated refresh (for config flow validation without global cache)
+    async_get_adm_token_isolated,
+)
 from custom_components.googlefindmy.Auth.token_cache import (
     get_cached_value,
     set_cached_value,
@@ -548,6 +553,12 @@ async def async_nova_request(
     hex_payload: str,
     username: Optional[str] = None,
     session: Optional[aiohttp.ClientSession] = None,
+    # Optional: initial token for config-flow isolation (bypass cache lookups)
+    token: Optional[str] = None,
+    # Optional overrides for flow-local validation (avoid global cache conflicts)
+    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
+    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
+    refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
 ) -> str:
     """
     Asynchronous Nova API request for Home Assistant.
@@ -561,6 +572,13 @@ async def async_nova_request(
         hex_payload: Hex string body.
         username: Optional username. If omitted, read from async cache.
         session: Optional aiohttp session to reuse.
+        token: Optional, direct ADM token to bypass cache lookups (for config flow).
+        cache_get/cache_set: Optional async functions to read/write TTL metadata
+            to a *flow-local* cache (dict-like). When provided, they fully replace
+            the global token cache for TTL policy use.
+        refresh_override: Optional async function returning a fresh token. Use
+            this to perform a *real* AAS→ADM refresh isolated from globals
+            (e.g. via `async_get_adm_token_isolated(...)`).
 
     Returns:
         Hex-encoded response body.
@@ -572,13 +590,19 @@ async def async_nova_request(
         NovaError: on other unrecoverable errors like network issues after retries.
     """
     url = f"https://android.googleapis.com/nova/{api_scope}"
-    user = username or await async_get_username()
-    if not user: raise ValueError("Username is not available for async_nova_request.")
+    
+    # Use provided credentials if available (for config flow), otherwise fetch from cache.
+    if token and username:
+        user = username
+        initial_token = token
+    else:
+        user = username or await async_get_username()
+        if not user: raise ValueError("Username is not available for async_nova_request.")
+        initial_token = await _get_initial_token_async(user, _LOGGER)
 
-    token = await _get_initial_token_async(user, _LOGGER)
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {initial_token}",
         "Accept-Language": "en-US",
         "User-Agent": NOVA_API_USER_AGENT,
     }
@@ -589,10 +613,17 @@ async def async_nova_request(
     except (binascii.Error, ValueError) as e:
         raise ValueError("Invalid hex payload for Nova request") from e
 
+    # Select cache/refresh providers (allow flow-local overrides)
+    get_fn = cache_get or async_get_cached_value
+    set_fn = cache_set or async_set_cached_value
+    rf_fn: Callable[[], Awaitable[Optional[str]]] = (
+        refresh_override or (lambda: async_get_adm_token_api(user))
+    )
+
     policy = AsyncTTLPolicy(
         username=user, logger=_LOGGER,
-        get_value=async_get_cached_value, set_value=async_set_cached_value,
-        refresh_fn=lambda: async_get_adm_token_api(user),
+        get_value=get_fn, set_value=set_fn,
+        refresh_fn=rf_fn,
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
     )
     await policy.pre_request()
@@ -670,4 +701,3 @@ async def async_nova_request(
     finally:
         if ephemeral_session and session:
             await session.close()
-

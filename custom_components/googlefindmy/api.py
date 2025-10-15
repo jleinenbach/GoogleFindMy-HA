@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 from aiohttp import ClientError, ClientSession
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -367,7 +367,14 @@ class GoogleFindMyAPI:
 
     # ----------------------------- Device enumeration ----------------------------
     async def async_get_basic_device_list(
-        self, username: Optional[str] = None
+        self,
+        username: Optional[str] = None,
+        *,
+        # Flow/local validation overrides (passed through to Nova):
+        token: Optional[str] = None,
+        cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
+        cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
+        refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
     ) -> List[Dict[str, Any]]:
         """Async variant of the lightweight device list used by HA flows/coordinator.
 
@@ -376,6 +383,10 @@ class GoogleFindMyAPI:
 
         Args:
             username: The Google account email. If None, it will be retrieved from the cache.
+            token: Optional auth token override to use for this call only.
+            cache_get: Optional async getter for TTL/aux metadata (flow-local).
+            cache_set: Optional async setter for TTL/aux metadata (flow-local).
+            refresh_override: Optional async callable to refresh/obtain a token for this call.
 
         Returns:
             A list of minimal device dicts (id, name, optional can_ring).
@@ -391,7 +402,33 @@ class GoogleFindMyAPI:
                 except Exception:
                     username = None
 
-            result_hex = await async_request_device_list(username)
+            # Prefer the HA-managed session if available.
+            sess = self._session
+
+            # Provide defaults for TTL metadata I/O if the caller didn't override.
+            cg = cache_get or self._cache.async_get_cached_value  # type: ignore[attr-defined]
+            cs = cache_set or self._cache.async_set_cached_value  # type: ignore[attr-defined]
+
+            # Forward flow/local knobs to the Nova ListDevices helper. If the installed
+            # helper is older and does not support these kwargs, gracefully fall back.
+            try:
+                result_hex = await async_request_device_list(
+                    username,
+                    session=sess,
+                    token=token,
+                    cache_get=cg,
+                    cache_set=cs,
+                    refresh_override=refresh_override,
+                )
+            except TypeError:
+                # Older helper signature (no pass-through); best-effort fallback matrix.
+                if sess is not None:
+                    try:
+                        result_hex = await async_request_device_list(username, session=sess)  # type: ignore[misc]
+                    except TypeError:
+                        result_hex = await async_request_device_list(username)  # type: ignore[misc]
+                else:
+                    result_hex = await async_request_device_list(username)  # type: ignore[misc]
 
             return self._process_device_list_response(result_hex)
         except asyncio.CancelledError:
