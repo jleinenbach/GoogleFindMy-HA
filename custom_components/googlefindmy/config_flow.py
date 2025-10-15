@@ -79,6 +79,7 @@ from .const import (
     coerce_ignored_mapping,
     ignored_choices_for_ui,
 )
+from .Auth.adm_token_retrieval import async_get_adm_token_isolated
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -234,14 +235,53 @@ async def async_pick_working_token(email: str, candidates: List[Tuple[str, str]]
     to verify the token works for the given Google account.
     This call is isolated and does not depend on the global cache state.
     """
-    for source, token in candidates:
+    for source, raw_token in candidates:
         try:
-            # Use an ephemeral API instance with explicit credentials for validation
-            api = GoogleFindMyAPI(oauth_token=token, google_email=email)
-            # Pass the token explicitly to the validation call to ensure isolation
-            await api.async_get_basic_device_list(username=email, token=token)
+            # Flow-local ephemeral TTL cache (kept purely in memory during validation)
+            _cache: dict[str, Any] = {}
+
+            async def _get(k: str) -> Any:
+                return _cache.get(k)
+
+            async def _set(k: str, v: Any) -> None:
+                if v is None:
+                    _cache.pop(k, None)
+                else:
+                    _cache[k] = v
+
+            # If the candidate is an AAS token, perform an isolated AAS→ADM exchange.
+            # Otherwise, use the token as-is.
+            if source == "aas_token":
+                adm_token = await async_get_adm_token_isolated(
+                    email,
+                    aas_token=raw_token,
+                    cache_get=_get,
+                    cache_set=_set,
+                )
+                flow_token = adm_token
+
+                async def _refresh_override() -> Optional[str]:
+                    return await async_get_adm_token_isolated(
+                        email, aas_token=raw_token, cache_get=_get, cache_set=_set
+                    )
+            else:
+                flow_token = raw_token
+
+                async def _refresh_override() -> Optional[str]:
+                    return None
+
+            # Use an ephemeral API instance with explicit credentials for validation,
+            # and pass the flow-local overrides down to Nova via the API call.
+            api = GoogleFindMyAPI(oauth_token=raw_token, google_email=email)
+            await api.async_get_basic_device_list(
+                username=email,
+                token=flow_token,
+                cache_get=_get,
+                cache_set=_set,
+                refresh_override=_refresh_override,
+            )
             _LOGGER.debug("Token from '%s' validated successfully.", source)
-            return token
+            return raw_token
         except Exception as err:  # noqa: BLE001 - network/auth errors
             _LOGGER.warning("Token from '%s' failed validation: %s", source, err)
             continue
