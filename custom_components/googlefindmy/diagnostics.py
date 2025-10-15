@@ -11,9 +11,15 @@ Privacy note:
 - POPETS’25 (Böttger et al., 2025) highlights that EID-related artifacts and UT bits can be used
   for correlation/identification. We therefore **over-redact** such fields, even if we never place
   them into diagnostics directly. This is a defense-in-depth safeguard to keep future changes safe.
+
+Additional privacy hardening (message bodies):
+- Coordinator "recent errors" may contain a human-readable "where(...)" prefix that can embed device
+  names. We therefore strip any parenthesized content from the prefix and avoid returning the free-form
+  message body entirely. Only a coarse "where" tag, error type, and timestamp are exposed.
 """
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -37,6 +43,9 @@ from .const import (
     OPT_ENABLE_STATS_ENTITIES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_IGNORED_DEVICES,
+    # defaults for options (used to avoid hard-coded literals)
+    DEFAULT_ENABLE_STATS_ENTITIES,
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     # secrets in entry.data (must never be exposed)
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
@@ -245,7 +254,17 @@ def _fcm_receiver_state(hass: HomeAssistant) -> Optional[dict[str, Any]]:
 
 
 def _recent_errors_block(coordinator: Any) -> Optional[list[dict[str, Any]]]:
-    """Convert coordinator.recent_errors (deque) to a redacted list."""
+    """Convert coordinator.recent_errors (deque) to a redacted list.
+
+    Original intent:
+        Return a bounded list of recent non-fatal errors for diagnostics.
+
+    Correction / privacy hardening:
+        Messages may include a 'where(...)' prefix that could embed device display names.
+        We now extract only the coarse 'where' label (text before the first ':') and
+        replace any parenthesized content with a generic placeholder '(*)'. The free-form
+        message body is **not** included to avoid PII leakage.
+    """
     try:
         recent = getattr(coordinator, "recent_errors", None)
     except Exception:
@@ -261,11 +280,20 @@ def _recent_errors_block(coordinator: Any) -> Optional[list[dict[str, Any]]]:
         except Exception:
             # Be defensive with unknown tuple shapes
             ts, etype, msg = (None, None, None)
+
+        # Extract a safe "where" tag (prefix up to ':') and scrub parentheses content.
+        where = None
+        try:
+            prefix = str(msg or "").split(":", 1)[0].strip()
+            where = re.sub(r"\([^)]*\)", "(*)", prefix)
+        except Exception:
+            where = None
+
         items.append(
             {
                 "timestamp": _iso_utc(ts),
                 "error_type": _safe_truncate(etype, 64),
-                "message": _safe_truncate(msg, 160),
+                "where": _safe_truncate(where, 64),
             }
         )
     return items or None
@@ -333,9 +361,13 @@ async def async_get_config_entry_diagnostics(
         "movement_threshold": _coerce_pos_int(opt.get(OPT_MOVEMENT_THRESHOLD, 50), 50),
         # Feature toggles
         "google_home_filter_enabled": bool(opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, False)),
-        "enable_stats_entities": bool(opt.get(OPT_ENABLE_STATS_ENTITIES, True)),
+        "enable_stats_entities": bool(
+            opt.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
+        ),
         # Token lifetime: store boolean value
-        "map_view_token_expiration": bool(opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, False)),
+        "map_view_token_expiration": bool(
+            opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+        ),
         # Counts only (never expose strings/IDs)
         "google_home_filter_keywords_count": _count_keywords(opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS)),
         "ignored_devices_count": ignored_count,
@@ -394,8 +426,18 @@ async def async_get_config_entry_diagnostics(
         perf_metrics = getattr(coordinator, "performance_metrics", {}) or {}
         setup_perf = _perf_durations(perf_metrics)
 
-        # Recent, redacted non-fatal errors (bounded)
+        # Recent, strictly redacted non-fatal errors (bounded)
         recent_errors = _recent_errors_block(coordinator)
+
+        # Optional anonymous counters: enabled poll targets & present devices as seen last
+        try:
+            enabled_poll_targets_count = len(getattr(coordinator, "_enabled_poll_device_ids", set()) or set())
+        except (AttributeError, TypeError):
+            enabled_poll_targets_count = None
+        try:
+            present_devices_seen_count = len(getattr(coordinator, "_present_device_ids", set()) or set())
+        except (AttributeError, TypeError):
+            present_devices_seen_count = None
 
         coordinator_block = {
             "is_polling": bool(getattr(coordinator, "_is_polling", False)),
@@ -403,6 +445,8 @@ async def async_get_config_entry_diagnostics(
             "cache_items_count": cache_items_count,
             "last_poll_wall_ts": last_poll_wall,  # seconds since epoch (UTC)
             "stats": stats,
+            "enabled_poll_targets_count": enabled_poll_targets_count,
+            "present_devices_seen_count": present_devices_seen_count,
         }
         if setup_perf:
             coordinator_block["setup_performance"] = setup_perf
