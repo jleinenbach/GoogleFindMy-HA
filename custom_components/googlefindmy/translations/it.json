@@ -25,7 +25,7 @@
         }
       },
       "device_selection": {
-        "title": "Selezione dispositivi e polling",
+        "title": "Impostazioni di interrogazione",
         "description": "I nuovi dispositivi rilevati appaiono disattivati e possono essere attivati nelle impostazioni del dispositivo. Configura qui i parametri generali di polling:\n• Intervallo di polling posizione: frequenza di avvio di un nuovo ciclo (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per ciascun dispositivo all’interno di un ciclo (1–60 secondi)",
         "data": {
           "location_poll_interval": "Intervallo di polling posizione (s)",
@@ -40,7 +40,12 @@
       },
       "reauth_confirm": {
         "title": "Riautenticazione",
-        "description": "Le tue credenziali sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email."
+        "description": "Le tue credenziali sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email.",
+        "data": {
+          "secrets_json": "Nuovo secrets.json (contenuto completo)",
+          "oauth_token": "Nuovo token OAuth",
+          "google_email": "Email Google"
+        }
       }
     },
     "error": {
@@ -49,7 +54,7 @@
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
       "no_devices": "Nessun dispositivo trovato. Assicurati che ‘Trova il mio dispositivo’ sia attivato nel tuo account Google.",
       "cannot_connect": "Impossibile connettersi all’API di Google. Potrebbe trattarsi di un problema temporaneo — riprova più tardi.",
-      "choose_one": "Fornisci esattamente un metodo di credenziali.",
+      "choose_one": "Fornisci esattamente un solo metodo di autenticazione.",
       "required": "Questo campo è obbligatorio.",
       "unknown": "Errore imprevisto."
     },
@@ -111,7 +116,7 @@
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
       "invalid": "Convalida non riuscita. Controlla i tuoi dati.",
       "cannot_connect": "Impossibile connettersi all’API di Google.",
-      "choose_one": "Fornisci esattamente un metodo di credenziali.",
+      "choose_one": "Fornisci esattamente un solo metodo di autenticazione.",
       "required": "Questo campo è obbligatorio.",
       "invalid_token": "Credenziali non valide (token/e-mail). Verifica formato e contenuto."
     },
