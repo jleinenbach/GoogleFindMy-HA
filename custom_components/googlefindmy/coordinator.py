@@ -43,7 +43,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Protocol, Set
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -68,7 +68,43 @@ from .const import (
     coerce_ignored_mapping,
 )
 
+# IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
+# This avoids silent type/name drift and keeps source labels stable.
+from custom_components.googlefindmy.ProtoDecoders import Common_pb2  # type: ignore
+
 _LOGGER = logging.getLogger(__name__)
+
+# --- Lightweight cache protocol for entry-scoped persistence -----------------
+class CacheProtocol(Protocol):
+    """Minimal cache protocol used by the coordinator.
+
+    Implementations are provided by the integration's token/cache layer.
+    """
+
+    async def async_get_cached_value(self, key: str) -> Any: ...
+    async def async_set_cached_value(self, key: str, value: Any) -> None: ...
+
+
+# --- Module constants (cooldowns & quorum) ---------------------------------
+# Accept an empty device list only on the 2nd consecutive result (defers once)
+_EMPTY_LIST_QUORUM = 2
+
+# POPETS'25-informed throttling windows for crowdsourced reports
+_COOLDOWN_MIN_IN_ALL_AREAS_S = 10 * 60  # 10 minutes
+_COOLDOWN_MIN_HIGH_TRAFFIC_S = 5 * 60   # 5 minutes
+
+# Guardrails for owner-driven locate cooldown
+_COOLDOWN_OWNER_MIN_S = 60              # at least 1 minute
+_COOLDOWN_OWNER_MAX_S = 15 * 60         # at most 15 minutes
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    """Clamp value between lo and hi (inclusive)."""
+    try:
+        v = float(value)
+        return max(float(lo), min(float(hi), v))
+    except (TypeError, ValueError):
+        return float(lo)
 
 
 # --- BEGIN: Diagnostics buffer & helpers (top-level) ---------------------------
@@ -114,44 +150,142 @@ class DiagnosticsBuffer:
         }
 
 
-# --- END: Diagnostics buffer & helpers ----------------------------------------
+# --- Epoch normalization (ms→s tolerant) -----------------------------------
+def _normalize_epoch_seconds(ts: Any) -> Optional[float]:
+    """Return epoch seconds as float; accept str/int/float; convert ms→s if needed."""
+    try:
+        f = float(ts)
+        if not math.isfinite(f):
+            return None
+        # Heuristic for milliseconds: 1_000_000_000_000 is ~Sep 2001 in ms
+        if f > 1_000_000_000_000:
+            f = f / 1000.0
+        return f
+    except (TypeError, ValueError):
+        return None
 
 
-# -------------------------------------------------------------------------
-# Internal guardrails for dynamic cooldowns (module-local on purpose)
-# Rationale: Only used by this coordinator; keep const.py focused on cross-cutting constants.
-# Values are *bounds* that clamp dynamic guesses; they are not fixed thresholds.
-# -------------------------------------------------------------------------
-_COOLDOWN_OWNER_MIN_S = 300  # 5 min
-_COOLDOWN_OWNER_MAX_S = 900  # 15 min
-
-# Server-informed minimum cooldowns per report type (POPETS'25)
-# We never go below these values; actual applied cooldown also respects the user poll interval.
-_COOLDOWN_MIN_IN_ALL_AREAS_S = 600  # 10 min
-_COOLDOWN_MIN_HIGH_TRAFFIC_S = 300  # 5 min
-
-# -------------------------------------------------------------------------
-# Minimal hardening: accept a *successful* empty device list only after a
-# small quorum of consecutive empties. This avoids reacting to rare, short
-# upstream anomalies as if the user had deleted all devices.
-# -------------------------------------------------------------------------
-_EMPTY_LIST_QUORUM = 2  # require N consecutive *successful* empties before clearing
+# --- Decoder-row Normalization & Attribute Helpers -------------------------
+_MISSING = object()
 
 
-def _clamp(val: float, lo: float, hi: float) -> float:
-    """Return val clamped into [lo, hi]."""
-    return max(lo, min(hi, val))
-
-
-class CacheProtocol(Protocol):
-    """Defines the interface for a cache that the coordinator can use.
-
-    This protocol ensures that any cache object passed to the coordinator
-    provides the necessary asynchronous methods for getting and setting values.
+def _row_source_label(row: Dict[str, Any]) -> Tuple[int, str]:
     """
+    Determine (rank, label) for the source of a report.
+    Rank: 3=owner, 2=crowdsourced, 1=aggregated, 0=semantic/unknown
+    Label: 'owner' | 'crowdsourced' | 'aggregated' | 'semantic/unknown'
+    """
+    is_own = bool(row.get("is_own_report"))
+    status_code = row.get("status_code")
+    try:
+        status_code_int = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code_int = None
 
-    async def async_get_cached_value(self, key: str) -> Any: ...
-    async def async_set_cached_value(self, key: str, value: Any) -> None: ...
+    raw_status = row.get("status")
+    if isinstance(raw_status, str):
+        status_name = raw_status.strip().lower()
+    elif isinstance(raw_status, (int, float)) and Common_pb2:
+        try:
+            status_name = Common_pb2.Status.Name(int(raw_status)).lower()
+        except Exception:
+            status_name = str(int(raw_status))
+    else:
+        status_name = ""
+
+    hint = str(row.get("_report_hint") or "").strip().lower()
+    cs = getattr(Common_pb2, "CROWDSOURCED", _MISSING)
+    ag = getattr(Common_pb2, "AGGREGATED", _MISSING)
+
+    if is_own:
+        return 3, "owner"
+    if (
+        (cs is not _MISSING and status_code_int == cs)
+        or "crowdsourced" in status_name
+        or "in_all_areas" in status_name
+        or hint == "in_all_areas"
+    ):
+        return 2, "crowdsourced"
+    if (
+        (ag is not _MISSING and status_code_int == ag)
+        or "aggregated" in status_name
+        or "high_traffic" in status_name
+        or hint == "high_traffic"
+    ):
+        return 1, "aggregated"
+    return 0, "semantic/unknown"
+
+
+def _sanitize_decoder_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Enforce protocol invariants and prepare HA attributes.
+
+    Notes:
+        - Ensures timestamps are normalized and provides an ISO UTC mirror.
+        - Derives a stable `source_label`/`source_rank` used for stats and UX.
+        - Zero-accuracy semantic entries are coerced to None to avoid noise.
+    """
+    r = dict(row)
+    rank, label = _row_source_label(r)
+
+    if label == "semantic/unknown" and r.get("is_own_report"):
+        r["is_own_report"] = False
+    if label == "semantic/unknown" and r.get("accuracy") in (0, 0.0):
+        r["accuracy"] = None
+
+    ts = _normalize_epoch_seconds(r.get("last_seen"))
+    r["last_seen"] = ts  # Store normalized float
+    if ts:
+        try:
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            r["last_seen_utc"] = dt.isoformat().replace("+00:00", "Z")
+        except Exception:
+            r["last_seen_utc"] = None
+    else:
+        r["last_seen_utc"] = None
+
+    r["source_label"] = label
+    r["source_rank"] = rank
+    return r
+
+
+def _as_ha_attributes(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Create a curated, stable attribute set for HA entities (recorder-friendly)."""
+    if not row:
+        return None
+    r = _sanitize_decoder_row(row)
+
+    def _cf(v):
+        try:
+            f = float(v)
+            return f if math.isfinite(f) else None
+        except (TypeError, ValueError):
+            return None
+
+    lat = _cf(r.get("latitude"))
+    lon = _cf(r.get("longitude"))
+    acc = _cf(r.get("accuracy"))
+    alt = _cf(r.get("altitude"))
+
+    out: Dict[str, Any] = {
+        "device_name": r.get("name"),
+        "device_id": r.get("device_id") or r.get("id"),
+        "status": r.get("status"),
+        "semantic_name": r.get("semantic_name"),
+        "battery_level": r.get("battery_level"),
+        "last_seen": r.get("last_seen"),
+        "last_seen_utc": r.get("last_seen_utc"),
+        "source_label": r.get("source_label"),
+        "source_rank": r.get("source_rank"),
+        "is_own_report": r.get("is_own_report"),
+    }
+    if lat is not None and lon is not None:
+        out["latitude"] = lat
+        out["longitude"] = lon
+    if acc is not None:
+        out["accuracy_m"] = acc
+    if alt is not None:
+        out["altitude_m"] = alt
+    return {k: v for k, v in out.items() if v is not None}
 
 
 # -------------------------------------------------------------------------
@@ -176,7 +310,8 @@ def _sync_get_last_gps_from_history(
     """
     try:
         # Minimal query: the last single change for this entity_id
-        changes = recorder_history.get_last_state_changes(hass, 1, entity_id)
+        # FIX: pass an iterable of entity_ids (API expects an iterable)
+        changes = recorder_history.get_last_state_changes(hass, 1, [entity_id])
         samples = changes.get(entity_id, [])
         if not samples:
             return None
@@ -339,11 +474,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             "timeouts": 0,
             "invalid_coords": 0,
             "low_quality_dropped": 0,
+            "invalid_ts_drop_count": 0,   # reused also for stale (< existing) timestamps (see stale-guard)
+            "future_ts_drop_count": 0,
             "non_significant_dropped": 0,
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
-        # NEW: Performance metrics (timestamps, durations) & recent errors (bounded)
+        # Performance metrics (timestamps, durations) & recent errors (bounded)
         self.performance_metrics: Dict[str, float] = {}
         self.recent_errors = deque(
             maxlen=5
@@ -397,7 +534,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 self._short_retry_cancel()
             except Exception:
                 pass
-            self._short_retry_cancel = None
+            finally:
+                self._short_retry_cancel = None
         # Cancel pending debounced stats write
         if self._stats_save_task and not self._stats_save_task.done():
             self._stats_save_task.cancel()
@@ -774,7 +912,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """
         return self._is_polling
 
-    # ---------------------------- NEW: Metrics & errors helpers -------------
+    # ---------------------------- Metrics & errors helpers ------------------
     def safe_update_metric(self, key: str, value: float) -> None:
         """Safely set a numeric performance metric (float-coerced)."""
         try:
@@ -1274,13 +1412,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             location.pop("_report_hint", None)
                             continue
 
+                        # Sanitize invariants + enrich fields (label, utc-string)
+                        location = _sanitize_decoder_row(location)
+
+                        # --- NEW: increment crowdsourced updates (post-sanitization) -----
+                        if location.get("source_label") == "crowdsourced":
+                            self.increment_stat("crowd_sourced_updates")
+                        # ----------------------------------------------------------------
+
                         # Significance gate (replaces naive duplicate check)
-                        last_seen = location.get("last_seen", 0)
                         if not self._is_significant_update(dev_id, location):
                             _LOGGER.debug(
                                 "Skipping non-significant update for %s (last_seen=%s)",
                                 dev_name,
-                                last_seen,
+                                location.get("last_seen"),
                             )
                             self.increment_stat("non_significant_dropped")
                             # Strip internal hint before dropping to avoid accidental exposure
@@ -1289,6 +1434,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
                         # Age diagnostics (informational)
                         wall_now = time.time()
+                        last_seen = location.get("last_seen", 0)
                         if last_seen:
                             age_hours = max(
                                 0.0, (wall_now - float(last_seen)) / 3600.0
@@ -1309,9 +1455,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         # Apply type-aware cooldowns based on internal hint (if any).
                         report_hint = location.get("_report_hint")
                         self._apply_report_type_cooldown(dev_id, report_hint)
-
-                        # Ensure we don't leak the internal hint into public snapshots/entities.
-                        location.pop("_report_hint", None)
 
                         # Commit to cache and bump statistics
                         location["last_updated"] = wall_now  # wall-clock for UX
@@ -1350,8 +1493,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 self._last_poll_mono = time.monotonic()
                 self._is_polling = False
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())
+                # FIX: publish a full, visible snapshot (not just polled devices)
+                ignored = self._get_ignored_set()
+                # Use the latest remembered full list; filter ignored
+                visible_devices = [
+                    d for d in (self._last_device_list or []) if d.get("id") not in ignored
+                ]
                 end_snapshot = self._build_snapshot_from_cache(
-                    devices, wall_now=time.time()
+                    visible_devices, wall_now=time.time()
                 )
                 self.async_set_updated_data(end_snapshot)
 
@@ -1456,6 +1605,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
             # Prefer cached result
             if self._update_entry_from_cache(entry, wall_now):
+                entry = _sanitize_decoder_row(entry)
                 snapshot.append(entry)
                 continue
 
@@ -1489,6 +1639,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                             "status": "Using current state",
                         }
                     )
+                    entry = _sanitize_decoder_row(entry)
                     snapshot.append(entry)
                     continue
 
@@ -1514,6 +1665,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         entity_id,
                     )
 
+            entry = _sanitize_decoder_row(entry)
             snapshot.append(entry)
 
         return snapshot
@@ -1681,25 +1833,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             )
             return
 
-        # Discard stale updates that would regress time (push can arrive late).
-        existing_data = self._device_location_data.get(device_id)
-        new_seen = location_data.get("last_seen")
-        if existing_data is not None and new_seen is not None:
-            try:
-                existing_seen = float(existing_data.get("last_seen", 0.0))
-                if float(new_seen) < existing_seen:
-                    _LOGGER.debug(
-                        "Discarding stale push update for %s (new last_seen=%s < existing=%s)",
-                        device_id,
-                        new_seen,
-                        existing_seen,
-                    )
-                    return
-            except (TypeError, ValueError):
-                # If timestamps are malformed, comparison is not possible.
-                # The update will proceed to the significance gate, which will handle it.
-                pass
-
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
 
@@ -1708,9 +1841,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
         slot.pop("_report_hint", None)
 
-        # Normalize coordinates (best-effort) if present; do not spam warnings here.
-        # The push path may deliver semantic-only updates (no coordinates), which is valid.
-        self._normalize_coords(slot, device_label=device_id, warn_on_invalid=False)
+        # Sanitize invariants + enrich fields before gating
+        slot = _sanitize_decoder_row(slot)
+
+        # NEW: increment crowdsourced updates for push/manual commits as well
+        if slot.get("source_label") == "crowdsourced":
+            self.increment_stat("crowd_sourced_updates")
 
         # Significance gate (prevents redundant churn while still respecting cooldowns)
         if not self._is_significant_update(device_id, slot):
@@ -1771,26 +1907,48 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         Notes:
           * This replaces a simple "same last_seen == duplicate" heuristic with a more
             intelligent assessment of data quality.
+          * Stale-guard: If a normalized `last_seen` is **older** than the existing one,
+            we drop it and reuse `invalid_ts_drop_count` to track this case to avoid
+            adding a new counter (see diagnostics & stats entity mapping).
           * It is assumed that a staleness guard has already discarded updates where
-            `new_seen < existing_seen`.
+            `new_seen` is in the far past (< 2000) or far future (+10 min).
         """
         existing = self._device_location_data.get(device_id)
         if not existing:
             return True
 
-        n_seen = new_data.get("last_seen")
-        e_seen = existing.get("last_seen")
-        try:
-            if n_seen is not None and e_seen is not None and float(n_seen) > float(
-                e_seen
-            ):
-                return True
-        except Exception:
-            # If timestamps are malformed, comparison is not possible; fall through.
-            pass
+        n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
+        # last_seen can be missing, do not drop, qualitative checks will still run
+        if n_seen_norm is not None:
+            if n_seen_norm < 946684800.0:  # < 2000-01-01
+                self.increment_stat("invalid_ts_drop_count")
+                return False
+            if n_seen_norm > time.time() + 600.0:  # > +10min
+                self.increment_stat("future_ts_drop_count")
+                return False
+
+        e_seen_norm = _normalize_epoch_seconds(existing.get("last_seen"))
+
+        # --- NEW: Stale-guard (reuse invalid_ts_drop_count for "older than existing") ---
+        if (
+            n_seen_norm is not None
+            and e_seen_norm is not None
+            and n_seen_norm < e_seen_norm
+        ):
+            # Reuse invalid_ts_drop_count to avoid introducing a new stat (stale_ts_drop_count).
+            self.increment_stat("invalid_ts_drop_count")
+            return False
+        # --------------------------------------------------------------------------------
+
+        if (
+            n_seen_norm is not None
+            and e_seen_norm is not None
+            and n_seen_norm > e_seen_norm
+        ):
+            return True
 
         # Same timestamp? Check for spatial delta and accuracy improvement.
-        if n_seen == e_seen:
+        if n_seen_norm is not None and n_seen_norm == e_seen_norm:
             n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
             e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
             if all(
@@ -1808,7 +1966,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             e_acc = existing.get("accuracy")
             if isinstance(n_acc, (int, float)) and isinstance(e_acc, (int, float)):
                 try:
-                    if float(n_acc) < float(e_acc) * 0.8:  # ≥20% better accuracy
+                    if float(n_acc) < float(e_acc) * 0.8:  # >=20% better accuracy
                         return True
                 except Exception:
                     pass
@@ -1953,14 +2111,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 }
             )
 
+        # Apply ignore filter first to avoid touching presence for ignored devices.
+        ignored = self._get_ignored_set()
+        ids = [d for d in ids if d not in ignored]
+
         # Touch presence timestamps for pushed devices (keeps presence stable)
         now_mono = time.monotonic()
         for dev_id in ids:
             self._present_last_seen[dev_id] = now_mono
-
-        # Apply ignore filter to prevent resurfacing ignored devices via push path.
-        ignored = self._get_ignored_set()
-        ids = [d for d in ids if d not in ignored]
 
         # Build "devices" stubs from id->name mapping
         devices_stub: List[Dict[str, Any]] = [
@@ -2354,6 +2512,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # Apply type-aware cooldowns based on internal hint (if any), then strip it.
             self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
             slot.pop("_report_hint", None)
+
+            # Sanitize invariants + derive labels before significance gating
+            slot = _sanitize_decoder_row(slot)
+
+            # Increment crowdsourced stats for manual locate as well (if applicable)
+            if slot.get("source_label") == "crowdsourced":
+                self.increment_stat("crowd_sourced_updates")
 
             # Significance gate also for manual locate to avoid churn.
             if not self._is_significant_update(device_id, slot):
