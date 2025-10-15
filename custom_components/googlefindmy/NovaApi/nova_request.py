@@ -548,6 +548,8 @@ async def async_nova_request(
     hex_payload: str,
     username: Optional[str] = None,
     session: Optional[aiohttp.ClientSession] = None,
+    # ADDED: Optional token for config flow isolation
+    token: Optional[str] = None,
 ) -> str:
     """
     Asynchronous Nova API request for Home Assistant.
@@ -561,6 +563,7 @@ async def async_nova_request(
         hex_payload: Hex string body.
         username: Optional username. If omitted, read from async cache.
         session: Optional aiohttp session to reuse.
+        token: Optional, direct ADM token to bypass cache lookups (for config flow).
 
     Returns:
         Hex-encoded response body.
@@ -572,13 +575,19 @@ async def async_nova_request(
         NovaError: on other unrecoverable errors like network issues after retries.
     """
     url = f"https://android.googleapis.com/nova/{api_scope}"
-    user = username or await async_get_username()
-    if not user: raise ValueError("Username is not available for async_nova_request.")
+    
+    # Use provided credentials if available (for config flow), otherwise fetch from cache.
+    if token and username:
+        user = username
+        initial_token = token
+    else:
+        user = username or await async_get_username()
+        if not user: raise ValueError("Username is not available for async_nova_request.")
+        initial_token = await _get_initial_token_async(user, _LOGGER)
 
-    token = await _get_initial_token_async(user, _LOGGER)
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {initial_token}",
         "Accept-Language": "en-US",
         "User-Agent": NOVA_API_USER_AGENT,
     }
@@ -670,4 +679,3 @@ async def async_nova_request(
     finally:
         if ephemeral_session and session:
             await session.close()
-
