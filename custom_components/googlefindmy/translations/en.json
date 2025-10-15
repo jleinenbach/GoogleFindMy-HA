@@ -156,7 +156,7 @@
       "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view.",
       "fields": {}
     },
-    "locate_device_external": {
+    "locate_external": {
       "name": "Locate Device (External)",
       "description": "Locate a device using the external helper; delegates to the normal locate operation.",
       "fields": {
@@ -230,6 +230,20 @@
       "stat_non_significant_dropped": {
         "name": "Non-significant updates dropped"
       }
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "Device '{device_id}' could not be found or is not part of this integration."
+    },
+    "locate_failed": {
+      "message": "Failed to locate device '{device_id}': {error}"
+    },
+    "play_sound_failed": {
+      "message": "Failed to play sound on '{device_id}': {error}"
+    },
+    "stop_sound_failed": {
+      "message": "Failed to stop sound on '{device_id}': {error}"
     }
   }
 }
