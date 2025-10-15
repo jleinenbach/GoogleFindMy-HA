@@ -20,6 +20,12 @@ Change (Step 1): Remove legacy `tracked_devices` UI from both the initial setup
 and the options flow, without altering authentication behaviour or the online
 connection test. Device inclusion/exclusion will be handled by native HA device
 enable/disable in later steps.
+
+Change (Step 1.1): When the API reports the *multi-entry guard*
+("Multiple config entries active. Use an entry-id-specific cache or pass
+`entry.runtime_data`"), we **defer online validation** inside the flow
+(accept the token candidate and skip the pre-setup device fetch). The actual
+validation happens during setup where the entry-scoped cache exists.
 """
 from __future__ import annotations
 
@@ -108,6 +114,15 @@ def _email_valid(value: str) -> bool:
 def _token_plausible(value: str) -> bool:
     """Return True if value looks like a token (no spaces, long enough)."""
     return bool(_TOKEN_RE.match(value or ""))
+
+
+def _is_multi_entry_guard_error(err: Exception) -> bool:
+    """Detect the API's multi-entry guard message to allow deferred validation."""
+    msg = f"{err}"
+    return (
+        "Multiple config entries active" in msg
+        or "entry.runtime_data" in msg
+    )
 
 
 # ---------------------------
@@ -239,17 +254,24 @@ async def async_pick_working_token(email: str, candidates: List[Tuple[str, str]]
 
     This performs a very lightweight API call (`async_get_basic_device_list`)
     to verify the token works for the given Google account.
-    This call is isolated and does not depend on the global cache state.
+
+    Special case:
+        If the API reports the multi-entry guard, we **defer validation** and
+        accept the current candidate (setup will validate with entry-scoped cache).
     """
     for source, token in candidates:
         try:
-            # Use an ephemeral API instance with explicit credentials for validation
             api = GoogleFindMyAPI(oauth_token=token, google_email=email)
-            # Pass the token explicitly to the validation call to ensure isolation
             await api.async_get_basic_device_list(username=email, token=token)
             _LOGGER.debug("Token from '%s' validated successfully.", source)
             return token
         except Exception as err:  # noqa: BLE001 - network/auth errors
+            if _is_multi_entry_guard_error(err):
+                _LOGGER.warning(
+                    "Token from '%s': multi-entry guard detected; deferring validation to setup.",
+                    source,
+                )
+                return token
             _LOGGER.warning("Token from '%s' failed validation: %s", source, err)
             continue
     return None
@@ -439,6 +461,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         Step 1 change: This form no longer contains the `tracked_devices` multi-select.
         We keep the **online validation** (device list fetch) and the remaining options.
+
+        Step 1.1: If the API signals the *multi-entry guard*, we **do not** fail the flow;
+        we defer validation to setup where an entry-scoped cache is available.
         """
         errors: Dict[str, str] = {}
 
@@ -448,7 +473,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"{DOMAIN}:{email_for_uid}")
             self._abort_if_unique_id_configured()
 
-        # Online validation: fetch devices once (fail → cannot_connect)
+        # Online validation: fetch devices once (fail → cannot_connect), unless guard suggests deferral
         if not self._available_devices:
             try:
                 api, username, token = await self._async_build_api_and_username()
@@ -460,8 +485,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # store as (name, id) for potential future use (kept for parity)
                     self._available_devices = [(d["name"], d["id"]) for d in devices]
             except Exception as err:  # noqa: BLE001 - API/transport errors
-                _LOGGER.error("Failed to fetch devices during setup: %s", err)
-                errors["base"] = "cannot_connect"
+                if _is_multi_entry_guard_error(err):
+                    _LOGGER.warning(
+                        "Multiple entries detected during setup flow; deferring device check to post-setup."
+                    )
+                    # Do NOT set an error; proceed to show schema / create entry.
+                else:
+                    _LOGGER.error("Failed to fetch devices during setup: %s", err)
+                    errors["base"] = "cannot_connect"
 
         if errors:
             # Keep the step to show an error, but with an empty schema.
@@ -595,6 +626,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             reason="reauth_successful",
                         )
                 except Exception as err2:  # noqa: BLE001
+                    if _is_multi_entry_guard_error(err2):
+                        # Accept and let setup validate with the entry-scoped cache
+                        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+                        assert entry is not None
+                        updated_data = dict(entry.data)
+                        updated_data.update(
+                            {
+                                DATA_AUTH_METHOD: (
+                                    _AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL
+                                ),
+                                CONF_OAUTH_TOKEN: cands[0][1],
+                                CONF_GOOGLE_EMAIL: email,
+                            }
+                        )
+                        return self.async_update_reload_and_abort(
+                            entry=entry,
+                            data=updated_data,
+                            reason="reauth_successful",
+                        )
                     _LOGGER.error("Reauth validation failed: %s", err2)
                     errors["base"] = "cannot_connect"
 
@@ -790,6 +840,9 @@ class OptionsFlowHandler(OptionsFlowBase):
             Exactly one method must be provided; we validate and then update `entry.data`,
             followed by an immediate reload. For secrets.json, we also apply online
             validation with token failover.
+
+        Step 1.1:
+            If the API signals the multi-entry guard, we defer validation to setup.
         """
         errors: Dict[str, str] = {}
 
@@ -847,6 +900,22 @@ class OptionsFlowHandler(OptionsFlowBase):
                         self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
                         return self.async_abort(reason="reconfigure_successful")
                 except Exception as err2:  # noqa: BLE001
+                    if _is_multi_entry_guard_error(err2):
+                        # Defer: accept first candidate and reload
+                        entry = self.config_entry
+                        updated_data = dict(entry.data)
+                        updated_data.update(
+                            {
+                                DATA_AUTH_METHOD: (
+                                    _AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL
+                                ),
+                                CONF_OAUTH_TOKEN: cands[0][1],
+                                CONF_GOOGLE_EMAIL: email,
+                            }
+                        )
+                        self.hass.config_entries.async_update_entry(entry, data=updated_data)
+                        self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+                        return self.async_abort(reason="reconfigure_successful")
                     _LOGGER.error("Credentials update failed: %s", err2)
                     errors["base"] = "cannot_connect"
 
