@@ -15,74 +15,32 @@ import logging
 import os
 import socket
 import time
-from typing import Any
+from typing import Any, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP, Platform
+from homeassistant.const import (
+    EVENT_HOMEASSISTANT_STARTED,
+    EVENT_HOMEASSISTANT_STOP,
+    Platform,
+)
 from homeassistant.core import CoreState, HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.network import get_url
-# from homeassistant.helpers.instance_id import async_get as async_get_instance_id  # optional
 
 # Token cache (new: entry-scoped HA Store-backed cache + registry/facade)
 from .Auth.token_cache import (
     TokenCache,
-    async_set_cached_value,
     _register_instance,
-    _unregister_instance,
     _set_default_entry_id,
+    _unregister_instance,
+    async_set_cached_value,
 )
-
 # Username key normalization
 from .Auth.username_provider import username_string
-
-from .const import (
-    # Core
-    DOMAIN,
-    # Credentials/data keys
-    CONF_OAUTH_TOKEN,
-    CONF_GOOGLE_EMAIL,
-    DATA_SECRET_BUNDLE,
-    DATA_AUTH_METHOD,
-    # Options keys & canonical list
-    OPTION_KEYS,
-    OPT_LOCATION_POLL_INTERVAL,
-    OPT_DEVICE_POLL_DELAY,
-    OPT_MIN_POLL_INTERVAL,
-    OPT_MIN_ACCURACY_THRESHOLD,
-    OPT_ALLOW_HISTORY_FALLBACK,
-    OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_IGNORED_DEVICES,  # persist user's delete decision
-    # Defaults
-    DEFAULT_OPTIONS,
-    DEFAULT_LOCATION_POLL_INTERVAL,
-    DEFAULT_DEVICE_POLL_DELAY,
-    DEFAULT_MIN_POLL_INTERVAL,
-    DEFAULT_MIN_ACCURACY_THRESHOLD,
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    # Services
-    SERVICE_LOCATE_DEVICE,
-    SERVICE_PLAY_SOUND,
-    SERVICE_STOP_SOUND,
-    SERVICE_LOCATE_EXTERNAL,
-    SERVICE_REFRESH_DEVICE_URLS,
-    SERVICE_REBUILD_REGISTRY,
-    # Rebuild service schema constants
-    ATTR_MODE,
-    ATTR_DEVICE_IDS,
-    MODE_REBUILD,
-    MODE_MIGRATE,
-    REBUILD_REGISTRY_MODES,
-    OPT_OPTIONS_SCHEMA_VERSION,
-    coerce_ignored_mapping,
-)
-from .coordinator import GoogleFindMyCoordinator
-from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
-
 # Shared FCM provider (HA-managed singleton)
 from .Auth.fcm_receiver_ha import FcmReceiverHA
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -93,9 +51,44 @@ from .api import (
     register_fcm_receiver_provider as api_register_fcm_provider,
     unregister_fcm_receiver_provider as api_unregister_fcm_provider,
 )
+from .const import (
+    ATTR_DEVICE_IDS,
+    ATTR_MODE,
+    CONF_GOOGLE_EMAIL,
+    CONF_OAUTH_TOKEN,
+    DATA_SECRET_BUNDLE,
+    DEFAULT_DEVICE_POLL_DELAY,
+    DEFAULT_LOCATION_POLL_INTERVAL,
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_MIN_ACCURACY_THRESHOLD,
+    DEFAULT_MIN_POLL_INTERVAL,
+    DEFAULT_OPTIONS,
+    DOMAIN,
+    MODE_MIGRATE,
+    MODE_REBUILD,
+    OPTION_KEYS,
+    OPT_ALLOW_HISTORY_FALLBACK,
+    OPT_DEVICE_POLL_DELAY,
+    OPT_IGNORED_DEVICES,
+    OPT_LOCATION_POLL_INTERVAL,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_MIN_ACCURACY_THRESHOLD,
+    OPT_MIN_POLL_INTERVAL,
+    OPT_OPTIONS_SCHEMA_VERSION,
+    REBUILD_REGISTRY_MODES,
+    SERVICE_LOCATE_DEVICE,
+    SERVICE_LOCATE_EXTERNAL,
+    SERVICE_PLAY_SOUND,
+    SERVICE_REBUILD_REGISTRY,
+    SERVICE_REFRESH_DEVICE_URLS,
+    SERVICE_STOP_SOUND,
+    coerce_ignored_mapping,
+)
+from .coordinator import GoogleFindMyCoordinator
+from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
+
 # Eagerly import diagnostics to prevent blocking calls on-demand
 from . import diagnostics
-
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,6 +99,98 @@ PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
 ]
+
+
+# --- BEGIN: Helpers for resolution and manual locate ---------------------------
+def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> Tuple[str, str]:
+    """Resolve HA device_id/entity_id/canonical_id -> (canonical_id, friendly_name).
+
+    Resolution order:
+    1) If `arg` is a Home Assistant `device_id` -> extract our (DOMAIN, identifier)
+       from the device registry. Fails with HomeAssistantError if not found/invalid.
+    2) If `arg` is an `entity_id` -> lookup entity; if it belongs to our DOMAIN
+       and is linked to a device, extract the identifier from the device.
+    3) Otherwise, treat `arg` as already-canonical Google ID and return it as-is.
+
+    Raises:
+        HomeAssistantError: if `arg` is a `device_id`/`entity_id` but does not map
+        to a valid identifier of this integration.
+
+    Security:
+        Do not include secrets or coordinates in raised messages or logs.
+    """
+    dev_reg = dr.async_get(hass)
+    ent_reg = er.async_get(hass)
+
+    # 1) device_id
+    dev = dev_reg.async_get(arg)
+    if dev:
+        for item in dev.identifiers:
+            try:
+                domain, ident = item  # expected 2-tuple
+            except (TypeError, ValueError):
+                continue
+            if domain == DOMAIN and isinstance(ident, str) and ident:
+                friendly = (dev.name_by_user or dev.name or ident).strip()
+                return ident, friendly
+        raise HomeAssistantError(f"Device '{arg}' has no valid {DOMAIN} identifier")
+
+    # 2) entity_id
+    if "." in arg:
+        ent = ent_reg.async_get(arg)
+        if ent and ent.platform == DOMAIN and ent.device_id:
+            dev = dev_reg.async_get(ent.device_id)
+            if dev:
+                for item in dev.identifiers:
+                    try:
+                        domain, ident = item
+                    except (TypeError, ValueError):
+                        continue
+                    if domain == DOMAIN and isinstance(ident, str) and ident:
+                        friendly = (dev.name_by_user or dev.name or ident).strip()
+                        return ident, friendly
+            raise HomeAssistantError(
+                f"Entity '{arg}' is not linked to a valid {DOMAIN} device"
+            )
+
+    # 3) fallback: assume canonical id already
+    return arg, arg
+
+
+async def async_handle_manual_locate(
+    hass: HomeAssistant, coordinator, arg: str
+) -> None:
+    """Handle manual locate button: resolve target, dispatch, and log correctly.
+
+    Behavior:
+    - Resolve any incoming identifier (`device_id`, `entity_id`, or canonical).
+    - On success: dispatch the request to the coordinator and log an info line.
+    - On failure: raise HomeAssistantError and mirror a redacted error record
+      into the coordinator diagnostics buffer.
+
+    This function should be called by your button entity handler.
+    """
+    try:
+        canonical_id, friendly = _resolve_canonical_from_any(hass, arg)
+        # Use the renamed coordinator method for clarity
+        await coordinator.async_request_locate(canonical_id)
+        _LOGGER.info("Successfully submitted manual locate for %s", friendly)
+    except HomeAssistantError as err:
+        # Redacted, bounded diagnostics record
+        if getattr(coordinator, "_diag", None):
+            coordinator._diag.add_error(
+                code="manual_locate_resolution_failed",
+                context={
+                    "device_id": "",  # unknown (arg may not be a device_id)
+                    "arg": str(arg)[:64],  # redact length
+                    "reason": str(err)[:160],
+                },
+            )
+        _LOGGER.error("Locate failed for '%s': %s", arg, err)
+        raise
+
+
+# --- END: Helpers for resolution and manual locate -----------------------------
 
 
 def _redact_url_token(url: str) -> str:
@@ -121,7 +206,13 @@ def _redact_url_token(url: str) -> str:
             else:
                 redacted.append((k, v))
         return urlunsplit(
-            (parts.scheme, parts.netloc, parts.path, urlencode(redacted, doseq=True), parts.fragment)
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(redacted, doseq=True),
+                parts.fragment,
+            )
         )
     except Exception:  # pragma: no cover
         return url
@@ -144,7 +235,9 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
     for key, value in enhanced_data.items():
         try:
             # Store primitives and JSON-safe structures directly
-            if isinstance(value, (str, int, float, bool)) or isinstance(value, (dict, list)):
+            if isinstance(value, (str, int, float, bool)) or isinstance(
+                value, (dict, list)
+            ):
                 await async_set_cached_value(key, value)
             else:
                 # Last-resort: try to JSON-encode unknown objects
@@ -153,7 +246,9 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
             _LOGGER.warning("Failed to save '%s' to persistent cache: %s", key, err)
 
 
-async def _async_save_individual_credentials(oauth_token: str, google_email: str) -> None:
+async def _async_save_individual_credentials(
+    oauth_token: str, google_email: str
+) -> None:
     """Persist individual credentials (oauth_token + email) to the token cache."""
     try:
         await async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
@@ -174,7 +269,9 @@ def _effective_config(entry: ConfigEntry) -> dict[str, Any]:
     return {k: _opt(entry, k, None) for k in OPTION_KEYS}
 
 
-async def _async_soft_migrate_data_to_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_soft_migrate_data_to_options(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
     """Idempotently copy known settings from data -> options (never move secrets)."""
     new_options = dict(entry.options)
     changed = False
@@ -208,12 +305,16 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
                     dev_reg.async_update_device(device_id=device.id, name=new_name)
                     updated += 1
         if updated:
-            _LOGGER.info('Normalized %d device name(s) by removing legacy "Find My - " prefix', updated)
+            _LOGGER.info(
+                'Normalized %d device name(s) by removing legacy "Find My - " prefix',
+                updated,
+            )
     except Exception as err:
         _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
 
 # --------------------------- Shared FCM provider ---------------------------
+
 
 async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
     """Get or create the shared FCM receiver for this HA instance.
@@ -227,7 +328,9 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
     fcm_lock = bucket.setdefault("fcm_lock", asyncio.Lock())
     # Contention monitoring: increment if someone else holds the lock right now
     if fcm_lock.locked():
-        bucket["fcm_lock_contention_count"] = int(bucket.get("fcm_lock_contention_count", 0)) + 1
+        bucket["fcm_lock_contention_count"] = (
+            int(bucket.get("fcm_lock_contention_count", 0)) + 1
+        )
     async with fcm_lock:
         refcount = int(bucket.get("fcm_refcount", 0))
         fcm: FcmReceiverHA | None = bucket.get("fcm_receiver")
@@ -242,8 +345,12 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
             _LOGGER.info("Shared FCM receiver initialized")
 
             # Register provider for both consumer modules (exactly once on first acquire)
-            loc_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
-            api_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
+            loc_register_fcm_provider(
+                lambda: hass.data[DOMAIN].get("fcm_receiver")
+            )
+            api_register_fcm_provider(
+                lambda: hass.data[DOMAIN].get("fcm_receiver")
+            )
 
         bucket["fcm_refcount"] = refcount + 1
         _LOGGER.debug("FCM refcount -> %s", bucket["fcm_refcount"])
@@ -285,6 +392,7 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
 
 # ------------------------------ Setup / Unload -----------------------------
 
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration from a config entry.
 
@@ -308,8 +416,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     is_reload = bool(domain_bucket.get("initial_setup_complete", False))
 
     # 1) Token cache: create/register early (fail-fast if ambiguous multi-entry usage occurs later)
-    legacy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json")
-    cache = await TokenCache.create(hass, entry.entry_id, legacy_path=legacy_path)
+    legacy_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json"
+    )
+    cache = await TokenCache.create(
+        hass, entry.entry_id, legacy_path=legacy_path
+    )
     _register_instance(entry.entry_id, cache)
     _set_default_entry_id(entry.entry_id)
 
@@ -321,11 +433,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as err:
             _LOGGER.debug("Cache flush on stop raised: %s", err)
 
-    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop))
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop)
+    )
 
     # 2) Optional: register HA-managed aiohttp session for Nova API (defer import)
     try:
         from .NovaApi import nova_request as nova
+
         reg = getattr(nova, "register_hass", None)
         unreg = getattr(nova, "unregister_session_provider", None)
         if callable(reg):
@@ -333,7 +448,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if callable(unreg):
                 entry.async_on_unload(unreg)
         else:
-            _LOGGER.debug("Nova API register_hass() not available; continuing with module defaults.")
+            _LOGGER.debug(
+                "Nova API register_hass() not available; continuing with module defaults."
+            )
     except Exception as err:  # Defensive: Nova module may not expose hooks in some builds
         _LOGGER.debug("Nova API session provider registration skipped: %s", err)
 
@@ -384,12 +501,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass,
         cache=cache,
         # tracked_devices removed: device inclusion via HA device enable/disable.
-        location_poll_interval=_opt(entry, OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL),
+        location_poll_interval=_opt(
+            entry, OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
+        ),
         device_poll_delay=_opt(entry, OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
-        min_poll_interval=_opt(entry, OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
-        min_accuracy_threshold=_opt(entry, OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD),
+        min_poll_interval=_opt(
+            entry, OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL
+        ),
+        min_accuracy_threshold=_opt(
+            entry, OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
+        ),
         allow_history_fallback=_opt(
-            entry, OPT_ALLOW_HISTORY_FALLBACK, DEFAULT_OPTIONS.get(OPT_ALLOW_HISTORY_FALLBACK, False)
+            entry,
+            OPT_ALLOW_HISTORY_FALLBACK,
+            DEFAULT_OPTIONS.get(OPT_ALLOW_HISTORY_FALLBACK, False),
         ),
     )
     coordinator.config_entry = entry  # convenience for platforms
@@ -429,7 +554,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Optional: attach Google Home filter (options-first configuration)
     from .google_home_filter import GoogleHomeFilter
 
-    coordinator.google_home_filter = GoogleHomeFilter(hass, _effective_config(entry))
+    coordinator.google_home_filter = GoogleHomeFilter(
+        hass, _effective_config(entry)
+    )
     _LOGGER.debug("Initialized Google Home filter (options-first)")
 
     # Share coordinator in hass.data
@@ -467,20 +594,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         listener_active = False
         try:
             if is_reload:
-                _LOGGER.info("Integration reloaded: forcing an immediate device scan window.")
+                _LOGGER.info(
+                    "Integration reloaded: forcing an immediate device scan window."
+                )
                 coordinator.force_poll_due()
 
             await coordinator.async_refresh()
             if not coordinator.last_update_success:
-                _LOGGER.warning("Initial refresh failed; entities will recover on subsequent polls.")
+                _LOGGER.warning(
+                    "Initial refresh failed; entities will recover on subsequent polls."
+                )
             await _async_normalize_device_names(hass)
         except Exception as err:
-            _LOGGER.error("Initial refresh raised an unexpected error: %s", err, exc_info=True)
+            _LOGGER.error(
+                "Initial refresh raised an unexpected error: %s", err, exc_info=True
+            )
 
     if hass.state == CoreState.running:
-        hass.async_create_task(_do_first_refresh(None), name="googlefindmy.initial_refresh")
+        hass.async_create_task(
+            _do_first_refresh(None), name="googlefindmy.initial_refresh"
+        )
     else:
-        unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_first_refresh)
+        unsub = hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STARTED, _do_first_refresh
+        )
         listener_active = True
 
         def _safe_unsub() -> None:
@@ -526,22 +663,31 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("Coordinator async_shutdown raised during unload: %s", err)
 
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unload_ok = await hass.config_entries.async_unload_platforms(
+        entry, PLATFORMS
+    )
 
     # Release shared FCM (decrement refcount and await bounded shutdown if it reaches zero)
     try:
         await _async_release_shared_fcm(hass)
     except Exception as err:
-        _LOGGER.debug("FCM release during async_unload_entry raised: %s", err)
+        _LOGGER.debug(
+            "FCM release during async_unload_entry raised: %s", err
+        )
 
     # Unregister and close the TokenCache instance
     cache = _unregister_instance(entry.entry_id)
     if cache:
         try:
             await cache.close()
-            _LOGGER.debug("TokenCache for entry '%s' has been flushed and closed.", entry.entry_id)
+            _LOGGER.debug(
+                "TokenCache for entry '%s' has been flushed and closed.",
+                entry.entry_id,
+            )
         except Exception as err:
-            _LOGGER.warning("Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err)
+            _LOGGER.warning(
+                "Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err
+            )
 
     if unload_ok:
         # Drop coordinator from hass.data
@@ -558,6 +704,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 # ------------------------------- Services ---------------------------------
 
+
 def _get_local_ip_sync() -> str:
     """Best-effort local IP discovery via UDP connect (executor-only)."""
     try:
@@ -568,48 +715,31 @@ def _get_local_ip_sync() -> str:
         return ""
 
 
-async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindMyCoordinator) -> None:
+async def _async_register_services(
+    hass: HomeAssistant, coordinator: GoogleFindMyCoordinator
+) -> None:
     """Register services for the integration (idempotent per-HA instance, race-free)."""
     domain_bucket = hass.data.setdefault(DOMAIN, {})
     services_lock = domain_bucket.setdefault("services_lock", asyncio.Lock())
     # Contention monitoring: increment if services_lock already held
     if services_lock.locked():
-        domain_bucket["services_lock_contention_count"] = int(
-            domain_bucket.get("services_lock_contention_count", 0)
-        ) + 1
+        domain_bucket["services_lock_contention_count"] = (
+            int(domain_bucket.get("services_lock_contention_count", 0)) + 1
+        )
     async with services_lock:
         if domain_bucket.get("services_registered"):
             return
 
-        def _resolve_canonical_from_any(arg: str) -> tuple[str, str]:
-            """Resolve any device identifier to (canonical_id, friendly_name)."""
-            # 1) Treat as HA device_id
-            dev = dr.async_get(hass).async_get(arg)
-            if dev:
-                for domain, ident in dev.identifiers:
-                    if domain == DOMAIN:
-                        name = dev.name_by_user or dev.name or ident
-                        return ident, name
-
-            # 2) Treat as entity_id
-            if "." in arg:
-                ent = er.async_get(hass).async_get(arg)
-                if ent and ent.platform == DOMAIN and ent.device_id:
-                    dev = dr.async_get(hass).async_get(ent.device_id)
-                    if dev:
-                        for domain, ident in dev.identifiers:
-                            if domain == DOMAIN:
-                                name = dev.name_by_user or dev.name or ident
-                                return ident, name
-
-            # 3) Fallback: assume arg is the canonical Google ID (no coordinator dependency here)
-            return arg, arg
-
-        def _get_coordinator_for_canonical_id(canonical_id: str) -> GoogleFindMyCoordinator | None:
+        def _get_coordinator_for_canonical_id(
+            canonical_id: str,
+        ) -> GoogleFindMyCoordinator | None:
             """Resolve the owning coordinator for a canonical device id via Device Registry."""
             dev_reg = dr.async_get(hass)
             for dev in dev_reg.devices.values():
-                if any(domain == DOMAIN and ident == canonical_id for domain, ident in dev.identifiers):
+                if any(
+                    domain == DOMAIN and ident == canonical_id
+                    for domain, ident in dev.identifiers
+                ):
                     for entry_id in dev.config_entries:
                         entry = hass.config_entries.async_get_entry(entry_id)
                         if entry and entry.domain == DOMAIN:
@@ -622,30 +752,32 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             """Handle locate device service call."""
             raw = call.data["device_id"]
             try:
-                canonical_id, friendly = _resolve_canonical_from_any(str(raw))
+                canonical_id, friendly = _resolve_canonical_from_any(hass, str(raw))
                 coord = _get_coordinator_for_canonical_id(canonical_id)
                 if coord is None:
                     raise ValueError(f"No coordinator found for device '{canonical_id}'")
-                # Early gating for better UX/logging (mirrors button/coordinator checks)
-                if not coord.can_request_location(canonical_id):
-                    _LOGGER.warning(
-                        "Locate request for %s (%s) ignored: not allowed right now (in-flight, cooldown, push not ready, or polling).",
-                        friendly,
-                        canonical_id,
-                    )
-                    return
-                _LOGGER.info("Locate request for %s (%s)", friendly, canonical_id)
-                await coord.async_locate_device(canonical_id)
-            except ValueError as err:
-                _LOGGER.error("Failed to locate device: %s", err)
-            except Exception as err:  # Catch potential API errors from coordinator
+
+                await coord.async_request_locate(canonical_id)
+                _LOGGER.info("Successfully submitted manual locate for %s", friendly)
+
+            except (ValueError, HomeAssistantError) as err:
                 _LOGGER.error("Failed to locate device '%s': %s", raw, err)
+                # Propagate to diagnostics buffer
+                if coord and getattr(coord, "_diag", None):
+                    coord._diag.add_error(
+                        code="manual_locate_failed",
+                        context={
+                            "device_id": "",
+                            "arg": str(raw)[:64],
+                            "reason": str(err)[:160],
+                        },
+                    )
 
         async def async_play_sound_service(call: ServiceCall) -> None:
             """Handle play sound service call."""
             raw = call.data["device_id"]
             try:
-                canonical_id, friendly = _resolve_canonical_from_any(str(raw))
+                canonical_id, friendly = _resolve_canonical_from_any(hass, str(raw))
                 coord = _get_coordinator_for_canonical_id(canonical_id)
                 if coord is None:
                     raise ValueError(f"No coordinator found for device '{canonical_id}'")
@@ -653,9 +785,10 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 ok = await coord.async_play_sound(canonical_id)
                 if not ok:
                     _LOGGER.warning(
-                        "Failed to play sound on %s (request may have been rejected by API)", friendly
+                        "Failed to play sound on %s (request may have been rejected by API)",
+                        friendly,
                     )
-            except ValueError as err:
+            except (ValueError, HomeAssistantError) as err:
                 _LOGGER.error("Failed to play sound: %s", err)
             except Exception as err:
                 _LOGGER.error("Failed to play sound on '%s': %s", raw, err)
@@ -664,7 +797,7 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             """Handle stop sound service call."""
             raw = call.data["device_id"]
             try:
-                canonical_id, friendly = _resolve_canonical_from_any(str(raw))
+                canonical_id, friendly = _resolve_canonical_from_any(hass, str(raw))
                 coord = _get_coordinator_for_canonical_id(canonical_id)
                 if coord is None:
                     raise ValueError(f"No coordinator found for device '{canonical_id}'")
@@ -672,9 +805,10 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 ok = await coord.async_stop_sound(canonical_id)
                 if not ok:
                     _LOGGER.warning(
-                        "Failed to stop sound on %s (request may have been rejected by API)", friendly
+                        "Failed to stop sound on %s (request may have been rejected by API)",
+                        friendly,
                     )
-            except ValueError as err:
+            except (ValueError, HomeAssistantError) as err:
                 _LOGGER.error("Failed to stop sound: %s", err)
             except Exception as err:
                 _LOGGER.error("Failed to stop sound on '%s': %s", raw, err)
@@ -684,38 +818,38 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             raw = call.data["device_id"]
             provided_name = call.data.get("device_name")
             try:
-                canonical_id, friendly = _resolve_canonical_from_any(str(raw))
+                canonical_id, friendly = _resolve_canonical_from_any(hass, str(raw))
                 coord = _get_coordinator_for_canonical_id(canonical_id)
                 if coord is None:
                     raise ValueError(f"No coordinator found for device '{canonical_id}'")
                 device_name = provided_name or friendly or canonical_id
-                # Early gating for better UX/logging (mirrors button/coordinator checks)
-                if not coord.can_request_location(canonical_id):
-                    _LOGGER.warning(
-                        "External locate request for %s (%s) ignored: not allowed right now (in-flight, cooldown, push not ready, or polling).",
-                        device_name,
-                        canonical_id,
-                    )
-                    return
                 _LOGGER.info(
                     "External location request for %s (%s) - delegating to normal locate",
                     device_name,
                     canonical_id,
                 )
-                await coord.async_locate_device(canonical_id)
-            except ValueError as err:
+                await coord.async_request_locate(canonical_id)
+            except (ValueError, HomeAssistantError) as err:
                 _LOGGER.error("Failed to execute external locate: %s", err)
             except Exception as err:
-                _LOGGER.error("Failed to execute external locate for '%s': %s", raw, err)
+                _LOGGER.error(
+                    "Failed to execute external locate for '%s': %s", raw, err
+                )
 
         async def async_refresh_device_urls_service(call: ServiceCall) -> None:
             """Refresh configuration URLs for integration devices (absolute URL)."""
             try:
                 base_url = get_url(
-                    hass, prefer_external=True, allow_cloud=True, allow_external=True, allow_internal=True
+                    hass,
+                    prefer_external=True,
+                    allow_cloud=True,
+                    allow_external=True,
+                    allow_internal=True,
                 )
             except HomeAssistantError as err:
-                _LOGGER.error("Could not determine base URL for device refresh: %s", err)
+                _LOGGER.error(
+                    "Could not determine base URL for device refresh: %s", err
+                )
                 return
 
             # Token mode: options-first
@@ -725,23 +859,41 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             if config_entries:
                 e0 = config_entries[0]
                 token_expiration_enabled = _opt(
-                    e0, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+                    e0,
+                    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+                    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
                 )
 
             if token_expiration_enabled:
                 week = str(int(time.time() // 604800))  # weekly rotation bucket
-                auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
+                auth_token = hashlib.md5(
+                    f"{ha_uuid}:{week}".encode()
+                ).hexdigest()[:16]
             else:
-                auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
+                auth_token = hashlib.md5(
+                    f"{ha_uuid}:static".encode()
+                ).hexdigest()[:16]
 
             dev_reg = dr.async_get(hass)
             updated_count = 0
             for device in dev_reg.devices.values():
-                if any(identifier[0] == DOMAIN for identifier in device.identifiers):
-                    dev_id = next((ident for domain, ident in device.identifiers if domain == DOMAIN), None)
+                if any(
+                    identifier[0] == DOMAIN for identifier in device.identifiers
+                ):
+                    dev_id = next(
+                        (
+                            ident
+                            for domain, ident in device.identifiers
+                            if domain == DOMAIN
+                        ),
+                        None,
+                    )
                     if dev_id:
                         new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
-                        dev_reg.async_update_device(device_id=device.id, configuration_url=new_config_url)
+                        dev_reg.async_update_device(
+                            device_id=device.id,
+                            configuration_url=new_config_url,
+                        )
                         updated_count += 1
                         _LOGGER.debug(
                             "Updated URL for device %s: %s",
@@ -749,7 +901,9 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                             _redact_url_token(new_config_url),
                         )
 
-            _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
+            _LOGGER.info(
+                "Refreshed URLs for %d Google Find My devices", updated_count
+            )
 
         async def async_rebuild_registry_service(call: ServiceCall) -> None:
             """Migrate soft settings or rebuild the registry (optionally scoped to device_ids).
@@ -760,7 +914,9 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 3. Remove orphaned devices (those with no entities left).
                 4. Reload the config entries associated with the affected devices.
             """
-            mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
+            mode: str = str(
+                call.data.get(ATTR_MODE, MODE_REBUILD)
+            ).lower()
             raw_ids = call.data.get(ATTR_DEVICE_IDS)
 
             if isinstance(raw_ids, str):
@@ -777,7 +933,13 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             _LOGGER.info(
                 "googlefindmy.rebuild_registry requested: mode=%s, device_ids=%s",
                 mode,
-                "none" if not raw_ids else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
+                "none"
+                if not raw_ids
+                else (
+                    raw_ids
+                    if isinstance(raw_ids, str)
+                    else f"{len(target_device_ids)} ids"
+                ),
             )
 
             if mode == MODE_MIGRATE:
@@ -785,7 +947,11 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                     try:
                         await _async_soft_migrate_data_to_options(hass, entry)
                     except Exception as err:
-                        _LOGGER.error("Soft-migrate failed for entry %s: %s", entry.entry_id, err)
+                        _LOGGER.error(
+                            "Soft-migrate failed for entry %s: %s",
+                            entry.entry_id,
+                            err,
+                        )
                 _LOGGER.info(
                     "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
                     len(entries),
@@ -816,7 +982,9 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                         affected_entry_ids.update(dev.config_entries)
 
             if not candidate_devices:
-                _LOGGER.info("googlefindmy.rebuild_registry: no matching devices to rebuild.")
+                _LOGGER.info(
+                    "googlefindmy.rebuild_registry: no matching devices to rebuild."
+                )
                 return
 
             removed_entities = 0
@@ -828,26 +996,37 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                         ent_reg.async_remove(ent.entity_id)
                         removed_entities += 1
                     except Exception as err:
-                        _LOGGER.error("Failed to remove entity %s: %s", ent.entity_id, err)
+                        _LOGGER.error(
+                            "Failed to remove entity %s: %s", ent.entity_id, err
+                        )
 
             for dev_id in list(candidate_devices):
                 dev = dev_reg.async_get(dev_id)
                 if dev is None:
                     continue
-                has_entities = any(e.device_id == dev_id for e in ent_reg.entities.values())
+                has_entities = any(
+                    e.device_id == dev_id for e in ent_reg.entities.values()
+                )
                 if not has_entities:
                     try:
                         dev_reg.async_remove_device(dev_id)
                         removed_devices += 1
                     except Exception as err:
-                        _LOGGER.error("Failed to remove device %s: %s", dev_id, err)
+                        _LOGGER.error(
+                            "Failed to remove device %s: %s", dev_id, err
+                        )
 
-            to_reload = [e for e in entries if e.entry_id in affected_entry_ids] or list(entries)
+            to_reload = (
+                [e for e in entries if e.entry_id in affected_entry_ids]
+                or list(entries)
+            )
             for entry in to_reload:
                 try:
                     await hass.config_entries.async_reload(entry.entry_id)
                 except Exception as err:
-                    _LOGGER.error("Reload failed for entry %s: %s", entry.entry_id, err)
+                    _LOGGER.error(
+                        "Reload failed for entry %s: %s", entry.entry_id, err
+                    )
 
             _LOGGER.info(
                 "googlefindmy.rebuild_registry: rebuild finished: removed %d entit(y/ies), %d device(s), entries reloaded=%d",
@@ -879,7 +1058,12 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             DOMAIN,
             SERVICE_LOCATE_EXTERNAL,
             async_locate_external_service,
-            schema=vol.Schema({vol.Required("device_id"): cv.string, vol.Optional("device_name"): cv.string}),
+            schema=vol.Schema(
+                {
+                    vol.Required("device_id"): cv.string,
+                    vol.Optional("device_name"): cv.string,
+                }
+            ),
         )
         hass.services.async_register(
             DOMAIN,
@@ -893,8 +1077,12 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             async_rebuild_registry_service,
             schema=vol.Schema(
                 {
-                    vol.Optional(ATTR_MODE, default=MODE_REBUILD): vol.In(REBUILD_REGISTRY_MODES),
-                    vol.Optional(ATTR_DEVICE_IDS): vol.Any(cv.string, [cv.string]),
+                    vol.Optional(
+                        ATTR_MODE, default=MODE_REBUILD
+                    ): vol.In(REBUILD_REGISTRY_MODES),
+                    vol.Optional(ATTR_DEVICE_IDS): vol.Any(
+                        cv.string, [cv.string]
+                    ),
                 }
             ),
         )
@@ -903,6 +1091,7 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
 
 
 # ------------------- Device removal (HA "Delete device" hook) -------------------
+
 
 async def async_remove_config_entry_device(
     hass: HomeAssistant,
@@ -925,7 +1114,11 @@ async def async_remove_config_entry_device(
 
     # Resolve our canonical device id from identifiers
     dev_id = next(
-        (ident for (domain, ident) in device_entry.identifiers if domain == DOMAIN),
+        (
+            ident
+            for (domain, ident) in device_entry.identifiers
+            if domain == DOMAIN
+        ),
         None,
     )
     if not dev_id:
@@ -937,7 +1130,9 @@ async def async_remove_config_entry_device(
 
     # Purge coordinator caches (best effort; does not trigger polling)
     try:
-        coordinator: GoogleFindMyCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        coordinator: GoogleFindMyCoordinator | None = hass.data.get(
+            DOMAIN, {}
+        ).get(entry.entry_id)
         if coordinator is not None:
             coordinator.purge_device(dev_id)
     except Exception as err:
@@ -947,11 +1142,15 @@ async def async_remove_config_entry_device(
     try:
         opts = dict(entry.options)
         # Coerce legacy shapes (list / dict[str,str]) to v2 mapping
-        current_raw = opts.get(OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES))
+        current_raw = opts.get(
+            OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES)
+        )
         ignored_map, migrated = coerce_ignored_mapping(current_raw)
 
         # Determine the best human name at deletion time
-        name_to_store = device_entry.name_by_user or device_entry.name or dev_id
+        name_to_store = (
+            device_entry.name_by_user or device_entry.name or dev_id
+        )
 
         meta = ignored_map.get(dev_id, {})
         prev_name = meta.get("name")
@@ -970,9 +1169,16 @@ async def async_remove_config_entry_device(
 
         if opts != entry.options:
             hass.config_entries.async_update_entry(entry, options=opts)
-            _LOGGER.info("Marked device '%s' (%s) as ignored for entry '%s'", name_to_store, dev_id, entry.title)
+            _LOGGER.info(
+                "Marked device '%s' (%s) as ignored for entry '%s'",
+                name_to_store,
+                dev_id,
+                entry.title,
+            )
     except Exception as err:
-        _LOGGER.debug("Persisting delete decision failed for %s: %s", dev_id, err)
+        _LOGGER.debug(
+            "Persisting delete decision failed for %s: %s", dev_id, err
+        )
 
     # Allow HA to delete the device (and its entities) if no other entry still references it
     return True
