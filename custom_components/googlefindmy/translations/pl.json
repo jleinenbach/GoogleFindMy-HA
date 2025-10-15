@@ -156,7 +156,7 @@
       "description": "Odświeża adresy URL konfiguracji urządzeń Google Find My tak, aby wskazywały na zintegrowany widok mapy.",
       "fields": {}
     },
-    "locate_device_external": {
+    "locate_external": {
       "name": "Zlokalizuj urządzenie (zewnętrznie)",
       "description": "Zlokalizuj urządzenie przy użyciu zewnętrznego pomocnika; deleguje do zwykłej lokalizacji.",
       "fields": {
@@ -230,6 +230,20 @@
       "stat_non_significant_dropped": {
         "name": "Odrzucone nieistotne aktualizacje"
       }
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "Urządzenie '{device_id}' nie zostało znalezione lub nie należy do tej integracji."
+    },
+    "locate_failed": {
+      "message": "Nie udało się zlokalizować urządzenia '{device_id}': {error}"
+    },
+    "play_sound_failed": {
+      "message": "Nie udało się odtworzyć dźwięku na '{device_id}': {error}"
+    },
+    "stop_sound_failed": {
+      "message": "Nie udało się zatrzymać dźwięku na '{device_id}': {error}"
     }
   }
 }
