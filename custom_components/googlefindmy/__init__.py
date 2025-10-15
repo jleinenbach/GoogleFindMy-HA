@@ -987,11 +987,18 @@ async def _async_register_services(hass: HomeAssistant) -> None:
     async def async_rebuild_registry_service(call: ServiceCall) -> None:
         """Migrate soft settings or rebuild the registry (optionally scoped to device_ids).
 
-        Logic:
-            1. Determine target devices (all or a subset).
-            2. Remove all entities associated with these devices.
-            3. Remove orphaned devices (those with no entities left).
-            4. Reload the config entries associated with the affected devices.
+        Safety invariants:
+          - Delete only what is unambiguously ours:
+            * Entities: ent.platform == DOMAIN
+            * Devices: device.identifiers contains our DOMAIN AND ALL linked config_entries belong to our DOMAIN
+            * Never touch "service"/integration device (identifier == 'integration')
+          - Do not remove any device that still has entities (from any platform).
+        Steps:
+          1) Determine target devices (ours) from Device Registry.
+          2) Remove all entities (ours) linked to those devices.
+          3) Remove orphan entities (ours) with no device or missing device.
+          4) Remove devices (ours) that now have zero entities and are not the service device.
+          5) Reload affected entries (or all, if only global orphan-entity cleanup happened).
         """
         mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
         raw_ids = call.data.get(ATTR_DEVICE_IDS)
@@ -1010,20 +1017,15 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         _LOGGER.info(
             "googlefindmy.rebuild_registry requested: mode=%s, device_ids=%s",
             mode,
-            "none"
-            if not raw_ids
-            else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
+            "none" if not raw_ids else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
         )
 
         if mode == MODE_MIGRATE:
             for entry in entries:
                 try:
                     await _async_soft_migrate_data_to_options(hass, entry)
-                    await _async_migrate_unique_ids(hass, entry)
                 except Exception as err:
-                    _LOGGER.error(
-                        "Soft-migrate failed for entry %s: %s", entry.entry_id, err
-                    )
+                    _LOGGER.error("Soft-migrate failed for entry %s: %s", entry.entry_id, err)
             _LOGGER.info(
                 "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
                 len(entries),
@@ -1038,30 +1040,43 @@ async def _async_register_services(hass: HomeAssistant) -> None:
             )
             return
 
+        def _dev_is_ours(dev: dr.DeviceEntry | None) -> bool:
+            if dev is None:
+                return False
+            # must have at least one identifier with our domain
+            has_our_ident = any(domain == DOMAIN for domain, _ in dev.identifiers)
+            if not has_our_ident:
+                return False
+            # all config_entries of this device must be of our domain
+            for eid in dev.config_entries:
+                e = hass.config_entries.async_get_entry(eid)
+                if not e or e.domain != DOMAIN:
+                    return False
+            return True
+
+        def _is_service_device(dev: dr.DeviceEntry) -> bool:
+            return any(domain == DOMAIN and ident == "integration" for domain, ident in dev.identifiers)
+
+        # 1) Determine candidate devices (strictly ours), optionally filtered by passed HA device_ids.
         affected_entry_ids: set[str] = set()
+        candidate_devices: set[str] = set()
+
         if target_device_ids:
-            candidate_devices = set()
             for d in target_device_ids:
                 dev = dev_reg.async_get(d)
-                if dev is not None:
+                if dev and _dev_is_ours(dev):
                     candidate_devices.add(dev.id)
                     affected_entry_ids.update(dev.config_entries)
         else:
-            candidate_devices = set()
             for dev in dev_reg.devices.values():
-                if any(domain == DOMAIN for domain, _ in dev.identifiers):
+                if _dev_is_ours(dev):
                     candidate_devices.add(dev.id)
                     affected_entry_ids.update(dev.config_entries)
-
-        if not candidate_devices:
-            _LOGGER.info(
-                "googlefindmy.rebuild_registry: no matching devices to rebuild."
-            )
-            return
 
         removed_entities = 0
         removed_devices = 0
 
+        # 2) Remove our entities linked to candidate devices (includes disabled/hidden).
         for ent in list(ent_reg.entities.values()):
             if ent.platform == DOMAIN and ent.device_id in candidate_devices:
                 try:
@@ -1070,9 +1085,27 @@ async def _async_register_services(hass: HomeAssistant) -> None:
                 except Exception as err:
                     _LOGGER.error("Failed to remove entity %s: %s", ent.entity_id, err)
 
+        # 3) Orphan cleanup (ours only): platform==DOMAIN and (no device_id OR device missing).
+        orphan_only_cleanup = False
+        for ent in list(ent_reg.entities.values()):
+            if ent.platform != DOMAIN:
+                continue
+            if ent.device_id:
+                dev_obj = dev_reg.async_get(ent.device_id)
+                if dev_obj is not None:
+                    continue  # has a device; not an orphan
+            # device_id is None OR device record missing -> safe orphan of our platform
+            try:
+                ent_reg.async_remove(ent.entity_id)
+                removed_entities += 1
+                orphan_only_cleanup = True
+            except Exception as err:
+                _LOGGER.error("Failed to remove orphan entity %s: %s", ent.entity_id, err)
+
+        # 4) Remove devices (ours only) that now have no entities left and are not service devices.
         for dev_id in list(candidate_devices):
             dev = dev_reg.async_get(dev_id)
-            if dev is None:
+            if dev is None or not _dev_is_ours(dev) or _is_service_device(dev):
                 continue
             has_entities = any(e.device_id == dev_id for e in ent_reg.entities.values())
             if not has_entities:
@@ -1082,9 +1115,13 @@ async def _async_register_services(hass: HomeAssistant) -> None:
                 except Exception as err:
                     _LOGGER.error("Failed to remove device %s: %s", dev_id, err)
 
-        to_reload = [e for e in entries if e.entry_id in affected_entry_ids] or list(
-            entries
-        )
+        # 5) Reload entries. If only orphan entities (no device context) were removed and we
+        #    didn't touch any known devices, reload all entries of our domain to be safe.
+        if orphan_only_cleanup and not affected_entry_ids:
+            to_reload = list(entries)
+        else:
+            to_reload = [e for e in entries if e.entry_id in affected_entry_ids] or list(entries)
+
         for entry in to_reload:
             try:
                 await hass.config_entries.async_reload(entry.entry_id)
@@ -1092,7 +1129,7 @@ async def _async_register_services(hass: HomeAssistant) -> None:
                 _LOGGER.error("Reload failed for entry %s: %s", entry.entry_id, err)
 
         _LOGGER.info(
-            "googlefindmy.rebuild_registry: rebuild finished: removed %d entit(y/ies), %d device(s), entries reloaded=%d",
+            "googlefindmy.rebuild_registry: finished (safe mode): removed %d entit(y/ies), %d device(s), entries reloaded=%d",
             removed_entities,
             removed_devices,
             len(to_reload),
