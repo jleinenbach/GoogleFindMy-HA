@@ -383,7 +383,6 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
                     "Migrated integration service device identifier for entry '%s'",
                     entry.entry_id,
                 )
-                break
     except Exception as err:
         _LOGGER.debug("Service device identifier migration skipped: %s", err)
 
