@@ -7,35 +7,56 @@
 from __future__ import annotations
 
 import binascii
+import datetime
+import math
+import os
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 from google.protobuf import text_format
-import datetime
-import math
-import pytz
+
+try:
+    from zoneinfo import ZoneInfo  # stdlib, Python 3.9+
+except ImportError:
+    ZoneInfo = None  # type: ignore
 
 from custom_components.googlefindmy.ProtoDecoders import (
+    Common_pb2,
     DeviceUpdate_pb2,
     LocationReportsUpload_pb2,
 )
-from custom_components.googlefindmy.example_data_provider import get_example_data
 
 
 # --------------------------------------------------------------------------------------
 # Pretty printer helpers (dev tooling)
 # --------------------------------------------------------------------------------------
 
-def custom_message_formatter(message, indent, as_one_line):
+
+def custom_message_formatter(message, indent, _as_one_line):
     """Format protobuf messages with bytes fields as hex strings (dev convenience).
 
     Note:
         This is a developer-facing utility and is intentionally tolerant to schema changes.
-        Time fields (named 'Time') are rendered in local time for readability.
+        Time fields (named 'Time') are rendered as ISO-8601 UTC (Z). Optionally, when the
+        environment variable GOOGLEFINDMY_DEV_TZ is set to a valid IANA zone (e.g.,
+        "Europe/Berlin"), a second line with that display timezone is printed.
+        This output is for human readability only and must not be used for program logic.
     """
     lines = []
     indent = f"{indent}"
     indent = indent.removeprefix("0")
+
+    # Resolve optional display timezone from env; default to UTC.
+    display_tz_name = os.environ.get("GOOGLEFINDMY_DEV_TZ", "UTC")
+    if display_tz_name == "UTC" or ZoneInfo is None:
+        display_tz = datetime.timezone.utc
+        display_tz_name = "UTC"
+    else:
+        try:
+            display_tz = ZoneInfo(display_tz_name)
+        except Exception:
+            display_tz = datetime.timezone.utc
+            display_tz_name = "UTC"
 
     for field, value in message.ListFields():
         if field.type == field.TYPE_BYTES:
@@ -45,32 +66,56 @@ def custom_message_formatter(message, indent, as_one_line):
             if field.label == field.LABEL_REPEATED:
                 for sub_message in value:
                     if field.message_type.name == "Time":
-                        unix_time = sub_message.seconds
-                        local_time = datetime.datetime.fromtimestamp(
-                            unix_time, pytz.timezone("Europe/Berlin")
+                        # seconds (+ optional nanos) -> float seconds
+                        secs = getattr(sub_message, "seconds", 0)
+                        nanos = getattr(sub_message, "nanos", 0)
+                        unix_time = float(secs) + float(nanos) / 1e9
+
+                        dt_utc = datetime.datetime.fromtimestamp(
+                            unix_time, tz=datetime.timezone.utc
                         )
-                        lines.append(
-                            f"{indent}{field.name} {{\n{indent}  {local_time}\n{indent}}}"
-                        )
+                        utc_str = dt_utc.isoformat().replace("+00:00", "Z")
+                        if display_tz_name == "UTC":
+                            lines.append(
+                                f"{indent}{field.name} {{\n{indent}  utc: {utc_str}\n{indent}}}"
+                            )
+                        else:
+                            dt_disp = dt_utc.astimezone(display_tz)
+                            disp_str = dt_disp.isoformat()
+                            lines.append(
+                                f"{indent}{field.name} {{\n{indent}  utc: {utc_str}\n{indent}  {display_tz_name}: {disp_str}\n{indent}}}"
+                            )
                     else:
                         nested_message = custom_message_formatter(
-                            sub_message, f"{indent}  ", as_one_line
+                            sub_message, f"{indent}  ", _as_one_line
                         )
                         lines.append(
                             f"{indent}{field.name} {{\n{nested_message}\n{indent}}}"
                         )
             else:
                 if field.message_type.name == "Time":
-                    unix_time = value.seconds
-                    local_time = datetime.datetime.fromtimestamp(
-                        unix_time, pytz.timezone("Europe/Berlin")
+                    # seconds (+ optional nanos) -> float seconds
+                    secs = getattr(value, "seconds", 0)
+                    nanos = getattr(value, "nanos", 0)
+                    unix_time = float(secs) + float(nanos) / 1e9
+
+                    dt_utc = datetime.datetime.fromtimestamp(
+                        unix_time, tz=datetime.timezone.utc
                     )
-                    lines.append(
-                        f"{indent}{field.name} {{\n{indent}  {local_time}\n{indent}}}"
-                    )
+                    utc_str = dt_utc.isoformat().replace("+00:00", "Z")
+                    if display_tz_name == "UTC":
+                        lines.append(
+                            f"{indent}{field.name} {{\n{indent}  utc: {utc_str}\n{indent}}}"
+                        )
+                    else:
+                        dt_disp = dt_utc.astimezone(display_tz)
+                        disp_str = dt_disp.isoformat()
+                        lines.append(
+                            f"{indent}{field.name} {{\n{indent}  utc: {utc_str}\n{indent}  {display_tz_name}: {disp_str}\n{indent}}}"
+                        )
                 else:
                     nested_message = custom_message_formatter(
-                        value, f"{indent}  ", as_one_line
+                        value, f"{indent}  ", _as_one_line
                     )
                     lines.append(
                         f"{indent}{field.name} {{\n{nested_message}\n{indent}}}"
@@ -83,6 +128,7 @@ def custom_message_formatter(message, indent, as_one_line):
 # --------------------------------------------------------------------------------------
 # Protobuf parse helpers (stable API)
 # --------------------------------------------------------------------------------------
+
 
 def parse_location_report_upload_protobuf(hex_string: str):
     """Parse LocationReportsUpload from a hex string."""
@@ -108,6 +154,7 @@ def parse_device_list_protobuf(hex_string: str):
 # --------------------------------------------------------------------------------------
 # Canonical ID extraction
 # --------------------------------------------------------------------------------------
+
 
 def get_canonic_ids(device_list) -> List[Tuple[str, str]]:
     """Return (device_name, canonic_id) for all devices in the list.
@@ -155,10 +202,13 @@ _DEVICE_STUB_KEYS: Tuple[str, ...] = (
     "accuracy",
     "last_seen",
     "status",
+    "status_code",
+    "_report_hint",
     "is_own_report",
     "semantic_name",
     "battery_level",
 )
+
 
 def _build_device_stub(device_name: str, canonic_id: str) -> Dict[str, Any]:
     """Return a normalized, predictable stub for a device row.
@@ -176,6 +226,8 @@ def _build_device_stub(device_name: str, canonic_id: str) -> Dict[str, Any]:
         "accuracy": None,
         "last_seen": None,
         "status": None,
+        "status_code": None,
+        "_report_hint": None,
         "is_own_report": None,
         "semantic_name": None,
         "battery_level": None,
@@ -203,6 +255,96 @@ def _normalize_location_dict(loc: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _get_rank_tuple(n: Dict[str, Any]) -> Tuple[int, int, float, float, str]:
+    """Create a sort key tuple with status-based prioritization.
+    Priority (high to low):
+      1. Source/Status: Owner > Crowdsourced > Aggregated > Unknown
+      2. Presence of coordinates
+      3. Newer last_seen timestamp
+      4. Better accuracy (smaller is better)
+      5. Deterministic tie-breaker string
+    """
+    # 1) Owner-Reports always take precedence
+    is_own = 1 if bool(n.get("is_own_report")) else 0
+
+    # 2) Robustly determine status rank (String, Int, or via Hint)
+    status_code = n.get("status_code")
+    try:
+        status_code_int = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code_int = None
+    raw_status = n.get("status")
+    if isinstance(raw_status, str):
+        status_name = raw_status.strip().lower()
+    elif isinstance(raw_status, (int, float)):
+        try:
+            status_name = Common_pb2.Status.Name(int(raw_status)).lower()
+        except Exception:
+            status_name = str(int(raw_status))
+    else:
+        status_name = ""
+
+    hint = str(n.get("_report_hint") or "").strip().lower()
+
+    # 3) Derive rank (multiple paths for robustness)
+    # Use a sentinel object for robust enum comparisons
+    _MISSING = object()
+    cs = getattr(Common_pb2.Status, "CROWDSOURCED", _MISSING)
+    ag = getattr(Common_pb2.Status, "AGGREGATED", _MISSING)
+    if is_own:
+        status_rank = 3
+    elif (
+        (cs is not _MISSING and status_code_int == cs)
+        or "crowdsourced" in status_name
+        or "in_all_areas" in status_name
+        or hint == "in_all_areas"
+    ):
+        status_rank = 2
+    elif (
+        (ag is not _MISSING and status_code_int == ag)
+        or "aggregated" in status_name
+        or "high_traffic" in status_name
+        or hint == "high_traffic"
+    ):
+        status_rank = 1
+    else:
+        status_rank = 0  # SEMANTIC/Unknown/Default
+
+    has_coords = (
+        1
+        if isinstance(n.get("latitude"), (int, float))
+        and isinstance(n.get("longitude"), (int, float))
+        else 0
+    )
+    seen = n.get("last_seen")
+    seen_rank = (
+        float(seen)
+        if isinstance(seen, (int, float)) and math.isfinite(float(seen))
+        else float("-inf")
+    )
+    acc = n.get("accuracy")
+    acc_rank = (
+        -float(acc)
+        if isinstance(acc, (int, float)) and math.isfinite(float(acc))
+        else float("-inf")
+    )
+    # Deterministic final tiebreaker: canonical content key (string).
+    stable_key = "|".join(
+        str(x)
+        for x in (
+            n.get("status_code", ""),
+            n.get("status", ""),
+            int(bool(n.get("is_own_report"))),
+            n.get("last_seen", ""),
+            n.get("latitude", ""),
+            n.get("longitude", ""),
+            n.get("accuracy", ""),
+            n.get("semantic_name", ""),
+        )
+    )
+    return (status_rank, has_coords, seen_rank, acc_rank, stable_key)
+
+
 def _select_best_location(
     cands: List[Dict[str, Any]]
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -211,15 +353,12 @@ def _select_best_location(
     This function normalizes all candidates once, then sorts them based on a
     clear priority hierarchy to find the single most relevant location report.
 
-    Priority (high → low):
-        1) Has numeric coordinates (lat/lon)
-        2) Newer `last_seen` timestamp
-        3) Better accuracy (smaller radius)
-        4) `is_own_report` (used as a soft, final tiebreaker)
-
-    Rationale:
-        A fresh, precise crowdsourced fix is typically more helpful than an old,
-        coarse own-report. This ordering reflects that practical preference.
+    Priority (high to low):
+        1) Status/Source (Owner > Crowdsourced > Aggregated)
+        2) Presence of coordinates
+        3) Newer `last_seen` timestamp
+        4) Better accuracy (smaller is better)
+        5) Deterministic tie-breaker (canonical stable key)
 
     Returns:
         A tuple containing:
@@ -233,37 +372,10 @@ def _select_best_location(
     # Normalize once up front
     normed_cands: List[Dict[str, Any]] = [_normalize_location_dict(c or {}) for c in cands]
 
-    for n in normed_cands:
-        has_coords = isinstance(n.get("latitude"), (int, float)) and isinstance(
-            n.get("longitude"), (int, float)
-        )
-        n["_rank_has_coords"] = 1 if has_coords else 0
-        try:
-            n["_rank_seen"] = float(n.get("last_seen") or 0.0)
-        except (TypeError, ValueError):
-            n["_rank_seen"] = 0.0
-        try:
-            acc = float(n.get("accuracy")) if n.get("accuracy") is not None else float("inf")
-            n["_rank_acc"] = -acc  # negative => smaller accuracy ranks higher
-        except (TypeError, ValueError):
-            n["_rank_acc"] = float("-inf")
-        n["_rank_is_own"] = 1 if bool(n.get("is_own_report")) else 0
+    # Sort using the new rank tuple which prioritizes status
+    normed_cands.sort(key=_get_rank_tuple, reverse=True)
 
-    # Coords → recency → accuracy → own-report
-    normed_cands.sort(
-        key=lambda x: (
-            x["_rank_has_coords"],
-            x["_rank_seen"],
-            x["_rank_acc"],
-            x["_rank_is_own"],
-        ),
-        reverse=True,
-    )
-
-    # Micro-optimization: remove temp rank keys in-place on the winner, then copy.
     best_candidate = normed_cands[0]
-    for k in ("_rank_has_coords", "_rank_seen", "_rank_acc", "_rank_is_own"):
-        best_candidate.pop(k, None)
 
     return dict(best_candidate), normed_cands
 
@@ -383,14 +495,24 @@ def get_devices_with_location(device_list) -> List[Dict[str, Any]]:
                 if device.HasField("information") and device.information.HasField(
                     "locationInformation"
                 ):
-                    has_reports = bool(
-                        getattr(device.information.locationInformation, "reports", [])
-                    )
+                    locinfo = device.information.locationInformation
+                    has_reports = False
+                    if locinfo.HasField("reports"):
+                        r = locinfo.reports
+                        # Either network reports exist, or a 'recentLocation' is set
+                        if r.HasField("recentLocationAndNetworkLocations"):
+                            rn = r.recentLocationAndNetworkLocations
+                            has_reports = (
+                                rn.HasField("recentLocation")
+                                or len(getattr(rn, "networkLocations", [])) > 0
+                            )
+
                     if has_reports:
                         mock_device_update = DeviceUpdate_pb2.DeviceUpdate()
                         mock_device_update.deviceMetadata.CopyFrom(device)
                         location_candidates = (
-                            decrypt_location_response_locations(mock_device_update) or []
+                            decrypt_location_response_locations(mock_device_update)
+                            or []
                         )
             except Exception:
                 # Defensive: decryption issues must not break the whole list.
@@ -431,31 +553,32 @@ def get_devices_with_location(device_list) -> List[Dict[str, Any]]:
 # Dev print helpers
 # --------------------------------------------------------------------------------------
 
+
 def print_location_report_upload_protobuf(hex_string: str):
-    print(
-        text_format.MessageToString(
-            parse_location_report_upload_protobuf(hex_string),
-            message_formatter=custom_message_formatter,
-        )
-    )
+    msg = parse_location_report_upload_protobuf(hex_string)
+    try:
+        s = text_format.MessageToString(msg, message_formatter=custom_message_formatter)
+    except TypeError:
+        s = text_format.MessageToString(msg)
+    print(s)
 
 
 def print_device_update_protobuf(hex_string: str):
-    print(
-        text_format.MessageToString(
-            parse_device_update_protobuf(hex_string),
-            message_formatter=custom_message_formatter,
-        )
-    )
+    msg = parse_device_update_protobuf(hex_string)
+    try:
+        s = text_format.MessageToString(msg, message_formatter=custom_message_formatter)
+    except TypeError:
+        s = text_format.MessageToString(msg)
+    print(s)
 
 
 def print_device_list_protobuf(hex_string: str):
-    print(
-        text_format.MessageToString(
-            parse_device_list_protobuf(hex_string),
-            message_formatter=custom_message_formatter,
-        )
-    )
+    msg = parse_device_list_protobuf(hex_string)
+    try:
+        s = text_format.MessageToString(msg, message_formatter=custom_message_formatter)
+    except TypeError:
+        s = text_format.MessageToString(msg)
+    print(s)
 
 
 # --------------------------------------------------------------------------------------
@@ -463,24 +586,45 @@ def print_device_list_protobuf(hex_string: str):
 # --------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Recompile
-    subprocess.run(["protoc", "--python_out=.", "ProtoDecoders/Common.proto"], cwd="../")
-    subprocess.run(
-        ["protoc", "--python_out=.", "ProtoDecoders/DeviceUpdate.proto"], cwd="../"
-    )
-    subprocess.run(
-        ["protoc", "--python_out=.", "ProtoDecoders/LocationReportsUpload.proto"],
-        cwd="../",
+    # dev-only import to avoid hard dependency at runtime
+    from custom_components.googlefindmy.example_data_provider import (
+        get_example_data,
     )
 
-    subprocess.run(["protoc", "--pyi_out=.", "ProtoDecoders/Common.proto"], cwd="../")
-    subprocess.run(
-        ["protoc", "--pyi_out=.", "ProtoDecoders/DeviceUpdate.proto"], cwd="../"
-    )
-    subprocess.run(
-        ["protoc", "--pyi_out=.", "ProtoDecoders/LocationReportsUpload.proto"],
-        cwd="../",
-    )
+    # Recompile (developer convenience)
+    try:
+        subprocess.run(
+            ["protoc", "--python_out=.", "ProtoDecoders/Common.proto"],
+            cwd="../",
+            check=True,
+        )
+        subprocess.run(
+            ["protoc", "--python_out=.", "ProtoDecoders/DeviceUpdate.proto"],
+            cwd="../",
+            check=True,
+        )
+        subprocess.run(
+            ["protoc", "--python_out=.", "ProtoDecoders/LocationReportsUpload.proto"],
+            cwd="../",
+            check=True,
+        )
+        subprocess.run(
+            ["protoc", "--pyi_out=.", "ProtoDecoders/Common.proto"], cwd="../", check=True
+        )
+        subprocess.run(
+            ["protoc", "--pyi_out=.", "ProtoDecoders/DeviceUpdate.proto"],
+            cwd="../",
+            check=True,
+        )
+        subprocess.run(
+            ["protoc", "--pyi_out=.", "ProtoDecoders/LocationReportsUpload.proto"],
+            cwd="../",
+            check=True,
+        )
+    except FileNotFoundError:
+        print("protoc not found. Skipping proto regeneration.")
+    except subprocess.CalledProcessError as e:
+        print(f"protoc failed: {e}")
 
     print("\n ------------------- \n")
 
