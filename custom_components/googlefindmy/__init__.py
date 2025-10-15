@@ -815,7 +815,7 @@ async def _async_register_services(
                 if coord is None:
                     raise ValueError(f"No coordinator found for device '{canonical_id}'")
 
-                await coord.async_request_locate(canonical_id)
+                await coord.async_locate_device(canonical_id)
                 _LOGGER.info("Successfully submitted manual locate for %s", friendly)
 
             except (ValueError, HomeAssistantError) as err:
