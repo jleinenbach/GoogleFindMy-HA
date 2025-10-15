@@ -232,11 +232,14 @@ async def async_pick_working_token(email: str, candidates: List[Tuple[str, str]]
 
     This performs a very lightweight API call (`async_get_basic_device_list`)
     to verify the token works for the given Google account.
+    This call is isolated and does not depend on the global cache state.
     """
     for source, token in candidates:
         try:
+            # Use an ephemeral API instance with explicit credentials for validation
             api = GoogleFindMyAPI(oauth_token=token, google_email=email)
-            await api.async_get_basic_device_list(email)
+            # Pass the token explicitly to the validation call to ensure isolation
+            await api.async_get_basic_device_list(username=email, token=token)
             _LOGGER.debug("Token from '%s' validated successfully.", source)
             return token
         except Exception as err:  # noqa: BLE001 - network/auth errors
@@ -412,7 +415,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="individual_tokens", data_schema=STEP_INDIVIDUAL_DATA_SCHEMA, errors=errors)
 
     # ---------- Shared helper to create API from stored auth_data ----------
-    async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, Optional[str]]:
+    async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, str, str]:
         """Build API instance for setup using minimal credentials."""
         email = self._auth_data.get(CONF_GOOGLE_EMAIL)
         oauth = self._auth_data.get(CONF_OAUTH_TOKEN)
@@ -421,7 +424,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise HomeAssistantError("Missing credentials in setup flow.")
 
         api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
-        return api, email
+        return api, email, oauth
 
     # ---------- Device selection (now: connection test + non-secret settings) ----------
     async def async_step_device_selection(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -441,8 +444,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Online validation: fetch devices once (fail → cannot_connect)
         if not self._available_devices:
             try:
-                api, username = await self._async_build_api_and_username()
-                devices = await api.async_get_basic_device_list(username)
+                api, username, token = await self._async_build_api_and_username()
+                # Pass token explicitly to ensure isolation from global state
+                devices = await api.async_get_basic_device_list(username=username, token=token)
                 if not devices:
                     errors["base"] = "no_devices"
                 else:
