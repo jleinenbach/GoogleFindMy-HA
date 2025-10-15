@@ -25,7 +25,7 @@
         }
       },
       "device_selection": {
-        "title": "Select Devices and Polling",
+        "title": "Polling Settings",
         "description": "Newly discovered devices appear disabled and can be enabled in device settings. Configure the general polling parameters:\n• Location poll interval: How often to start a new polling cycle (60–3600 seconds)\n• Device poll delay: Delay between individual device polls within a cycle (1–60 seconds)",
         "data": {
           "location_poll_interval": "Location poll interval (s)",
@@ -40,7 +40,12 @@
       },
       "reauth_confirm": {
         "title": "Reauthenticate",
-        "description": "Your credentials appear to be invalid or expired. Please provide new credentials below.\n\nTip: You can either paste the full contents of a fresh secrets.json **or** supply a new OAuth token and email."
+        "description": "Your credentials appear to be invalid or expired. Please provide new credentials below.\n\nTip: You can either paste the full contents of a fresh secrets.json **or** supply a new OAuth token and email.",
+        "data": {
+          "secrets_json": "New secrets.json (full contents)",
+          "oauth_token": "New OAuth token",
+          "google_email": "Google email"
+        }
       }
     },
     "error": {
