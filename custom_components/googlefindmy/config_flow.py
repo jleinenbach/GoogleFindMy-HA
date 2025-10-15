@@ -37,7 +37,6 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers import device_registry as dr
 
 # Defensive import of selector (older HA versions may not expose it)
 try:  # pragma: no cover - import environment detail
@@ -81,6 +80,14 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Backcompat base for OptionsFlow: prefer OptionsFlowWithReload, else OptionsFlow
+# -----------------------------------------------------------------------------
+try:  # pragma: no cover - depends on HA core version
+    OptionsFlowBase = config_entries.OptionsFlowWithReload  # type: ignore[attr-defined]
+except Exception:  # Older cores without OptionsFlowWithReload
+    OptionsFlowBase = config_entries.OptionsFlow  # type: ignore[assignment]
 
 # ---------------------------
 # Validators (format/plausibility)
@@ -594,7 +601,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="reauth_confirm", data_schema=schema, errors=errors)
 
 
-class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
+class OptionsFlowHandler(OptionsFlowBase):
     """Options flow to update non-secret settings and optionally refresh credentials.
 
     NOTE: Step 1 change: `tracked_devices` has been removed from the Settings UI.
@@ -619,21 +626,26 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
         """
         # Prefer runtime_data (Best Practice)
         rd = getattr(entry, "runtime_data", None)
-        if rd is not None and hasattr(rd, "_cache"):
-            try:
-                return getattr(rd, "_cache")
-            except Exception:  # pragma: no cover - defensive
-                pass
+        if rd is not None:
+            for attr in ("_cache", "cache"):
+                if hasattr(rd, attr):
+                    try:
+                        return getattr(rd, attr)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
 
         # Fallback to hass.data
         data = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
-        if data is not None and hasattr(data, "_cache"):
-            try:
-                return getattr(data, "_cache")
-            except Exception:  # pragma: no cover - defensive
-                pass
-        if isinstance(data, dict) and "cache" in data:
-            return data["cache"]
+        if data is not None:
+            for attr in ("_cache", "cache"):
+                if hasattr(data, attr):
+                    try:
+                        return getattr(data, attr)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+        if isinstance(data, dict):
+            # last-chance dictionary-style storage
+            return data.get("cache") or data.get("_cache")
 
         return None
 
@@ -715,7 +727,7 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: user_input.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, current_map_token_exp),
             }
 
-            # Commit options and trigger automatic reload via OptionsFlowWithReload.
+            # Commit options and trigger automatic reload via OptionsFlowWithReload (or base fallback).
             return self.async_create_entry(title="", data=new_options)
 
         suggested_values = {
