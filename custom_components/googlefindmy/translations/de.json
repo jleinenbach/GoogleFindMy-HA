@@ -77,7 +77,7 @@
       },
       "credentials": {
         "title": "Anmeldedaten aktualisieren (optional)",
-        "description": "Aktualisiere deine Anmeldedaten, ohne bestehende Werte preiszugeben. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth-Token** und **Google-E-Mail** eingeben.\n\nFalls angegeben, werden die Anmeldedaten validiert und gespeichert. Die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
+        "description": "Aktualisiere deine Anmeldedaten, ohne bestehende Werte preiszugeben. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth-Token** und **Google-E-Mail** eingeben.\n\nFalls angegeben, werden die Anmeldedaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
         "data": {
           "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
           "oauth_token": "Neuer OAuth-Token",
@@ -205,6 +205,9 @@
     "binary_sensor": {
       "polling": {
         "name": "Abfrage aktiv"
+      },
+      "auth_status": {
+        "name": "Authentifizierungsstatus"
       }
     },
     "sensor": {
@@ -230,11 +233,17 @@
         "name": "Ungültige Koordinaten"
       },
       "stat_low_quality_dropped": {
-        "name": "Verworfene Standorte (geringe Genauigkeit)"
+        "name": "Verworfen (geringe Genauigkeit)"
       },
       "stat_non_significant_dropped": {
         "name": "Unwesentliche Aktualisierungen verworfen"
       }
+    }
+  },
+  "issues": {
+    "auth_expired": {
+      "title": "Erneute Anmeldung erforderlich",
+      "description": "Die Anmeldung für Google Find My Device ist ungültig oder abgelaufen.\n\n**Eintrag:** {entry_title}\n**Konto:** {email}\n\nWähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden. Wenn du kürzlich dein Google-Passwort geändert oder Tokens widerrufen hast, musst du dich hier neu authentifizieren, um die Funktionalität wiederherzustellen."
     }
   },
   "exceptions": {
