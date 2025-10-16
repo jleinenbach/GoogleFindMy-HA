@@ -205,6 +205,9 @@
     "binary_sensor": {
       "polling": {
         "name": "Polling"
+      },
+      "auth_status": {
+        "name": "Authentication status"
       }
     },
     "sensor": {
@@ -235,6 +238,12 @@
       "stat_non_significant_dropped": {
         "name": "Non-significant updates dropped"
       }
+    }
+  },
+  "issues": {
+    "auth_expired": {
+      "title": "Reauthentication required",
+      "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality."
     }
   },
   "exceptions": {
