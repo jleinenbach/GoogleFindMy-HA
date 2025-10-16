@@ -32,6 +32,14 @@ Implementation note (minimal addendum):
 - If **any** config entry for this domain already exists (even disabled), we
   proactively **skip all flow-time online checks** (token validation and
   pre-setup device fetch) to avoid the guard entirely. Setup will validate.
+
+Change (Step 4): Defensive negative validation before persisting `CONF_OAUTH_TOKEN`.
+- We must **not** treat values that look like AAS tokens (`aas_et…`) or JWTs (`eyJ…`)
+  as OAuth tokens on write. For manual input, such values are rejected. For
+  `secrets.json`, we still allow using an AAS token for online validation (it may work),
+  but we try to persist a *non-disqualified* alternative as `CONF_OAUTH_TOKEN`
+  (e.g. a real OAuth token) when available; otherwise we persist the validated value
+  with a warning (runtime code defensively re-validates on read).
 """
 from __future__ import annotations
 
@@ -118,6 +126,27 @@ def _email_valid(value: str) -> bool:
 def _token_plausible(value: str) -> bool:
     """Return True if value looks like a token (no spaces, long enough)."""
     return bool(_TOKEN_RE.match(value or ""))
+
+
+# --- New (Step 4): shape-based negative validation for OAuth field ----------------
+def _looks_like_aas(value: str) -> bool:
+    """Heuristically detect AAS-shaped tokens (Android AuthSub)."""
+    return value.startswith("aas_et/") or value.startswith("aas_et.")
+
+
+def _looks_like_jwt(value: str) -> bool:
+    """Lightweight detection of JWT-like blobs (Base64URL x3, commonly 'eyJ…')."""
+    return value.count(".") >= 2 and value[:3] == "eyJ"
+
+
+def _disqualifies_oauth_for_persistence(value: str) -> Optional[str]:
+    """Return reason if token must not be persisted as OAuth (AAS/JWT)."""
+    if _looks_like_aas(value):
+        return "token resembles an AAS token (aas_et…), not an OAuth token"
+    if _looks_like_jwt(value):
+        return "token looks like a JWT (installation/ID token), not an OAuth token"
+    return None
+# -------------------------------------------------------------------------------
 
 
 def _is_multi_entry_guard_error(err: Exception) -> bool:
@@ -346,7 +375,10 @@ def _interpret_credentials_choice(
         # Partial manual input
         return None, None, None, "choose_one"
 
+    # Manual path: reject values that obviously are *not* OAuth (AAS/JWT)
     if not (_email_valid(google_email) and _token_plausible(oauth_token)):
+        return "manual", None, None, "invalid_token"
+    if _disqualifies_oauth_for_persistence(oauth_token):
         return "manual", None, None, "invalid_token"
 
     return "manual", google_email, [("manual", oauth_token)], None
@@ -420,10 +452,27 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # Syntax was OK but none of the candidates worked online
                     errors["base"] = "cannot_connect"
                 else:
+                    # Decide what to persist as CONF_OAUTH_TOKEN:
+                    # Prefer a non-disqualified candidate (OAuth-looking) if available,
+                    # otherwise persist the validated value (may be AAS) and warn.
+                    to_persist = chosen
+                    if _disqualifies_oauth_for_persistence(to_persist):
+                        alt = next((v for (_src, v) in cands if not _disqualifies_oauth_for_persistence(v)), None)
+                        if alt:
+                            to_persist = alt
+                            _LOGGER.debug(
+                                "Secrets path: validated token is not OAuth-shaped; persisting alternative candidate."
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Secrets path: only non-OAuth-shaped token available; persisting validated value. "
+                                "Runtime code will defensively validate on read."
+                            )
+
                     # Store only minimal credentials transiently for next step (do not keep full secrets bundle)
                     self._auth_data = {
                         DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                        CONF_OAUTH_TOKEN: chosen,
+                        CONF_OAUTH_TOKEN: to_persist,
                         CONF_GOOGLE_EMAIL: email,
                     }
                     return await self.async_step_device_selection()
@@ -627,11 +676,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if not chosen:
                         errors["base"] = "cannot_connect"
                     else:
+                        # Determine persistence token (prefer non-disqualified if possible)
+                        to_persist = chosen
+                        if _disqualifies_oauth_for_persistence(to_persist):
+                            alt = next((v for (_src, v) in cands if not _disqualifies_oauth_for_persistence(v)), None)
+                            if alt:
+                                to_persist = alt
+                                _LOGGER.debug(
+                                    "Reauth: validated token is not OAuth-shaped; persisting alternative candidate."
+                                )
+                            else:
+                                _LOGGER.warning(
+                                    "Reauth: only non-OAuth-shaped token available; persisting validated value."
+                                )
+
                         new_data = {
                             DATA_AUTH_METHOD: (
                                 _AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL
                             ),
-                            CONF_OAUTH_TOKEN: chosen,
+                            CONF_OAUTH_TOKEN: to_persist,
                             CONF_GOOGLE_EMAIL: email,
                         }
 
@@ -907,11 +970,24 @@ class OptionsFlowHandler(OptionsFlowBase):
                     if not chosen:
                         errors["base"] = "cannot_connect"
                     else:
+                        to_persist = chosen
+                        if _disqualifies_oauth_for_persistence(to_persist):
+                            alt = next((v for (_src, v) in cands if not _disqualifies_oauth_for_persistence(v)), None)
+                            if alt:
+                                to_persist = alt
+                                _LOGGER.debug(
+                                    "Options credentials: validated token is not OAuth-shaped; persisting alternative candidate."
+                                )
+                            else:
+                                _LOGGER.warning(
+                                    "Options credentials: only non-OAuth-shaped token available; persisting validated value."
+                                )
+
                         new_data = {
                             DATA_AUTH_METHOD: (
                                 _AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL
                             ),
-                            CONF_OAUTH_TOKEN: chosen,
+                            CONF_OAUTH_TOKEN: to_persist,
                             CONF_GOOGLE_EMAIL: email,
                         }
 
