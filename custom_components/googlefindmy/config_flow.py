@@ -26,6 +26,11 @@ Change (Step 1.1): When the API reports the *multi-entry guard*
 `entry.runtime_data`"), we **defer online validation** inside the flow
 (accept the token candidate and skip the pre-setup device fetch). The actual
 validation happens during setup where the entry-scoped cache exists.
+
+Implementation note (minimal addendum):
+- If **any** config entry for this domain already exists (even disabled), we
+  proactively **skip all flow-time online checks** (token validation and
+  pre-setup device fetch) to avoid the guard entirely. Setup will validate.
 """
 from __future__ import annotations
 
@@ -119,10 +124,15 @@ def _token_plausible(value: str) -> bool:
 def _is_multi_entry_guard_error(err: Exception) -> bool:
     """Detect the API's multi-entry guard message to allow deferred validation."""
     msg = f"{err}"
-    return (
-        "Multiple config entries active" in msg
-        or "entry.runtime_data" in msg
-    )
+    return ("Multiple config entries active" in msg) or ("entry.runtime_data" in msg)
+
+
+def _should_skip_online_validation(hass) -> bool:
+    """Return True if any config entry for this domain exists (avoid flow-time API calls)."""
+    try:
+        return bool(hass.config_entries.async_entries(DOMAIN))
+    except Exception:
+        return False
 
 
 # ---------------------------
@@ -400,7 +410,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = err
             else:
                 assert method == "secrets" and email and cands
-                chosen = await async_pick_working_token(email, cands)
+                # Minimal change: skip online validation entirely if any entry exists
+                if _should_skip_online_validation(self.hass):
+                    chosen = cands[0][1]
+                    _LOGGER.debug("Skipping flow-time token validation (existing entry present).")
+                else:
+                    chosen = await async_pick_working_token(email, cands)
                 if not chosen:
                     # Syntax was OK but none of the candidates worked online
                     errors["base"] = "cannot_connect"
@@ -432,7 +447,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = err
             else:
                 assert method == "manual" and email and cands
-                # For initial setup we defer the online validation to device_selection.
+                # For initial setup we defer the online validation (see device_selection).
                 token = cands[0][1]
                 self._auth_data = {
                     DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
@@ -473,17 +488,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"{DOMAIN}:{email_for_uid}")
             self._abort_if_unique_id_configured()
 
-        # Online validation: fetch devices once (fail → cannot_connect), unless guard suggests deferral
+        # Online validation: fetch devices once (fail → cannot_connect), unless we skip or guard suggests deferral
         if not self._available_devices:
             try:
-                api, username, token = await self._async_build_api_and_username()
-                # Pass token explicitly to ensure isolation from global state
-                devices = await api.async_get_basic_device_list(username=username, token=token)
-                if not devices:
-                    errors["base"] = "no_devices"
+                if not _should_skip_online_validation(self.hass):
+                    api, username, token = await self._async_build_api_and_username()
+                    # Pass token explicitly to ensure isolation from global state
+                    devices = await api.async_get_basic_device_list(username=username, token=token)
+                    if not devices:
+                        errors["base"] = "no_devices"
+                    else:
+                        # store as (name, id) for potential future use (kept for parity)
+                        self._available_devices = [(d["name"], d["id"]) for d in devices]
                 else:
-                    # store as (name, id) for potential future use (kept for parity)
-                    self._available_devices = [(d["name"], d["id"]) for d in devices]
+                    _LOGGER.debug("Skipping flow-time device fetch (existing entry present).")
             except Exception as err:  # noqa: BLE001 - API/transport errors
                 if _is_multi_entry_guard_error(err):
                     _LOGGER.warning(
@@ -603,7 +621,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 try:
                     assert email and cands
-                    chosen = await async_pick_working_token(email, cands)
+                    if _should_skip_online_validation(self.hass):
+                        chosen = cands[0][1]
+                        _LOGGER.debug("Skipping flow-time token validation (reauth, existing entry present).")
+                    else:
+                        chosen = await async_pick_working_token(email, cands)
                     if not chosen:
                         errors["base"] = "cannot_connect"
                     else:
@@ -842,7 +864,8 @@ class OptionsFlowHandler(OptionsFlowBase):
             validation with token failover.
 
         Step 1.1:
-            If the API signals the multi-entry guard, we defer validation to setup.
+            If the API signals the multi-entry guard, or if any entry exists,
+            we defer validation to setup (accept first candidate).
         """
         errors: Dict[str, str] = {}
 
@@ -878,7 +901,11 @@ class OptionsFlowHandler(OptionsFlowBase):
             else:
                 try:
                     assert email and cands
-                    chosen = await async_pick_working_token(email, cands)
+                    if _should_skip_online_validation(self.hass):
+                        chosen = cands[0][1]
+                        _LOGGER.debug("Skipping flow-time token validation (options credentials).")
+                    else:
+                        chosen = await async_pick_working_token(email, cands)
                     if not chosen:
                         errors["base"] = "cannot_connect"
                     else:
