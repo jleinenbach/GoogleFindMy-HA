@@ -50,6 +50,7 @@
     },
     "error": {
       "auth_failed": "Authentication failed. Please try again.",
+      "invalid_auth": "Invalid authentication. Please provide a fresh token and/or sign in again.",
       "invalid_token": "Invalid token/email provided or required fields are missing.",
       "invalid_json": "Invalid JSON format in secrets.json content.",
       "no_devices": "No devices found. Please ensure that Find My Device is enabled on your Google account.",
@@ -115,10 +116,12 @@
     "error": {
       "invalid_json": "Invalid JSON format in secrets.json content.",
       "invalid": "Validation failed. Please check your input.",
+      "invalid_auth": "Invalid authentication. Please provide a fresh token and/or sign in again.",
       "cannot_connect": "Failed to connect to the Google API.",
       "choose_one": "Please provide exactly one credential method.",
       "required": "This field is required.",
-      "invalid_token": "Invalid credentials (token/email). Please check format and content."
+      "invalid_token": "Invalid credentials (token/email). Please check format and content.",
+      "unknown": "Unexpected error occurred."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration successful.",
@@ -244,6 +247,10 @@
     "auth_expired": {
       "title": "Reauthentication required",
       "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality."
+    },
+    "multiple_config_entries": {
+      "title": "Multiple configuration entries detected",
+      "description": "This integration currently has more than one configuration entry:\n\n{entries}\n\nOnly a single entry is supported. Go to **Settings → Devices & Services**, open **Google Find My Device**, and remove duplicate entries so that exactly one remains. Then reload the integration (or restart Home Assistant)."
     }
   },
   "exceptions": {
