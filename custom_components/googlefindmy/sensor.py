@@ -41,6 +41,10 @@ from .const import (
     OPT_ENABLE_STATS_ENTITIES,
     DEFAULT_ENABLE_STATS_ENTITIES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    SERVICE_DEVICE_NAME,
+    SERVICE_DEVICE_MODEL,
+    SERVICE_DEVICE_MANUFACTURER,
+    service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
 
@@ -140,10 +144,15 @@ async def async_setup_entry(
     known_ids: set[str] = set()
 
     # Options-first toggle for diagnostic counters (single source of truth)
-    enable_stats = entry.options.get(
-        OPT_ENABLE_STATS_ENTITIES,
-        entry.data.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES),
-    )
+    try:
+        from . import _opt  # type: ignore
+        enable_stats = _opt(entry, OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
+    except Exception:
+        enable_stats = entry.options.get(
+            OPT_ENABLE_STATS_ENTITIES,
+            entry.data.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES),
+        )
+
     if enable_stats:
         created_stats = []
         for stat_key, desc in STATS_DESCRIPTIONS.items():
@@ -242,14 +251,14 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         The identifiers are namespaced by entry_id to prevent collisions with multiple entries.
         """
         entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", "default")
+        ident = service_device_identifier(entry_id)
         return DeviceInfo(
-            identifiers={(DOMAIN, f"integration_{entry_id}")},
-            name="Google Find My Integration",
-            manufacturer="BSkando",
-            model="Find My Device Integration",
+            identifiers={ident},
+            name=SERVICE_DEVICE_NAME,
+            manufacturer=SERVICE_DEVICE_MANUFACTURER,
+            model=SERVICE_DEVICE_MODEL,
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
             # Mark as a service device to hide the "Delete device" action in HA UI.
-            # (Still allows showing diagnostic entities on this device.)
             entry_type=dr.DeviceEntryType.SERVICE,
         )
 
@@ -440,7 +449,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         Notes:
             - Only provide `name` when we have a real Google label; otherwise omit it.
             - Include a stable configuration_url pointing to the per-device map.
-            - Link to the service device using `via_device=(DOMAIN, f"integration_{entry_id}")`.
+            - Link to the service device using entry-scoped `service_device_identifier`.
         """
         auth_token = self._get_map_token()
         path = self._build_map_path(self._device["id"], auth_token, redirect=False)
@@ -463,7 +472,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
         # Link this end device to the single per-entry service device
         entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", None)
-        via = (DOMAIN, f"integration_{entry_id}") if entry_id else None
+        via = service_device_identifier(entry_id) if entry_id else None
 
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
@@ -483,29 +492,39 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         return f"/api/googlefindmy/map/{device_id}?token={token}"
 
     def _get_map_token(self) -> str:
-        """Generate a simple token for map authentication (options-first).
+        """Generate a hardened token for map authentication (entry-scoped + weekly/static).
 
-        We deliberately avoid storing a long-lived secret here. A weekly-rolling token
-        (derived from the HA instance UUID) is sufficient for casual sharing of a
-        device-specific map view URL.
+        Token formula (kept consistent with buttons, tracker and map_view):
+            md5( f"{ha_uuid}:{entry_id}:{week|static}" )[:16]
         """
         config_entry = getattr(self.coordinator, "config_entry", None)
-        if config_entry:
-            token_expiration_enabled = config_entry.options.get(
-                OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                config_entry.data.get(
-                    OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-                ),
-            )
-        else:
-            token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
+        # Prefer the central _opt helper; fall back to direct options/data reads for safety.
+        try:
+            from . import _opt  # type: ignore
+            token_expiration_enabled = _opt(
+                config_entry,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION,
+                DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+            )
+        except Exception:
+            if config_entry:
+                token_expiration_enabled = config_entry.options.get(
+                    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+                    config_entry.data.get(
+                        OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+                    ),
+                )
+            else:
+                token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+
+        entry_id = getattr(config_entry, "entry_id", "") if config_entry else ""
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
 
         if token_expiration_enabled:
             week = str(int(time.time() // 604800))  # weekly-rolling
-            secret = f"{ha_uuid}:{week}"
+            secret = f"{ha_uuid}:{entry_id}:{week}"
         else:
-            secret = f"{ha_uuid}:static"
+            secret = f"{ha_uuid}:{entry_id}:static"
 
         return hashlib.md5(secret.encode()).hexdigest()[:16]
