@@ -33,7 +33,12 @@ from homeassistant.helpers.network import get_url
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION, DOMAIN
+from .const import (
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DOMAIN,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    service_device_identifier,
+)
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
 
 _LOGGER = logging.getLogger(__name__)
@@ -265,7 +270,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
         # Link against the per-entry service device
         entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", None)
-        via = (DOMAIN, f"integration_{entry_id}") if entry_id else None
+        via = service_device_identifier(entry_id) if entry_id else None
 
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
@@ -285,33 +290,43 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         return f"/api/googlefindmy/map/{device_id}?token={token}"
 
     def _get_map_token(self) -> str:
-        """Generate a simple token for map authentication (options-first, low sensitivity).
+        """Generate a hardened token for map authentication (entry-scoped + weekly/static).
 
-        We deliberately avoid storing a long-lived secret here. A weekly-rolling token
-        (derived from the HA instance UUID) is sufficient for casual sharing of a
-        device-specific map view URL.
+        Token formula (kept consistent with buttons, sensors and map_view):
+            md5( f"{ha_uuid}:{entry_id}:{week|static}" )[:16]
         """
         config_entry = getattr(self.coordinator, "config_entry", None)
-        if config_entry:
-            # Helper defined in __init__.py for options-first reading.
-            from . import _opt
 
+        # Prefer the central _opt helper; fall back to direct options/data reads.
+        try:
+            from . import _opt  # type: ignore
             token_expiration_enabled = _opt(
-                config_entry, "map_view_token_expiration", DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+                config_entry,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION,
+                DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
             )
-        else:
-            token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+        except Exception:
+            if config_entry:
+                token_expiration_enabled = config_entry.options.get(
+                    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+                    config_entry.data.get(
+                        OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+                    ),
+                )
+            else:
+                token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
+        entry_id = getattr(config_entry, "entry_id", "") if config_entry else ""
         # Best-effort UUID; on very early startup it might be missing (safe fallback).
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
 
         if token_expiration_enabled:
             # Weekly-rolling token (7-day bucket).
             week = str(int(time.time() // 604800))
-            secret = f"{ha_uuid}:{week}"
+            secret = f"{ha_uuid}:{entry_id}:{week}"
         else:
             # Static token (no rotation).
-            secret = f"{ha_uuid}:static"
+            secret = f"{ha_uuid}:{entry_id}:static"
 
         # Short md5 digest slice is fine here; this token does not gate sensitive operations.
         return hashlib.md5(secret.encode()).hexdigest()[:16]
