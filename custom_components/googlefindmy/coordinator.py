@@ -434,7 +434,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         # Flag to separate initial discovery from later runtime additions.
         # After the first successful non-empty device list is processed, this becomes True.
-        self.initial_discovery_done: bool = False
+        self._initial_discovery_done: bool = False
 
         # Presence smoothing (TTL):
         # - Per-device "last seen in full list" timestamp (monotonic)
@@ -705,7 +705,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         Behavior:
         - Skips devices in the ignored set.
         - Uses `via_device` to link end-devices to the per-entry service device.
-        - During initial discovery (self.initial_discovery_done == False), devices are
+        - During initial discovery (`self._initial_discovery_done == False`), devices are
           created **enabled**. After that, newly discovered devices are created and
           immediately **disabled by integration** to respect the requested policy.
 
@@ -740,7 +740,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     via_device=parent_ident,
                 )
                 # Disable new devices only after the initial discovery window has closed
-                if self.initial_discovery_done and dev.disabled_by is None:
+                if self._initial_discovery_done and dev.disabled_by is None:
                     dev_reg.async_update_device(
                         device_id=dev.id,
                         disabled_by=DeviceEntryDisabler.INTEGRATION,
@@ -852,8 +852,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         IMPORTANT:
         - To guarantee effect, the applied cooldown is **never shorter than** the
-          configured `location_poll_interval`. This ensures at least one scheduled
-          poll cycle is skipped in practice.
+        configured `location_poll_interval`. This ensures at least one scheduled
+        poll cycle is skipped in practice.
         """
         if not report_hint:
             return 0
@@ -1331,9 +1331,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 visible_devices
             )
 
-            # 4.5) Close the initial discovery window once we have real devices
-            if not self.initial_discovery_done and visible_devices:
-                self.initial_discovery_done = True
+            # 4.5) Close the initial discovery window once we have a non-empty full list
+            if not self._initial_discovery_done and all_devices:
+                self._initial_discovery_done = True
                 _LOGGER.info(
                     "Initial discovery window closed; newly discovered devices will be created disabled by default."
                 )
