@@ -50,6 +50,7 @@
     },
     "error": {
       "auth_failed": "Autenticazione non riuscita. Riprova.",
+      "invalid_auth": "Autenticazione non valida. Fornisci un nuovo token e/o accedi di nuovo.",
       "invalid_token": "Credenziali non valide (token/e-mail) o campi obbligatori mancanti.",
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
       "no_devices": "Nessun dispositivo trovato. Assicurati che ‘Trova il mio dispositivo’ sia attivato nel tuo account Google.",
@@ -115,10 +116,12 @@
     "error": {
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
       "invalid": "Convalida non riuscita. Controlla i tuoi dati.",
+      "invalid_auth": "Autenticazione non valida. Fornisci un nuovo token e/o accedi di nuovo.",
       "cannot_connect": "Impossibile connettersi all’API di Google.",
       "choose_one": "Fornisci esattamente un solo metodo di autenticazione.",
       "required": "Questo campo è obbligatorio.",
-      "invalid_token": "Credenziali non valide (token/e-mail). Verifica formato e contenuto."
+      "invalid_token": "Credenziali non valide (token/e-mail). Verifica formato e contenuto.",
+      "unknown": "Errore imprevisto."
     },
     "abort": {
       "reconfigure_successful": "Riconfigurazione riuscita.",
@@ -244,6 +247,10 @@
     "auth_expired": {
       "title": "È necessaria una nuova autenticazione",
       "description": "L’autenticazione di Google Find My Device non è più valida o è scaduta.\n\n**Voce:** {entry_title}\n**Account:** {email}\n\nNella scheda dell’integrazione, scegli **Riconfigura** per riautenticarti. Se di recente hai cambiato la password di Google o hai revocato dei token, dovrai accedere di nuovo qui per ripristinare il funzionamento."
+    },
+    "multiple_config_entries": {
+      "title": "Rilevate più voci di configurazione",
+      "description": "Esistono attualmente più voci di configurazione per questa integrazione:\n\n{entries}\n\nÈ supportata una sola voce. Vai su **Impostazioni → Dispositivi e servizi**, apri **Google Find My Device** e rimuovi i duplicati finché non ne rimane una sola. Poi ricarica l’integrazione (o riavvia Home Assistant)."
     }
   },
   "exceptions": {
