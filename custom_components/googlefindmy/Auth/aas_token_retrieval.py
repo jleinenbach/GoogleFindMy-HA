@@ -20,10 +20,12 @@ Notes:
 - The username is obtained from the cache via `username_provider`; if an ADM fallback
   is used, we also update the username accordingly.
 
-Enhancement (safe short-circuit):
-- Some deployments store an already-exchanged AAS token in the OAuth slot. Empirically,
-  such tokens start with "aas_et/" or "aas_et." (user-provided evidence). We detect
-  this shape and short-circuit to return it directly, avoiding a redundant exchange.
+Enhancement (defensive validation):
+- Some deployments accidentally persist non-OAuth values in the OAuth slot (e.g., an
+  AAS token with prefix "aas_et…" or a JWT-like blob starting with "eyJ…").
+  We **do not reuse** such values. Instead, we disqualify them for the OAuth→AAS
+  exchange and fall back to the next available source. This avoids brittle shortcuts
+  and keeps the exchange path well-defined.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ from .token_cache import (
     async_set_cached_value,
 )
 from .username_provider import async_get_username, username_string
-from ..const import CONF_OAUTH_TOKEN
+from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -62,6 +64,30 @@ def _looks_like_aas(token: str) -> bool:
         True if the token looks like an AAS token; otherwise False.
     """
     return token.startswith("aas_et/") or token.startswith("aas_et.")
+
+
+def _looks_like_jwt(token: str) -> bool:
+    """Very lightweight check for JWT-like blobs (Base64URL x3, commonly 'eyJ' prefix).
+
+    Note:
+        We only use this to *disqualify* obviously wrong inputs for the OAuth→AAS
+        exchange path. This is not a full JWT validator and intentionally avoids
+        strict checks to keep the code robust and non-invasive.
+    """
+    return token.count(".") >= 2 and token[:3] == "eyJ"
+
+
+def _disqualifies_oauth_for_exchange(token: str) -> Optional[str]:
+    """Return a reason string if the value is clearly not suitable as an OAuth token.
+
+    This function implements a negative filter. If it returns a non-empty string,
+    callers must ignore the value for the OAuth→AAS exchange and use fallbacks.
+    """
+    if _looks_like_aas(token):
+        return "value resembles an AAS token (aas_et…), not an OAuth token"
+    if _looks_like_jwt(token):
+        return "value looks like a JWT (possibly installation/ID token), not an OAuth token"
+    return None
 
 
 async def _exchange_oauth_for_aas(username: str, oauth_token: str) -> Dict[str, Any]:
@@ -100,7 +126,7 @@ async def _generate_aas_token() -> str:
 
     Strategy:
         1) Try the explicit OAuth token from the cache (`CONF_OAUTH_TOKEN`).
-           1a) SHORT-CIRCUIT: If that value already looks like an AAS token, return it as-is.
+           1a) If the value is *clearly not* an OAuth token (e.g., AAS/JWT), ignore it.
         2) If missing, scan for any `adm_token_*` key and reuse its value as an OAuth token.
            In that case, set `username` from the key suffix (after `adm_token_`).
         3) Exchange OAuth → AAS via gpsoauth in an executor.
@@ -119,20 +145,16 @@ async def _generate_aas_token() -> str:
     # Prefer explicit OAuth token from cache.
     oauth_token: Optional[str] = await async_get_cached_value(CONF_OAUTH_TOKEN)
 
-    # --- FIX/Enhancement: Accept pre-existing AAS tokens stored under the OAuth key. ---
-    # Rationale:
-    # * Some setups accidentally persist the AAS token into the OAuth slot.
-    # * Attempting to "exchange" an AAS token again would fail or be redundant.
-    # * If the value clearly matches an AAS token shape, we can directly reuse it.
-    if oauth_token and _looks_like_aas(oauth_token):
-        _LOGGER.debug(
-            "Using pre-existing AAS token found in oauth_token cache (short-circuit)."
-        )
-        # NOTE: We intentionally skip username checks here because an AAS token is
-        # already the final credential needed for downstream calls.
-        return oauth_token
+    # Defensive negative validation: disqualify obvious non-OAuth values in the OAuth slot.
+    if oauth_token:
+        reason = _disqualifies_oauth_for_exchange(oauth_token)
+        if reason:
+            _LOGGER.warning(
+                "Ignoring value from '%s': %s.", CONF_OAUTH_TOKEN, reason
+            )
+            oauth_token = None  # Force fallback path
 
-    # Fallback: scan ADM tokens if no explicit OAuth token exists.
+    # Fallback: scan ADM tokens if no explicit OAuth token exists or it was disqualified.
     if not oauth_token:
         all_cached = await async_get_all_cached_values()
         for key, value in all_cached.items():
@@ -181,12 +203,16 @@ async def _generate_aas_token() -> str:
 async def async_get_aas_token() -> str:
     """Return the cached AAS token or compute and cache it.
 
+    Notes:
+        - Persisted under the TokenCache key `DATA_AAS_TOKEN` (HA Store backend).
+        - Callers must not access this key directly; always use this function to
+          obtain a valid token (handles validation, fallback and refresh).
     Returns:
         The AAS token string.
     """
     # `async_get_cached_value_or_set` ensures single-flight computation:
     # the first caller computes and stores the value; subsequent callers reuse it.
-    return await async_get_cached_value_or_set("aas_token", _generate_aas_token)
+    return await async_get_cached_value_or_set(DATA_AAS_TOKEN, _generate_aas_token)
 
 
 # ----------------------- Legacy sync wrapper (unsupported) -----------------------
@@ -200,4 +226,3 @@ def get_aas_token() -> str:  # pragma: no cover - legacy path kept for compatibi
     raise NotImplementedError(
         "Use `await async_get_aas_token()` instead of the synchronous get_aas_token()."
     )
-
