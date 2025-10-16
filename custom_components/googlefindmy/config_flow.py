@@ -13,8 +13,9 @@ Invariants (why this looks the way it does):
   setups for the same Google account (quality-scale rule: unique-config-entry).
 - We prefer `entry.runtime_data` over `hass.data` for runtime objects and avoid
   logging secrets.
-- For `secrets.json`, we support multiple token sources and **fail over**:
-  prefer `aas_token`, then `fcm_credentials.installation.token`, then legacy keys.
+- For `secrets.json`, we support multiple token sources and **fail over** with
+  this priority (Step 7): **`aas_token` → direct OAuth (`oauth_token`/variants)
+  → `fcm_credentials.installation.token` → `fcm_credentials.fcm.registration.token`**.
 
 Change (Step 1): Remove legacy `tracked_devices` UI from both the initial setup
 and the options flow, without altering authentication behaviour or the online
@@ -198,51 +199,52 @@ def _extract_email_from_secrets(data: Dict[str, Any]) -> Optional[str]:
 
 
 def _extract_oauth_candidates_from_secrets(data: Dict[str, Any]) -> List[Tuple[str, str]]:
-    """Return plausible tokens in order of preference from a secrets bundle.
+    """Return plausible tokens in **preferred** order from a secrets bundle.
 
-    The order encodes our failover strategy:
+    Priority (Step 7):
     1) 'aas_token' (Account Authentication Service token) — preferred
-    2) 'fcm_credentials.installation.token' — FCM installation JWT
-    3) 'fcm_credentials.fcm.registration.token' — FCM registration token (rare)
-    4) Legacy/generic flat keys such as 'oauth_token', 'access_token', etc.
+    2) Direct OAuth/flat keys (e.g. 'oauth_token', 'access_token', etc.)
+    3) 'fcm_credentials.installation.token' — FCM installation JWT
+    4) 'fcm_credentials.fcm.registration.token' — FCM registration token (last resort)
+
+    We also de-duplicate identical token values while preserving source labels.
     """
     cands: List[Tuple[str, str]] = []
+    seen_values: set[str] = set()
+
+    def _add(label: str, value: Any) -> None:
+        if isinstance(value, str) and _token_plausible(value) and value not in seen_values:
+            cands.append((label, value))
+            seen_values.add(value)
 
     # 1) AAS token (preferred)
-    t = data.get("aas_token")
-    if isinstance(t, str) and _token_plausible(t):
-        cands.append(("aas_token", t))
+    _add("aas_token", data.get("aas_token"))
 
-    # 2) FCM Installation JWT (preferred fallback)
-    try:
-        t2 = data["fcm_credentials"]["installation"]["token"]
-        if isinstance(t2, str) and _token_plausible(t2):
-            cands.append(("fcm_installation", t2))
-    except Exception:
-        pass
-
-    # 3) FCM registration token (rarely useful for FMD; lowest priority but keep as last resort)
-    try:
-        t3 = data["fcm_credentials"]["fcm"]["registration"]["token"]
-        if isinstance(t3, str) and _token_plausible(t3):
-            cands.append(("fcm_registration", t3))
-    except Exception:
-        pass
-
-    # 4) Legacy / generic flat keys (very last)
+    # 2) Direct OAuth / flat keys (second preference)
     for key in (
-        CONF_OAUTH_TOKEN,
+        CONF_OAUTH_TOKEN,   # canonical
+        "oauth_token",
         "oauthToken",
         "OAuthToken",
-        "token",
         "access_token",
+        "token",
         "adm_token",
         "admToken",
         "Auth",
     ):
-        v = data.get(key)
-        if isinstance(v, str) and _token_plausible(v):
-            cands.append((key, v))
+        _add(key, data.get(key))
+
+    # 3) FCM Installation JWT
+    try:
+        _add("fcm_installation", data["fcm_credentials"]["installation"]["token"])
+    except Exception:
+        pass
+
+    # 4) FCM registration token (lowest)
+    try:
+        _add("fcm_registration", data["fcm_credentials"]["fcm"]["registration"]["token"])
+    except Exception:
+        pass
 
     return cands
 
