@@ -205,6 +205,9 @@
     "binary_sensor": {
       "polling": {
         "name": "Interrogazione"
+      },
+      "auth_status": {
+        "name": "Stato dell’autenticazione"
       }
     },
     "sensor": {
@@ -235,6 +238,12 @@
       "stat_non_significant_dropped": {
         "name": "Aggiornamenti non significativi scartati"
       }
+    }
+  },
+  "issues": {
+    "auth_expired": {
+      "title": "È necessaria una nuova autenticazione",
+      "description": "L’autenticazione di Google Find My Device non è più valida o è scaduta.\n\n**Voce:** {entry_title}\n**Account:** {email}\n\nNella scheda dell’integrazione, scegli **Riconfigura** per riautenticarti. Se di recente hai cambiato la password di Google o hai revocato dei token, dovrai accedere di nuovo qui per ripristinare il funzionamento."
     }
   },
   "exceptions": {
