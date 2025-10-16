@@ -1,4 +1,3 @@
-# custom_components/googlefindmy/button.py
 """Button platform for Google Find My Device.
 
 This module exposes per-device buttons that trigger actions on Google Find My
@@ -35,7 +34,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DEFAULT_MAP_VIEW_TOKEN_EXPIRATION, DOMAIN, SERVICE_LOCATE_DEVICE
+from .const import (
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DOMAIN,
+    SERVICE_LOCATE_DEVICE,
+    service_device_identifier,
+)
 from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -206,7 +210,7 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         eid = self._entry_id
         if not eid:
             return None
-        return (DOMAIN, f"integration_{eid}")
+        return service_device_identifier(eid)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -258,7 +262,11 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         return f"/api/googlefindmy/map/{device_id}?token={token}"
 
     def _get_map_token(self) -> str:
-        """Generate a simple map token (options-first; weekly/static)."""
+        """Generate a hardened map token (entry-scoped + weekly/static).
+
+        Token formula (kept consistent with other platforms & map_view):
+            md5( f"{ha_uuid}:{entry_id}:{week|static}" )[:16]
+        """
         config_entry = getattr(self.coordinator, "config_entry", None)
         if config_entry:
             # Lazy import (helper provided by __init__.py)
@@ -268,15 +276,17 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
                 "map_view_token_expiration",
                 DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
             )
+            entry_id = getattr(config_entry, "entry_id", "") or ""
         else:
             token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            entry_id = ""
 
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
         if token_expiration_enabled:
             week = str(int(time.time() // 604800))  # 7-day bucket
-            token_src = f"{ha_uuid}:{week}"
+            token_src = f"{ha_uuid}:{entry_id}:{week}"
         else:
-            token_src = f"{ha_uuid}:static"
+            token_src = f"{ha_uuid}:{entry_id}:static"
 
         return hashlib.md5(token_src.encode()).hexdigest()[:16]
 
