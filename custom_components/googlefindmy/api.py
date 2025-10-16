@@ -12,6 +12,9 @@ Token/Auth handling (Step 5.1-D):
 - **401/403 (auth failures)** raised by Nova helpers are mapped to
   `homeassistant.exceptions.ConfigEntryAuthFailed` so the *coordinator* can
   trigger HA’s re-auth UX and Repairs issue workflow.
+- **gpsoauth/ADM failures** (e.g., "BadAuthentication", "Missing 'Token' in gpsoauth")
+  are normalized to `ConfigEntryAuthFailed` as well, even if they bubble up as a
+  `RuntimeError`/`ValueError` rather than a `NovaAuthError`.
 - Other server/network problems are treated as *transient*:
   - For device list: re-raised as `UpdateFailed` to keep coordinator semantics.
   - For per-device location and actions: logged and return {} / False to keep the
@@ -458,21 +461,44 @@ class GoogleFindMyAPI:
                     result_hex = await async_request_device_list(username)  # type: ignore[misc]
 
             return self._process_device_list_response(result_hex)
+
         except asyncio.CancelledError:
             raise
+
         except NovaRateLimitError as err:
             _LOGGER.warning("Device list temporarily rate-limited: %s", err)
             raise UpdateFailed(str(err)) from err
+
         except NovaHTTPError as err:
+            # Map 401/403 explicitly to ConfigEntryAuthFailed
+            if getattr(err, "status", None) in (401, 403):
+                _LOGGER.error("Authentication failed (HTTP %s) while listing devices: %s", err.status, err)
+                raise ConfigEntryAuthFailed(str(err)) from err
             _LOGGER.warning("Device list temporarily unavailable (server error %s): %s", err.status, err)
             raise UpdateFailed(str(err)) from err
+
         except NovaAuthError as err:
             _LOGGER.error("Authentication failed while listing devices: %s", err)
             raise ConfigEntryAuthFailed(str(err)) from err
+
+        # Normalize gpsoauth/ADM "BadAuthentication" style failures to ConfigEntryAuthFailed
+        except (RuntimeError, ValueError) as err:
+            msg = str(err)
+            if (
+                "BadAuthentication" in msg
+                or "Missing 'Token' in gpsoauth" in msg
+                or "Bad Authentication" in msg
+            ):
+                _LOGGER.error("Authentication failed (gpsoauth): %s", msg)
+                raise ConfigEntryAuthFailed(msg) from err
+            _LOGGER.warning("Failed to get basic device list (runtime/value): %s", err)
+            raise UpdateFailed(f"{err}") from err
+
         except ClientError as err:
             # Minimal-invasive change: do not degrade to empty success; signal transient failure.
             _LOGGER.warning("Failed to get basic device list (async, network): %s", err)
             raise UpdateFailed(f"Network error fetching device list: {err}") from err
+
         except Exception as err:
             # Do not mask unexpected errors as an empty list; let the coordinator keep last good data.
             _LOGGER.error("Failed to get basic device list (async): %s", err)
@@ -549,6 +575,7 @@ class GoogleFindMyAPI:
                 return best
             _LOGGER.warning("API v3.0 Async: No location data for %s", device_name)
             return {}
+
         except NovaAuthError as err:
             # Explicit mapping for upstream auth failure (token expired/invalid)
             _LOGGER.error(
@@ -558,6 +585,7 @@ class GoogleFindMyAPI:
                 err,
             )
             raise ConfigEntryAuthFailed(str(err)) from err
+
         except NovaHTTPError as err:
             # Map 401/403 to ConfigEntryAuthFailed; other HTTP errors are transient here.
             if getattr(err, "status", None) in (401, 403):
@@ -577,6 +605,7 @@ class GoogleFindMyAPI:
                 err,
             )
             return {}
+
         except NovaRateLimitError as err:
             _LOGGER.warning(
                 "Location request rate-limited for %s (%s): %s",
@@ -585,6 +614,7 @@ class GoogleFindMyAPI:
                 err,
             )
             return {}
+
         except ClientError as err:
             _LOGGER.error(
                 "Network error while getting async location for %s (%s): %s",
@@ -593,6 +623,7 @@ class GoogleFindMyAPI:
                 err,
             )
             return {}
+
         except RuntimeError as err:
             # Startup safety net: during cold boot, the FCM provider may not yet be registered.
             # Downgrade this expected transient to DEBUG and retry on the next cycle.
@@ -610,6 +641,7 @@ class GoogleFindMyAPI:
                 err,
             )
             return {}
+
         except Exception as err:
             _LOGGER.error(
                 "Failed to get async location for %s (%s): %s",
@@ -794,9 +826,11 @@ class GoogleFindMyAPI:
             else:
                 _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
             return bool(ok)
+
         except NovaAuthError as err:
             _LOGGER.error("Authentication failed while playing sound on %s: %s", device_id, err)
             return False
+
         except NovaHTTPError as err:
             if getattr(err, "status", None) in (401, 403):
                 _LOGGER.error(
@@ -808,12 +842,15 @@ class GoogleFindMyAPI:
                 return False
             _LOGGER.warning("Server error (%s) while playing sound on %s: %s", err.status, device_id, err)
             return False
+
         except NovaRateLimitError as err:
             _LOGGER.warning("Play Sound rate-limited for %s: %s", device_id, err)
             return False
+
         except ClientError as err:
             _LOGGER.error("Network error while playing sound on %s: %s", device_id, err)
             return False
+
         except Exception as err:
             _LOGGER.error("Failed to play sound (async) on %s: %s", device_id, err)
             return False
@@ -845,9 +882,11 @@ class GoogleFindMyAPI:
             else:
                 _LOGGER.error("Stop Sound (async) submission failed for %s", device_id)
             return bool(ok)
+
         except NovaAuthError as err:
             _LOGGER.error("Authentication failed while stopping sound on %s: %s", device_id, err)
             return False
+
         except NovaHTTPError as err:
             if getattr(err, "status", None) in (401, 403):
                 _LOGGER.error(
@@ -859,12 +898,15 @@ class GoogleFindMyAPI:
                 return False
             _LOGGER.warning("Server error (%s) while stopping sound on %s: %s", err.status, device_id, err)
             return False
+
         except NovaRateLimitError as err:
             _LOGGER.warning("Stop Sound rate-limited for %s: %s", device_id, err)
             return False
+
         except ClientError as err:
             _LOGGER.error("Network error while stopping sound on %s: %s", device_id, err)
             return False
+
         except Exception as err:
             _LOGGER.error("Failed to stop sound (async) on %s: %s", device_id, err)
             return False
