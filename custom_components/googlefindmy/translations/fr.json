@@ -205,6 +205,9 @@
     "binary_sensor": {
       "polling": {
         "name": "Interrogation"
+      },
+      "auth_status": {
+        "name": "Statut d’authentification"
       }
     },
     "sensor": {
@@ -235,6 +238,12 @@
       "stat_non_significant_dropped": {
         "name": "Mises à jour non significatives écartées"
       }
+    }
+  },
+  "issues": {
+    "auth_expired": {
+      "title": "Une réauthentification est requise",
+      "description": "L’authentification de Google Find My Device n’est plus valide ou a expiré.\n\n**Entrée :** {entry_title}\n**Compte :** {email}\n\nDans la carte de l’intégration, choisissez **Reconfigurer** pour vous réauthentifier. Si vous avez récemment changé votre mot de passe Google ou révoqué des jetons, vous devrez vous reconnecter ici pour rétablir le fonctionnement."
     }
   },
   "exceptions": {
