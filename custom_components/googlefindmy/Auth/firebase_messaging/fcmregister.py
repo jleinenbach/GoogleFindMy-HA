@@ -79,7 +79,7 @@ class FcmRegisterConfig:
         chrome_id: The Chrome ID, defaults to 'org.chromium.linux'.
         chrome_version: The Chrome version string.
         vapid_key: The VAPID key for web push notifications.
-        persistend_ids: A list of persistent IDs.
+        persistent_ids: A list of persistent IDs.
         heartbeat_interval_ms: The heartbeat interval in milliseconds.
 
     Notes:
@@ -96,13 +96,13 @@ class FcmRegisterConfig:
     chrome_id: str = "org.chromium.linux"
     chrome_version: str = "94.0.4606.51"
     vapid_key: str | None = GCM_SERVER_KEY_B64
-    persistend_ids: list[str] | None = None
+    persistent_ids: list[str] | None = None
     heartbeat_interval_ms: int = 5 * 60 * 1000  # 5 mins
 
     def __post_init__(self) -> None:
-        """Post-initialization hook to set default for persistend_ids."""
-        if self.persistend_ids is None:
-            self.persistend_ids = []
+        """Post-initialization hook to set default for persistent_ids."""
+        if self.persistent_ids is None:
+            self.persistent_ids = []
 
 
 class FcmRegister:
