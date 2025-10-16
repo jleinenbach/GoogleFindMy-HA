@@ -311,6 +311,28 @@ FCM_MONITOR_INTERVAL_S: int = 1
 FCM_ABORT_ON_SEQ_ERROR_COUNT: int = 3
 
 # --------------------------------------------------------------------------------------
+# Events & Repairs (auth status)
+# --------------------------------------------------------------------------------------
+# Events fired by the coordinator to allow user automations.
+EVENT_AUTH_ERROR: str = f"{DOMAIN}.authentication_error"
+EVENT_AUTH_OK: str = f"{DOMAIN}.authentication_ok"
+
+# Translation key for the dedicated auth-status binary_sensor entity.
+TRANSLATION_KEY_AUTH_STATUS: str = "auth_status"
+
+# Issue key used for Repairs (translations use the same key).
+ISSUE_AUTH_EXPIRED_KEY: str = "auth_expired"
+
+
+def issue_id_for(entry_id: str) -> str:
+    """Return a stable Repairs issue_id for a given config entry.
+
+    Pattern: 'auth_expired_<entry_id>'
+    """
+    return f"{ISSUE_AUTH_EXPIRED_KEY}_{entry_id}"
+
+
+# --------------------------------------------------------------------------------------
 # Storage (entry-scoped key prefix; each entry gets its own Store file)
 # --------------------------------------------------------------------------------------
 STORAGE_KEY: str = f"{DOMAIN}_secrets"
@@ -414,6 +436,11 @@ __all__ = [
     "FCM_CONNECTION_RETRY_COUNT",
     "FCM_MONITOR_INTERVAL_S",
     "FCM_ABORT_ON_SEQ_ERROR_COUNT",
+    "EVENT_AUTH_ERROR",
+    "EVENT_AUTH_OK",
+    "TRANSLATION_KEY_AUTH_STATUS",
+    "ISSUE_AUTH_EXPIRED_KEY",
+    "issue_id_for",
     "STORAGE_KEY",
     "STORAGE_VERSION",
     "coerce_ignored_mapping",
