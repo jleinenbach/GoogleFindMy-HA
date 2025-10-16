@@ -63,7 +63,6 @@ from .const import (
     # Data (credentials, immutable)
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
-    DATA_SECRET_BUNDLE,  # kept for compatibility in translations; not stored anymore
     DATA_AUTH_METHOD,
     # Options (user-changeable)
     # OPT_TRACKED_DEVICES,  # (removed from UI in Step 1; left import commented for clarity)
@@ -85,7 +84,6 @@ from .const import (
     DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     DEFAULT_ENABLE_STATS_ENTITIES,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_OPTIONS,
     OPT_OPTIONS_SCHEMA_VERSION,
     coerce_ignored_mapping,
     ignored_choices_for_ui,
@@ -422,13 +420,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # Syntax was OK but none of the candidates worked online
                     errors["base"] = "cannot_connect"
                 else:
-                    # Store only minimal credentials transiently for next step
+                    # Store only minimal credentials transiently for next step (do not keep full secrets bundle)
                     self._auth_data = {
                         DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
                         CONF_OAUTH_TOKEN: chosen,
                         CONF_GOOGLE_EMAIL: email,
-                        # Keep the original bundle transiently (not stored in entry)
-                        DATA_SECRET_BUNDLE: json.loads(user_input.get("secrets_json") or "{}"),
                     }
                     return await self.async_step_device_selection()
 
