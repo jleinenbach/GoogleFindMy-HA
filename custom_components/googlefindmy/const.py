@@ -313,6 +313,42 @@ FCM_ABORT_ON_SEQ_ERROR_COUNT: int = 3
 STORAGE_KEY: str = f"{DOMAIN}_secrets"
 STORAGE_VERSION: int = 1
 
+# --------------------------------------------------------------------------------------
+# Map token helpers (centralized, import-safe)
+# --------------------------------------------------------------------------------------
+WEEK_SECONDS: int = 7 * 24 * 60 * 60
+
+
+def map_token_secret_seed(
+    ha_uuid: str,
+    entry_id: str,
+    expiration_enabled: bool,
+    now: int | None = None,
+) -> str:
+    """Return the secret seed string used to derive map-view tokens.
+
+    Callers should hash the returned value (e.g. md5) and slice as desired.
+
+    Args:
+        ha_uuid: Home Assistant instance UUID (e.g., `hass.data["core.uuid"]`).
+        entry_id: Config entry id used to namespace tokens per entry.
+        expiration_enabled: If True, use a weekly-rolling bucket; else static.
+        now: Optional epoch seconds, useful for tests; defaults to current time.
+
+    Returns:
+        A deterministic seed string in the form:
+            "<uuid>:<entry_id>:<week>"  (rolling)
+        or  "<uuid>:<entry_id>:static" (static)
+    """
+    safe_uuid = ha_uuid or "ha"
+    if expiration_enabled:
+        if now is None:
+            now = int(time.time())
+        week = now // WEEK_SECONDS
+        return f"{safe_uuid}:{entry_id}:{week}"
+    return f"{safe_uuid}:{entry_id}:static"
+
+
 __all__ = [
     "DOMAIN",
     "INTEGRATION_VERSION",
@@ -378,4 +414,6 @@ __all__ = [
     "STORAGE_VERSION",
     "coerce_ignored_mapping",
     "ignored_choices_for_ui",
+    "WEEK_SECONDS",
+    "map_token_secret_seed",
 ]
