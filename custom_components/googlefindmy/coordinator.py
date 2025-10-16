@@ -603,7 +603,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     def _extract_our_identifier(self, device: dr.DeviceEntry) -> Optional[str]:
         """Return the first valid (DOMAIN, identifier) from a device, else None.
-
+        
         Why defensive parsing?
         - Per HA spec, DeviceEntry.identifiers is a set of 2-tuples: (DOMAIN, identifier).
           Some foreign or outdated integrations may accidentally write non-conforming
@@ -642,6 +642,72 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 return ident
         return None
 
+    def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
+        """Idempotently create/update the per-entry 'service device' in the device registry.
+    
+        This keeps diagnostic entities (e.g. polling/auth-status) grouped under a stable
+        integration-level device. Safe to call multiple times.
+        """
+        # Resolve hass
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return
+    
+        # Resolve ConfigEntry (works with either .entry or .config_entry on the coordinator)
+        entry = entry or getattr(self, "entry", None) or getattr(self, "config_entry", None)
+        if entry is None:
+            _LOGGER.debug("Service-device ensure skipped: ConfigEntry not available on coordinator.")
+            return
+    
+        # Fast-path: already ensured in this runtime
+        if getattr(self, "_service_device_ready", False):
+            return
+    
+        dev_reg = dr.async_get(hass)
+        identifiers = {service_device_identifier(entry.entry_id)}  # {(DOMAIN, f"integration_<entry_id>")}
+    
+        device = dev_reg.async_get_device(identifiers=identifiers)
+        if device is None:
+            device = dev_reg.async_get_or_create(
+                config_entry_id=entry.entry_id,
+                identifiers=identifiers,
+                name=SERVICE_DEVICE_NAME,
+                manufacturer=SERVICE_DEVICE_MANUFACTURER,
+                model=SERVICE_DEVICE_MODEL,
+                sw_version=INTEGRATION_VERSION,
+                entry_type=dr.DeviceEntryType.SERVICE,
+                configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
+            )
+            _LOGGER.debug("Created Google Find My service device for entry %s (device_id=%s)",
+                          entry.entry_id, getattr(device, "id", None))
+        else:
+            # Keep metadata fresh if it drifted (rare)
+            needs_update = (
+                device.manufacturer != SERVICE_DEVICE_MANUFACTURER
+                or device.model != SERVICE_DEVICE_MODEL
+                or device.sw_version != INTEGRATION_VERSION
+                or device.name != SERVICE_DEVICE_NAME
+                or device.entry_type != dr.DeviceEntryType.SERVICE
+            )
+            if needs_update:
+                dev_reg.async_update_device(
+                    device_id=device.id,
+                    manufacturer=SERVICE_DEVICE_MANUFACTURER,
+                    model=SERVICE_DEVICE_MODEL,
+                    sw_version=INTEGRATION_VERSION,
+                    name=SERVICE_DEVICE_NAME,
+                    entry_type=dr.DeviceEntryType.SERVICE,
+                    configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
+                )
+                _LOGGER.debug("Updated Google Find My service device metadata for entry %s", entry.entry_id)
+    
+        # Book-keeping for quick re-entrance
+        self._service_device_ready = True
+        self._service_device_id = getattr(device, "id", None)
+    
+    # Optional back-compat alias (some callers may use the public-style name)
+    ensure_service_device_exists = _ensure_service_device_exists
+  
     @callback
     def _reindex_poll_targets_from_device_registry(self) -> None:
         """Rebuild internal poll target sets from registries (fast, robust, diagnostics-aware).
