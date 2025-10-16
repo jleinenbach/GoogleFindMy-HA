@@ -50,6 +50,7 @@
     },
     "error": {
       "auth_failed": "Uwierzytelnianie nie powiodło się. Spróbuj ponownie.",
+      "invalid_auth": "Nieprawidłowe uwierzytelnienie. Podaj nowy token i/lub zaloguj się ponownie.",
       "invalid_token": "Nieprawidłowy token/e-mail lub brakuje wymaganych pól.",
       "invalid_json": "Nieprawidłowy format JSON w zawartości pliku secrets.json.",
       "no_devices": "Nie znaleziono urządzeń. Upewnij się, że „Znajdź moje urządzenie” jest włączone na Twoim koncie Google.",
@@ -115,10 +116,12 @@
     "error": {
       "invalid_json": "Nieprawidłowy format JSON w zawartości pliku secrets.json.",
       "invalid": "Walidacja nie powiodła się. Sprawdź swoje dane.",
+      "invalid_auth": "Nieprawidłowe uwierzytelnienie. Podaj nowy token i/lub zaloguj się ponownie.",
       "cannot_connect": "Nie udało się połączyć z API Google.",
       "choose_one": "Podaj dokładnie jedną metodę poświadczeń.",
       "required": "To pole jest wymagane.",
-      "invalid_token": "Nieprawidłowe dane logowania (token/e-mail). Sprawdź format i zawartość."
+      "invalid_token": "Nieprawidłowe dane logowania (token/e-mail). Sprawdź format i zawartość.",
+      "unknown": "Wystąpił nieoczekiwany błąd."
     },
     "abort": {
       "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie.",
@@ -244,6 +247,10 @@
     "auth_expired": {
       "title": "Wymagane ponowne uwierzytelnienie",
       "description": "Uwierzytelnienie Google Find My Device jest nieprawidłowe lub wygasło.\n\n**Wpis:** {entry_title}\n**Konto:** {email}\n\nNa karcie integracji wybierz **Skonfiguruj ponownie**, aby przejść proces ponownego logowania. Jeśli niedawno zmieniono hasło do Google lub cofnięto tokeny, musisz zalogować się tutaj ponownie, aby przywrócić działanie."
+    },
+    "multiple_config_entries": {
+      "title": "Wykryto wiele wpisów konfiguracji",
+      "description": "Obecnie istnieje więcej niż jeden wpis konfiguracji dla tej integracji:\n\n{entries}\n\nObsługiwany jest tylko jeden wpis. Przejdź do **Ustawienia → Urządzenia i usługi**, otwórz **Google Find My Device** i usuń duplikaty tak, aby pozostał tylko jeden. Następnie przeładuj integrację (lub uruchom ponownie Home Assistant)."
     }
   },
   "exceptions": {
