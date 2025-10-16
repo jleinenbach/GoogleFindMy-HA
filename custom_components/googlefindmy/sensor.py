@@ -8,7 +8,8 @@ Exposes:
 Best practices:
 - Device names are synced from the coordinator once known; user-assigned names are never overwritten.
 - No placeholder names are written to the device registry on cold boot.
-- DeviceInfo uses Primary fields only; never sets default_* keys to avoid misclassification.
+- End devices link to the per-entry *service device* via `via_device=(DOMAIN, f"integration_{entry_id}")`.
+- Sensors default to **enabled** so a fresh installation is immediately functional.
 """
 from __future__ import annotations
 
@@ -150,7 +151,6 @@ async def async_setup_entry(
             if hasattr(coordinator, "stats") and stat_key in coordinator.stats:
                 entities.append(GoogleFindMyStatsSensor(coordinator, stat_key, desc))
                 created_stats.append(stat_key)
-        # Helpful debug to verify which stats sensors are created at setup time.
         _LOGGER.debug("Stats sensors created: %s", ", ".join(created_stats))
 
     # Per-device last_seen sensors from current snapshot
@@ -268,8 +268,8 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     # Best practice: let HA compose "<Device Name> <translated entity name>"
     _attr_has_entity_name = True
-    # Default to disabled in the registry for per-device sensors
-    _attr_entity_registry_enabled_default = False
+    # Entities should be enabled by default on fresh installs
+    _attr_entity_registry_enabled_default = True
     entity_description = LAST_SEEN_DESCRIPTION
 
     def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:
@@ -435,11 +435,12 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return per-device info without writing placeholders to the registry.
+        """Return per-device info linked via the per-entry service device.
 
         Notes:
             - Only provide `name` when we have a real Google label; otherwise omit it.
             - Include a stable configuration_url pointing to the per-device map.
+            - Link to the service device using `via_device=(DOMAIN, f"integration_{entry_id}")`.
         """
         auth_token = self._get_map_token()
         path = self._build_map_path(self._device["id"], auth_token, redirect=False)
@@ -460,6 +461,10 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         raw_name = (self._device.get("name") or "").strip()
         use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
 
+        # Link this end device to the single per-entry service device
+        entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", None)
+        via = (DOMAIN, f"integration_{entry_id}") if entry_id else None
+
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
             name=use_name,  # may be None; that's OK when identifiers are provided
@@ -467,6 +472,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
             serial_number=self._device["id"],
+            via_device=via,
         )
 
     @staticmethod
