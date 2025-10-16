@@ -9,13 +9,20 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers import device_registry as dr  # DeviceEntryType
 
-from .const import DOMAIN, INTEGRATION_VERSION
+from .const import (
+    DOMAIN,
+    INTEGRATION_VERSION,
+    SERVICE_DEVICE_NAME,
+    SERVICE_DEVICE_MODEL,
+    SERVICE_DEVICE_MANUFACTURER,
+    service_device_identifier,
+)
 from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,7 +72,8 @@ class GoogleFindMyPollingSensor(CoordinatorEntity[GoogleFindMyCoordinator], Bina
         public_val = getattr(self.coordinator, "is_polling", None)
         if isinstance(public_val, bool):
             return public_val
-        return bool(getattr(self.coordinator, "_is_polling", False))  # legacy fallback
+        # Legacy fallback (older coordinator builds)
+        return bool(getattr(self.coordinator, "_is_polling", False))
 
     @property
     def icon(self) -> str:
@@ -78,16 +86,11 @@ class GoogleFindMyPollingSensor(CoordinatorEntity[GoogleFindMyCoordinator], Bina
         # Single service device per config entry:
         # identifiers -> (DOMAIN, f"integration_<entry_id>")
         return DeviceInfo(
-            identifiers={(DOMAIN, f"integration_{self._entry_id}")},
-            name="Google Find My Integration",
-            manufacturer="BSkando",
-            model="Find My Device Integration",
+            identifiers={service_device_identifier(self._entry_id)},
+            name=SERVICE_DEVICE_NAME,
+            manufacturer=SERVICE_DEVICE_MANUFACTURER,
+            model=SERVICE_DEVICE_MODEL,
             sw_version=INTEGRATION_VERSION,
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
             entry_type=dr.DeviceEntryType.SERVICE,
         )
-
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Write state on coordinator updates (polling status can change)."""
-        self.async_write_ha_state()
