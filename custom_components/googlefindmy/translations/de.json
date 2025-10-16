@@ -50,6 +50,7 @@
     },
     "error": {
       "auth_failed": "Authentifizierung fehlgeschlagen. Bitte versuche es erneut.",
+      "invalid_auth": "Ungültige Authentifizierung. Bitte gib einen frischen Token ein und/oder melde dich erneut an.",
       "invalid_token": "Ungültige E-Mail/Token oder erforderliche Felder fehlen.",
       "invalid_json": "Ungültiges JSON-Format im Inhalt der secrets.json.",
       "no_devices": "Keine Geräte gefunden. Bitte stelle sicher, dass „Mein Gerät finden“ in deinem Google-Konto aktiviert ist.",
@@ -115,10 +116,12 @@
     "error": {
       "invalid_json": "Ungültiges JSON-Format im Inhalt der secrets.json.",
       "invalid": "Validierung fehlgeschlagen. Bitte überprüfe deine Eingabe.",
+      "invalid_auth": "Ungültige Authentifizierung. Bitte gib einen frischen Token ein und/oder melde dich erneut an.",
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
-      "invalid_token": "Ungültige Anmeldedaten (Token/E-Mail). Bitte prüfe Format und Inhalt."
+      "invalid_token": "Ungültige Anmeldedaten (Token/E-Mail). Bitte prüfe Format und Inhalt.",
+      "unknown": "Unerwarteter Fehler."
     },
     "abort": {
       "reconfigure_successful": "Neukonfiguration erfolgreich.",
@@ -244,6 +247,10 @@
     "auth_expired": {
       "title": "Erneute Anmeldung erforderlich",
       "description": "Die Anmeldung für Google Find My Device ist ungültig oder abgelaufen.\n\n**Eintrag:** {entry_title}\n**Konto:** {email}\n\nWähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden. Wenn du kürzlich dein Google-Passwort geändert oder Tokens widerrufen hast, musst du dich hier neu authentifizieren, um die Funktionalität wiederherzustellen."
+    },
+    "multiple_config_entries": {
+      "title": "Mehrere Konfigurationseinträge erkannt",
+      "description": "Für diese Integration sind aktuell mehr als ein Konfigurationseintrag vorhanden:\n\n{entries}\n\nEs wird genau ein Eintrag unterstützt. Wechsle zu **Einstellungen → Geräte & Dienste**, öffne **Google Find My Device** und entferne doppelte Einträge, sodass genau einer übrig bleibt. Anschließend Integration neu laden oder Home Assistant neu starten."
     }
   },
   "exceptions": {
