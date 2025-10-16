@@ -88,6 +88,7 @@ from .const import (
     LOCATION_REQUEST_TIMEOUT_S,
     OPT_IGNORED_DEVICES,
     UPDATE_INTERVAL,
+    INTEGRATION_VERSION,
     # Integration "service device" metadata
     SERVICE_DEVICE_NAME,
     SERVICE_DEVICE_MODEL,
