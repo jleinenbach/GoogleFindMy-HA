@@ -429,8 +429,13 @@ class FcmRegister:
         ).decode()
         if not self.credentials:
             raise RuntimeError("Credentials must be set to refresh install token")
-        fcm_refresh_token = self.credentials["fcm"]["installation"]["refresh_token"]
-
+        # PATCH
+        try:
+            fcm_refresh_token = self.credentials["fcm"]["installation"]["refresh_token"]
+            fid = self.credentials["fcm"]["installation"]["fid"]
+        except KeyError as e:
+            _logger.error(f"Cannot refresh FCM token: '{e}' key missing in credentials.")
+            return None
         headers = {
             "Authorization": f"{AUTH_VERSION} {fcm_refresh_token}",
             "x-firebase-client": hb_header,
@@ -442,9 +447,10 @@ class FcmRegister:
                 "appId": self.config.app_id,
             }
         }
+        # PATCH
         url = (
             FCM_INSTALLATION + f"projects/{self.config.project_id}/"
-            "installations/{fid}/authTokens:generate"
+            f"installations/{fid}/authTokens:generate"
         )
         async with self._session.post(
             url=url,
