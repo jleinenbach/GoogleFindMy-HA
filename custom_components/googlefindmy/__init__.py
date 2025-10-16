@@ -6,6 +6,8 @@ Version: 2.6 — Unique-ID migration, storage refactor & lifecycle hardening
 - Enforce multi-entry safety via registry; flush/close guarantees on stop/unload.
 - Preserve existing services, views, FCM supervisor wiring, and coordinator lifecycle.
 - One-time migration that namespaces entity unique_ids by entry_id (idempotent).
+- Services are registered at integration level (async_setup) so they are always visible,
+  even if an entry is not fully initialized yet.
 """
 from __future__ import annotations
 
@@ -661,8 +663,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     bucket[entry.entry_id] = coordinator
 
     # IMPORTANT: register DR listener & perform initial DR index
-    # (precondition for registry-driven polling targets)
-    await coordinator.async_setup()
+    # (precondition for registry-driven polling targets) – GUARD this to keep
+    # the entry loaded (and services usable) even if setup stumbles early.
+    try:
+        await coordinator.async_setup()
+    except Exception as err:
+        _LOGGER.warning(
+            "Coordinator setup failed early; will recover on next refresh: %s", err
+        )
 
     # Register map views (idempotent across multi-entry)
     if not bucket.get("views_registered"):
