@@ -1,5 +1,22 @@
 # custom_components/googlefindmy/api.py
-"""API wrapper for Google Find My Device (async-first, HA-friendly)."""
+"""API wrapper for Google Find My Device (async-first, HA-friendly).
+
+This module encapsulates all network interactions with Google's Find My Device
+backend and exposes a small, HA-oriented API surface:
+
+- Device enumeration (lightweight list w/ capability hints).
+- Per-device location retrieval.
+- Action endpoints (play/stop sound) using the shared FCM receiver.
+
+Token/Auth handling (Step 5.1-D):
+- **401/403 (auth failures)** raised by Nova helpers are mapped to
+  `homeassistant.exceptions.ConfigEntryAuthFailed` so the *coordinator* can
+  trigger HA’s re-auth UX and Repairs issue workflow.
+- Other server/network problems are treated as *transient*:
+  - For device list: re-raised as `UpdateFailed` to keep coordinator semantics.
+  - For per-device location and actions: logged and return {} / False to keep the
+    polling cycle resilient (do not abort the sequential loop on a single error).
+"""
 from __future__ import annotations
 
 import asyncio
@@ -35,14 +52,24 @@ _LOGGER = logging.getLogger(__name__)
 # ----------------------------- Minimal protocols -----------------------------
 @runtime_checkable
 class FcmReceiverProtocol(Protocol):
-    """Minimal protocol for the shared FCM receiver used by this module."""
+    """Minimal protocol for the shared FCM receiver used by this module.
+
+    Implementations must provide a `get_fcm_token()` method that returns a string
+    token or None when not yet initialized.
+    """
 
     def get_fcm_token(self) -> Optional[str]: ...
 
 
 @runtime_checkable
 class CacheProtocol(Protocol):
-    """Entry-scoped cache protocol (TokenCache instance)."""
+    """Entry-scoped cache protocol (TokenCache instance).
+
+    The API expects a minimal async get/set key-value store used for:
+      - username lookup,
+      - token TTL metadata and ephemeral flags during flows,
+      - optional stats persistence hooks (coordinator handles most stats).
+    """
 
     async def async_get_cached_value(self, key: str) -> Any: ...
     async def async_set_cached_value(self, key: str, value: Any) -> None: ...
@@ -492,6 +519,11 @@ class GoogleFindMyAPI:
         This function requests the location for a specific device and selects the most
         relevant location record from the response.
 
+        **Auth mapping (5.1-D):**
+            - If `NovaAuthError` or `NovaHTTPError` with status 401/403 occurs,
+              raise `ConfigEntryAuthFailed` so the coordinator can start re-auth.
+            - Rate limit / other server issues are treated as transient and return `{}`.
+
         Args:
             device_id: The canonical ID of the device.
             device_name: The human-readable name of the device for logging.
@@ -516,6 +548,42 @@ class GoogleFindMyAPI:
                 )
                 return best
             _LOGGER.warning("API v3.0 Async: No location data for %s", device_name)
+            return {}
+        except NovaAuthError as err:
+            # Explicit mapping for upstream auth failure (token expired/invalid)
+            _LOGGER.error(
+                "Authentication failed while getting location for %s (%s): %s",
+                device_name,
+                device_id,
+                err,
+            )
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except NovaHTTPError as err:
+            # Map 401/403 to ConfigEntryAuthFailed; other HTTP errors are transient here.
+            if getattr(err, "status", None) in (401, 403):
+                _LOGGER.error(
+                    "Authentication failed (HTTP %s) while getting location for %s (%s): %s",
+                    err.status,
+                    device_name,
+                    device_id,
+                    err,
+                )
+                raise ConfigEntryAuthFailed(str(err)) from err
+            _LOGGER.warning(
+                "Server error (%s) while getting location for %s (%s): %s",
+                err.status,
+                device_name,
+                device_id,
+                err,
+            )
+            return {}
+        except NovaRateLimitError as err:
+            _LOGGER.warning(
+                "Location request rate-limited for %s (%s): %s",
+                device_name,
+                device_id,
+                err,
+            )
             return {}
         except ClientError as err:
             _LOGGER.error(
@@ -699,6 +767,10 @@ class GoogleFindMyAPI:
     async def async_play_sound(self, device_id: str) -> bool:
         """Send a 'Play Sound' command to a device (async path for HA).
 
+        Auth mapping note:
+            If an auth error occurs here, we log and return False (service call context),
+            since re-auth is primarily driven by the coordinator’s data update path.
+
         Args:
             device_id: The canonical ID of the device.
 
@@ -722,6 +794,23 @@ class GoogleFindMyAPI:
             else:
                 _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
             return bool(ok)
+        except NovaAuthError as err:
+            _LOGGER.error("Authentication failed while playing sound on %s: %s", device_id, err)
+            return False
+        except NovaHTTPError as err:
+            if getattr(err, "status", None) in (401, 403):
+                _LOGGER.error(
+                    "Authentication failed (HTTP %s) while playing sound on %s: %s",
+                    err.status,
+                    device_id,
+                    err,
+                )
+                return False
+            _LOGGER.warning("Server error (%s) while playing sound on %s: %s", err.status, device_id, err)
+            return False
+        except NovaRateLimitError as err:
+            _LOGGER.warning("Play Sound rate-limited for %s: %s", device_id, err)
+            return False
         except ClientError as err:
             _LOGGER.error("Network error while playing sound on %s: %s", device_id, err)
             return False
@@ -731,6 +820,10 @@ class GoogleFindMyAPI:
 
     async def async_stop_sound(self, device_id: str) -> bool:
         """Send a 'Stop Sound' command to a device (async path for HA).
+
+        Auth mapping note:
+            If an auth error occurs here, we log and return False (service call context),
+            since re-auth is primarily driven by the coordinator’s data update path.
 
         Args:
             device_id: The canonical ID of the device.
@@ -752,6 +845,23 @@ class GoogleFindMyAPI:
             else:
                 _LOGGER.error("Stop Sound (async) submission failed for %s", device_id)
             return bool(ok)
+        except NovaAuthError as err:
+            _LOGGER.error("Authentication failed while stopping sound on %s: %s", device_id, err)
+            return False
+        except NovaHTTPError as err:
+            if getattr(err, "status", None) in (401, 403):
+                _LOGGER.error(
+                    "Authentication failed (HTTP %s) while stopping sound on %s: %s",
+                    err.status,
+                    device_id,
+                    err,
+                )
+                return False
+            _LOGGER.warning("Server error (%s) while stopping sound on %s: %s", err.status, device_id, err)
+            return False
+        except NovaRateLimitError as err:
+            _LOGGER.warning("Stop Sound rate-limited for %s: %s", device_id, err)
+            return False
         except ClientError as err:
             _LOGGER.error("Network error while stopping sound on %s: %s", device_id, err)
             return False
