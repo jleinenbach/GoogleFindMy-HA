@@ -48,6 +48,7 @@ def service_device_identifier(entry_id: str) -> Tuple[str, str]:
 # --------------------------------------------------------------------------------------
 # Data (immutable / credentials): stored in config_entry.data
 CONF_OAUTH_TOKEN: str = "oauth_token"          # kept for backward compatibility
+DATA_AAS_TOKEN: str = "aas_token"              # AAS token, short-lived
 CONF_GOOGLE_EMAIL: str = "google_email"        # helper key when individual tokens are used
 DATA_SECRET_BUNDLE: str = "secrets_data"       # full GoogleFindMyTools secrets.json content
 DATA_AUTH_METHOD: str = "auth_method"          # "secrets_json" | "individual_tokens"
