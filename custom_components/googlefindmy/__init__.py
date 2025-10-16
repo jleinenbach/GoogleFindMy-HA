@@ -337,7 +337,7 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
         - Old pattern:  'googlefindmy_<rest>'
         - New pattern:  'googlefindmy_<entry_id>_<rest>'
         - Skip if already namespaced. Idempotent and collision-safe.
-        - Also migrate the service device identifier from 'integration' -> f'integration_<entry_id>'
+        - Also migrate the service device identifier from 'integration' -> f'integration_{entry.entry_id}'
           when applicable (best-effort).
     """
     if entry.options.get("unique_id_migrated") is True:
@@ -538,6 +538,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     entry.async_on_unload(
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop)
     )
+
+    # --- New: Early, idempotent seeding of TokenCache from entry.data -----------------
+    # Rationale:
+    # * Keep config_entry.data as the authoritative SSOT for user-provided credentials.
+    # * Mirror (seed) those values into the TokenCache for runtime use (rotation/refresh).
+    # * This seeding is safe to repeat on reloads and complements the later credential
+    #   persistence paths (_async_save_secrets_data / _async_save_individual_credentials).
+    try:
+        if CONF_OAUTH_TOKEN in entry.data:
+            await async_set_cached_value(CONF_OAUTH_TOKEN, entry.data[CONF_OAUTH_TOKEN])
+            _LOGGER.debug("Seeded oauth_token into TokenCache from entry.data")
+        if CONF_GOOGLE_EMAIL in entry.data:
+            await async_set_cached_value(username_string, entry.data[CONF_GOOGLE_EMAIL])
+            _LOGGER.debug("Seeded google_email into TokenCache from entry.data")
+    except Exception as err:
+        _LOGGER.debug("Early TokenCache seeding from entry.data failed: %s", err)
+    # -------------------------------------------------------------------------------
 
     # 2) Optional: register HA-managed aiohttp session for Nova API (defer import)
     try:
@@ -1005,8 +1022,8 @@ async def _async_register_services(hass: HomeAssistant) -> None:
           1) Determine target devices (ours) from Device Registry.
           2) Remove all entities (ours) linked to those devices.
           3) Remove orphan entities (ours) with no device or missing device.
-          4) Remove devices (ours) that now have zero entities and are not the service device.
-          5) Reload affected entries (or all, if only global orphan-entity cleanup happened).
+          4) Remove devices (ours) that now have zero entities left and are not the service device.
+          5) Reload entries (or all if only global orphan-entity cleanup happened).
         """
         mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
         raw_ids = call.data.get(ATTR_DEVICE_IDS)
