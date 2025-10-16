@@ -2,13 +2,25 @@
 """Google Find My Device integration for Home Assistant.
 
 Version: 2.6 — Unique-ID migration, storage refactor & lifecycle hardening
-- Use entry-scoped TokenCache (HA Store backend) with migration from legacy secrets.json.
-- Enforce multi-entry safety via registry; flush/close guarantees on stop/unload.
-- Preserve existing services, views, FCM supervisor wiring, and coordinator lifecycle.
-- One-time migration that namespaces entity unique_ids by entry_id (idempotent).
-- Services are registered at integration level (async_setup) so they are always visible,
-  even if an entry is not fully initialized yet.
+
+Highlights
+----------
+- Entry-scoped TokenCache (HA Store backend) with migration from legacy secrets.json.
+- Multi-entry safety: robust detection of multiple *active* entries -> Repair issue and early abort
+  with deterministic tie-break to avoid "mutual abort".
+- Deterministic default-entry choice: set only when exactly one active entry exists; clear default on conflicts.
+- One-time migration that namespaces entity unique_ids by entry_id (idempotent, collision-aware);
+  migration flag is set only on full success; collisions produce a Repair issue.
+- Services are registered at integration level (async_setup) so they are always visible.
+- Clean lifecycle: refcounted shared FCM receiver; coordinator shutdown & cache flush on unload.
+- Defensive logging: redact tokens in URLs; never log PII (no coordinates/secrets).
+
+Notes
+-----
+This module aims to be self-documenting. All public functions include precise docstrings
+(purpose, parameters, errors, security considerations). Keep comments/docstrings in English.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,11 +30,11 @@ import logging
 import os
 import socket
 import time
-from typing import Any, Tuple, Iterable, Optional
+from typing import Any, Iterable, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STARTED,
     EVENT_HOMEASSISTANT_STOP,
@@ -35,7 +47,7 @@ from homeassistant.exceptions import (
     ServiceValidationError,
 )
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.network import get_url
 
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
@@ -95,7 +107,13 @@ from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
 
 # Eagerly import diagnostics to prevent blocking calls on-demand
-from . import diagnostics
+from . import diagnostics  # noqa: F401
+
+# Optional feature: GoogleHomeFilter (guard import to avoid hard dependency)
+try:
+    from .google_home_filter import GoogleHomeFilter  # type: ignore
+except Exception:  # pragma: no cover
+    GoogleHomeFilter = None  # type: ignore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,11 +125,18 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
 ]
 
+
 # ---- Runtime typing helpers -------------------------------------------------
 class RuntimeData:
-    """Container for per-entry runtime structures."""
+    """Container for per-entry runtime structures.
+
+    Attributes:
+        coordinator: The entry's GoogleFindMyCoordinator instance.
+    """
+
     def __init__(self, coordinator: GoogleFindMyCoordinator) -> None:
         self.coordinator = coordinator
+
 
 MyConfigEntry = ConfigEntry
 
@@ -121,15 +146,15 @@ def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> Tuple[str, str
     """Resolve HA device_id/entity_id/canonical_id -> (canonical_id, friendly_name).
 
     Resolution order:
-    1) If `arg` is a Home Assistant `device_id` -> extract our (DOMAIN, identifier)
-       from the device registry. Fails with HomeAssistantError if not found/invalid.
-    2) If `arg` is an `entity_id` -> lookup entity; if it belongs to our DOMAIN
-       and is linked to a device, extract the identifier from the device.
-    3) Otherwise, treat `arg` as already-canonical Google ID and return it as-is.
+    1) If `arg` is a Home Assistant `device_id`: extract our (DOMAIN, identifier)
+       from the device registry. Fails if not found/invalid.
+    2) If `arg` is an `entity_id`: lookup entity; if it belongs to our DOMAIN
+       and is linked to a device, extract the identifier from that device.
+    3) Otherwise: treat `arg` as already-canonical Google ID.
 
     Raises:
-        HomeAssistantError: if `arg` is a `device_id`/`entity_id` but does not map
-        to a valid identifier of this integration.
+        HomeAssistantError: if `arg` is a `device_id`/`entity_id` but cannot be mapped
+            to a valid identifier of this integration.
 
     Security:
         Do not include secrets or coordinates in raised messages or logs.
@@ -173,28 +198,26 @@ def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> Tuple[str, str
 
 
 async def async_handle_manual_locate(
-    hass: HomeAssistant, coordinator, arg: str
+    hass: HomeAssistant, coordinator: GoogleFindMyCoordinator, arg: str
 ) -> None:
     """Handle manual locate button: resolve target, dispatch, and log correctly.
 
     Behavior:
-    - Resolve any incoming identifier (`device_id`, `entity_id`, or canonical).
-    - On success: dispatch the request to the coordinator and log an info line.
-    - On failure: raise HomeAssistantError and mirror a redacted error record
-      into the coordinator diagnostics buffer.
+        - Resolve any incoming identifier (`device_id`, `entity_id`, or canonical).
+        - On success: dispatch the request to the coordinator and log an info line.
+        - On failure: raise HomeAssistantError and mirror a redacted error record
+          into the coordinator diagnostics buffer (if present).
 
     This function should be called by your button entity handler.
     """
-    coord = None
     try:
         canonical_id, friendly = _resolve_canonical_from_any(hass, arg)
-        # Use the coordinator method dedicated to locate actions.
         await coordinator.async_locate_device(canonical_id)
         _LOGGER.info("Successfully submitted manual locate for %s", friendly)
     except HomeAssistantError as err:
         # Redacted, bounded diagnostics record
         if getattr(coordinator, "_diag", None):
-            coordinator._diag.add_error(
+            coordinator._diag.add_error(  # type: ignore[attr-defined]
                 code="manual_locate_resolution_failed",
                 context={
                     "device_id": "",  # unknown (arg may not be a device_id)
@@ -232,6 +255,57 @@ def _redact_url_token(url: str) -> str:
         )
     except Exception:  # pragma: no cover
         return url
+
+
+def _is_active_entry(entry: ConfigEntry) -> bool:
+    """Return True if the config entry should be considered *active* for guard logic.
+
+    Active is defined as:
+        - not disabled (disabled_by is falsy), and
+        - state not in {NOT_LOADED, UNLOADED, UNLOAD_IN_PROGRESS}.
+      (SETUP_* and MIGRATION are treated as active to avoid ambiguity.)
+    """
+    if entry.disabled_by:
+        return False
+    return entry.state not in {
+        ConfigEntryState.NOT_LOADED,
+        ConfigEntryState.UNLOADED,
+        ConfigEntryState.UNLOAD_IN_PROGRESS,
+    }
+
+
+def _primary_active_entry(entries: list[ConfigEntry]) -> Optional[ConfigEntry]:
+    """Pick a deterministic 'primary' active entry to avoid mutual aborts.
+
+    Tie-break rule (stable, minimalistic):
+        1) Prefer entries that are LOADED over all others.
+        2) Otherwise, pick the lexicographically smallest entry_id.
+
+    Returns:
+        The chosen ConfigEntry, or None if no active entries exist.
+    """
+    active = [e for e in entries if _is_active_entry(e)]
+    if not active:
+        return None
+    # Prefer LOADED
+    loaded = [e for e in active if e.state == ConfigEntryState.LOADED]
+    pool = loaded or active
+    return sorted(pool, key=lambda e: e.entry_id)[0]
+
+
+def _clear_default_entry_id() -> None:
+    """Best-effort: clear the default entry in the TokenCache registry.
+
+    TokenCache may or may not accept None; fall back to empty string.
+    """
+    try:
+        _set_default_entry_id(None)  # type: ignore[arg-type]
+    except Exception:
+        try:
+            _set_default_entry_id("")  # type: ignore[arg-type]
+        except Exception:
+            # Last resort: do nothing; downstream reads must handle missing default.
+            pass
 
 
 async def _async_save_secrets_data(secrets_data: dict) -> None:
@@ -329,6 +403,32 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
 
+async def _async_create_uid_collision_issue(
+    hass: HomeAssistant, entry: ConfigEntry, entity_ids: list[str]
+) -> None:
+    """Create a repair issue for unique_id collisions (batched; idempotent by key)."""
+    try:
+        # Truncate list for message brevity; diagnostics can hold the full list.
+        preview = ", ".join(entity_ids[:8]) + ("…" if len(entity_ids) > 8 else "")
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            f"unique_id_collision_{entry.entry_id}",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="unique_id_collision",
+            translation_placeholders={
+                "entry": entry.title or entry.entry_id,
+                "count": str(len(entity_ids)),
+                "entities": preview or "n/a",
+            },
+            # Optional: provide a learn-more URL when docs exist
+            # learn_more_url="https://www.home-assistant.io/integrations/",
+        )
+    except Exception as err:
+        _LOGGER.debug("Failed to create UID collision issue: %s", err)
+
+
 async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """One-time migration to namespace entity unique_ids by config entry id.
 
@@ -336,19 +436,30 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
         - Only migrate entities that belong to *this* entry (entity.config_entry_id match).
         - Old pattern:  'googlefindmy_<rest>'
         - New pattern:  'googlefindmy_<entry_id>_<rest>'
-        - Skip if already namespaced. Idempotent and collision-safe.
+        - Skip if already namespaced. Idempotent and collision-aware.
         - Also migrate the service device identifier from 'integration' -> f'integration_{entry.entry_id}'
           when applicable (best-effort).
+
+    Flagging rule:
+        - Set options['unique_id_migrated']=True only if ALL candidates that need migration
+          (old-prefix entities for this entry) were successfully migrated (no collisions).
+        - If any collisions occurred, create a Repair issue and DO NOT set the flag;
+          migration will be retried on next load after user action.
     """
     if entry.options.get("unique_id_migrated") is True:
         return
 
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
-    migrated = 0
-    skipped = 0
+
     prefix = f"{DOMAIN}_"
     namespaced_prefix = f"{DOMAIN}_{entry.entry_id}_"
+
+    total_candidates = 0
+    migrated = 0
+    skipped_already_scoped = 0
+    skipped_nonprefix = 0
+    collisions: list[str] = []
 
     # Entities
     for ent in list(ent_reg.entities.values()):
@@ -357,13 +468,28 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
                 continue
             uid = ent.unique_id or ""
             if uid.startswith(namespaced_prefix):
-                skipped += 1
+                skipped_already_scoped += 1
                 continue
             if not uid.startswith(prefix):
-                skipped += 1
+                skipped_nonprefix += 1
                 continue
+
+            total_candidates += 1
             new_uid = namespaced_prefix + uid[len(prefix) :]
-            # Perform migration (HA handles index rebuild and collision checks)
+
+            # Collision check: if any entity already uses new_uid, skip and record.
+            existing_eid = ent_reg.async_get_entity_id(ent.domain, ent.platform, new_uid)
+            if existing_eid:
+                _LOGGER.warning(
+                    "Unique-ID migration skipped (collision): %s -> %s (existing=%s)",
+                    uid,
+                    new_uid,
+                    existing_eid,
+                )
+                collisions.append(ent.entity_id)
+                continue
+
+            # Perform migration (HA handles index rebuild)
             ent_reg.async_update_entity(ent.entity_id, new_unique_id=new_uid)
             migrated += 1
         except Exception as err:
@@ -388,22 +514,34 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
     except Exception as err:
         _LOGGER.debug("Service device identifier migration skipped: %s", err)
 
-    # Record migration flag
-    new_opts = dict(entry.options)
-    new_opts["unique_id_migrated"] = True
-    if new_opts != entry.options:
-        hass.config_entries.async_update_entry(entry, options=new_opts)
-
-    if migrated:
-        _LOGGER.info(
-            "Unique-ID migration complete for '%s': migrated=%d, skipped=%d",
+    # Finalize flag / issue
+    if collisions:
+        await _async_create_uid_collision_issue(hass, entry, collisions)
+        _LOGGER.warning(
+            "Unique-ID migration incomplete for '%s': migrated=%d / total_needed=%d, collisions=%d",
             entry.title,
             migrated,
-            skipped,
+            total_candidates,
+            len(collisions),
         )
+        # Do NOT set the migration flag; we want to retry after user resolves collisions.
+    else:
+        new_opts = dict(entry.options)
+        new_opts["unique_id_migrated"] = True
+        if new_opts != entry.options:
+            hass.config_entries.async_update_entry(entry, options=new_opts)
+        if total_candidates or migrated:
+            _LOGGER.info(
+                "Unique-ID migration complete for '%s': migrated=%d, already_scoped=%d, nonprefix=%d",
+                entry.title,
+                migrated,
+                skipped_already_scoped,
+                skipped_nonprefix,
+            )
 
 
 # --------------------------- Shared FCM provider ---------------------------
+
 
 async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
     """Get or create the shared FCM receiver for this HA instance.
@@ -460,11 +598,11 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
         # Unregister providers first (consumers will see provider=None immediately)
         try:
             loc_unregister_fcm_provider()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         try:
             api_unregister_fcm_provider()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
         if fcm is not None:
@@ -476,12 +614,15 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
 
 
 # ------------------------------ Setup / Unload -----------------------------
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the integration namespace and register global services.
 
-    Services must be registered from async_setup so they are always available,
-    even if no config entry is loaded, which enables frontend validation of
-    automations referencing these services.
+    Rationale:
+        Services must be registered from async_setup so they are always available,
+        even if no config entry is loaded, which enables frontend validation of
+        automations referencing these services.
     """
     bucket = hass.data.setdefault(DOMAIN, {})
     bucket.setdefault("entries", {})  # entry_id -> RuntimeData
@@ -501,17 +642,65 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """Set up a config entry.
 
     Order of operations (important):
-      1) Initialize and register TokenCache (includes legacy migration).
-      2) Soft-migrate options and unique_ids; acquire and wire the shared FCM provider.
-      3) Seed token cache from entry data (secrets bundle or individual tokens).
-      4) Build coordinator, register views, forward platforms.
-      5) Schedule initial refresh after HA is fully started.
+      1) Multi-entry guard: if more than one *active* entry exists, choose a deterministic
+         'primary' entry and abort all others with a Repair issue (avoid mutual abort); clear default.
+      2) Initialize and register TokenCache (includes legacy migration).
+      3) Soft-migrate options and unique_ids; acquire and wire the shared FCM provider.
+      4) Seed token cache from entry data (secrets bundle or individual tokens).
+      5) Build coordinator, register views, forward platforms.
+      6) Schedule initial refresh after HA is fully started.
 
     Notes:
-        * FCM acquisition/registration now happens through a single deterministic path.
-          The startup barrier is set immediately after a successful acquire, avoiding
-          duplicate provider registrations or refcount bumps.
+        * FCM acquisition/registration happens through a single deterministic path.
+        * Default-entry is only set if exactly one active entry exists (deterministic).
     """
+    # --- Multi-entry guard (robust & early) -----------------------------------
+    all_entries = hass.config_entries.async_entries(DOMAIN)
+    active_entries = [e for e in all_entries if _is_active_entry(e)]
+    if len(active_entries) > 1:
+        primary = _primary_active_entry(all_entries)
+        # If *this* is not the chosen primary, abort with issue and clear default.
+        if not primary or primary.entry_id != entry.entry_id:
+            try:
+                ir.async_create_issue(
+                    hass,
+                    DOMAIN,
+                    "multiple_config_entries",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.ERROR,
+                    translation_key="multiple_config_entries",
+                    translation_placeholders={
+                        "entries": ", ".join([e.title or e.entry_id for e in active_entries]),
+                        "kept": (primary.title if primary and primary.title else (primary.entry_id if primary else "")),
+                    },
+                    # learn_more_url="https://www.home-assistant.io/docs/configuration/troubleshooting/",
+                    is_persistent=True,
+                )
+            except Exception as err:
+                _LOGGER.debug("Failed to create multi-entry repair issue: %s", err)
+
+            _clear_default_entry_id()
+            _LOGGER.error(
+                "Multiple active config entries for %s detected. "
+                "Keeping '%s' and aborting setup for '%s'. Remove redundant entries in Settings > Devices & Services.",
+                DOMAIN,
+                (primary.title or primary.entry_id) if primary else "(unknown)",
+                entry.title or entry.entry_id,
+            )
+            return False
+        else:
+            # We are the chosen primary; continue with setup and remove any prior issue.
+            try:
+                ir.async_delete_issue(hass, DOMAIN, "multiple_config_entries")
+            except Exception:
+                pass
+    else:
+        # Clean up a previously created issue, if any.
+        try:
+            ir.async_delete_issue(hass, DOMAIN, "multiple_config_entries")
+        except Exception:
+            pass
+
     # Monotonic performance markers (captured even before coordinator exists)
     pm_setup_start = time.monotonic()
 
@@ -519,13 +708,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     domain_bucket = hass.data.setdefault(DOMAIN, {})
     is_reload = bool(domain_bucket.get("initial_setup_complete", False))
 
-    # 1) Token cache: create/register early (fail-fast if ambiguous multi-entry usage occurs later)
+    # 1) Token cache: create/register early (before any default is set)
     legacy_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json"
     )
     cache = await TokenCache.create(hass, entry.entry_id, legacy_path=legacy_path)
     _register_instance(entry.entry_id, cache)
-    _set_default_entry_id(entry.entry_id)
+
+    # Deterministic default-entry: only set when this is the single active entry.
+    all_entries = hass.config_entries.async_entries(DOMAIN)
+    active_entries = [e for e in all_entries if _is_active_entry(e)]
+    if len(active_entries) == 1 and active_entries[0].entry_id == entry.entry_id:
+        _set_default_entry_id(entry.entry_id)
+    else:
+        _LOGGER.debug(
+            "Default entry not set due to %d active entries (deterministic guard).",
+            len(active_entries),
+        )
 
     # Ensure deferred writes are flushed on HA shutdown
     async def _flush_on_stop(event) -> None:
@@ -539,12 +738,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop)
     )
 
-    # --- New: Early, idempotent seeding of TokenCache from entry.data -----------------
-    # Rationale:
-    # * Keep config_entry.data as the authoritative SSOT for user-provided credentials.
-    # * Mirror (seed) those values into the TokenCache for runtime use (rotation/refresh).
-    # * This seeding is safe to repeat on reloads and complements the later credential
-    #   persistence paths (_async_save_secrets_data / _async_save_individual_credentials).
+    # Early, idempotent seeding of TokenCache from entry.data (authoritative SSOT)
     try:
         if CONF_OAUTH_TOKEN in entry.data:
             await async_set_cached_value(CONF_OAUTH_TOKEN, entry.data[CONF_OAUTH_TOKEN])
@@ -554,9 +748,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             _LOGGER.debug("Seeded google_email into TokenCache from entry.data")
     except Exception as err:
         _LOGGER.debug("Early TokenCache seeding from entry.data failed: %s", err)
-    # -------------------------------------------------------------------------------
 
-    # 2) Optional: register HA-managed aiohttp session for Nova API (defer import)
+    # Optional: register HA-managed aiohttp session for Nova API (defer import)
     try:
         from .NovaApi import nova_request as nova
 
@@ -573,13 +766,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     except Exception as err:  # Defensive: Nova module may not expose hooks in some builds
         _LOGGER.debug("Nova API session provider registration skipped: %s", err)
 
-    # 3) Soft-migrate mutable settings from data -> options (never secrets) and unique_ids
+    # Soft-migrate mutable settings from data -> options (never secrets) and unique_ids
     await _async_soft_migrate_data_to_options(hass, entry)
     await _async_migrate_unique_ids(hass, entry)
 
-    # 4) Acquire shared FCM and create a startup barrier for the first poll cycle.
+    # Acquire shared FCM and create a startup barrier for the first poll cycle.
     fcm_ready_event = asyncio.Event()
-    # Single acquisition path: acquire and register providers once, then set the barrier.
     fcm = await _async_acquire_shared_fcm(hass)
     pm_fcm_acquired = time.monotonic()
     fcm_ready_event.set()
@@ -596,7 +788,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     entry.async_on_unload(_on_unload_signal_fcm)
 
-    # 5) Seed the token cache from entry data (one of the two paths must be present)
+    # Credentials seed: legacy bundle OR individual oauth_token+email must be present
     secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
@@ -613,11 +805,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
         raise ConfigEntryNotReady("Credentials missing")
 
-    # 6) Build effective runtime settings (options-first)
+    # Build effective runtime settings (options-first)
     coordinator = GoogleFindMyCoordinator(
         hass,
         cache=cache,
-        # tracked_devices removed: device inclusion via HA device enable/disable.
         location_poll_interval=_opt(
             entry, OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
         ),
@@ -634,21 +825,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     )
     coordinator.config_entry = entry  # convenience for platforms
 
-    # --- Performance metrics injection (coordinator-owned dictionary) ---
+    # Performance metrics injection (coordinator-owned dictionary)
     try:
         perf = getattr(coordinator, "performance_metrics", None)
         if not isinstance(perf, dict):
             perf = {}
             setattr(coordinator, "performance_metrics", perf)
-        # Persist the earlier captured times (pre-coordinator phases included)
         perf["setup_start_monotonic"] = pm_setup_start
         perf["fcm_acquired_monotonic"] = pm_fcm_acquired
     except Exception as err:
         _LOGGER.debug("Failed to set performance metrics on coordinator: %s", err)
-    # ---------------------------------------------------------------------
 
     # Hand over the barrier without changing the coordinator's signature.
-    # Event is already set after successful FCM acquisition to avoid startup races.
     setattr(coordinator, "fcm_ready_event", fcm_ready_event)
 
     # Register the coordinator with the shared FCM receiver (clear synchronous contract).
@@ -670,18 +858,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     )
 
     # Optional: attach Google Home filter (options-first configuration)
-    from .google_home_filter import GoogleHomeFilter
-
-    coordinator.google_home_filter = GoogleHomeFilter(hass, _effective_config(entry))
-    _LOGGER.debug("Initialized Google Home filter (options-first)")
+    if GoogleHomeFilter:
+        try:
+            coordinator.google_home_filter = GoogleHomeFilter(hass, _effective_config(entry))  # type: ignore[call-arg]
+            _LOGGER.debug("Initialized Google Home filter (options-first)")
+        except Exception as err:
+            _LOGGER.debug("GoogleHomeFilter attach skipped due to: %s", err)
+    else:
+        _LOGGER.debug("GoogleHomeFilter not available; continuing without it")
 
     # Share coordinator in hass.data (legacy location for other modules)
     bucket = hass.data.setdefault(DOMAIN, {})
     bucket[entry.entry_id] = coordinator
 
     # IMPORTANT: register DR listener & perform initial DR index
-    # (precondition for registry-driven polling targets) – GUARD this to keep
-    # the entry loaded (and services usable) even if setup stumbles early.
     try:
         await coordinator.async_setup()
     except Exception as err:
@@ -734,7 +924,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             _do_first_refresh(None), name="googlefindmy.initial_refresh"
         )
     else:
-        unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_first_refresh)
+        unsub = hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STARTED, _do_first_refresh
+        )
         listener_active = True
 
         def _safe_unsub() -> None:
@@ -819,6 +1011,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
 
 # ------------------------------- Services ---------------------------------
+
+
 async def _async_register_services(hass: HomeAssistant) -> None:
     """Register integration-wide services.
 
@@ -836,11 +1030,18 @@ async def _async_register_services(hass: HomeAssistant) -> None:
     async def _resolve_runtime_for_device_id(device_id: str) -> Tuple[RuntimeData, str]:
         """Return the runtime and canonical_id for a device_id or raise translated error.
 
-        Implementation notes (robustness):
+        Robustness:
+        - If no runtime is available at all, fail early with a clear, translated error.
         - Prefer Device Registry mapping from the provided device_id.
-        - Fall back to scanning active coordinators for the canonical id presence.
-        - Raise a translated ServiceValidationError if no runtime can be determined.
+        - Fall back to scanning active coordinators for the device's canonical id presence.
         """
+        # Early exit: no active runtimes at all
+        if not list(_iter_runtimes(hass)):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="no_active_entry",
+            )
+
         canonical_id, _ = _resolve_canonical_from_any(hass, device_id)
 
         # 1) Device registry mapping (preferred)
@@ -854,13 +1055,11 @@ async def _async_register_services(hass: HomeAssistant) -> None:
 
         # 2) Fallback: scan known coordinators for the device's canonical id
         for runtime in _iter_runtimes(hass):
-            # Coordinator may expose a display/name lookup; use it as existence probe.
             if hasattr(runtime.coordinator, "get_device_display_name"):
                 try:
                     if runtime.coordinator.get_device_display_name(canonical_id):
                         return runtime, canonical_id
                 except Exception:
-                    # Non-fatal probe failure; continue scanning.
                     pass
 
         # 3) Not found -> translated error
@@ -955,7 +1154,12 @@ async def _async_register_services(hass: HomeAssistant) -> None:
             ) from err
 
     async def async_refresh_device_urls_service(call: ServiceCall) -> None:
-        """Refresh configuration URLs for integration devices (absolute URL)."""
+        """Refresh configuration URLs for integration devices (absolute URL).
+
+        Security:
+            The token is a short-lived (weekly) or static gate derived from the HA UUID.
+            All tokens are redacted in logs; the view must validate tokens server-side.
+        """
         try:
             base_url = get_url(
                 hass,
@@ -968,16 +1172,22 @@ async def _async_register_services(hass: HomeAssistant) -> None:
             _LOGGER.error("Could not determine base URL for device refresh: %s", err)
             return
 
-        # Token mode: options-first, weekly rotation (or static) using HA instance UUID.
-        ha_uuid = str(hass.data.get("core.uuid", "ha"))
+        # Token mode: choose options from the *active* entry (deterministic primary).
         config_entries = hass.config_entries.async_entries(DOMAIN)
+        active_entries = [e for e in config_entries if _is_active_entry(e)]
+        chosen = _primary_active_entry(config_entries)
         token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-        if config_entries:
-            e0 = config_entries[0]
+        if chosen:
             token_expiration_enabled = _opt(
-                e0, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+                chosen, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            )
+        elif active_entries:
+            # Fallback: should not happen (primary is active), but keep safe default
+            token_expiration_enabled = _opt(
+                active_entries[0], OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             )
 
+        ha_uuid = str(hass.data.get("core.uuid", "ha"))
         if token_expiration_enabled:
             week = str(int(time.time() // 604800))  # weekly rotation bucket
             auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
@@ -1016,13 +1226,13 @@ async def _async_register_services(hass: HomeAssistant) -> None:
           - Delete only what is unambiguously ours:
             * Entities: ent.platform == DOMAIN
             * Devices: device.identifiers contains our DOMAIN AND ALL linked config_entries belong to our DOMAIN
-            * Never touch "service"/integration device (identifier == 'integration')
+            * Never touch the "service"/integration device (identifier == 'integration')
           - Do not remove any device that still has entities (from any platform).
         Steps:
           1) Determine target devices (ours) from Device Registry.
           2) Remove all entities (ours) linked to those devices.
           3) Remove orphan entities (ours) with no device or missing device.
-          4) Remove devices (ours) that now have zero entities left and are not the service device.
+          4) Remove devices (ours) that now have no entities left and are not the service device.
           5) Reload entries (or all if only global orphan-entity cleanup happened).
         """
         mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
@@ -1042,15 +1252,17 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         _LOGGER.info(
             "googlefindmy.rebuild_registry requested: mode=%s, device_ids=%s",
             mode,
-            "none" if not raw_ids else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
+            "none"
+            if not raw_ids
+            else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
         )
 
         if mode == MODE_MIGRATE:
-            for entry in entries:
+            for entry_ in entries:
                 try:
-                    await _async_soft_migrate_data_to_options(hass, entry)
+                    await _async_soft_migrate_data_to_options(hass, entry_)
                 except Exception as err:
-                    _LOGGER.error("Soft-migrate failed for entry %s: %s", entry.entry_id, err)
+                    _LOGGER.error("Soft-migrate failed for entry %s: %s", entry_.entry_id, err)
             _LOGGER.info(
                 "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
                 len(entries),
@@ -1147,11 +1359,11 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         else:
             to_reload = [e for e in entries if e.entry_id in affected_entry_ids] or list(entries)
 
-        for entry in to_reload:
+        for entry_ in to_reload:
             try:
-                await hass.config_entries.async_reload(entry.entry_id)
+                await hass.config_entries.async_reload(entry_.entry_id)
             except Exception as err:
-                _LOGGER.error("Reload failed for entry %s: %s", entry.entry_id, err)
+                _LOGGER.error("Reload failed for entry %s: %s", entry_.entry_id, err)
 
         _LOGGER.info(
             "googlefindmy.rebuild_registry: finished (safe mode): removed %d entit(y/ies), %d device(s), entries reloaded=%d",
@@ -1160,8 +1372,52 @@ async def _async_register_services(hass: HomeAssistant) -> None:
             len(to_reload),
         )
 
+    # ---- Actual service registrations (global; visible even without entries) ----
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_LOCATE_DEVICE,
+        async_locate_device_service,
+        schema=vol.Schema({vol.Required("device_id"): cv.string}),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_LOCATE_EXTERNAL,
+        async_locate_external_service,
+        schema=vol.Schema({vol.Required("device_id"): cv.string}),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PLAY_SOUND,
+        async_play_sound_service,
+        schema=vol.Schema({vol.Required("device_id"): cv.string}),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_STOP_SOUND,
+        async_stop_sound_service,
+        schema=vol.Schema({vol.Required("device_id"): cv.string}),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REFRESH_DEVICE_URLS,
+        async_refresh_device_urls_service,
+        schema=vol.Schema({}),  # no parameters
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REBUILD_REGISTRY,
+        async_rebuild_registry_service,
+        schema=vol.Schema(
+            {
+                vol.Optional(ATTR_MODE, default=MODE_REBUILD): vol.In(REBUILD_REGISTRY_MODES),
+                vol.Optional(ATTR_DEVICE_IDS): vol.Any(cv.string, [cv.string]),
+            }
+        ),
+    )
+
 
 # ------------------- Device removal (HA "Delete device" hook) -------------------
+
 
 async def async_remove_config_entry_device(
     hass: HomeAssistant,
@@ -1211,7 +1467,7 @@ async def async_remove_config_entry_device(
         current_raw = opts.get(
             OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES)
         )
-        ignored_map, migrated = coerce_ignored_mapping(current_raw)
+        ignored_map, _migrated = coerce_ignored_mapping(current_raw)
 
         # Determine the best human name at deletion time
         name_to_store = device_entry.name_by_user or device_entry.name or dev_id
@@ -1247,6 +1503,7 @@ async def async_remove_config_entry_device(
 
 
 # ------------------------------- Misc helpers ---------------------------------
+
 
 def _get_local_ip_sync() -> str:
     """Best-effort local IP discovery via UDP connect (executor-only)."""
