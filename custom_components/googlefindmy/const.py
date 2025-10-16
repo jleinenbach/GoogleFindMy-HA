@@ -8,13 +8,39 @@ Keep comments and docstrings in English; user-facing strings belong in translati
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Tuple
 
 # --------------------------------------------------------------------------------------
 # Core identifiers
 # --------------------------------------------------------------------------------------
 DOMAIN: str = "googlefindmy"
+# Keep the integration version aligned across the project
 INTEGRATION_VERSION: str = "1.6"
+
+# --------------------------------------------------------------------------------------
+# Service device metadata & helpers (to enforce consistent identifiers across platforms)
+# --------------------------------------------------------------------------------------
+SERVICE_DEVICE_NAME: str = "Google Find My Integration"
+SERVICE_DEVICE_MODEL: str = "Find My Device Integration"
+SERVICE_DEVICE_MANUFACTURER: str = "BSkando"
+
+# Identifier pattern for the per-entry "integration device"
+SERVICE_DEVICE_IDENTIFIER_PREFIX: str = "integration_"
+# Legacy, pre-namespaced identifier used by older releases (kept for migrations)
+LEGACY_SERVICE_IDENTIFIER: str = "integration"
+
+
+def service_device_identifier(entry_id: str) -> Tuple[str, str]:
+    """Return the (domain, identifier) tuple for the per-entry 'service device'.
+
+    Args:
+        entry_id: Home Assistant config entry id.
+
+    Returns:
+        A tuple suitable for DeviceInfo.identifiers, e.g. ('googlefindmy', 'integration_<entry_id>')
+    """
+    return (DOMAIN, f"{SERVICE_DEVICE_IDENTIFIER_PREFIX}{entry_id}")
+
 
 # --------------------------------------------------------------------------------------
 # Configuration keys (data vs. options separation)
@@ -114,9 +140,11 @@ _IGN_KEY_ALIASES = "aliases"
 _IGN_KEY_IGNORED_AT = "ignored_at"
 _IGN_KEY_SOURCE = "source"
 
+
 def _now_epoch() -> int:
     """Return current epoch timestamp as an integer."""
     return int(time.time())
+
 
 def coerce_ignored_mapping(raw: object) -> tuple[dict[str, dict], bool]:
     """Coerce various legacy shapes into v2 mapping.
@@ -168,12 +196,14 @@ def coerce_ignored_mapping(raw: object) -> tuple[dict[str, dict], bool]:
         out = {}
     return out, changed
 
+
 def ignored_choices_for_ui(ignored_map: dict[str, dict]) -> dict[str, str]:
     """Build UI labels 'Name (id)' directly from the stored mapping."""
     return {
         dev_id: f"{(meta.get(_IGN_KEY_NAME) or dev_id)} ({dev_id})"
         for dev_id, meta in ignored_map.items()
     }
+
 
 # --------------------------------------------------------------------------------------
 # CONFIG_FIELDS — server-side validation contract for config/options flows
@@ -286,6 +316,12 @@ STORAGE_VERSION: int = 1
 __all__ = [
     "DOMAIN",
     "INTEGRATION_VERSION",
+    "SERVICE_DEVICE_NAME",
+    "SERVICE_DEVICE_MODEL",
+    "SERVICE_DEVICE_MANUFACTURER",
+    "SERVICE_DEVICE_IDENTIFIER_PREFIX",
+    "LEGACY_SERVICE_IDENTIFIER",
+    "service_device_identifier",
     "CONF_OAUTH_TOKEN",
     "CONF_GOOGLE_EMAIL",
     "DATA_SECRET_BUNDLE",
