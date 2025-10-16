@@ -205,6 +205,9 @@
     "binary_sensor": {
       "polling": {
         "name": "Odpytywanie"
+      },
+      "auth_status": {
+        "name": "Status uwierzytelnienia"
       }
     },
     "sensor": {
@@ -235,6 +238,12 @@
       "stat_non_significant_dropped": {
         "name": "Odrzucone nieistotne aktualizacje"
       }
+    }
+  },
+  "issues": {
+    "auth_expired": {
+      "title": "Wymagane ponowne uwierzytelnienie",
+      "description": "Uwierzytelnienie Google Find My Device jest nieprawidłowe lub wygasło.\n\n**Wpis:** {entry_title}\n**Konto:** {email}\n\nNa karcie integracji wybierz **Skonfiguruj ponownie**, aby przejść proces ponownego logowania. Jeśli niedawno zmieniono hasło do Google lub cofnięto tokeny, musisz zalogować się tutaj ponownie, aby przywrócić działanie."
     }
   },
   "exceptions": {
