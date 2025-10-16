@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
@@ -14,7 +13,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers import device_registry as dr  # Needed for DeviceEntryType
+from homeassistant.helpers import device_registry as dr  # DeviceEntryType
 
 from .const import DOMAIN, INTEGRATION_VERSION
 from .coordinator import GoogleFindMyCoordinator
@@ -24,7 +23,7 @@ _LOGGER = logging.getLogger(__name__)
 POLLING_DESC = BinarySensorEntityDescription(
     key="polling",
     translation_key="polling",
-    icon="mdi:refresh",  # Default icon
+    icon="mdi:refresh",
 )
 
 
@@ -35,46 +34,38 @@ async def async_setup_entry(
 ) -> None:
     """Set up Google Find My Device binary sensor entities.
 
-    We expose a single diagnostic sensor that reflects whether a polling cycle
-    is currently in progress. This is helpful for troubleshooting.
+    Exposes a single diagnostic sensor reflecting whether a polling cycle
+    is currently in progress (useful for troubleshooting).
     """
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][entry.entry_id]
-
-    entities: list[GoogleFindMyPollingSensor] = [GoogleFindMyPollingSensor(coordinator)]
-
-    # Write state immediately so the dashboard reflects the current status
+    entities: list[GoogleFindMyPollingSensor] = [
+        GoogleFindMyPollingSensor(coordinator, entry)
+    ]
     async_add_entities(entities, True)
 
 
-class GoogleFindMyPollingSensor(CoordinatorEntity, BinarySensorEntity):
+class GoogleFindMyPollingSensor(CoordinatorEntity[GoogleFindMyCoordinator], BinarySensorEntity):
     """Binary sensor indicating whether background polling is active."""
 
-    _attr_has_entity_name = True  # Compose "<Device Name> <Entity Name>"
+    _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     entity_description = POLLING_DESC
 
-    def __init__(self, coordinator: GoogleFindMyCoordinator) -> None:
+    def __init__(self, coordinator: GoogleFindMyCoordinator, entry: ConfigEntry) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_polling"
-        # _attr_name is intentionally not set; it's derived from translation_key.
+        self._entry_id = entry.entry_id
+        # Namespaced unique_id for multi-account safety
+        self._attr_unique_id = f"{DOMAIN}_{self._entry_id}_polling"
+        # Name is derived from translation_key; no explicit _attr_name.
 
     @property
     def is_on(self) -> bool:
-        """Return True if a polling cycle is currently running.
-
-        Prefer the public read-only property 'is_polling' (new Coordinator API).
-        Fall back to the legacy private attribute '_is_polling' for backward
-        compatibility.
-        """
-        # Public API (preferred)
+        """Return True if a polling cycle is currently running."""
         public_val = getattr(self.coordinator, "is_polling", None)
         if isinstance(public_val, bool):
             return public_val
-
-        # Legacy fallback (for compatibility during transition)
-        legacy_val = bool(getattr(self.coordinator, "_is_polling", False))
-        return legacy_val
+        return bool(getattr(self.coordinator, "_is_polling", False))  # legacy fallback
 
     @property
     def icon(self) -> str:
@@ -83,15 +74,16 @@ class GoogleFindMyPollingSensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return DeviceInfo for the integration's diagnostic device."""
+        """Attach the sensor to the per-entry service device."""
+        # Single service device per config entry:
+        # identifiers -> (DOMAIN, f"integration_<entry_id>")
         return DeviceInfo(
-            identifiers={(DOMAIN, "integration")},
+            identifiers={(DOMAIN, f"integration_{self._entry_id}")},
             name="Google Find My Integration",
             manufacturer="BSkando",
             model="Find My Device Integration",
-            sw_version=INTEGRATION_VERSION,  # Display integration version
+            sw_version=INTEGRATION_VERSION,
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
-            # Mark as a service device to hide the "Delete device" action in HA UI.
             entry_type=dr.DeviceEntryType.SERVICE,
         )
 
