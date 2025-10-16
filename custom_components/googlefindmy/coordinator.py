@@ -53,7 +53,10 @@ from homeassistant.config_entries import ConfigEntryAuthFailed
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.device_registry import EVENT_DEVICE_REGISTRY_UPDATED
+from homeassistant.helpers.device_registry import (
+    EVENT_DEVICE_REGISTRY_UPDATED,
+    DeviceEntryDisabler,
+)
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -65,6 +68,10 @@ from .const import (
     LOCATION_REQUEST_TIMEOUT_S,
     OPT_IGNORED_DEVICES,
     UPDATE_INTERVAL,
+    SERVICE_DEVICE_NAME,
+    SERVICE_DEVICE_MODEL,
+    SERVICE_DEVICE_MANUFACTURER,
+    service_device_identifier,
     coerce_ignored_mapping,
 )
 
@@ -425,6 +432,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             set()
         )  # diagnostics-only set from latest non-empty list
 
+        # Flag to separate initial discovery from later runtime additions.
+        # After the first successful non-empty device list is processed, this becomes True.
+        self.initial_discovery_done: bool = False
+
         # Presence smoothing (TTL):
         # - Per-device "last seen in full list" timestamp (monotonic)
         # - Cold-start marker: timestamp of last non-empty list (monotonic)
@@ -511,7 +522,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         - Loads stats (already scheduled in __init__, so this is idempotent).
         - Indexes poll targets from the Device Registry.
         - Subscribes to DR updates (unsubscribed in `async_shutdown()`).
+        - Ensures the per-entry "service device" exists in the Device Registry.
         """
+        # Make sure the service device exists early to anchor end-devices via `via_device`.
+        self._ensure_service_device_exists()
+
         # Initial index (works even if config_entry is not yet bound; will re-run on DR event)
         self._reindex_poll_targets_from_device_registry()
         if self._dr_unsub is None:
@@ -657,6 +672,92 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             len(present),
             len(enabled),
         )
+
+    # --- NEW: Device Registry creation/management -------------------------------
+    def _ensure_service_device_exists(self) -> None:
+        """Ensure the per-entry 'service device' exists (idempotent, lightweight).
+
+        The service device anchors all end-devices via `via_device` and must use
+        an entry-specific identifier to support multi-account setups.
+        """
+        entry_id = self._entry_id()
+        if not entry_id:
+            return
+        dev_reg = dr.async_get(self.hass)
+        ident = service_device_identifier(entry_id)  # (DOMAIN, f"integration_<entry>")
+        try:
+            dev_reg.async_get_or_create(
+                config_entry_id=entry_id,
+                identifiers={ident},
+                manufacturer=SERVICE_DEVICE_MANUFACTURER,
+                model=SERVICE_DEVICE_MODEL,
+                name=SERVICE_DEVICE_NAME,
+                entry_type=dr.DeviceEntryType.SERVICE,
+            )
+        except Exception as err:
+            _LOGGER.debug("Failed to ensure service device exists: %s", err)
+
+    def _ensure_registry_for_devices(
+        self, devices: List[Dict[str, Any]], ignored: Set[str]
+    ) -> int:
+        """Create Device Registry entries for newly discovered devices.
+
+        Behavior:
+        - Skips devices in the ignored set.
+        - Uses `via_device` to link end-devices to the per-entry service device.
+        - During initial discovery (self.initial_discovery_done == False), devices are
+          created **enabled**. After that, newly discovered devices are created and
+          immediately **disabled by integration** to respect the requested policy.
+
+        Returns:
+            The number of device records created or updated (disabled flag applied).
+        """
+        entry_id = self._entry_id()
+        if not entry_id or not devices:
+            return 0
+
+        dev_reg = dr.async_get(self.hass)
+        self._ensure_service_device_exists()
+        parent_ident = service_device_identifier(entry_id)
+        created = 0
+
+        for d in devices:
+            dev_id = d.get("id")
+            if not isinstance(dev_id, str) or not dev_id or dev_id in ignored:
+                continue
+            if dev_id in self._devices_with_entry:
+                continue  # already registered for this entry
+
+            name = d.get("name") or self._device_names.get(dev_id) or dev_id
+            try:
+                # Create (or get) the end-device, linked via the per-entry service device.
+                dev = dev_reg.async_get_or_create(
+                    config_entry_id=entry_id,
+                    identifiers={(DOMAIN, dev_id)},
+                    name=name,
+                    manufacturer="Google",
+                    model="Find My Device",
+                    via_device=parent_ident,
+                )
+                # Disable new devices only after the initial discovery window has closed
+                if self.initial_discovery_done and dev.disabled_by is None:
+                    dev_reg.async_update_device(
+                        device_id=dev.id,
+                        disabled_by=DeviceEntryDisabler.INTEGRATION,
+                    )
+                # Track locally so we avoid re-creating
+                self._devices_with_entry.add(dev_id)
+                created += 1
+            except Exception as err:
+                _LOGGER.debug("Device registry create/update failed for %s: %s", dev_id, err)
+
+        if created:
+            _LOGGER.info(
+                "Registered %d newly discovered device(s) in the Device Registry", created
+            )
+            # Refresh local targeting state after changes
+            self._reindex_poll_targets_from_device_registry()
+        return created
 
     # --- END: Add/Replace inside Coordinator class --------------------------------
 
@@ -1173,6 +1274,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     slot = self._device_caps.setdefault(dev_id, {})
                     slot["can_ring"] = can_ring
 
+            # 2.5) Ensure Device Registry entries exist (service device + end-devices)
+            created = self._ensure_registry_for_devices(all_devices, ignored)
+
             # 3) Decide whether to trigger a poll cycle (monotonic clock)
             # Build list of devices to POLL:
             # Poll devices that have at least one enabled DR entry for this config entry;
@@ -1226,6 +1330,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             snapshot = await self._async_build_device_snapshot_with_fallbacks(
                 visible_devices
             )
+
+            # 4.5) Close the initial discovery window once we have real devices
+            if not self.initial_discovery_done and visible_devices:
+                self.initial_discovery_done = True
+                _LOGGER.info(
+                    "Initial discovery window closed; newly discovered devices will be created disabled by default."
+                )
+
             _LOGGER.debug(
                 "Returning %d device entries; next poll in ~%ds",
                 len(snapshot),
@@ -1625,9 +1737,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     break
             if not entity_id:
                 _LOGGER.debug(
-                    "No entity registry entry for device '%s' (unique_id=%s); skipping any fallback.",
+                    "No entity registry entry for device '%s' (unique_id candidates=%s); skipping any fallback.",
                     entry["name"],
-                    unique_id,
+                    uid_candidates,
                 )
                 snapshot.append(entry)
                 continue
@@ -2090,7 +2202,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         This **does not** trigger a poll. It:
         - Immediately pushes cache state to entities via `async_set_updated_data()`.
         - Optionally resets the internal poll baseline to 'now' to prevent an immediate
-          re-poll when push-driven updates arrive (`reset_baseline=True` by default).
+        re-poll when push-driven updates arrive (`reset_baseline=True` by default).
         - Optionally limits the snapshot to `device_ids`; otherwise includes all known devices.
 
         Args:
