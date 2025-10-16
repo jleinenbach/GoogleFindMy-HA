@@ -50,6 +50,7 @@
     },
     "error": {
       "auth_failed": "Error de autenticación. Vuelve a intentarlo.",
+      "invalid_auth": "Autenticación no válida. Proporciona un token nuevo y/o vuelve a iniciar sesión.",
       "invalid_token": "Credenciales no válidas (token/correo) o faltan campos obligatorios.",
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
       "no_devices": "No se han encontrado dispositivos. Asegúrate de que ‘Encontrar mi dispositivo’ esté activado en tu cuenta de Google.",
@@ -115,13 +116,15 @@
     "error": {
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
       "invalid": "Falló la validación. Revisa tus datos.",
+      "invalid_auth": "Autenticación no válida. Proporciona un token nuevo y/o vuelve a iniciar sesión.",
       "cannot_connect": "No se pudo conectar con la API de Google.",
       "choose_one": "Proporciona exactamente un método de credenciales.",
       "required": "Este campo es obligatorio.",
-      "invalid_token": "Credenciales no válidas (token/correo). Comprueba el formato y el contenido."
+      "invalid_token": "Credenciales no válidas (token/correo). Comprueba el formato y el contenido.",
+      "unknown": "Error inesperado."
     },
     "abort": {
-      "reconfigure_successful": "Reconfiguración correcta.",
+      "reconfigure_successful": "Reconfiguración correcto.",
       "no_ignored_devices": "No hay dispositivos ignorados para restaurar."
     }
   },
@@ -244,6 +247,10 @@
     "auth_expired": {
       "title": "Se requiere volver a iniciar sesión",
       "description": "La autenticación de Google Find My Device no es válida o ha caducado.\n\n**Entrada:** {entry_title}\n**Cuenta:** {email}\n\nEn la tarjeta de la integración, elige **Reconfigurar** para volver a autenticarte. Si recientemente cambiaste tu contraseña de Google o revocaste tokens, tendrás que iniciar sesión aquí para restablecer la funcionalidad."
+    },
+    "multiple_config_entries": {
+      "title": "Se detectaron varias entradas de configuración",
+      "description": "Actualmente hay más de una entrada de configuración para esta integración:\n\n{entries}\n\nSolo se admite una única entrada. Ve a **Ajustes → Dispositivos y servicios**, abre **Google Find My Device** y elimina las entradas duplicadas hasta que quede exactamente una. Después recarga la integración (o reinicia Home Assistant)."
     }
   },
   "exceptions": {
