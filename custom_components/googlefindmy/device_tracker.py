@@ -8,6 +8,7 @@ Notes on design and consistency with the coordinator:
 - Extra attributes come from `_as_ha_attributes(...)` and intentionally use stable keys
   like `accuracy_m` for recorder friendliness, while the entity's built-in accuracy
   property exposes an integer `gps_accuracy` to HA Core.
+- End devices link to the per-entry SERVICE device via `via_device=(DOMAIN, f"integration_{entry_id}")`.
 """
 from __future__ import annotations
 
@@ -150,8 +151,8 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     _attr_has_entity_name = False
     _attr_source_type = SourceType.GPS
     _attr_entity_category = None  # ensure tracker is not diagnostic
-    # Default to disabled in the registry (user must explicitly enable)
-    _attr_entity_registry_enabled_default = False
+    # Default to enabled in the registry for per-device trackers
+    _attr_entity_registry_enabled_default = True
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----
     @staticmethod
@@ -236,6 +237,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         - We never pass `default_name` here. `DeviceInfo` must fit the primary
           category (identifiers/manufacturer/model). Supplying `default_*`
           fields could re-categorize as secondary in some cores.
+        - Link this end device to the per-entry SERVICE device using `via_device`.
         """
         try:
             base_url = get_url(
@@ -261,12 +263,17 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             # Only pass a real name; never pass default_name here.
             name_kwargs["name"] = display_name
 
+        # Link against the per-entry service device
+        entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", None)
+        via = (DOMAIN, f"integration_{entry_id}") if entry_id else None
+
         return DeviceInfo(
             identifiers={(DOMAIN, self._device["id"])},
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}" if base_url else None,
             serial_number=self._device["id"],  # technical id in the proper field
+            via_device=via,
             **name_kwargs,
         )
 
