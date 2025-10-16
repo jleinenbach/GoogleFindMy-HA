@@ -6,24 +6,21 @@
 """
 ADM (Android Device Manager) token retrieval for the Google Find My Device integration.
 
-Async-first implementation:
-- Uses async AAS token retrieval to avoid event-loop blocking.
-- Runs gpsoauth.perform_oauth (blocking) inside an executor.
-- Persists TTL metadata in the token cache (used by Nova TTL policies).
+This module provides an async-first API to obtain an ADM (Android Device Manager)
+token, which is required for all interactions with the Nova API (e.g., listing
+devices, requesting locations).
 
-Key points
-----------
-- Multi-entry safe: all state is kept in the shared TokenCache.
+Design & Fix for BadAuthentication:
 - Async-first: `async_get_adm_token()` is the primary API.
-- Legacy sync facade: `get_adm_token()` is provided for CLI/offline usage only
-  and will raise a RuntimeError if called from within the HA event loop.
-
-Cache keys
-----------
-- adm_token_<email>                  -> str : the ADM token
-- adm_token_issued_at_<email>        -> float (epoch seconds)
-- adm_probe_startup_left_<email>     -> int : bootstrap probe counter (optional)
-- username                           -> str : canonical username (see username_provider)
+- **PATCH**: This version reverts to the direct token retrieval method used in older,
+  functional versions. It removes the dependency on `aas_token_retrieval.py` which
+  introduced overly strict validations and caused `BadAuthentication` errors for
+  configurations relying on a cached `aas_token`.
+- It now directly calls `async_request_token` from `token_retrieval.py`, delegating
+  the entire authentication chain to a single, specialized module. This simplifies
+  the logic and restores compatibility.
+- Blocking `gpsoauth` calls within the token retrieval process are executed in a
+  thread executor by the underlying `async_request_token` function.
 """
 
 from __future__ import annotations
@@ -31,169 +28,38 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional, Awaitable, Callable, Any
+from typing import Optional
 
-import gpsoauth
-
-from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
-from custom_components.googlefindmy.Auth.username_provider import (
-    async_get_username,
-    username_string,
-)
+# Import the direct, async token requester, restoring the old, functional architecture.
+from custom_components.googlefindmy.Auth.token_retrieval import \
+    async_request_token
 from custom_components.googlefindmy.Auth.token_cache import (
-    async_get_cached_value,
-    async_set_cached_value,
-)
+    async_get_cached_value, async_get_cached_value_or_set,
+    async_set_cached_value)
+from custom_components.googlefindmy.Auth.username_provider import \
+    async_get_username
 
 _LOGGER = logging.getLogger(__name__)
 
-# Constants for gpsoauth
-_ANDROID_ID: int = 0x38918A453D071993
-_CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
-_APP_ID: str = "com.google.android.apps.adm"
 
-
-async def _seed_username_in_cache(username: str) -> None:
-    """Ensure the canonical username cache key is populated (idempotent)."""
-    try:
-        cached = await async_get_cached_value(username_string)
-        if cached != username and isinstance(username, str) and username:
-            await async_set_cached_value(username_string, username)
-            _LOGGER.debug("Seeded username cache key '%s' with '%s'.", username_string, username)
-    except Exception as exc:  # defensive: never fail token flow on seeding
-        _LOGGER.debug("Username cache seeding skipped: %s", exc)
-
-
-async def _perform_oauth_with_aas(username: str) -> str:
-    """Exchange AAS -> scope token (ADM) using gpsoauth in a thread executor."""
-    # Get AAS token asynchronously (it handles its own blocking via executor)
-    aas_token = await async_get_aas_token()
-
-    def _run() -> str:
-        """Synchronous part to be run in an executor."""
-        resp = gpsoauth.perform_oauth(
-            username,
-            aas_token,
-            _ANDROID_ID,
-            service="oauth2:https://www.googleapis.com/auth/android_device_manager",
-            app=_APP_ID,
-            client_sig=_CLIENT_SIG,
-        )
-        if not resp or "Auth" not in resp:
-            raise RuntimeError(f"gpsoauth.perform_oauth returned invalid response: {resp}")
-        return resp["Auth"]
-
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _run)
-
-
-# -------------------- Isolated / flow-local exchange helpers --------------------
-
-async def _perform_oauth_with_provided_aas(username: str, aas_token: str) -> str:
-    """Like _perform_oauth_with_aas, but uses a caller-provided AAS token (no globals)."""
-    def _run() -> str:
-        resp = gpsoauth.perform_oauth(
-            username,
-            aas_token,
-            _ANDROID_ID,
-            service="oauth2:https://www.googleapis.com/auth/android_device_manager",
-            app=_APP_ID,
-            client_sig=_CLIENT_SIG,
-        )
-        if not resp or "Auth" not in resp:
-            raise RuntimeError(f"gpsoauth.perform_oauth returned invalid response: {resp}")
-        return resp["Auth"]
-
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _run)
-
-
-async def async_get_adm_token_isolated(
-    username: str,
-    *,
-    # One of the following must be provided to allow an isolated exchange:
-    aas_token: Optional[str] = None,
-    secrets_bundle: Optional[dict[str, Any]] = None,
-    # Optional, flow-local TTL metadata storage (to keep validation fully isolated)
-    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
-    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
-    retries: int = 1,
-    backoff: float = 1.0,
-) -> str:
+async def _generate_adm_token(username: str) -> str:
     """
-    Perform a *real* AAS→ADM exchange **without touching the global cache**.
+    Generate a new ADM token by directly calling the central token retriever.
 
-    Usage:
-      - Provide `aas_token` directly, or include it in `secrets_bundle['aas_token']`.
-      - Optionally pass `cache_get` / `cache_set` to record TTL metadata in a
-        flow-local ephemeral cache (used by Nova TTL policy during validation).
+    This function restores the simpler, more robust logic of older versions by
+    delegating the entire token exchange process to `async_request_token`.
+
+    Args:
+        username: The Google account e-mail for the request context.
 
     Returns:
-      ADM token string.
-
-    Raises:
-      RuntimeError if input is insufficient or exchange fails after retries.
+        The generated ADM token string.
     """
-    if not isinstance(username, str) or not username:
-        raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token (isolated).")
+    _LOGGER.debug("Generating new ADM token for user %s", username)
+    # Directly request the specific token needed. The underlying function will handle
+    # the necessary AAS token acquisition and exchange.
+    return await async_request_token(username, "android_device_manager")
 
-    # Prefer explicit parameter; otherwise look into the provided secrets bundle.
-    src_aas = aas_token
-    if src_aas is None and isinstance(secrets_bundle, dict):
-        candidate = secrets_bundle.get("aas_token")
-        if isinstance(candidate, str) and candidate.strip():
-            src_aas = candidate.strip()
-
-    if not src_aas:
-        raise RuntimeError(
-            "Isolated ADM exchange requires an AAS token (pass `aas_token` or include `aas_token` in `secrets_bundle`)."
-        )
-
-    last_exc: Optional[Exception] = None
-    attempts = max(1, retries + 1)
-    for attempt in range(attempts):
-        try:
-            tok = await _perform_oauth_with_provided_aas(username, src_aas)
-
-            # Best-effort: persist TTL metadata *only* via provided flow-local cache.
-            if cache_set is not None:
-                try:
-                    await cache_set(f"adm_token_{username}", tok)
-                    await cache_set(f"adm_token_issued_at_{username}", time.time())
-                    needs_bootstrap = True
-                    if cache_get is not None:
-                        try:
-                            existing = await cache_get(f"adm_probe_startup_left_{username}")
-                            needs_bootstrap = not bool(existing)
-                        except Exception:  # defensive
-                            needs_bootstrap = True
-                    if needs_bootstrap:
-                        await cache_set(f"adm_probe_startup_left_{username}", 3)
-                except Exception as meta_exc:  # never fail the exchange on metadata issues
-                    _LOGGER.debug("Isolated TTL metadata write skipped: %s", meta_exc)
-
-            return tok
-
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < attempts - 1:
-                sleep_s = backoff * (2**attempt)
-                _LOGGER.info(
-                    "Isolated ADM exchange failed (attempt %s/%s): %s — retrying in %.1fs",
-                    attempt + 1,
-                    attempts,
-                    exc,
-                    sleep_s,
-                )
-                await asyncio.sleep(sleep_s)
-                continue
-            _LOGGER.error("Isolated ADM exchange failed after %s attempts: %s", attempts, exc)
-
-    assert last_exc is not None
-    raise last_exc
-
-
-# --------------------- Standard async API (global cache) ---------------------
 
 async def async_get_adm_token(
     username: Optional[str] = None,
@@ -203,6 +69,8 @@ async def async_get_adm_token(
 ) -> str:
     """
     Return a cached ADM token or generate a new one (async-first API).
+
+    This is the main entry point for other modules to get a valid ADM token.
 
     Args:
         username: Optional explicit username. If None, it's resolved from cache.
@@ -221,39 +89,42 @@ async def async_get_adm_token(
 
     cache_key = f"adm_token_{user}"
 
-    # Cache fast-path
-    token = await async_get_cached_value(cache_key)
-    if isinstance(token, str) and token:
-        return token
+    # Use get_cached_value_or_set to handle caching, generation, and retries atomically.
+    # The generator lambda captures the username for the generation function.
+    generator = lambda: _generate_adm_token(user)
 
-    # Generate with bounded retries
+    # Note: The retry logic is now implicitly handled by the robust get_or_set,
+    # but we keep an explicit loop for logging and backoff control.
     last_exc: Optional[Exception] = None
-    attempts = retries + 1
-    for attempt in range(attempts):
+    for attempt in range(retries + 1):
         try:
-            await _seed_username_in_cache(user)
-            tok = await _perform_oauth_with_aas(user)
+            # The `get_cached_value_or_set` pattern ensures the generator is only
+            # called if the value is not in the cache.
+            token = await async_get_cached_value_or_set(cache_key, generator)
 
-            # Persist token & issued-at metadata
-            await async_set_cached_value(cache_key, tok)
-            await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
+            # Persist TTL metadata upon successful generation
+            if not await async_get_cached_value(f"adm_token_issued_at_{user}"):
+                 await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
             if not await async_get_cached_value(f"adm_probe_startup_left_{user}"):
                 await async_set_cached_value(f"adm_probe_startup_left_{user}", 3)
-            return tok
-        except Exception as exc:  # noqa: BLE001
+
+            return token
+        except Exception as exc:
             last_exc = exc
-            if attempt < attempts - 1:
+            if attempt < retries:
                 sleep_s = backoff * (2**attempt)
                 _LOGGER.info(
-                    "ADM token generation failed (attempt %s/%s): %s — retrying in %.1fs",
+                    "ADM token generation failed (attempt %d/%d): %s — retrying in %.1fs",
                     attempt + 1,
-                    attempts,
+                    retries + 1,
                     exc,
                     sleep_s,
                 )
+                # Clear potentially bad cache entry before retrying
+                await async_set_cached_value(cache_key, None)
                 await asyncio.sleep(sleep_s)
                 continue
-            _LOGGER.error("ADM token generation failed after %s attempts: %s", attempts, exc)
+            _LOGGER.error("ADM token generation failed after %d attempts: %s", retries + 1, exc)
 
     assert last_exc is not None
     raise last_exc
