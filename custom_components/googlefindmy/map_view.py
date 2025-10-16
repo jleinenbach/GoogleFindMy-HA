@@ -2,7 +2,9 @@
 """Map view for Google Find My Device locations."""
 from __future__ import annotations
 
+import hashlib
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -10,7 +12,6 @@ from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 from homeassistant.util import dt as dt_util
 
@@ -41,6 +42,60 @@ def _html_response(title: str, body: str, status: int = 200) -> web.Response:
     )
 
 
+# --------------------------- Token / Entry helpers ---------------------------
+
+def _week_bucket(now_ts: Optional[float] = None) -> int:
+    """Return the current 7-day bucket index (UTC)."""
+    if now_ts is None:
+        now_ts = time.time()
+    return int(now_ts // 604800)
+
+
+def _entry_accept_tokens(
+    hass: HomeAssistant,
+    entry_id: str,
+    token_expiration_enabled: bool,
+) -> set[str]:
+    """Compute the accepted tokens for a given entry_id.
+
+    Contract (must match Buttons/Sensor/Tracker):
+      secret = f"{ha_uuid}:{entry_id}:{week|static}"
+      token  = md5(secret).hexdigest()[:16]
+
+    For weekly tokens, accept the current and previous bucket (grace on week rollover).
+    For static tokens, accept only the static form.
+    """
+    ha_uuid = str(hass.data.get("core.uuid", "ha"))
+    tokens: set[str] = set()
+    if token_expiration_enabled:
+        current = _week_bucket()
+        prev = current - 1
+        for wk in (current, prev):
+            secret = f"{ha_uuid}:{entry_id}:{wk}"
+            tokens.add(hashlib.md5(secret.encode()).hexdigest()[:16])
+    else:
+        secret = f"{ha_uuid}:{entry_id}:static"
+        tokens.add(hashlib.md5(secret.encode()).hexdigest()[:16])
+    return tokens
+
+
+def _resolve_entry_by_token(hass: HomeAssistant, auth_token: str):
+    """Return (entry, accepted_tokens) for the entry that matches the token, else (None, None).
+
+    We iterate over all config entries for this DOMAIN and compare the provided token
+    against the per-entry accepted token set (weekly/static as per options).
+    """
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        token_exp = entry.options.get(
+            OPT_MAP_VIEW_TOKEN_EXPIRATION,
+            entry.data.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
+        )
+        accepted = _entry_accept_tokens(hass, entry.entry_id, bool(token_exp))
+        if auth_token in accepted:
+            return entry, accepted
+    return None, None
+
+
 # ------------------------------- Map View -----------------------------------
 
 class GoogleFindMyMapView(HomeAssistantView):
@@ -58,65 +113,61 @@ class GoogleFindMyMapView(HomeAssistantView):
         """Generate and serve a map for the device.
 
         Security notes:
-        - We use a short-lived/static token conveyed via query param. This is a UX helper
-          for opening the map from the device page. Do not use it for sensitive data.
+        - Token validation is **entry-scoped** (includes entry_id in the token).
+        - Weekly tokens accept current and previous bucket to survive boundary flips.
         - We never log tokens or full URLs that include tokens.
         """
-        # ---- 1) Token check (options-first; 401 on missing/invalid) ----
+        # ---- 1) Token check & entry resolution (401 on missing/invalid) ----
         auth_token = request.query.get("token")
         if not auth_token:
             return _html_response("Unauthorized", "Missing authentication token.", status=401)
 
-        if auth_token != self._get_simple_token():
-            # No token echo in logs; keep message generic.
-            _LOGGER.debug("Map token mismatch for device_id=%s", device_id)
+        entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
+        if not entry:
+            _LOGGER.debug("Map token mismatch (no entry resolved) for device_id=%s", device_id)
             return _html_response("Unauthorized", "Invalid authentication token.", status=401)
 
+        # ---- 2) Coordinator + device membership check (404 if unknown in this entry) ----
         try:
-            # ---- 2) Validate device_id against Device Registry; 404 if unknown ----
-            dev_reg = dr.async_get(self.hass)
-            device_known = False
-            for dev in list(dev_reg.devices.values()):
-                if any(ident[0] == DOMAIN and ident[1] == device_id for ident in dev.identifiers):
-                    device_known = True
-                    break
+            coordinator = self.hass.data[DOMAIN][entry.entry_id]
+        except KeyError:
+            _LOGGER.debug("Coordinator not found for entry_id=%s", entry.entry_id)
+            return _html_response("Server Error", "Integration not ready.", status=503)
 
-            if not device_known:
-                _LOGGER.debug("Map requested for unknown device_id=%s", device_id)
-                return _html_response("Not Found", "Device not found.", status=404)
+        data_list = getattr(coordinator, "data", None) or []
+        device_known = any(dev.get("id") == device_id for dev in data_list)
+        if not device_known:
+            _LOGGER.debug("Map requested for unknown device_id=%s in entry_id=%s", device_id, entry.entry_id)
+            return _html_response("Not Found", "Device not found.", status=404)
 
-            # ---- 3) Resolve a human-readable device name from coordinator snapshot (best effort) ----
-            coordinator_data = self.hass.data.get(DOMAIN, {})
-            device_name = "Unknown Device"
-            for entry_id, coordinator in coordinator_data.items():
-                if entry_id == "config_data":
-                    continue
-                data_list = getattr(coordinator, "data", None) or []
-                for device in data_list:
-                    if device.get("id") == device_id:
-                        device_name = device.get("name", device_name)
-                        break
+        try:
+            # ---- 3) Resolve a human-readable device name from THIS coordinator snapshot ----
+            device_name = next((d.get("name") for d in data_list if d.get("id") == device_id), None) or "Unknown Device"
 
-            # ---- 4) Find the device_tracker entity (entity registry) ----
-            # Prefer the actual entity id over a guess.
-            entity_id_guess = f"device_tracker.{device_id.replace('-', '_').lower()}"
+            # ---- 4) Find the device_tracker entity (entity registry, scoped to this entry) ----
             entity_registry = async_get_entity_registry(self.hass)
             entity_id: Optional[str] = None
 
             for entity in entity_registry.entities.values():
                 if (
-                    entity.unique_id
-                    and device_id in entity.unique_id
+                    entity.config_entry_id == entry.entry_id
                     and entity.platform == DOMAIN
                     and entity.entity_id.startswith("device_tracker.")
+                    and entity.unique_id
+                    and device_id in entity.unique_id
                 ):
                     entity_id = entity.entity_id
                     break
 
             if not entity_id:
-                # Fall back to the guess; the page will render "no history", which is acceptable UX.
-                entity_id = entity_id_guess
-                _LOGGER.debug("No explicit tracker entity found for %s, using guess %s", device_id, entity_id)
+                # Fallback to a guess; page will render "no history" if none found, which is acceptable UX.
+                entity_id = f"device_tracker.{device_id.replace('-', '_').lower()}"
+                _LOGGER.debug(
+                    "No explicit tracker entity found for %s in entry_id=%s, using guess %s",
+                    device_id,
+                    entry.entry_id,
+                    entity_id,
+                )
 
             # ---- 5) Parse time range and accuracy filter from query ----
             end_time = dt_util.utcnow()
@@ -179,7 +230,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                             current_last_seen = state.last_updated.timestamp()
                     except (ValueError, TypeError):
                         current_last_seen = state.last_updated.timestamp()
-                        
+
                     if current_last_seen and current_last_seen == last_seen:
                         # de-dupe by identical last_seen
                         continue
@@ -201,7 +252,8 @@ class GoogleFindMyMapView(HomeAssistantView):
                             "entity_id": entity_id,
                             "state": state.state,
                             "is_own_report": state.attributes.get("is_own_report"),
-                            "semantic_location": state.attributes.get("semantic_location"),
+                            # Harmonize with coordinator attributes: use 'semantic_name'
+                            "semantic_location": state.attributes.get("semantic_name"),
                         }
                     )
 
@@ -617,36 +669,6 @@ class GoogleFindMyMapView(HomeAssistantView):
         </body>
         </html>
         """
-
-    # ---------------------------- Token helper ----------------------------
-
-    def _get_simple_token(self) -> str:
-        """Generate a simple token for basic authentication.
-
-        Notes:
-        - Options-first harmony with other platforms (weekly/static).
-        - No logging of the token value here or elsewhere.
-        """
-        import hashlib
-        import time
-
-        config_entries = self.hass.config_entries.async_entries(DOMAIN)
-        token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-        if config_entries:
-            entry = config_entries[0]
-            token_expiration_enabled = entry.options.get(
-                OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                entry.data.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
-            )
-
-        # Prefer HA's instance UUID if present; fall back to a benign constant.
-        ha_uuid = str(self.hass.data.get("core.uuid") or "ha")
-
-        if token_expiration_enabled:
-            week = str(int(time.time() // 604800))  # 7-day bucket
-            return hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
-        return hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
-
 
 # ------------------------------ Redirect View -------------------------------
 
