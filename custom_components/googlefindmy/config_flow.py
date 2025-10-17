@@ -766,6 +766,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Data = minimal credentials; options = non-secret runtime settings
             data_payload: Dict[str, Any] = {
                 DATA_AUTH_METHOD: self._auth_data.get(DATA_AUTH_METHOD),
+                # PATCH/CLARIFICATION by jleinenbach:
+                # The key "oauth_token" is misleading. The token stored here is actually the
+                # long-lived AAS (Android AuthSub) "Master Token" obtained from gpsoauth.
+                # This master token (often prefixed with "aas_et/") is essential for
+                # autonomously generating new, short-lived service tokens in the background,
+                # ensuring the integration continues to work without requiring manual re-authentication.
                 CONF_OAUTH_TOKEN: self._auth_data.get(CONF_OAUTH_TOKEN),
                 CONF_GOOGLE_EMAIL: self._auth_data.get(CONF_GOOGLE_EMAIL),
             }
