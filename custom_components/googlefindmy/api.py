@@ -84,16 +84,16 @@ def _maybe_log_guard_once(context: str, *, email: Optional[str] = None, entry_id
         extra.append(f"email={email}")
     if entry_id:
         extra.append(f"entry_id={entry_id}")
-    suffix = f" ({', '.join(extra)})" if extra else ""
+    suffix = f" ({', '.join(extra)}) if extra else ''"
 
     if not _GUARD_LOGGED_ONCE:
         _LOGGER.info(
             "Auth guard: multiple config entries detected; deferring validation to setup%s",
-            suffix,
+            suffix if isinstance(suffix, str) else "",
         )
         _GUARD_LOGGED_ONCE = True
     else:
-        _LOGGER.debug("Auth guard (suppressed duplicate): %s%s", context, suffix)
+        _LOGGER.debug("Auth guard (suppressed duplicate): %s%s", context, suffix if isinstance(suffix, str) else "")
 
 
 # ----------------------------- Minimal protocols -----------------------------
@@ -302,6 +302,21 @@ class GoogleFindMyAPI:
         # Key: canonical device id, Value: can_ring (bool)
         self._device_capabilities: Dict[str, bool] = {}
 
+    # ------------------------ Namespace helper (entry-scope) ------------------------
+    def _namespace(self) -> Optional[str]:
+        """Return an entry-scoped namespace for downstream Nova helpers.
+
+        Prefer an explicit `entry_id` attribute on the cache; fall back to a generic
+        `namespace` attribute if present. Returns None when no scope is available.
+        """
+        try:
+            ns = getattr(self._cache, "entry_id", None) or getattr(self._cache, "namespace", None)
+            if isinstance(ns, str) and ns.strip():
+                return ns.strip()
+        except Exception:
+            pass
+        return None
+
     # ------------------------ Internal processing helpers ------------------------
     def _process_device_list_response(self, result_hex: str) -> List[Dict[str, Any]]:
         """Parse protobuf, update capability cache, and build basic device list.
@@ -493,6 +508,7 @@ class GoogleFindMyAPI:
                     cache_get=cg,
                     cache_set=cs,
                     refresh_override=refresh_override,
+                    namespace=self._namespace(),
                 )
             except TypeError:
                 # Older helper signature (no pass-through); best-effort fallback matrix.
@@ -621,9 +637,15 @@ class GoogleFindMyAPI:
             _LOGGER.info(
                 "API v3.0 Async: Requesting location for %s (%s)", device_name, device_id
             )
-            records = await get_location_data_for_device(
-                device_id, device_name, session=self._session
-            )
+            # Prefer new signature with entry namespace; fall back gracefully.
+            try:
+                records = await get_location_data_for_device(
+                    device_id, device_name, session=self._session, namespace=self._namespace()
+                )
+            except TypeError:
+                records = await get_location_data_for_device(
+                    device_id, device_name, session=self._session
+                )
             best = self._select_best_location(records)
             if best:
                 _LOGGER.info(
@@ -876,9 +898,14 @@ class GoogleFindMyAPI:
             # Delegate payload build + transport to the submitter; provide HA session.
             # NOTE: If Nova later requires an explicit username for action endpoints,
             # extend submitter signatures to accept and forward it consistently.
-            result_hex = await async_submit_start_sound_request(
-                device_id, token, session=self._session
-            )
+            try:
+                result_hex = await async_submit_start_sound_request(
+                    device_id, token, session=self._session, namespace=self._namespace()
+                )
+            except TypeError:
+                result_hex = await async_submit_start_sound_request(
+                    device_id, token, session=self._session
+                )
             ok = result_hex is not None
             if ok:
                 _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
@@ -932,9 +959,14 @@ class GoogleFindMyAPI:
             return False
         try:
             _LOGGER.info("Submitting Stop Sound (async) for %s", device_id)
-            result_hex = await async_submit_stop_sound_request(
-                device_id, token, session=self._session
-            )
+            try:
+                result_hex = await async_submit_stop_sound_request(
+                    device_id, token, session=self._session, namespace=self._namespace()
+                )
+            except TypeError:
+                result_hex = await async_submit_stop_sound_request(
+                    device_id, token, session=self._session
+                )
             ok = result_hex is not None
             if ok:
                 _LOGGER.info("Stop Sound (async) submitted successfully for %s", device_id)
