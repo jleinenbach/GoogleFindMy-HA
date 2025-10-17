@@ -16,6 +16,7 @@ Compatibility
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from typing import Any, Iterable, Optional, Tuple
 
@@ -37,8 +38,10 @@ from .const import (
     MODE_MIGRATE,
     MODE_REBUILD,
     REBUILD_REGISTRY_MODES,
-    OPT_MAP_VIEW_TOKEN_EXPIRATION,  # used for ctx sanity if missing
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,  # ctx provides the key but we keep a local fallback constant
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> None:
@@ -58,6 +61,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         - "default_map_view_token_expiration": bool
         - "opt_map_view_token_expiration_key": str
         - "redact_url_token": Callable[[str], str]
+        - "soft_migrate_entry": Callable[[HomeAssistant, Any], Any]  # awaited per entry
     """
 
     # ---- Small local helpers (no circular imports) ---------------------------
@@ -228,6 +232,8 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             The token is a short-lived (weekly) or static gate derived from the HA UUID.
             All tokens are redacted in logs; the view must validate tokens server-side.
         """
+        from homeassistant.exceptions import HomeAssistantError  # local import to avoid top-level dependency
+
         try:
             base_url = get_url(
                 hass,
@@ -237,10 +243,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 allow_internal=True,
             )
         except HomeAssistantError as err:
-            # Visible in logs; not raising a translated error because the service
-            # has no user parameters and we don't want to mask the root cause.
-            # (services.yaml provides the metadata/UI)
-            hass.logger().error("Could not determine base URL for device refresh: %s", err)
+            _LOGGER.error("Could not determine base URL for device refresh: %s", err)
             return
 
         # Choose options from the *active* entry (deterministic primary).
@@ -275,13 +278,13 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     )
                     updated_count += 1
                     if ctx.get("redact_url_token"):
-                        hass.logger().debug(
+                        _LOGGER.debug(
                             "Updated URL for device %s: %s",
                             device.name_by_user or device.name,
                             ctx["redact_url_token"](new_config_url),
                         )
 
-        hass.logger().info("Refreshed URLs for %d Google Find My devices", updated_count)
+        _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
     async def async_rebuild_registry_service(call: ServiceCall) -> None:
         """Migrate soft settings or rebuild the registry (optionally scoped to device_ids).
@@ -302,18 +305,26 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
         raw_ids = call.data.get(ATTR_DEVICE_IDS)
 
+        # C-4: Micro-hardening for device_ids input (developer tools misuse)
         if isinstance(raw_ids, str):
             target_device_ids = {raw_ids}
         elif isinstance(raw_ids, (list, tuple, set)):
-            target_device_ids = {str(x) for x in raw_ids}
-        else:
+            try:
+                target_device_ids = {str(x) for x in raw_ids}
+            except Exception:
+                _LOGGER.error("Invalid 'device_ids' payload; expected list/tuple/set of device IDs (strings).")
+                return
+        elif raw_ids is None:
             target_device_ids = set()
+        else:
+            _LOGGER.error("Invalid 'device_ids' type: %s; expected string, list/tuple/set, or omitted.", type(raw_ids).__name__)
+            return
 
         dev_reg = dr.async_get(hass)
         ent_reg = er.async_get(hass)
         entries = hass.config_entries.async_entries(DOMAIN)
 
-        hass.logger().info(
+        _LOGGER.info(
             "googlefindmy.rebuild_registry requested: mode=%s, device_ids=%s",
             mode,
             "none"
@@ -322,29 +333,32 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         )
 
         if mode == MODE_MIGRATE:
-            # soft migrate (data -> options) for all our entries
-            for entry_ in entries:
-                try:
-                    # use the opt function to detect desired keys if needed; here we simply trigger
-                    # the migration by re-saving options (performed in __init__.py flow normally).
-                    # We reload entries below anyway to pick up changes.
-                    pass
-                except Exception as err:
-                    hass.logger().error("Soft-migrate failed for entry %s: %s", entry_.entry_id, err)
+            # C-2: real soft-migrate path using __init__.py helper via ctx
+            soft_migrate = ctx.get("soft_migrate_entry")
+            if callable(soft_migrate):
+                for entry_ in entries:
+                    try:
+                        await soft_migrate(hass, entry_)
+                    except Exception as err:
+                        _LOGGER.error("Soft-migrate failed for entry %s: %s", entry_.entry_id, err)
+            else:
+                _LOGGER.warning("soft_migrate_entry not provided in context; MIGRATE path is a no-op.")
+
             # Reload all entries to apply migrations
             for entry_ in entries:
                 try:
                     await hass.config_entries.async_reload(entry_.entry_id)
                 except Exception as err:
-                    hass.logger().error("Reload failed for entry %s: %s", entry_.entry_id, err)
-            hass.logger().info(
+                    _LOGGER.error("Reload failed for entry %s: %s", entry_.entry_id, err)
+
+            _LOGGER.info(
                 "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
                 len(entries),
             )
             return
 
         if mode != MODE_REBUILD:
-            hass.logger().error(
+            _LOGGER.error(
                 "Unsupported mode '%s' for rebuild_registry; use one of: %s",
                 mode,
                 ", ".join(REBUILD_REGISTRY_MODES),
@@ -398,7 +412,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     ent_reg.async_remove(ent.entity_id)
                     removed_entities += 1
                 except Exception as err:
-                    hass.logger().error("Failed to remove entity %s: %s", ent.entity_id, err)
+                    _LOGGER.error("Failed to remove entity %s: %s", ent.entity_id, err)
 
         # 3) Orphan cleanup (ours only): platform==DOMAIN and (no device_id OR device missing).
         orphan_only_cleanup = False
@@ -414,7 +428,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 removed_entities += 1
                 orphan_only_cleanup = True
             except Exception as err:
-                hass.logger().error("Failed to remove orphan entity %s: %s", ent.entity_id, err)
+                _LOGGER.error("Failed to remove orphan entity %s: %s", ent.entity_id, err)
 
         # 4) Remove devices (ours only) that now have no entities left and are not service devices.
         for dev_id in list(candidate_devices):
@@ -427,7 +441,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     dev_reg.async_remove_device(dev_id)
                     removed_devices += 1
                 except Exception as err:
-                    hass.logger().error("Failed to remove device %s: %s", dev_id, err)
+                    _LOGGER.error("Failed to remove device %s: %s", dev_id, err)
 
         # 5) Reload entries. If only orphan entities were removed and we didn't touch any known devices,
         #    reload all entries of our domain to be safe.
@@ -440,9 +454,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             try:
                 await hass.config_entries.async_reload(entry_.entry_id)
             except Exception as err:
-                hass.logger().error("Reload failed for entry %s: %s", entry_.entry_id, err)
+                _LOGGER.error("Reload failed for entry %s: %s", entry_.entry_id, err)
 
-        hass.logger().info(
+        _LOGGER.info(
             "googlefindmy.rebuild_registry: finished (safe mode): removed %d entit(y/ies), %d device(s), entries reloaded=%d",
             removed_entities,
             removed_devices,
