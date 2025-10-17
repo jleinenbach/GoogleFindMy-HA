@@ -97,12 +97,7 @@ from .const import (
     coerce_ignored_mapping,
     # Credential meta for Repairs placeholders
     CONF_GOOGLE_EMAIL,
-    # The following symbols are required by step 5.1-A in const.py.
-    # If they are not yet present, add them there in a follow-up step.
-    # - EVENT_AUTH_ERROR (string): domain-scoped HA event type for auth errors
-    # - EVENT_AUTH_OK    (string): domain-scoped HA event type for recovery
-    # - ISSUE_AUTH_EXPIRED_KEY (string): translations key for Repairs issue
-    # - issue_id_for(entry_id) -> str: helper that returns a stable per-entry Repairs issue id
+    # Required symbols provided by const.py (5.1-A)
     EVENT_AUTH_ERROR,
     EVENT_AUTH_OK,
     ISSUE_AUTH_EXPIRED_KEY,
@@ -440,6 +435,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self.hass = hass
         self._cache = cache
 
+        # Try to ensure entry-scoped namespace on the cache early when possible.
+        # This will be finalized in async_setup() once the ConfigEntry is bound.
+        try:
+            if not getattr(self._cache, "entry_id", None) and getattr(self, "config_entry", None):
+                setattr(self._cache, "entry_id", self.config_entry.entry_id)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
         # Get the singleton aiohttp.ClientSession from Home Assistant and reuse it.
         self._session = async_get_clientsession(hass)
         self.api = GoogleFindMyAPI(cache=self._cache, session=self._session)
@@ -552,7 +555,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         - Indexes poll targets from the Device Registry.
         - Subscribes to DR updates (unsubscribed in `async_shutdown()`).
         - Ensures the per-entry "service device" exists in the Device Registry.
+        - Enforces entry-scoped namespace by attaching `entry_id` to the cache object.
         """
+        # Ensure the cache carries our entry_id namespace for downstream Nova/API helpers.
+        try:
+            entry = getattr(self, "config_entry", None) or getattr(self, "entry", None)
+            if entry and not getattr(self._cache, "entry_id", None):
+                setattr(self._cache, "entry_id", entry.entry_id)
+        except Exception:
+            pass
+
         # Make sure the service device exists early to anchor end-devices via `via_device`.
         self._ensure_service_device_exists()
 
@@ -603,22 +615,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     def _extract_our_identifier(self, device: dr.DeviceEntry) -> Optional[str]:
         """Return the first valid (DOMAIN, identifier) from a device, else None.
-        
-        Why defensive parsing?
-        - Per HA spec, DeviceEntry.identifiers is a set of 2-tuples: (DOMAIN, identifier).
-          Some foreign or outdated integrations may accidentally write non-conforming
-          values. We defensively ignore malformed items, log ONCE per device, and add
-          a diagnostics warning.
 
-        Side-effects:
-        - On encountering a malformed identifier, log a single WARNING per device and
-          store a redacted record in the diagnostics buffer (bounded).
+        Multi-account compatibility:
+        - Since 2025.5+ we use **entry-scoped device identifiers** in the Device Registry
+          to guarantee global uniqueness across multiple accounts:
+              (DOMAIN, f\"{entry_id}:{device_id}\")
+        - For backward compatibility we also recognize legacy identifiers:
+              (DOMAIN, device_id)
+
+        This helper:
+        * Extracts our identifier
+        * If it has the namespaced form, it returns the **raw device_id** part
+          (the coordinator uses canonical device IDs internally).
+        * If malformed tuples are encountered, it logs once and records a diagnostics warning.
         """
+        entry_id = self._entry_id()
         for item in device.identifiers:
             try:
                 domain, ident = item  # spec: 2-tuple (DOMAIN, identifier)
             except (TypeError, ValueError):
-                # Malformed identifier from a non-conforming integration.
                 if device.id not in self._warned_bad_identifier_devices:
                     self._warned_bad_identifier_devices.add(device.id)
                     _LOGGER.warning(
@@ -638,13 +653,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     )
                 continue
 
-            if domain == DOMAIN and isinstance(ident, str) and ident:
-                return ident
+            if domain != DOMAIN or not isinstance(ident, str) or not ident:
+                continue
+
+            # Handle namespaced format "<entry_id>:<device_id>"
+            if ":" in ident:
+                if entry_id and ident.startswith(entry_id + ":"):
+                    return ident.split(":", 1)[1]  # return canonical device_id
+                # Identifier belongs to a different entry; ignore.
+                continue
+            # Legacy format -> accept as-is
+            return ident
         return None
 
     def _ensure_service_device_exists(self, entry: 'ConfigEntry | None' = None) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
-    
+
         This keeps diagnostic entities (e.g. polling/auth-status) grouped under a stable
         integration-level device. Safe to call multiple times.
         """
@@ -652,20 +676,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         hass = getattr(self, "hass", None)
         if hass is None:
             return
-    
+
         # Resolve ConfigEntry (works with either .entry or .config_entry on the coordinator)
         entry = entry or getattr(self, "entry", None) or getattr(self, "config_entry", None)
         if entry is None:
             _LOGGER.debug("Service-device ensure skipped: ConfigEntry not available on coordinator.")
             return
-    
+
         # Fast-path: already ensured in this runtime
         if getattr(self, "_service_device_ready", False):
             return
-    
+
         dev_reg = dr.async_get(hass)
         identifiers = {service_device_identifier(entry.entry_id)}  # {(DOMAIN, f"integration_<entry_id>")}
-    
+
         device = dev_reg.async_get_device(identifiers=identifiers)
         if device is None:
             device = dev_reg.async_get_or_create(
@@ -700,14 +724,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
                 )
                 _LOGGER.debug("Updated Google Find My service device metadata for entry %s", entry.entry_id)
-    
+
         # Book-keeping for quick re-entrance
         self._service_device_ready = True
         self._service_device_id = getattr(device, "id", None)
-    
+
     # Optional back-compat alias (some callers may use the public-style name)
     ensure_service_device_exists = _ensure_service_device_exists
-  
+
     @callback
     def _reindex_poll_targets_from_device_registry(self) -> None:
         """Rebuild internal poll target sets from registries (fast, robust, diagnostics-aware).
@@ -720,7 +744,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
           itself is not disabled. This preserves the entities-driven polling
           selection and reduces UI churning.
 
-        This function runs on the HA loop and is called at startup and on DR/ER updates.
+        Multi-account safety:
+        - Uses entry-scoped identifiers in the Device Registry:
+              (DOMAIN, f"{entry_id}:{device_id}")
+          and gracefully accepts legacy identifiers `(DOMAIN, device_id)`.
         """
         dev_reg = dr.async_get(self.hass)
         ent_reg = er.async_get(self.hass)
@@ -752,7 +779,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         for dev in devices_for_entry:
             ident = self._extract_our_identifier(dev)
             if not ident:
-                # No valid (DOMAIN, identifier) for this device; skip silently.
                 continue
             present.add(ident)
             if dev.id in has_enabled_tracker and dev.disabled_by is None:
@@ -774,6 +800,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     ) -> int:
         """Ensure end-device DR entries exist and link via the per-entry service device.
 
+        Multi-account/compatibility rules:
+        - **Primary identifier (namespaced):** (DOMAIN, f"{entry_id}:{device_id}")
+          guarantees global uniqueness across config entries.
+        - **Legacy identifier (non-namespaced):** (DOMAIN, device_id) recognized for
+          existing installs. If a legacy device belongs to *this* entry, we migrate it
+          by adding the new identifier (union) via `async_update_device`.
+        - If a legacy device is associated with a *different* entry, we **do not merge**.
+          We create a fresh device with the namespaced identifier to avoid cross-account
+          collisions.
+
         Returns:
             Count of devices that were created or updated.
         """
@@ -782,37 +818,61 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             return 0
 
         dev_reg = dr.async_get(self.hass)
-        created = 0
+        created_or_updated = 0
 
         for d in devices:
             dev_id = d.get("id")
             if not isinstance(dev_id, str) or dev_id in ignored:
                 continue
 
-            identifiers = {(DOMAIN, dev_id)}
-            dev = dev_reg.async_get_device(identifiers=identifiers)
+            # Build identifiers
+            ns_ident = (DOMAIN, f"{entry_id}:{dev_id}")
+            legacy_ident = (DOMAIN, dev_id)
 
-            # Only set a real label; never write placeholders on cold boot
-            raw_name = (d.get("name") or "").strip()
-            use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
-
+            # Preferred: device already known by namespaced identifier?
+            dev = dev_reg.async_get_device(identifiers={ns_ident})
             if dev is None:
+                # Legacy present?
+                legacy_dev = dev_reg.async_get_device(identifiers={legacy_ident})
+                if legacy_dev is not None:
+                    # If legacy device belongs to THIS entry, migrate by adding namespaced ident.
+                    if entry_id in legacy_dev.config_entries:
+                        new_idents = set(legacy_dev.identifiers)
+                        new_idents.add(ns_ident)
+                        dev_reg.async_update_device(
+                            device_id=legacy_dev.id,
+                            new_identifiers=new_idents,
+                        )
+                        dev = legacy_dev
+                        created_or_updated += 1
+                    else:
+                        # Belongs to another entry → create a new device with namespaced ident (no merge).
+                        dev = None
+
+            # Create if still missing
+            if dev is None:
+                # Only set a real label; never write placeholders on cold boot
+                raw_name = (d.get("name") or "").strip()
+                use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
+
                 dev = dev_reg.async_get_or_create(
                     config_entry_id=entry_id,
-                    identifiers=identifiers,
+                    identifiers={ns_ident},
                     manufacturer="Google",
                     model="Find My Device",
                     name=use_name,
                     via_device_id=getattr(self, "_service_device_id", None),
                 )
-                created += 1
+                created_or_updated += 1
             else:
                 # Keep name fresh if not user-overridden and a new upstream label is available
+                raw_name = (d.get("name") or "").strip()
+                use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
                 if use_name and not dev.name_by_user and dev.name != use_name:
                     dev_reg.async_update_device(device_id=dev.id, name=use_name)
-                    created += 1  # count as an update for logging parity
+                    created_or_updated += 1  # count as an update for logging parity
 
-        return created
+        return created_or_updated
 
     # --- NEW: Repairs + Auth state helpers ---------------------------------
     def _get_account_email(self) -> str:
@@ -1424,7 +1484,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     slot = self._device_caps.setdefault(dev_id, {})
                     slot["can_ring"] = can_ring
 
-            # 2.5) Ensure Device Registry entries exist (service device + end-devices)
+            # 2.5) Ensure Device Registry entries exist (service device + end-devices, namespaced)
             created = self._ensure_registry_for_devices(all_devices, ignored)
             if created:
                 _LOGGER.debug("Device Registry ensured/updated for %d device(s).", created)
@@ -2109,7 +2169,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         R = 6371000.0  # Earth radius in meters
         lat1_r, lon1_r = radians(float(lat1)), radians(float(lon1))
-        lat2_r, lon2_r = radians(float(lat2)), float(lon2) if isinstance(lon2, (int, float)) else float(lon2)  # type: ignore[arg-type]
         lat2_r, lon2_r = radians(float(lat2)), radians(float(lon2))
         dlat = lat2_r - lat1_r
         dlon = lon2_r - lon1_r
