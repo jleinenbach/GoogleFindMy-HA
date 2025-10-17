@@ -251,11 +251,18 @@
     "multiple_config_entries": {
       "title": "Multiple configuration entries detected",
       "description": "This integration currently has more than one configuration entry:\n\n{entries}\n\nOnly a single entry is supported. Go to **Settings → Devices & Services**, open **Google Find My Device**, and remove duplicate entries so that exactly one remains. Then reload the integration (or restart Home Assistant)."
+    },
+    "unique_id_collision": {
+      "title": "Entity unique ID collision detected",
+      "description": "Some entities for **{entry}** already use the new unique ID format and conflict with the migration.\n\n**Count:** {count}\n**Examples:** {entities}\n\nTo resolve:\n1) Open **Settings → Devices & Services → Entities** and search for the listed entities.\n2) Remove or rename conflicting entities, or delete abandoned entries from other integrations.\n3) Reload the integration (or restart Home Assistant). The migration will retry automatically."
     }
   },
   "exceptions": {
     "device_not_found": {
       "message": "Device '{device_id}' could not be found or is not part of this integration."
+    },
+    "no_active_entry": {
+      "message": "No active Google Find My Device entry is available. Ensure exactly one entry is enabled and try again."
     },
     "locate_failed": {
       "message": "Failed to locate device '{device_id}': {error}"
