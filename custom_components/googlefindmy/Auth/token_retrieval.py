@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 
 import gpsoauth
 
@@ -57,43 +57,86 @@ def _perform_oauth_sync(username: str, aas_token: str, scope: str, play_services
         raise RuntimeError(f"Failed to get auth token for scope '{scope}': {e}") from e
 
 
-def request_token(username: str, scope: str, play_services: bool = False) -> str:
+def request_token(
+    username: str,
+    scope: str,
+    play_services: bool = False,
+    *,
+    aas_token: Optional[str] = None,
+) -> str:
     """Synchronous token request via gpsoauth (CLI/tests only).
 
     IMPORTANT:
-    - This resolves the AAS token via the **async** cache API using a dedicated event loop.
-      If you are inside Home Assistant (or any running event loop), **do not** call this
-      function directly — use `await async_request_token(...)` or run `request_token`
-      from an executor thread.
+    - This function is blocking. If you are inside Home Assistant (or any running
+      event loop), **do not** call this function directly — use
+      `await async_request_token(...)` or run this function in an executor thread.
+    - You may inject an `aas_token` to avoid touching any global/async cache (e.g., for
+      entry-scoped tests or isolated tooling).
+
+    Args:
+        username: Google account email.
+        scope: OAuth scope suffix.
+        play_services: Use the Play Services app id instead of ADM when True.
+        aas_token: Optional AAS token to shortcut async cache lookup.
+
+    Raises:
+        RuntimeError: if called while an event loop is running.
     """
-    # Detect misuse in an async context and fail fast with a clear message.
+    # Guard against misuse in a running event loop.
     try:
         asyncio.get_running_loop()
-        # If we got here, a loop is running in the current thread.
+    except RuntimeError:
+        # No running loop in this thread → safe to continue.
+        pass
+    else:
+        # A loop exists and is running → disallow direct sync call.
         raise RuntimeError(
             "request_token() was called while an event loop is running. "
             "Use `await async_request_token(...)` in async contexts."
         )
-    except RuntimeError:
-        # No running loop in this thread → safe to create a temporary one.
-        pass
 
-    # Resolve the AAS token with the async-first helper in an isolated event loop.
-    aas_token = asyncio.run(async_get_aas_token())
+    # Resolve the AAS token: prefer injected token; otherwise use async provider in an isolated loop.
+    if aas_token is None:
+        aas_token = asyncio.run(async_get_aas_token())
 
     # Perform the blocking OAuth exchange.
     return _perform_oauth_sync(username, aas_token, scope, play_services)
 
 
-async def async_request_token(username: str, scope: str, play_services: bool = False) -> str:
+async def async_request_token(
+    username: str,
+    scope: str,
+    play_services: bool = False,
+    *,
+    aas_provider: Optional[Callable[[], Awaitable[str]]] = None,
+    aas_token: Optional[str] = None,
+) -> str:
     """Async wrapper for the OAuth token request (HA-safe).
 
     Behavior:
-    - Awaits the entry-scoped AAS token via `async_get_aas_token()` (non-blocking).
-    - Runs the blocking `gpsoauth.perform_oauth` in a thread pool to keep the event loop responsive.
+    - Uses an injected `aas_token` if provided; otherwise awaits the supplied
+      `aas_provider()`; otherwise falls back to the default `async_get_aas_token()`.
+    - Runs the blocking `gpsoauth.perform_oauth` in a thread pool to keep the
+      event loop responsive.
+    - This arrangement allows entry-scoped token resolution (e.g., via
+      `entry.runtime_data.get_aas_token`) without global singletons.
+
+    Args:
+        username: Google account email.
+        scope: OAuth scope suffix.
+        play_services: Use the Play Services app id instead of ADM when True.
+        aas_provider: Optional async callable that returns an AAS token.
+        aas_token: Optional pre-fetched AAS token (takes precedence over provider).
+
+    Returns:
+        OAuth access token string for the requested scope.
     """
-    # Get the AAS token from the async cache/provider.
-    aas_token = await async_get_aas_token()
+    # Get the AAS token from injected token → injected provider → default provider.
+    if aas_token is None:
+        if aas_provider is not None:
+            aas_token = await aas_provider()
+        else:
+            aas_token = await async_get_aas_token()
 
     # Offload the blocking OAuth exchange to a worker thread.
     loop = asyncio.get_running_loop()
