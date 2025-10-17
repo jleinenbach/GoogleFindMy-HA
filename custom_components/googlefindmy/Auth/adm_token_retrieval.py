@@ -23,6 +23,10 @@ Design & Fix for BadAuthentication:
   has been retained to prevent import errors during setup.
 - Blocking `gpsoauth` calls are executed in a thread executor to avoid blocking
   Home Assistant's event loop.
+
+Security notes (logging):
+- We never log tokens or raw auth responses. Error details are summarized (type/keys),
+  and account emails are masked for privacy.
 """
 
 from __future__ import annotations
@@ -34,21 +38,53 @@ from typing import Any, Awaitable, Callable, Optional
 
 import gpsoauth
 
-from custom_components.googlefindmy.Auth.token_retrieval import \
-    async_request_token
-from custom_components.googlefindmy.Auth.token_cache import (
-    async_get_cached_value, async_get_cached_value_or_set,
-    async_set_cached_value)
-from custom_components.googlefindmy.Auth.username_provider import \
-    async_get_username
+# Prefer relative imports inside the package for robustness
+from .token_retrieval import async_request_token
+from .token_cache import (
+    async_get_cached_value,
+    async_get_cached_value_or_set,
+    async_set_cached_value,
+)
+from .username_provider import async_get_username
 
 _LOGGER = logging.getLogger(__name__)
 
-# Constants for gpsoauth
+# Constants for gpsoauth (kept for compatibility/reference)
 _ANDROID_ID: int = 0x38918A453D071993
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 _APP_ID: str = "com.google.android.apps.adm"
 
+
+# ---------------------------------------------------------------------------
+# Helpers (privacy-friendly logging, normalization, brief error messages)
+# ---------------------------------------------------------------------------
+
+def _mask_email(email: str | None) -> str:
+    """Return a privacy-friendly representation of an email for logs."""
+    if not email or "@" not in email:
+        return "<unknown>"
+    local, domain = email.split("@", 1)
+    if not local:
+        return f"*@{domain}"
+    masked_local = (local[0] + "***") if len(local) > 1 else "*"
+    return f"{masked_local}@{domain}"
+
+def _clip(s: str, limit: int = 200) -> str:
+    """Clip long strings to a safe length for logs."""
+    return s if len(s) <= limit else (s[: limit - 1] + "…")
+
+def _summarize_response(obj: Any) -> str:
+    """Summarize a gpsoauth response without leaking sensitive data."""
+    if isinstance(obj, dict):
+        # Only reveal keys; never values
+        keys = ", ".join(sorted(obj.keys()))
+        return f"dict(keys=[{keys}])"
+    return f"{type(obj).__name__}"
+
+
+# ---------------------------------------------------------------------------
+# Core token generation (delegates to central token retriever)
+# ---------------------------------------------------------------------------
 
 async def _generate_adm_token(username: str) -> str:
     """
@@ -63,11 +99,14 @@ async def _generate_adm_token(username: str) -> str:
     Returns:
         The generated ADM token string.
     """
-    _LOGGER.debug("Generating new ADM token for user %s", username)
-    # Directly request the specific token needed. The underlying function will handle
-    # the necessary AAS token acquisition and exchange.
+    _LOGGER.debug("Generating new ADM token for account %s", _mask_email(username))
+    # The underlying function will handle AAS acquisition/exchange as needed.
     return await async_request_token(username, "android_device_manager")
 
+
+# ---------------------------------------------------------------------------
+# Public APIs
+# ---------------------------------------------------------------------------
 
 async def async_get_adm_token(
     username: Optional[str] = None,
@@ -91,54 +130,67 @@ async def async_get_adm_token(
     Raises:
         RuntimeError: If the username is invalid or token generation fails after all retries.
     """
-    user = username or await async_get_username()
-    if not isinstance(user, str) or not user:
+    user = (username or await async_get_username() or "").strip().lower()
+    if not user:
         raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token.")
 
     cache_key = f"adm_token_{user}"
-    generator = lambda: _generate_adm_token(user)
 
-    # Note: The retry logic is now implicitly handled by the robust get_or_set,
-    # but we keep an explicit loop for logging and backoff control.
+    async def _generator() -> str:
+        return await _generate_adm_token(user)
+
     last_exc: Optional[Exception] = None
-    for attempt in range(retries + 1):
-        try:
-            # The `get_cached_value_or_set` pattern ensures the generator is only
-            # called if the value is not in the cache.
-            token = await async_get_cached_value_or_set(cache_key, generator)
+    attempts = max(1, retries + 1)
 
-            # Persist TTL metadata upon successful generation
+    for attempt in range(attempts):
+        try:
+            # Only generates if not cached
+            token = await async_get_cached_value_or_set(cache_key, _generator)
+
+            # Persist TTL metadata (best-effort)
             if not await async_get_cached_value(f"adm_token_issued_at_{user}"):
-                 await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
+                await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
             if not await async_get_cached_value(f"adm_probe_startup_left_{user}"):
                 await async_set_cached_value(f"adm_probe_startup_left_{user}", 3)
 
             return token
-        except Exception as exc:
+
+        except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            if attempt < retries:
-                sleep_s = backoff * (2**attempt)
+            if attempt < attempts - 1:
+                sleep_s = backoff * (2 ** attempt)
                 _LOGGER.info(
-                    "ADM token generation failed (attempt %d/%d): %s — retrying in %.1fs",
+                    "ADM token generation failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
                     attempt + 1,
-                    retries + 1,
-                    exc,
+                    attempts,
+                    _mask_email(user),
+                    _clip(str(exc)),
                     sleep_s,
                 )
-                # Clear potentially bad cache entry before retrying
-                await async_set_cached_value(cache_key, None)
+                # Clear potentially bad cache entry before retrying (best-effort)
+                try:
+                    await async_set_cached_value(cache_key, None)
+                except Exception:  # noqa: BLE001
+                    pass
                 await asyncio.sleep(sleep_s)
                 continue
-            _LOGGER.error("ADM token generation failed after %d attempts: %s", retries + 1, exc)
+
+            _LOGGER.error(
+                "ADM token generation failed after %d attempts for %s: %s",
+                attempts,
+                _mask_email(user),
+                _clip(str(exc)),
+            )
 
     assert last_exc is not None
     raise last_exc
 
-# --- Functions required by config_flow.py ---
+
+# --- Functions required by config_flow.py (isolated, no global cache touch) ---
 
 async def _perform_oauth_with_provided_aas(username: str, aas_token: str) -> str:
     """
-    Performs OAuth exchange with a provided AAS token (used for isolated validation).
+    Perform the OAuth exchange with a provided AAS token (used for isolated validation).
 
     Args:
         username: The Google account e-mail.
@@ -146,6 +198,9 @@ async def _perform_oauth_with_provided_aas(username: str, aas_token: str) -> str
 
     Returns:
         The resulting ADM token.
+
+    Raises:
+        RuntimeError: If the OAuth response is invalid or missing the expected fields.
     """
     def _run() -> str:
         resp = gpsoauth.perform_oauth(
@@ -156,12 +211,26 @@ async def _perform_oauth_with_provided_aas(username: str, aas_token: str) -> str
             app=_APP_ID,
             client_sig=_CLIENT_SIG,
         )
-        if not resp or "Auth" not in resp:
-            raise RuntimeError(f"gpsoauth.perform_oauth returned invalid response: {resp}")
+        if not isinstance(resp, dict):
+            # Never include the raw `resp` in logs/errors
+            raise RuntimeError(f"gpsoauth.perform_oauth returned non-dict response ({type(resp).__name__})")
+        if "Auth" not in resp:
+            # Typical error shape: {"Error": "BadAuthentication"} (do not print full dict)
+            err = resp.get("Error", "unknown")
+            raise RuntimeError(f"Missing 'Auth' in gpsoauth response (error={err})")
         return resp["Auth"]
 
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _run)
+    try:
+        return await loop.run_in_executor(None, _run)
+    except Exception as exc:  # noqa: BLE001
+        # Summarize without leaking sensitive data
+        _LOGGER.debug(
+            "perform_oauth failed for %s: %s",
+            _mask_email(username),
+            _clip(str(exc)),
+        )
+        raise
 
 
 async def async_get_adm_token_isolated(
@@ -193,46 +262,55 @@ async def async_get_adm_token_isolated(
     Raises:
         RuntimeError: If no AAS token is provided or the exchange fails.
     """
-    if not isinstance(username, str) or not username:
+    user = (username or "").strip().lower()
+    if not user:
         raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token (isolated).")
 
-    src_aas = aas_token
-    if src_aas is None and isinstance(secrets_bundle, dict):
+    src_aas = (aas_token or "").strip()
+    if not src_aas and isinstance(secrets_bundle, dict):
         candidate = secrets_bundle.get("aas_token")
         if isinstance(candidate, str) and candidate.strip():
             src_aas = candidate.strip()
 
     if not src_aas:
-        raise RuntimeError(
-            "Isolated ADM exchange requires an AAS token."
-        )
+        raise RuntimeError("Isolated ADM exchange requires an AAS token.")
 
     last_exc: Optional[Exception] = None
     attempts = max(1, retries + 1)
+
     for attempt in range(attempts):
         try:
-            tok = await _perform_oauth_with_provided_aas(username, src_aas)
+            tok = await _perform_oauth_with_provided_aas(user, src_aas)
             if cache_set is not None:
+                # Best-effort metadata write (flow-local)
                 try:
-                    await cache_set(f"adm_token_{username}", tok)
-                    await cache_set(f"adm_token_issued_at_{username}", time.time())
-                except Exception as meta_exc:
-                    _LOGGER.debug("Isolated TTL metadata write skipped: %s", meta_exc)
+                    await cache_set(f"adm_token_{user}", tok)
+                    await cache_set(f"adm_token_issued_at_{user}", time.time())
+                except Exception as meta_exc:  # noqa: BLE001
+                    _LOGGER.debug("Isolated TTL metadata write skipped: %s", _clip(str(meta_exc)))
             return tok
-        except Exception as exc:
+
+        except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < attempts - 1:
-                sleep_s = backoff * (2**attempt)
+                sleep_s = backoff * (2 ** attempt)
                 _LOGGER.info(
-                    "Isolated ADM exchange failed (attempt %s/%s): %s — retrying in %.1fs",
+                    "Isolated ADM exchange failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
                     attempt + 1,
                     attempts,
-                    exc,
+                    _mask_email(user),
+                    _clip(str(exc)),
                     sleep_s,
                 )
                 await asyncio.sleep(sleep_s)
                 continue
-            _LOGGER.error("Isolated ADM exchange failed after %s attempts: %s", attempts, exc)
+
+            _LOGGER.error(
+                "Isolated ADM exchange failed after %d attempts for %s: %s",
+                attempts,
+                _mask_email(user),
+                _clip(str(exc)),
+            )
 
     assert last_exc is not None
     raise last_exc
@@ -248,7 +326,7 @@ def get_adm_token(
 ) -> str:
     """
     Synchronous facade for CLI/offline usage; not allowed in the HA event loop.
-    
+
     Raises:
         RuntimeError: If called from within a running event loop.
     """
