@@ -70,6 +70,7 @@ _RE_BEARER = re.compile(r"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*", re.I)
 _RE_EMAIL = re.compile(r"([A-Za-z0-9._%+-])([A-Za-z0-9._%+-]*)(@[^,\s]+)")
 _RE_HEX16 = re.compile(r"\b[0-9a-fA-F]{16,}\b")
 
+
 def _redact(s: str) -> str:
     """Redact sensitive information from a string for safe logging."""
     s = _RE_BEARER.sub("Bearer <redacted>", s)
@@ -77,47 +78,59 @@ def _redact(s: str) -> str:
     s = _RE_HEX16.sub("<hex-redacted>", s)
     return s
 
+
 # --- Custom Exceptions ---
 class NovaError(Exception):
     """Base exception for Nova API errors."""
 
+
 class NovaAuthError(NovaError):
     """Raised on 4xx client errors after retries."""
+
     def __init__(self, status: int, detail: Optional[str] = None):
         super().__init__(f"HTTP Client Error {status}: {detail or ''}".strip())
         self.status = status
         self.detail = detail
 
+
 class NovaRateLimitError(NovaError):
     """Raised on 429 rate-limiting errors after retries."""
+
     def __init__(self, detail: Optional[str] = None):
         super().__init__(f"Rate limited by upstream API: {detail or ''}".strip())
         self.detail = detail
 
+
 class NovaHTTPError(NovaError):
     """Raised for 5xx server errors after retries."""
+
     def __init__(self, status: int, detail: Optional[str] = None):
         super().__init__(f"HTTP Server Error {status}: {detail or ''}".strip())
         self.status = status
         self.detail = detail
 
+
 # ------------------------ Optional Home Assistant hooks ------------------------
 # These hooks allow the integration to supply a shared aiohttp ClientSession.
 _HASS_REF = None
+
 
 def register_hass(hass) -> None:
     """Register a Home Assistant instance to provide a shared ClientSession."""
     global _HASS_REF
     _HASS_REF = hass
 
+
 def unregister_hass() -> None:
     """Unregister the Home Assistant instance reference."""
     global _HASS_REF
     _HASS_REF = None
 
+
 # --- Refresh Locks ---
 _sync_refresh_lock = threading.Lock()
 _async_refresh_lock: asyncio.Lock | None = None
+
 
 def _get_async_refresh_lock() -> asyncio.Lock:
     """Lazily initialize and return the async refresh lock."""
@@ -126,6 +139,7 @@ def _get_async_refresh_lock() -> asyncio.Lock:
         _async_refresh_lock = asyncio.Lock()
     return _async_refresh_lock
 
+
 # ------------------------ TTL policy (shared core) ------------------------
 class TTLPolicy:
     """Token TTL/probe policy (synchronous I/O).
@@ -133,6 +147,7 @@ class TTLPolicy:
     Encapsulates probe arming, jitter and proactive refresh. The policy records
     the best-known TTL and times token issuance, allowing pre-emptive refreshes.
     """
+
     TTL_MARGIN_SEC, JITTER_SEC = 120, 90
     PROBE_INTERVAL_SEC, PROBE_INTERVAL_JITTER_PCT = 6 * 3600, 0.1
 
@@ -144,6 +159,7 @@ class TTLPolicy:
         set_value: Callable[[str, object | None], None],
         refresh_fn: Callable[[], Optional[str]],
         set_auth_header_fn: Callable[[str], None],
+        ns_prefix: str = "",
     ) -> None:
         """
         Args:
@@ -152,22 +168,35 @@ class TTLPolicy:
             get_value/set_value: Cache I/O functions (sync).
             refresh_fn: Returns a fresh token (string) or None.
             set_auth_header_fn: Receives the full 'Authorization' header value.
+            ns_prefix: Optional key namespace (e.g., config entry_id) to avoid collisions.
         """
         self.username = username
         self.log = logger
         self._get, self._set, self._refresh, self._set_auth = get_value, set_value, refresh_fn, set_auth_header_fn
-    
-    # Cache keys for this username
+        self._ns = (ns_prefix or "").strip()
+        if self._ns and not self._ns.endswith(":"):
+            self._ns += ":"
+
+    # Cache keys for this username (optionally namespaced)
     @property
-    def k_issued(self):    return f"adm_token_issued_at_{self.username}"
+    def k_issued(self):
+        return f"{self._ns}adm_token_issued_at_{self.username}"
+
     @property
-    def k_bestttl(self):   return f"adm_best_ttl_sec_{self.username}"
+    def k_bestttl(self):
+        return f"{self._ns}adm_best_ttl_sec_{self.username}"
+
     @property
-    def k_startleft(self): return f"adm_probe_startup_left_{self.username}"
+    def k_startleft(self):
+        return f"{self._ns}adm_probe_startup_left_{self.username}"
+
     @property
-    def k_probenext(self): return f"adm_probe_next_at_{self.username}"
+    def k_probenext(self):
+        return f"{self._ns}adm_probe_next_at_{self.username}"
+
     @property
-    def k_armed(self):     return f"adm_probe_armed_{self.username}"
+    def k_armed(self):
+        return f"{self._ns}adm_probe_armed_{self.username}"
 
     @staticmethod
     def _jitter_sec(base: float, jitter_abs: float) -> float:
@@ -200,10 +229,16 @@ class TTLPolicy:
             do_arm = True
         else:
             if probenext is None:
-                self._set(self.k_probenext, now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct))
+                self._set(
+                    self.k_probenext,
+                    now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct),
+                )
             elif now >= float(probenext):
                 do_arm = True
-                self._set(self.k_probenext, now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct))
+                self._set(
+                    self.k_probenext,
+                    now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct),
+                )
 
         if do_arm:
             self._set(self.k_armed, 1)
@@ -213,7 +248,7 @@ class TTLPolicy:
     def _do_refresh(self, now: float) -> Optional[str]:
         """Refresh token, update header and issuance timestamp, bootstrap startup probes if missing."""
         try:
-            self._set(f"adm_token_{self.username}", None)  # best-effort clear
+            self._set(f"{self._ns}adm_token_{self.username}", None)  # best-effort clear
         except Exception:
             pass
         tok = self._refresh()
@@ -303,7 +338,7 @@ class AsyncTTLPolicy(TTLPolicy):
 
     async def _do_refresh_async(self, now: float) -> Optional[str]:
         try:
-            await self._set(f"adm_token_{self.username}", None)  # best-effort clear
+            await self._set(f"{self._ns}adm_token_{self.username}", None)  # best-effort clear
         except Exception:
             pass
         tok = await self._refresh()  # async callable
@@ -373,32 +408,51 @@ class AsyncTTLPolicy(TTLPolicy):
             return await self._do_refresh_async(now)
 
 
-def _get_initial_token_sync(username: str, _logger) -> str:
+def _get_initial_token_sync(username: str, _logger, ns_prefix: str = "") -> str:
     """Get or create the initial ADM token in sync path and ensure TTL metadata is recorded."""
-    token = get_cached_value(f"adm_token_{username}") or get_cached_value("adm_token")
+    ns = (ns_prefix or "").strip()
+    if ns and not ns.endswith(":"):
+        ns += ":"
+    token = (
+        get_cached_value(f"{ns}adm_token_{username}")
+        or get_cached_value(f"{ns}adm_token")
+        or get_cached_value(f"adm_token_{username}")
+        or get_cached_value("adm_token")
+    )
     if not token:
         _logger.info("Attempting to generate new ADM token...")
         token = get_adm_token(username)
         if token:
-            set_cached_value(f"adm_token_issued_at_{username}", time.time())
-            if not get_cached_value(f"adm_probe_startup_left_{username}"):
-                set_cached_value(f"adm_probe_startup_left_{username}", 3)
-    if not token: raise ValueError("No ADM token available - please reconfigure authentication")
+            set_cached_value(f"{ns}adm_token_issued_at_{username}", time.time())
+            if not get_cached_value(f"{ns}adm_probe_startup_left_{username}"):
+                set_cached_value(f"{ns}adm_probe_startup_left_{username}", 3)
+    if not token:
+        raise ValueError("No ADM token available - please reconfigure authentication")
     return token
 
 
-async def _get_initial_token_async(username: str, _logger) -> str:
+async def _get_initial_token_async(username: str, _logger, ns_prefix: str = "") -> str:
     """Get or create the initial ADM token in async path and ensure TTL metadata is recorded."""
-    token = await async_get_cached_value(f"adm_token_{username}") or await async_get_cached_value("adm_token")
+    ns = (ns_prefix or "").strip()
+    if ns and not ns.endswith(":"):
+        ns += ":"
+    token = (
+        await async_get_cached_value(f"{ns}adm_token_{username}")
+        or await async_get_cached_value(f"{ns}adm_token")
+        or await async_get_cached_value(f"adm_token_{username}")
+        or await async_get_cached_value("adm_token")
+    )
     if not token:
         _logger.info("Attempting to generate new ADM token (async)...")
         token = await async_get_adm_token_api(username)
         if token:
-            await async_set_cached_value(f"adm_token_issued_at_{username}", time.time())
-            if not await async_get_cached_value(f"adm_probe_startup_left_{username}"):
-                await async_set_cached_value(f"adm_probe_startup_left_{username}", 3)
-    if not token: raise ValueError("No ADM token available - please reconfigure authentication")
+            await async_set_cached_value(f"{ns}adm_token_issued_at_{username}", time.time())
+            if not await async_get_cached_value(f"{ns}adm_probe_startup_left_{username}"):
+                await async_set_cached_value(f"{ns}adm_probe_startup_left_{username}", 3)
+    if not token:
+        raise ValueError("No ADM token available - please reconfigure authentication")
     return token
+
 
 def _beautify_text(resp_text: str) -> str:
     """
@@ -407,10 +461,11 @@ def _beautify_text(resp_text: str) -> str:
     """
     try:
         # local import only when needed
-        from bs4 import BeautifulSoup 
+        from bs4 import BeautifulSoup
         return BeautifulSoup(resp_text, "html.parser").get_text(strip=True)
     except Exception:
         return resp_text[:512]
+
 
 def _compute_delay(attempt: int, retry_after: Optional[str]) -> float:
     """
@@ -429,19 +484,20 @@ def _compute_delay(attempt: int, retry_after: Optional[str]) -> float:
                 retry_dt = parsedate_to_datetime(retry_after)
                 delay = max(0.0, (retry_dt - datetime.now(timezone.utc)).total_seconds())
             except Exception:
-                pass # Fallback to backoff if date parsing fails
-    
+                pass  # Fallback to backoff if date parsing fails
+
     if delay is None:
         # Exponential backoff with full jitter
         backoff = (NOVA_BACKOFF_FACTOR ** (attempt - 1)) * NOVA_INITIAL_BACKOFF_S
         delay = random.uniform(0.0, backoff)
-    
+
     capped_delay = min(delay, NOVA_MAX_RETRY_AFTER_S)
     if delay is not None and delay > capped_delay:
         _LOGGER.info("Retry-After delay of %.2fs capped to %.2fs by client policy.", delay, capped_delay)
     return capped_delay
 
-def nova_request(api_scope: str, hex_payload: str) -> str:
+
+def nova_request(api_scope: str, hex_payload: str, *, namespace: Optional[str] = None) -> str:
     """
     Synchronous Nova API request (CLI/testing only).
 
@@ -449,10 +505,11 @@ def nova_request(api_scope: str, hex_payload: str) -> str:
     This function is blocking and MUST NOT be called from within the Home Assistant
     event loop. It will raise a RuntimeError if such usage is detected.
     Use `async_nova_request` for all Home Assistant code.
-    
+
     Args:
         api_scope: Nova API scope suffix (appended to the base URL).
         hex_payload: Hex string body.
+        namespace: Optional key namespace (e.g., config entry_id) to avoid cache collisions.
 
     Returns:
         Hex-encoded response body.
@@ -466,27 +523,34 @@ def nova_request(api_scope: str, hex_payload: str) -> str:
         if asyncio.get_running_loop().is_running():
             raise RuntimeError("Sync nova_request() must not be called from the event loop.")
     except RuntimeError:
+        # No running loop in this thread → OK
         pass
 
     url = f"https://android.googleapis.com/nova/{api_scope}"
     username = get_username()
-    token = _get_initial_token_sync(username, _LOGGER)
+    ns = (namespace or "").strip()
+    token = _get_initial_token_sync(username, _LOGGER, ns_prefix=ns)
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Authorization": f"Bearer {token}", "Accept-Language": "en-US",
+        "Authorization": f"Bearer {token}",
+        "Accept-Language": "en-US",
         "User-Agent": NOVA_API_USER_AGENT,
     }
     try:
         payload = binascii.unhexlify(hex_payload)
-        if len(payload) > MAX_PAYLOAD_BYTES: raise ValueError(f"Nova payload too large: {len(payload)} bytes")
+        if len(payload) > MAX_PAYLOAD_BYTES:
+            raise ValueError(f"Nova payload too large: {len(payload)} bytes")
     except (binascii.Error, ValueError) as e:
         raise ValueError("Invalid hex payload for Nova request") from e
 
     policy = TTLPolicy(
-        username=username, logger=_LOGGER,
-        get_value=get_cached_value, set_value=set_cached_value,
+        username=username,
+        logger=_LOGGER,
+        get_value=get_cached_value,
+        set_value=set_cached_value,
         refresh_fn=lambda: get_adm_token(username),
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
+        ns_prefix=ns,
     )
     policy.pre_request()
 
@@ -501,7 +565,7 @@ def nova_request(api_scope: str, hex_payload: str) -> str:
 
             if response.status_code == 200:
                 return response.content.hex()
-            
+
             text_snippet = _redact(_beautify_text(response.text))
 
             if response.status_code == 401:
@@ -516,37 +580,60 @@ def nova_request(api_scope: str, hex_payload: str) -> str:
 
                 if not refreshed_once:
                     refreshed_once = True
-                    continue # Free retry, do not increment retries_used
+                    continue  # Free retry, do not increment retries_used
 
                 raise NovaAuthError(response.status_code, "Unauthorized after token refresh")
 
             if response.status_code in (408, 429, 500, 502, 503, 504):
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, response.headers.get("Retry-After"))
-                    _LOGGER.info("Nova API sync request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
-                                 api_scope, response.status_code, delay, retries_used + 1, NOVA_MAX_RETRIES)
+                    _LOGGER.info(
+                        "Nova API sync request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
+                        api_scope,
+                        response.status_code,
+                        delay,
+                        retries_used + 1,
+                        NOVA_MAX_RETRIES,
+                    )
                     retries_used += 1
                     time.sleep(delay)
                     continue
                 else:
-                    _LOGGER.error("Nova API sync request to %s failed after %d attempts with status %d.", api_scope, retries_used + 1, response.status_code)
+                    _LOGGER.error(
+                        "Nova API sync request to %s failed after %d attempts with status %d.",
+                        api_scope,
+                        retries_used + 1,
+                        response.status_code,
+                    )
                     if response.status_code == 429:
                         raise NovaRateLimitError(f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts.")
                     raise NovaHTTPError(response.status_code, f"Nova API failed after {NOVA_MAX_RETRIES} attempts.")
-            
+
             raise NovaAuthError(response.status_code, text_snippet)
 
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             if retries_used < NOVA_MAX_RETRIES:
                 delay = _compute_delay(attempt, None)
-                _LOGGER.info("Nova API sync request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
-                             api_scope, type(e).__name__, delay, retries_used + 1, NOVA_MAX_RETRIES)
+                _LOGGER.info(
+                    "Nova API sync request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
+                    api_scope,
+                    type(e).__name__,
+                    delay,
+                    retries_used + 1,
+                    NOVA_MAX_RETRIES,
+                )
                 retries_used += 1
                 time.sleep(delay)
                 continue
             else:
-                 _LOGGER.error("Nova API sync request to %s failed after %d attempts with %s.", api_scope, retries_used + 1, type(e).__name__)
-                 raise NovaError(f"Nova API request failed after retries: {e}") from e
+                _LOGGER.error(
+                    "Nova API sync request to %s failed after %d attempts with %s.",
+                    api_scope,
+                    retries_used + 1,
+                    type(e).__name__,
+                )
+                raise NovaError(f"Nova API request failed after retries: {e}") from e
+
 
 async def async_nova_request(
     api_scope: str,
@@ -559,6 +646,8 @@ async def async_nova_request(
     cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
     cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
     refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+    # Optional: entry-specific namespace for cache keys (e.g., entry_id)
+    namespace: Optional[str] = None,
 ) -> str:
     """
     Asynchronous Nova API request for Home Assistant.
@@ -566,7 +655,7 @@ async def async_nova_request(
     This is the preferred method for all communication with the Nova API from
     within Home Assistant, as it is non-blocking and integrates with HA's
     shared aiohttp session.
-    
+
     Args:
         api_scope: Nova API scope suffix (appended to the base URL).
         hex_payload: Hex string body.
@@ -579,6 +668,7 @@ async def async_nova_request(
         refresh_override: Optional async function returning a fresh token. Use
             this to perform a *real* AAS→ADM refresh isolated from globals
             (e.g. via `async_get_adm_token_isolated(...)`).
+        namespace: Optional key namespace (e.g., config entry_id) to avoid cache collisions.
 
     Returns:
         Hex-encoded response body.
@@ -590,15 +680,16 @@ async def async_nova_request(
         NovaError: on other unrecoverable errors like network issues after retries.
     """
     url = f"https://android.googleapis.com/nova/{api_scope}"
-    
+
     # Use provided credentials if available (for config flow), otherwise fetch from cache.
     if token and username:
         user = username
         initial_token = token
     else:
         user = username or await async_get_username()
-        if not user: raise ValueError("Username is not available for async_nova_request.")
-        initial_token = await _get_initial_token_async(user, _LOGGER)
+        if not user:
+            raise ValueError("Username is not available for async_nova_request.")
+        initial_token = await _get_initial_token_async(user, _LOGGER, ns_prefix=(namespace or ""))
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
@@ -616,15 +707,16 @@ async def async_nova_request(
     # Select cache/refresh providers (allow flow-local overrides)
     get_fn = cache_get or async_get_cached_value
     set_fn = cache_set or async_set_cached_value
-    rf_fn: Callable[[], Awaitable[Optional[str]]] = (
-        refresh_override or (lambda: async_get_adm_token_api(user))
-    )
+    rf_fn: Callable[[], Awaitable[Optional[str]]] = refresh_override or (lambda: async_get_adm_token_api(user))
 
     policy = AsyncTTLPolicy(
-        username=user, logger=_LOGGER,
-        get_value=get_fn, set_value=set_fn,
+        username=user,
+        logger=_LOGGER,
+        get_value=get_fn,
+        set_value=set_fn,
         refresh_fn=rf_fn,
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
+        ns_prefix=(namespace or ""),
     )
     await policy.pre_request()
 
@@ -633,10 +725,13 @@ async def async_nova_request(
         if _HASS_REF:
             # Use the HA-managed shared session for best performance and resource management.
             from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
             session = async_get_clientsession(_HASS_REF)
         else:
             # Fallback for environments without a shared session (e.g., standalone scripts).
-            session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True))
+            session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
+            )
             ephemeral_session = True
 
     try:
@@ -646,23 +741,29 @@ async def async_nova_request(
             attempt = retries_used + 1
             try:
                 timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
-                async with session.post(url, headers=headers, data=payload, timeout=timeout, allow_redirects=False) as response:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    data=payload,
+                    timeout=timeout,
+                    allow_redirects=False,
+                ) as response:
                     content = await response.read()
                     status = response.status
                     _LOGGER.debug("Nova API async request to %s: status=%d", api_scope, status)
 
                     if status == 200:
                         return content.hex()
-                    
-                    text_snippet = _redact(_beautify_text(content.decode(errors='ignore')))
-                    
+
+                    text_snippet = _redact(_beautify_text(content.decode(errors="ignore")))
+
                     if status == 401:
                         lvl = logging.INFO if not refreshed_once else logging.WARNING
                         _LOGGER.log(lvl, "Nova API async request to %s: 401 Unauthorized. Refreshing token.", api_scope)
                         await policy.on_401()
                         if not refreshed_once:
                             refreshed_once = True
-                            continue # Free retry
+                            continue  # Free retry
 
                         raise NovaAuthError(status, "Unauthorized after token refresh")
 
@@ -671,17 +772,26 @@ async def async_nova_request(
                             delay = _compute_delay(attempt, response.headers.get("Retry-After"))
                             _LOGGER.info(
                                 "Nova API async request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
-                                api_scope, status, delay, retries_used + 1, NOVA_MAX_RETRIES
+                                api_scope,
+                                status,
+                                delay,
+                                retries_used + 1,
+                                NOVA_MAX_RETRIES,
                             )
                             retries_used += 1
                             await asyncio.sleep(delay)
                             continue
                         else:
-                            _LOGGER.error("Nova API async request to %s failed after %d attempts with status %d.", api_scope, retries_used + 1, status)
+                            _LOGGER.error(
+                                "Nova API async request to %s failed after %d attempts with status %d.",
+                                api_scope,
+                                retries_used + 1,
+                                status,
+                            )
                             if status == 429:
                                 raise NovaRateLimitError(f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts.")
                             raise NovaHTTPError(status, f"Nova API failed after {NOVA_MAX_RETRIES} attempts.")
-                    
+
                     raise NovaAuthError(status, text_snippet)
 
             except asyncio.CancelledError:
@@ -689,13 +799,24 @@ async def async_nova_request(
             except (asyncio.TimeoutError, aiohttp.ClientError) as e:
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, None)
-                    _LOGGER.info("Nova API async request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
-                                 api_scope, type(e).__name__, delay, retries_used + 1, NOVA_MAX_RETRIES)
+                    _LOGGER.info(
+                        "Nova API async request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
+                        api_scope,
+                        type(e).__name__,
+                        delay,
+                        retries_used + 1,
+                        NOVA_MAX_RETRIES,
+                    )
                     retries_used += 1
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    _LOGGER.error("Nova API async request to %s failed after %d attempts with %s.", api_scope, retries_used + 1, type(e).__name__)
+                    _LOGGER.error(
+                        "Nova API async request to %s failed after %d attempts with %s.",
+                        api_scope,
+                        retries_used + 1,
+                        type(e).__name__,
+                    )
                     raise NovaError(f"Nova API request failed after retries: {e}") from e
 
     finally:
