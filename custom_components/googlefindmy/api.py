@@ -51,6 +51,50 @@ from .const import CONF_OAUTH_TOKEN  # used by the ephemeral flow cache
 
 _LOGGER = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------
+# Internal logging helpers / guards
+# ---------------------------------------------------------------------
+
+# We log the "multiple config entries active" guard at INFO only once to avoid spam.
+_GUARD_LOGGED_ONCE = False
+
+# Limit error messages to avoid leaking long payloads by accident (defensive).
+_MAX_ERR_CHARS = 300
+
+
+def _short_err(e: Exception | str) -> str:
+    """Return a truncated error string suitable for logs (privacy-conscious)."""
+    msg = str(e)
+    if len(msg) > _MAX_ERR_CHARS:
+        return msg[: _MAX_ERR_CHARS - 3] + "..."
+    return msg
+
+
+def _is_multi_entry_guard_message(msg: str) -> bool:
+    """Detect the 'multiple entries' guard by message content (signature-free)."""
+    m = msg or ""
+    return ("Multiple config entries active" in m) or ("entry.runtime_data" in m)
+
+
+def _maybe_log_guard_once(context: str, *, email: Optional[str] = None, entry_id: Optional[str] = None) -> None:
+    """Log the multi-entry guard once at INFO; subsequent occurrences at DEBUG."""
+    global _GUARD_LOGGED_ONCE
+    extra = []
+    if email:
+        extra.append(f"email={email}")
+    if entry_id:
+        extra.append(f"entry_id={entry_id}")
+    suffix = f" ({', '.join(extra)})" if extra else ""
+
+    if not _GUARD_LOGGED_ONCE:
+        _LOGGER.info(
+            "Auth guard: multiple config entries detected; deferring validation to setup%s",
+            suffix,
+        )
+        _GUARD_LOGGED_ONCE = True
+    else:
+        _LOGGER.debug("Auth guard (suppressed duplicate): %s%s", context, suffix)
+
 
 # ----------------------------- Minimal protocols -----------------------------
 @runtime_checkable
@@ -353,7 +397,7 @@ class GoogleFindMyAPI:
         try:
             receiver = _FCM_ReceiverGetter()
         except Exception as err:
-            _LOGGER.error("Cannot obtain FCM token: provider callable failed: %s", err)
+            _LOGGER.error("Cannot obtain FCM token: provider callable failed: %s", _short_err(err))
             return None
         if receiver is None:
             _LOGGER.error("Cannot obtain FCM token: provider returned None.")
@@ -361,7 +405,7 @@ class GoogleFindMyAPI:
         try:
             token = receiver.get_fcm_token()
         except Exception as err:
-            _LOGGER.error("Cannot obtain FCM token from shared receiver: %s", err)
+            _LOGGER.error("Cannot obtain FCM token from shared receiver: %s", _short_err(err))
             return None
         if not token or not isinstance(token, str) or len(token) < 10:
             _LOGGER.error("FCM token not available or invalid (via shared receiver).")
@@ -380,7 +424,7 @@ class GoogleFindMyAPI:
         try:
             receiver = _FCM_ReceiverGetter()
         except Exception as err:
-            _LOGGER.debug("FCM readiness probe: provider callable failed: %s", err)
+            _LOGGER.debug("FCM readiness probe: provider callable failed: %s", _short_err(err))
             return None
         if receiver is None:
             _LOGGER.debug("FCM readiness probe: provider returned None.")
@@ -388,7 +432,7 @@ class GoogleFindMyAPI:
         try:
             token = receiver.get_fcm_token()
         except Exception as err:
-            _LOGGER.debug("FCM readiness probe: get_fcm_token failed: %s", err)
+            _LOGGER.debug("FCM readiness probe: get_fcm_token failed: %s", _short_err(err))
             return None
         if not token or not isinstance(token, str) or len(token) < 10:
             _LOGGER.debug("FCM readiness probe: token missing or too short.")
@@ -466,20 +510,20 @@ class GoogleFindMyAPI:
             raise
 
         except NovaRateLimitError as err:
-            _LOGGER.warning("Device list temporarily rate-limited: %s", err)
-            raise UpdateFailed(str(err)) from err
+            _LOGGER.warning("Device list temporarily rate-limited: %s", _short_err(err))
+            raise UpdateFailed(_short_err(err)) from err
 
         except NovaHTTPError as err:
             # Map 401/403 explicitly to ConfigEntryAuthFailed
             if getattr(err, "status", None) in (401, 403):
-                _LOGGER.error("Authentication failed (HTTP %s) while listing devices: %s", err.status, err)
-                raise ConfigEntryAuthFailed(str(err)) from err
-            _LOGGER.warning("Device list temporarily unavailable (server error %s): %s", err.status, err)
-            raise UpdateFailed(str(err)) from err
+                _LOGGER.error("Authentication failed (HTTP %s) while listing devices: %s", err.status, _short_err(err))
+                raise ConfigEntryAuthFailed(_short_err(err)) from err
+            _LOGGER.warning("Device list temporarily unavailable (server error %s): %s", err.status, _short_err(err))
+            raise UpdateFailed(_short_err(err)) from err
 
         except NovaAuthError as err:
-            _LOGGER.error("Authentication failed while listing devices: %s", err)
-            raise ConfigEntryAuthFailed(str(err)) from err
+            _LOGGER.error("Authentication failed while listing devices: %s", _short_err(err))
+            raise ConfigEntryAuthFailed(_short_err(err)) from err
 
         # Normalize gpsoauth/ADM "BadAuthentication" style failures to ConfigEntryAuthFailed
         except (RuntimeError, ValueError) as err:
@@ -489,20 +533,35 @@ class GoogleFindMyAPI:
                 or "Missing 'Token' in gpsoauth" in msg
                 or "Bad Authentication" in msg
             ):
-                _LOGGER.error("Authentication failed (gpsoauth): %s", msg)
-                raise ConfigEntryAuthFailed(msg) from err
-            _LOGGER.warning("Failed to get basic device list (runtime/value): %s", err)
-            raise UpdateFailed(f"{err}") from err
+                _LOGGER.error("Authentication failed (gpsoauth): %s", _short_err(msg))
+                raise ConfigEntryAuthFailed(_short_err(msg)) from err
+
+            # Detect and tame the multi-entry guard (INFO once, DEBUG thereafter)
+            if _is_multi_entry_guard_message(msg):
+                # Try to enrich with context if available from cache (best-effort)
+                try:
+                    email = await self._cache.async_get_cached_value(username_string)
+                except Exception:
+                    email = None
+                entry_id = getattr(self._cache, "entry_id", None)
+                _maybe_log_guard_once("device_list", email=email, entry_id=entry_id)
+
+                # Still raise UpdateFailed so the coordinator/flow can keep semantics,
+                # and the flow can recognize the guard by message content.
+                raise UpdateFailed(_short_err(msg)) from err
+
+            _LOGGER.warning("Failed to get basic device list (runtime/value): %s", _short_err(err))
+            raise UpdateFailed(_short_err(err)) from err
 
         except ClientError as err:
             # Minimal-invasive change: do not degrade to empty success; signal transient failure.
-            _LOGGER.warning("Failed to get basic device list (async, network): %s", err)
-            raise UpdateFailed(f"Network error fetching device list: {err}") from err
+            _LOGGER.warning("Failed to get basic device list (async, network): %s", _short_err(err))
+            raise UpdateFailed(f"Network error fetching device list: {_short_err(err)}") from err
 
         except Exception as err:
             # Do not mask unexpected errors as an empty list; let the coordinator keep last good data.
-            _LOGGER.error("Failed to get basic device list (async): %s", err)
-            raise UpdateFailed(f"Unexpected error fetching device list: {err}") from err
+            _LOGGER.error("Failed to get basic device list (async): %s", _short_err(err))
+            raise UpdateFailed(f"Unexpected error fetching device list: {_short_err(err)}") from err
 
     def get_basic_device_list(self) -> List[Dict[str, Any]]:
         """Thin sync wrapper around async_get_basic_device_list for non-HA contexts.
@@ -522,7 +581,7 @@ class GoogleFindMyAPI:
                 return []
             return loop.run_until_complete(self.async_get_basic_device_list())
         except Exception as err:
-            _LOGGER.error("Failed to get basic device list (sync): %s", err)
+            _LOGGER.error("Failed to get basic device list (sync): %s", _short_err(err))
             return []
 
     def get_devices(self) -> List[Dict[str, Any]]:
@@ -582,9 +641,9 @@ class GoogleFindMyAPI:
                 "Authentication failed while getting location for %s (%s): %s",
                 device_name,
                 device_id,
-                err,
+                _short_err(err),
             )
-            raise ConfigEntryAuthFailed(str(err)) from err
+            raise ConfigEntryAuthFailed(_short_err(err)) from err
 
         except NovaHTTPError as err:
             # Map 401/403 to ConfigEntryAuthFailed; other HTTP errors are transient here.
@@ -594,15 +653,15 @@ class GoogleFindMyAPI:
                     err.status,
                     device_name,
                     device_id,
-                    err,
+                    _short_err(err),
                 )
-                raise ConfigEntryAuthFailed(str(err)) from err
+                raise ConfigEntryAuthFailed(_short_err(err)) from err
             _LOGGER.warning(
                 "Server error (%s) while getting location for %s (%s): %s",
                 err.status,
                 device_name,
                 device_id,
-                err,
+                _short_err(err),
             )
             return {}
 
@@ -611,7 +670,7 @@ class GoogleFindMyAPI:
                 "Location request rate-limited for %s (%s): %s",
                 device_name,
                 device_id,
-                err,
+                _short_err(err),
             )
             return {}
 
@@ -620,7 +679,7 @@ class GoogleFindMyAPI:
                 "Network error while getting async location for %s (%s): %s",
                 device_name,
                 device_id,
-                err,
+                _short_err(err),
             )
             return {}
 
@@ -638,7 +697,7 @@ class GoogleFindMyAPI:
                 "Runtime error while getting async location for %s (%s): %s",
                 device_name,
                 device_id,
-                err,
+                _short_err(err),
             )
             return {}
 
@@ -647,7 +706,7 @@ class GoogleFindMyAPI:
                 "Failed to get async location for %s (%s): %s",
                 device_name,
                 device_id,
-                err,
+                _short_err(err),
             )
             return {}
 
@@ -671,7 +730,7 @@ class GoogleFindMyAPI:
             return loop.run_until_complete(self.async_get_device_location(device_id, device_name))
         except Exception as err:
             _LOGGER.error(
-                "Failed to get location for %s (%s): %s", device_name, device_id, err
+                "Failed to get location for %s (%s): %s", device_name, device_id, _short_err(err)
             )
             return {}
 
@@ -771,7 +830,7 @@ class GoogleFindMyAPI:
                 return False
             return loop.run_until_complete(self.async_play_sound(device_id))
         except Exception as err:
-            _LOGGER.error("Failed to play sound on %s: %s", device_id, err)
+            _LOGGER.error("Failed to play sound on %s: %s", device_id, _short_err(err))
             return False
 
     def stop_sound(self, device_id: str) -> bool:
@@ -792,7 +851,7 @@ class GoogleFindMyAPI:
                 return False
             return loop.run_until_complete(self.async_stop_sound(device_id))
         except Exception as err:
-            _LOGGER.error("Failed to stop sound on %s: %s", device_id, err)
+            _LOGGER.error("Failed to stop sound on %s: %s", device_id, _short_err(err))
             return False
 
     # ---------- Play/Stop Sound (async; HA-first) ----------
@@ -828,7 +887,7 @@ class GoogleFindMyAPI:
             return bool(ok)
 
         except NovaAuthError as err:
-            _LOGGER.error("Authentication failed while playing sound on %s: %s", device_id, err)
+            _LOGGER.error("Authentication failed while playing sound on %s: %s", device_id, _short_err(err))
             return False
 
         except NovaHTTPError as err:
@@ -837,22 +896,22 @@ class GoogleFindMyAPI:
                     "Authentication failed (HTTP %s) while playing sound on %s: %s",
                     err.status,
                     device_id,
-                    err,
+                    _short_err(err),
                 )
                 return False
-            _LOGGER.warning("Server error (%s) while playing sound on %s: %s", err.status, device_id, err)
+            _LOGGER.warning("Server error (%s) while playing sound on %s: %s", err.status, device_id, _short_err(err))
             return False
 
         except NovaRateLimitError as err:
-            _LOGGER.warning("Play Sound rate-limited for %s: %s", device_id, err)
+            _LOGGER.warning("Play Sound rate-limited for %s: %s", device_id, _short_err(err))
             return False
 
         except ClientError as err:
-            _LOGGER.error("Network error while playing sound on %s: %s", device_id, err)
+            _LOGGER.error("Network error while playing sound on %s: %s", device_id, _short_err(err))
             return False
 
         except Exception as err:
-            _LOGGER.error("Failed to play sound (async) on %s: %s", device_id, err)
+            _LOGGER.error("Failed to play sound (async) on %s: %s", device_id, _short_err(err))
             return False
 
     async def async_stop_sound(self, device_id: str) -> bool:
@@ -884,7 +943,7 @@ class GoogleFindMyAPI:
             return bool(ok)
 
         except NovaAuthError as err:
-            _LOGGER.error("Authentication failed while stopping sound on %s: %s", device_id, err)
+            _LOGGER.error("Authentication failed while stopping sound on %s: %s", device_id, _short_err(err))
             return False
 
         except NovaHTTPError as err:
@@ -893,20 +952,20 @@ class GoogleFindMyAPI:
                     "Authentication failed (HTTP %s) while stopping sound on %s: %s",
                     err.status,
                     device_id,
-                    err,
+                    _short_err(err),
                 )
                 return False
-            _LOGGER.warning("Server error (%s) while stopping sound on %s: %s", err.status, device_id, err)
+            _LOGGER.warning("Server error (%s) while stopping sound on %s: %s", err.status, device_id, _short_err(err))
             return False
 
         except NovaRateLimitError as err:
-            _LOGGER.warning("Stop Sound rate-limited for %s: %s", device_id, err)
+            _LOGGER.warning("Stop Sound rate-limited for %s: %s", device_id, _short_err(err))
             return False
 
         except ClientError as err:
-            _LOGGER.error("Network error while stopping sound on %s: %s", device_id, err)
+            _LOGGER.error("Network error while stopping sound on %s: %s", device_id, _short_err(err))
             return False
 
         except Exception as err:
-            _LOGGER.error("Failed to stop sound (async) on %s: %s", device_id, err)
+            _LOGGER.error("Failed to stop sound (async) on %s: %s", device_id, _short_err(err))
             return False
