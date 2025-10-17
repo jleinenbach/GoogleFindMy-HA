@@ -656,50 +656,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """
     # --- Multi-entry guard (robust & early) -----------------------------------
     all_entries = hass.config_entries.async_entries(DOMAIN)
+    # An active entry is one that is not disabled and is currently loaded or trying to load.
     active_entries = [e for e in all_entries if _is_active_entry(e)]
-    if len(active_entries) > 1:
-        primary = _primary_active_entry(all_entries)
-        # If *this* is not the chosen primary, abort with issue and clear default.
-        if not primary or primary.entry_id != entry.entry_id:
-            try:
-                ir.async_create_issue(
-                    hass,
-                    DOMAIN,
-                    "multiple_config_entries",
-                    is_fixable=False,
-                    severity=ir.IssueSeverity.ERROR,
-                    translation_key="multiple_config_entries",
-                    translation_placeholders={
-                        "entries": ", ".join([e.title or e.entry_id for e in active_entries]),
-                        "kept": (primary.title if primary and primary.title else (primary.entry_id if primary else "")),
-                    },
-                    # learn_more_url="https://www.home-assistant.io/docs/configuration/troubleshooting/",
-                    is_persistent=True,
-                )
-            except Exception as err:
-                _LOGGER.debug("Failed to create multi-entry repair issue: %s", err)
 
-            _clear_default_entry_id()
-            _LOGGER.error(
-                "Multiple active config entries for %s detected. "
-                "Keeping '%s' and aborting setup for '%s'. Remove redundant entries in Settings > Devices & Services.",
-                DOMAIN,
-                (primary.title or primary.entry_id) if primary else "(unknown)",
-                entry.title or entry.entry_id,
-            )
-            return False
-        else:
-            # We are the chosen primary; continue with setup and remove any prior issue.
-            try:
-                ir.async_delete_issue(hass, DOMAIN, "multiple_config_entries")
-            except Exception:
-                pass
+    if len(active_entries) > 1:
+        # If there are multiple active entries, create a repair issue and fail setup for all of them.
+        # This prevents race conditions and ensures a consistent state.
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            "multiple_config_entries",
+            is_fixable=False,  # User must manually delete the entries.
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="multiple_config_entries",
+            translation_placeholders={
+                "entries": ", ".join([e.title or e.entry_id for e in active_entries])
+            },
+        )
+        _LOGGER.error(
+            "Multiple config entries found for %s. Integration setup aborted for entry '%s'. "
+            "Please remove all but one entry from Settings > Devices & Services to resolve this issue.",
+            DOMAIN,
+            entry.entry_id
+        )
+        return False
     else:
-        # Clean up a previously created issue, if any.
-        try:
-            ir.async_delete_issue(hass, DOMAIN, "multiple_config_entries")
-        except Exception:
-            pass
+        # If the condition is resolved (only one entry left), remove the repair issue.
+        ir.async_delete_issue(hass, DOMAIN, "multiple_config_entries")
 
     # Monotonic performance markers (captured even before coordinator exists)
     pm_setup_start = time.monotonic()
