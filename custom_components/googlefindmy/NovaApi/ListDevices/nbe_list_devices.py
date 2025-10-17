@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import binascii
 import logging
-from typing import Optional
+from typing import Optional, Callable, Awaitable, Any
 
 from aiohttp import ClientSession
 
@@ -52,6 +52,12 @@ async def async_request_device_list(
     username: Optional[str] = None,
     *,
     session: Optional[ClientSession] = None,
+    # Flow-local / entry-scoped overrides (all optional):
+    token: Optional[str] = None,
+    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
+    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
+    refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+    namespace: Optional[str] = None,
 ) -> str:
     """Asynchronously request the device list via Nova.
 
@@ -61,27 +67,58 @@ async def async_request_device_list(
     Priority of HTTP session (HA best practice):
     1) Explicit `session` argument (tests/special cases),
     2) Registered provider from nova_request (uses HA's async_get_clientsession),
-    3) Short-lived fallback session managed by nova_request (DEBUG only).
+    3) Short-lived fallback session managed by nova_request.
+
+    Entry-scope & cache isolation:
+    - When `cache_get`/`cache_set` are supplied **and** a `namespace` is provided,
+      this function wraps the given cache I/O with a namespacing prefix
+      (`f"{namespace}:{key}"`). This keeps TTL metadata distinct across multiple
+      config entries even for the same Google account.
+    - If no cache functions are supplied, nova_request will use its defaults.
 
     Args:
-        username: The Google account username. If None, it will be retrieved
-                  from the cache.
-        session: (Deprecated) The aiohttp ClientSession. This is no longer
-                 forwarded as nova_request handles session management.
+        username: Google account username (email). If None, nova_request will
+                  resolve it via its async cache helpers.
+        session: aiohttp ClientSession to reuse (recommended in HA).
+        token: Optional direct ADM token for config-flow isolation.
+        cache_get: Optional async getter for TTL/aux metadata (flow-local).
+        cache_set: Optional async setter for TTL/aux metadata (flow-local).
+        refresh_override: Optional async function to obtain a new token, isolated
+                          from global caches (e.g., AAS→ADM refresh during flows).
+        namespace: Optional entry-scoped namespace used to prefix cache keys.
 
     Returns:
         Hex-encoded Nova response payload.
 
     Raises:
         RuntimeError / aiohttp.ClientError on transport failures.
+        Nova* errors bubble via nova_request (handled by callers).
     """
     hex_payload = create_device_list_request()
+
+    # Optionally wrap cache I/O with an entry-scoped namespace.
+    ns_get = cache_get
+    ns_set = cache_set
+    if namespace:
+        if cache_get is not None:
+            async def _ns_get(key: str) -> Any:
+                return await cache_get(f"{namespace}:{key}")
+            ns_get = _ns_get
+        if cache_set is not None:
+            async def _ns_set(key: str, value: Any) -> None:
+                await cache_set(f"{namespace}:{key}", value)
+            ns_set = _ns_set
+
     # Delegate HTTP to Nova client (handles session provider & timeouts).
     return await async_nova_request(
         NOVA_LIST_DEVICES_API_SCOPE,
         hex_payload,
         username=username,
-        # session intentionally not forwarded anymore; nova_request manages reuse/fallback
+        session=session,
+        token=token,
+        cache_get=ns_get,
+        cache_set=ns_set,
+        refresh_override=refresh_override,
     )
 
 
