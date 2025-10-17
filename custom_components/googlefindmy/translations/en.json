@@ -40,11 +40,10 @@
       },
       "reauth_confirm": {
         "title": "Reauthenticate",
-        "description": "Your credentials appear to be invalid or expired. Please provide new credentials below.\n\nTip: You can either paste the full contents of a fresh secrets.json **or** supply a new OAuth token and email.",
+        "description": "Your credentials for **{email}** appear to be invalid or expired. Provide new credentials below.\n\nYou can either paste the full contents of a fresh **secrets.json** **or** enter a new **OAuth token**.\n\nNote: The account email is fixed for this reauthentication and cannot be changed here.",
         "data": {
           "secrets_json": "New secrets.json (full contents)",
-          "oauth_token": "New OAuth token",
-          "google_email": "Google email"
+          "new_oauth_token": "New OAuth token"
         }
       }
     },
@@ -57,7 +56,8 @@
       "cannot_connect": "Failed to connect to the Google API. This may be temporary — please try again later.",
       "choose_one": "Please provide exactly one credential method.",
       "required": "This field is required.",
-      "unknown": "Unexpected error occurred."
+      "unknown": "Unexpected error occurred.",
+      "email_mismatch": "The provided credentials belong to a different Google account. To add that account, create a new integration; reauthentication cannot change the account for this entry."
     },
     "abort": {
       "already_configured": "Google Find My Device is already configured.",
