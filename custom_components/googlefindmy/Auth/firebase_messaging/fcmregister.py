@@ -83,7 +83,7 @@ class FcmRegisterConfig:
         heartbeat_interval_ms: The heartbeat interval in milliseconds.
 
     Notes:
-        - `messaging_sender_id` must be the *numeric* Sender ID (a.k.a. project number).
+        - `messaging_sender_id` must be the *numeric* Sender ID (project number).
         - `vapid_key` should generally remain the default (server key b64). When equal
           to GCM_SERVER_KEY_B64 we do **not** include it in the registration payload
           to avoid server errors.
@@ -138,6 +138,37 @@ class FcmRegister:
         self._http_client_session = http_client_session
         self._local_session: ClientSession | None = None
 
+    # ---------------------------------------------------------------------
+    # Helpers (logging / URL handling / redaction)
+    # ---------------------------------------------------------------------
+    @staticmethod
+    def _redact(value: Any, keep_tail: int = 6) -> str:
+        """Return a redacted version of tokens/ids for safe logging."""
+        s = str(value or "")
+        if not s:
+            return ""
+        if len(s) <= keep_tail:
+            return "•••"
+        return f"•••{s[-keep_tail:]}"
+
+    @staticmethod
+    def _looks_like_html(text: str) -> bool:
+        """Rudimentary check to decide if a response body is HTML (e.g., 404 page)."""
+        t = (text or "").lstrip().upper()
+        return t.startswith("<!DOCTYPE") or t.startswith("<HTML") or "<H1>" in t
+
+    @staticmethod
+    def _toggle_gcm_register_variant(url: str) -> str:
+        """Swap .../register <-> .../register3 once (404 mitigation)."""
+        if url.endswith("/register3"):
+            return url[:-1]  # drop '3' -> .../register
+        if url.endswith("/register"):
+            return url + "3"
+        return url
+
+    # ---------------------------------------------------------------------
+    # GCM Check-in
+    # ---------------------------------------------------------------------
     def _get_checkin_payload(
         self, android_id: int | None = None, security_token: int | None = None
     ) -> AndroidCheckinRequest:
@@ -197,10 +228,10 @@ class FcmRegister:
         payload = self._get_checkin_payload(android_id, security_token)
 
         if self._log_debug_verbose:
-            _logger.debug("GCM check in payload:\n%s", payload)
+            _logger.debug("GCM check-in payload prepared (with%s credentials).",
+                          "" if (android_id and security_token) else "out")
 
         max_attempts = 8
-        backoff = 1.0  # seconds
         content: bytes | None = None
 
         for attempt in range(1, max_attempts + 1):
@@ -218,30 +249,26 @@ class FcmRegister:
 
                     text = await resp.text()
                     _logger.warning(
-                        "GCM check-in failed (attempt %d/%d): status=%s, body=%s",
-                        attempt,
-                        max_attempts,
-                        status,
-                        text[:200],
+                        "GCM check-in failed (attempt %d/%d): url=%s, status=%s, body=%s",
+                        attempt, max_attempts, GCM_CHECKIN_URL, status, text[:200],
                     )
                     # After a failure, retry **without** android_id/security_token once
                     payload = self._get_checkin_payload()
             except Exception as e:
                 _logger.warning(
-                    "GCM check-in error (attempt %d/%d): %s",
-                    attempt,
-                    max_attempts,
-                    e,
+                    "GCM check-in error (attempt %d/%d) at url=%s: %s",
+                    attempt, max_attempts, GCM_CHECKIN_URL, e,
                 )
 
             # Exponential backoff with light jitter
             if attempt < max_attempts:
-                delay = min(backoff * (2 ** (attempt - 1)), 30.0)
+                delay = min(1.5 * (2 ** (attempt - 1)), 30.0)
                 delay *= (0.9 + 0.2 * secrets.randbits(4) / 15.0)  # ±10% jitter
                 await asyncio.sleep(delay)
 
         if not content:
-            _logger.error("Unable to check-in to GCM after %d attempts", max_attempts)
+            _logger.error("Unable to check-in to GCM after %d attempts (url=%s)",
+                          max_attempts, GCM_CHECKIN_URL)
             return None
 
         acir = AndroidCheckinResponse()
@@ -249,10 +276,13 @@ class FcmRegister:
 
         if self._log_debug_verbose:
             msg = MessageToJson(acir, indent=4)
-            _logger.debug("GCM check in response (raw):\n%s", msg)
+            _logger.debug("GCM check-in response (raw):\n%s", msg)
 
         return MessageToDict(acir)
 
+    # ---------------------------------------------------------------------
+    # GCM Register (token)
+    # ---------------------------------------------------------------------
     async def gcm_register(
         self,
         options: dict[str, Any],
@@ -267,16 +297,18 @@ class FcmRegister:
 
         Returns:
             A minimal credential dict with token, app_id, etc., or None on failure.
-            returns {"token": "...", "gcm_app_id": 123123, "androidId":123123,
-                "securityToken": 123123}
+            returns {"token": "...", "gcm_app_id": 123123, "android_id":123123,
+                "security_token": 123123}
         """
         gcm_app_id = f"wp:{self.config.bundle_id}#{uuid.uuid4()}"
         android_id = options["androidId"]
         security_token = options["securityToken"]
 
+        # NB: we purposefully do NOT send any 'Accept' header here.
         headers = {
             "Authorization": f"AidLogin {android_id}:{security_token}",
             "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Android-GCM/1.5",
         }
         body = {
             "app": self.config.chrome_id,
@@ -286,54 +318,78 @@ class FcmRegister:
             "sender": self.config.messaging_sender_id,
         }
         if self._log_debug_verbose:
-            _logger.debug("GCM Registration request: %s", body)
+            _logger.debug(
+                "GCM Registration request (url=%s): app=%s, X-subtype=%s, device=%s, sender=%s",
+                GCM_REGISTER_URL,
+                body["app"],
+                self._redact(body["X-subtype"]),
+                self._redact(body["device"]),
+                body["sender"],
+            )
 
+        url = GCM_REGISTER_URL
+        tried_variant = False
         last_error: str | Exception | None = None
+
         for attempt in range(1, retries + 1):
             try:
                 async with self._session.post(
-                    url=GCM_REGISTER_URL,
+                    url=url,
                     headers=headers,
-                    data=body,
+                    data=body,  # x-www-form-urlencoded
                     timeout=self.CLIENT_TIMEOUT,
                 ) as resp:
+                    response_status = resp.status
                     response_text = await resp.text()
 
+                if response_status == 404 or self._looks_like_html(response_text):
+                    # Frequently caused by using the wrong variant (register vs register3).
+                    if not tried_variant:
+                        alt = self._toggle_gcm_register_variant(url)
+                        _logger.warning(
+                            "GCM register: 404/HTML received at %s; retrying with alternate endpoint %s",
+                            url, alt,
+                        )
+                        url = alt
+                        tried_variant = True
+                        # Quick retry without consuming an attempt slot
+                        await asyncio.sleep(0.5)
+                        continue
+
                 if "Error" in response_text:
-                    last_error = response_text
+                    last_error = response_text.strip()
                     if "PHONE_REGISTRATION_ERROR" in response_text:
                         _logger.warning(
-                            "GCM register: PHONE_REGISTRATION_ERROR (attempt %d/%d) – backing off",
-                            attempt,
-                            retries,
+                            "GCM register: PHONE_REGISTRATION_ERROR at %s (attempt %d/%d) – backing off",
+                            url, attempt, retries,
                         )
                     else:
                         _logger.warning(
-                            "GCM register error (attempt %d/%d): %s",
-                            attempt,
-                            retries,
-                            response_text.strip(),
+                            "GCM register error at %s (attempt %d/%d): %s",
+                            url, attempt, retries, response_text.strip(),
                         )
                 else:
-                    # Typical response: "token=<...>"
-                    parts = response_text.split("=", 1)
-                    if len(parts) == 2 and parts[0].lower().strip() == "token":
-                        token = parts[1].strip()
+                    # Typical response: "token=<...>" possibly with extra lines
+                    token = None
+                    for line in response_text.splitlines():
+                        k, sep, v = line.partition("=")
+                        if sep and k.strip().lower() == "token":
+                            token = v.strip()
+                            break
+                    if token:
                         return {
                             "token": token,
                             "app_id": gcm_app_id,
                             "android_id": android_id,
                             "security_token": security_token,
                         }
-                    last_error = f"Unexpected register response: {response_text[:200]}"
+                    last_error = f"Unexpected register response (status={response_status}): {response_text[:200]}"
 
             except Exception as e:
                 last_error = e
                 _logger.warning(
-                    "GCM register request failed (attempt %d/%d): %s",
-                    attempt,
-                    retries,
-                    e,
+                    "GCM register request failed at %s (attempt %d/%d): %s",
+                    url, attempt, retries, e,
                 )
 
             if attempt < retries:
@@ -342,13 +398,16 @@ class FcmRegister:
                 delay *= (0.9 + 0.2 * secrets.randbits(4) / 15.0)
                 await asyncio.sleep(delay)
 
-        msg = f"Unable to complete GCM register after {retries} attempts"
+        msg = f"Unable to complete GCM register after {retries} attempts (last url={url})"
         if isinstance(last_error, Exception):
             _logger.error("%s", msg, exc_info=last_error)
         else:
             _logger.error("%s, last error was: %s", msg, last_error)
         return None
 
+    # ---------------------------------------------------------------------
+    # FCM (Install + Registration)
+    # ---------------------------------------------------------------------
     async def fcm_install_and_register(
         self, gcm_data: dict[str, Any], keys: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -399,22 +458,24 @@ class FcmRegister:
         async with self._session.post(
             url=url,
             headers=headers,
-            data=json.dumps(payload),
+            json=payload,
             timeout=self.CLIENT_TIMEOUT,
         ) as resp:
             if resp.status == 200:
                 fcm_install = await resp.json()
-
                 return {
                     "token": fcm_install["authToken"]["token"],
-                    "expires_in": int(fcm_install["authToken"]["expiresIn"][:-1:]),
+                    "expires_in": int(str(fcm_install["authToken"]["expiresIn"]).rstrip("s")),
                     "refresh_token": fcm_install["refreshToken"],
                     "fid": fcm_install["fid"],
                     "created_at": time.monotonic(),
                 }
             else:
                 text = await resp.text()
-                _logger.error("Error during fcm_install: %s ", text)
+                _logger.error(
+                    "Error during fcm_install at %s (status=%s): %s",
+                    url, resp.status, text[:300],
+                )
                 return None
 
     async def fcm_refresh_install_token(self) -> dict | None:
@@ -429,45 +490,45 @@ class FcmRegister:
         ).decode()
         if not self.credentials:
             raise RuntimeError("Credentials must be set to refresh install token")
-        # PATCH
+
+        # Defensive access — log precisely which field is missing if any
         try:
             fcm_refresh_token = self.credentials["fcm"]["installation"]["refresh_token"]
             fid = self.credentials["fcm"]["installation"]["fid"]
         except KeyError as e:
-            _logger.error(f"Cannot refresh FCM token: '{e}' key missing in credentials.")
+            _logger.error("Cannot refresh FCM token: missing credentials key: %s", e)
             return None
+
         headers = {
             "Authorization": f"{AUTH_VERSION} {fcm_refresh_token}",
             "x-firebase-client": hb_header,
             "x-goog-api-key": self.config.api_key,
         }
-        payload = {
-            "installation": {
-                "sdkVersion": SDK_VERSION,
-                "appId": self.config.app_id,
-            }
-        }
-        # PATCH
+        payload = {"installation": {"sdkVersion": SDK_VERSION, "appId": self.config.app_id}}
+
         url = (
-            FCM_INSTALLATION + f"projects/{self.config.project_id}/"
-            f"installations/{fid}/authTokens:generate"
+            FCM_INSTALLATION
+            + f"projects/{self.config.project_id}/installations/{fid}/authTokens:generate"
         )
         async with self._session.post(
             url=url,
             headers=headers,
-            data=json.dumps(payload),
+            json=payload,
             timeout=self.CLIENT_TIMEOUT,
         ) as resp:
             if resp.status == 200:
                 fcm_refresh = await resp.json()
                 return {
                     "token": fcm_refresh["token"],
-                    "expires_in": int(fcm_refresh["expiresIn"][:-1:]),
+                    "expires_in": int(str(fcm_refresh["expiresIn"]).rstrip("s")),
                     "created_at": time.monotonic(),
                 }
             else:
                 text = await resp.text()
-                _logger.error("Error during fcm_refresh_install_token: %s ", text)
+                _logger.error(
+                    "Error during fcm_refresh_install_token at %s (status=%s): %s",
+                    url, resp.status, text[:300],
+                )
                 return None
 
     def generate_keys(self) -> dict:
@@ -530,81 +591,91 @@ class FcmRegister:
         }
         url = FCM_REGISTRATION + f"projects/{self.config.project_id}/registrations"
         if self._log_debug_verbose:
-            _logger.debug("FCM registration data: %s", payload)
+            _logger.debug(
+                "FCM registration data (url=%s): endpoint=%s…, appPubKey=%s, p256dh=%s…",
+                url,
+                (payload["web"]["endpoint"][:48] + "…"),
+                bool(payload["web"]["applicationPubKey"]),
+                self._redact(payload["web"]["p256dh"]),
+            )
 
+        last_error: str | Exception | None = None
         for attempt in range(1, retries + 1):
             try:
                 async with self._session.post(
                     url=url,
                     headers=headers,
-                    data=json.dumps(payload),
+                    json=payload,
                     timeout=self.CLIENT_TIMEOUT,
                 ) as resp:
-                    if resp.status == 200:
+                    status = resp.status
+                    if status == 200:
                         fcm = await resp.json()
                         return fcm
                     else:
                         text = await resp.text()
                         _logger.error(
-                            "Error during FCM register (attempt %d/%d): %s",
-                            attempt,
-                            retries,
-                            text,
+                            "Error during FCM register at %s (attempt %d/%d, status=%s): %s",
+                            url, attempt, retries, status, text[:400],
                         )
             except Exception as e:
+                last_error = e
                 _logger.error(
-                    "Error during FCM register (attempt %d/%d)",
-                    attempt,
-                    retries,
-                    exc_info=e,
+                    "Error during FCM register at %s (attempt %d/%d)",
+                    url, attempt, retries, exc_info=e,
                 )
                 await asyncio.sleep(1)
+
+        if isinstance(last_error, Exception):
+            _logger.error("FCM register ultimately failed at %s", url, exc_info=last_error)
         return None
 
+    # ---------------------------------------------------------------------
+    # Orchestration
+    # ---------------------------------------------------------------------
     async def checkin_or_register(self) -> dict[str, Any]:
         """Check in if you have credentials otherwise register as a new client.
 
-        :param sender_id: sender id identifying push service you are connecting to.
-        :param app_id: identifier for your application.
-        :return: The FCM token which is used to identify you with the push end
-            point application.
+        :return: The full credentials dict containing keys/gcm/fcm/config.
         """
         if self.credentials:
-            gcm_response = await self.gcm_check_in(
-                self.credentials["gcm"]["android_id"],
-                self.credentials["gcm"]["security_token"],
-            )
-            if gcm_response:
-                return self.credentials
+            try:
+                gcm_response = await self.gcm_check_in(
+                    self.credentials["gcm"]["android_id"],
+                    self.credentials["gcm"]["security_token"],
+                )
+                if gcm_response:
+                    return self.credentials
+            except Exception as e:
+                _logger.warning("Existing credentials check-in failed: %s; re-registering", e)
 
         self.credentials = await self.register()
         if self.credentials_updated_callback:
-            self.credentials_updated_callback(self.credentials)
+            try:
+                self.credentials_updated_callback(self.credentials)
+            except Exception as e:  # avoid caller breaking the flow
+                _logger.debug("credentials_updated_callback raised: %s", e)
 
         return self.credentials
 
     async def register(self) -> dict:
         """Register GCM and FCM tokens for configured sender_id/app.
-            Typically you would
-            call checkin instead of register which does not do a full registration
-            if credentials are present
-        :param sender_id: sender id identifying push service you are connecting to.
-        :param app_id: identifier for your application.
 
-        Returns:
-            The dict containing all credentials.
+        Typically you would call `checkin_or_register()` instead of `register()`,
+        which can reuse existing credentials when valid.
         """
         keys = self.generate_keys()
 
         gcm_data = await self.gcm_check_in_and_register()
         if gcm_data is None:
             raise RuntimeError("Unable to establish subscription with Google Cloud Messaging.")
-        self._log_verbose("GCM subscription: %s", gcm_data)
+        self._log_verbose("GCM subscription: %s", {**gcm_data, "token": self._redact(gcm_data.get("token"))})
 
         fcm_data = await self.fcm_install_and_register(gcm_data, keys)
         if not fcm_data:
             raise RuntimeError("Unable to register with FCM")
-        self._log_verbose("FCM registration: %s", fcm_data)
+        self._log_verbose("FCM registration: %s", {"installation": "…", "registration": "…"})
+
         res: dict[str, Any] = {
             "keys": keys,
             "gcm": gcm_data,
@@ -615,7 +686,7 @@ class FcmRegister:
                 "vapid_key": self.config.vapid_key,
             },
         }
-        self._log_verbose("Credential: %s", res)
+        self._log_verbose("Credential assembled (redacted).")
         _logger.info("Registered with FCM")
         return res
 
