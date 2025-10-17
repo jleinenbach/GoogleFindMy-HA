@@ -51,21 +51,6 @@ _LOGGER = logging.getLogger(__name__)
 _ANDROID_ID: int = 0x38918A453D071993
 
 
-def _looks_like_aas(token: str) -> bool:
-    """Heuristically identify an AAS token by its well-known prefix.
-
-    Why a heuristic?
-    ----------------
-    There is no public, official spec for the AAS token wire format. However, in practice
-    (and as provided by the user sample), AAS tokens commonly start with "aas_et/" or
-    "aas_et." on Android. We conservatively check these prefixes to avoid false positives.
-
-    Returns:
-        True if the token looks like an AAS token; otherwise False.
-    """
-    return token.startswith("aas_et/") or token.startswith("aas_et.")
-
-
 def _looks_like_jwt(token: str) -> bool:
     """Very lightweight check for JWT-like blobs (Base64URL x3, commonly 'eyJ' prefix).
 
@@ -83,8 +68,6 @@ def _disqualifies_oauth_for_exchange(token: str) -> Optional[str]:
     This function implements a negative filter. If it returns a non-empty string,
     callers must ignore the value for the OAuth→AAS exchange and use fallbacks.
     """
-    if _looks_like_aas(token):
-        return "value resembles an AAS token (aas_et…), not an OAuth token"
     if _looks_like_jwt(token):
         return "value looks like a JWT (possibly installation/ID token), not an OAuth token"
     return None
