@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/NovaApi/ExecuteAction/LocateTracker/location_request.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
@@ -8,7 +9,7 @@ import asyncio
 import time
 import logging
 import traceback
-from typing import Optional, Callable, Protocol, runtime_checkable
+from typing import Optional, Callable, Protocol, runtime_checkable, Awaitable, Any
 
 import aiohttp
 
@@ -234,6 +235,12 @@ async def get_location_data_for_device(
     session: Optional[aiohttp.ClientSession] = None,
     *,
     username: Optional[str] = None,
+    # Entry-scope extensions (all optional / backward compatible):
+    token: Optional[str] = None,
+    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
+    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
+    refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+    namespace: Optional[str] = None,
 ) -> list:
     """Get location data for a device (async, HA-compatible).
 
@@ -246,12 +253,20 @@ async def get_location_data_for_device(
     - The long-lived FCM receiver is provided by integration setup via a provider.
       This function only registers/unregisters callbacks; it does not start/stop the receiver.
     - If a Home Assistant aiohttp.ClientSession is provided, it will be reused for the Nova call.
+    - **Multi-entry safety:** When `namespace` is provided (e.g., the entry_id), this function
+      builds namespaced cache wrappers for TTL metadata to avoid collisions with other entries,
+      unless explicit `cache_get/cache_set` overrides are already supplied.
 
     Args:
         canonic_device_id: The canonical ID of the device to locate.
         name: The human-readable name of the device for logging purposes.
-        session: (Deprecated) An optional aiohttp.ClientSession. No longer used directly.
+        session: An optional aiohttp.ClientSession to reuse for the Nova call.
         username: The username for the request.
+        token: Optional, direct ADM token for flow-local validation.
+        cache_get: Optional async getter for TTL/aux metadata.
+        cache_set: Optional async setter for TTL/aux metadata.
+        refresh_override: Optional async function to refresh a token in isolation.
+        namespace: Optional entry-scoped namespace (e.g., config_entry.entry_id).
 
     Returns:
         A list of dictionaries containing location data, or an empty list on failure.
@@ -268,6 +283,31 @@ async def get_location_data_for_device(
     registered = False
     ctx = _CallbackContext()
     loop = asyncio.get_running_loop()
+
+    # Build namespaced cache wrappers if requested and no explicit overrides were given.
+    ns_get: Optional[Callable[[str], Awaitable[Any]]] = cache_get
+    ns_set: Optional[Callable[[str, Any], Awaitable[None]]] = cache_set
+    if namespace and (cache_get is None or cache_set is None):
+        try:
+            from custom_components.googlefindmy.Auth.token_cache import (
+                async_get_cached_value as _base_get,
+                async_set_cached_value as _base_set,
+            )
+
+            async def _ns_get(key: str) -> Any:
+                return await _base_get(f"{namespace}:{key}")
+
+            async def _ns_set(key: str, value: Any) -> None:
+                await _base_set(f"{namespace}:{key}", value)
+
+            # Only override the missing side(s)
+            if ns_get is None:
+                ns_get = _ns_get
+            if ns_set is None:
+                ns_set = _ns_set
+        except Exception as e:
+            # If token_cache is unavailable for any reason, continue without namespacing.
+            _LOGGER.debug("Namespaced cache wrapper setup failed (%s); proceeding without namespace.", e)
 
     try:
         # Generate request UUID
@@ -299,7 +339,14 @@ async def get_location_data_for_device(
         _LOGGER.info("Sending location request to Google API for %s...", name)
         try:
             _ = await async_nova_request(
-                NOVA_ACTION_API_SCOPE, hex_payload, username=username
+                NOVA_ACTION_API_SCOPE,
+                hex_payload,
+                username=username,
+                session=session,
+                token=token,
+                cache_get=ns_get,
+                cache_set=ns_set,
+                refresh_override=refresh_override,
             )
         except asyncio.CancelledError:
             raise
