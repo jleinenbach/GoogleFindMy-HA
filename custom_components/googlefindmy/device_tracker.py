@@ -9,6 +9,10 @@ Notes on design and consistency with the coordinator:
   like `accuracy_m` for recorder friendliness, while the entity's built-in accuracy
   property exposes an integer `gps_accuracy` to HA Core.
 - End devices link to the per-entry SERVICE device via `via_device=(DOMAIN, f"integration_{entry_id}")`.
+
+Entry-scope guarantees (C2):
+- Unique IDs are entry-scoped using the new schema: "<entry_id>:<device_id>".
+- Device Registry identifiers are also entry-scoped to avoid cross-account merges.
 """
 from __future__ import annotations
 
@@ -80,6 +84,11 @@ def _maybe_update_device_registry_name(
             )
     except Exception as e:  # noqa: BLE001 - best-effort only
         _LOGGER.debug("Device Registry name update failed for %s: %s", entity_id, e)
+
+
+def _entry_id_of(coordinator: GoogleFindMyCoordinator) -> str:
+    """Return the entry_id for namespacing (empty string if unavailable)."""
+    return getattr(getattr(coordinator, "config_entry", None), "entry_id", "") or ""
 
 
 # ---------------------------------------------------------------------------
@@ -176,12 +185,17 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         """Initialize the tracker entity."""
         super().__init__(coordinator)
         self._device = device
-        # Namespace unique_id by entry to avoid collisions in multi-account setups.
-        entry_id = getattr(getattr(coordinator, "config_entry", None), "entry_id", "default")
-        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{device['id']}"
+
+        entry_id = _entry_id_of(coordinator)
+        dev_id = device["id"]
+
+        # New unique_id schema: "<entry_id>:<device_id>" (entry-scoped).
+        self._attr_unique_id = f"{entry_id}:{dev_id}"
+
         # With has_entity_name=False we must set the entity's name ourselves.
         # If name is missing during cold boot, HA will show the entity_id; that's fine.
         self._attr_name = self._display_name(device.get("name"))
+
         # Persist a "last good" fix to keep map position usable when current accuracy is filtered
         self._last_good_accuracy_data: dict[str, Any] | None = None
 
@@ -238,10 +252,8 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     def device_info(self) -> DeviceInfo:
         """Return DeviceInfo with a stable configuration_url and safe naming.
 
-        Important for HA 2025.x:
-        - We never pass `default_name` here. `DeviceInfo` must fit the primary
-          category (identifiers/manufacturer/model). Supplying `default_*`
-          fields could re-categorize as secondary in some cores.
+        Important:
+        - Identifiers are entry-scoped to keep devices distinct across accounts.
         - Link this end device to the per-entry SERVICE device using `via_device`.
         """
         try:
@@ -256,8 +268,11 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             _LOGGER.debug("Could not determine Home Assistant URL, using fallback: %s", e)
             base_url = "http://homeassistant.local:8123"
 
+        entry_id = _entry_id_of(self.coordinator)
+        dev_id = self._device["id"]
+
         auth_token = self._get_map_token()
-        path = self._build_map_path(self._device["id"], auth_token, redirect=False)
+        path = self._build_map_path(dev_id, auth_token, redirect=False)
 
         # Avoid overwriting stored device names during cold boot
         raw_name = self._device.get("name")
@@ -269,15 +284,17 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             name_kwargs["name"] = display_name
 
         # Link against the per-entry service device
-        entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", None)
         via = service_device_identifier(entry_id) if entry_id else None
 
+        # Entry-scoped device identifier to avoid merges across accounts.
+        entry_scoped_identifier = f"{entry_id}:{dev_id}" if entry_id else dev_id
+
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device["id"])},
+            identifiers={(DOMAIN, entry_scoped_identifier)},
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}" if base_url else None,
-            serial_number=self._device["id"],  # technical id in the proper field
+            serial_number=dev_id,  # technical id in the proper field
             via_device=via,
             **name_kwargs,
         )
@@ -292,7 +309,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     def _get_map_token(self) -> str:
         """Generate a hardened token for map authentication (entry-scoped + weekly/static).
 
-        Token formula (kept consistent with buttons, sensors and map_view):
+        Token formula:
             md5( f"{ha_uuid}:{entry_id}:{week|static}" )[:16]
         """
         config_entry = getattr(self.coordinator, "config_entry", None)
