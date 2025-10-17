@@ -1,7 +1,7 @@
 # custom_components/googlefindmy/__init__.py
 """Google Find My Device integration for Home Assistant.
 
-Version: 2.6.2 — Unique-ID migration, storage refactor & lifecycle hardening
+Version: 2.6.3 — Unique-ID migration, storage refactor, lifecycle hardening & service split
 
 Highlights
 ----------
@@ -12,6 +12,7 @@ Highlights
 - One-time migration that namespaces entity unique_ids by entry_id (idempotent, collision-aware);
   migration flag is set only on full success; collisions produce a Repair issue.
 - Services are registered at integration level (async_setup) so they are always visible.
+- **Service metadata moved to services.yaml; handlers split into services.py (clean SoC).**
 - Clean lifecycle: refcounted shared FCM receiver; coordinator shutdown & cache flush on unload.
 - Defensive logging: redact tokens in URLs; never log PII (no coordinates/secrets).
 
@@ -19,6 +20,12 @@ Notes
 -----
 This module aims to be self-documenting. All public functions include precise docstrings
 (purpose, parameters, errors, security considerations). Keep comments/docstrings in English.
+
+Compatibility
+-------------
+- Designed for HA 2025.5+.
+- Future multi-account architecture: guard logic remains compatible; behavior is strict
+  (single active entry) until the multi-account feature is officially enabled.
 """
 
 from __future__ import annotations
@@ -263,6 +270,10 @@ def _is_active_entry(entry: ConfigEntry) -> bool:
     - LOADED: entry is fully operational
     - SETUP_IN_PROGRESS / SETUP_RETRY: entry is being (re)initialized
     All other states are considered non-active.
+
+    Rationale:
+        An explicit allow-list is resilient to future/legacy state matrices and
+        avoids misclassifying entries during transient states.
     """
     if entry.disabled_by:
         return False
@@ -547,6 +558,9 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         - Creates and initializes the singleton if missing.
         - Registers provider callbacks for API and LocateTracker once.
         - Maintains a reference counter to support multiple entries.
+
+    Security:
+        The FCM receiver holds no long-term secrets here; do not log PII or full tokens.
     """
     bucket = hass.data.setdefault(DOMAIN, {})
     fcm_lock = bucket.setdefault("fcm_lock", asyncio.Lock())
@@ -620,6 +634,10 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         Services must be registered from async_setup so they are always available,
         even if no config entry is loaded, which enables frontend validation of
         automations referencing these services.
+
+    Implementation:
+        - Register services once (idempotent) and keep their metadata in services.yaml.
+        - Pass a small context dict to services.py to avoid circular imports.
     """
     bucket = hass.data.setdefault(DOMAIN, {})
     bucket.setdefault("entries", {})  # entry_id -> RuntimeData
@@ -638,6 +656,8 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 "default_map_view_token_expiration": DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
                 "opt_map_view_token_expiration_key": OPT_MAP_VIEW_TOKEN_EXPIRATION,
                 "redact_url_token": _redact_url_token,
+                # Minimal fix: allow services.py to perform the real soft data->options migration when requested.
+                "soft_migrate_entry": _async_soft_migrate_data_to_options,
             }
             await async_register_services(hass, svc_ctx)
             bucket["services_registered"] = True
@@ -661,6 +681,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     Notes:
         * FCM acquisition/registration happens through a single deterministic path.
         * Default-entry is only set if exactly one active entry exists (deterministic).
+        * Guard is strict-by-design (single active entry) but remains compatible with
+          a future multi-account architecture.
     """
     # --- Multi-entry guard (robust & early) -----------------------------------
     all_entries = hass.config_entries.async_entries(DOMAIN)
@@ -1018,6 +1040,10 @@ async def async_remove_config_entry_device(
     - Add the id to `ignored_devices` to prevent automatic re-creation.
     - Return True to allow HA to remove the device record and its entities.
     - Never allow removing the integration's own "service" device (ident startswith 'integration').
+
+    Security:
+        Do not log full device identifiers together with user-chosen names in error paths.
+        Keep logs non-PII and bounded.
     """
     # Only handle devices that belong to this config entry
     if entry.entry_id not in device_entry.config_entries:
