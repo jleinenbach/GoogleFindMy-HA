@@ -1,7 +1,7 @@
 # custom_components/googlefindmy/__init__.py
 """Google Find My Device integration for Home Assistant.
 
-Version: 2.6 — Unique-ID migration, storage refactor & lifecycle hardening
+Version: 2.6.1 — Unique-ID migration, storage refactor & lifecycle hardening 
 
 Highlights
 ----------
@@ -262,14 +262,17 @@ def _is_active_entry(entry: ConfigEntry) -> bool:
 
     Active is defined as:
         - not disabled (disabled_by is falsy), and
-        - state not in {NOT_LOADED, UNLOADED, UNLOAD_IN_PROGRESS}.
+        - state not in {NOT_LOADED, UNLOAD_IN_PROGRESS}.
       (SETUP_* and MIGRATION are treated as active to avoid ambiguity.)
+
+    Notes:
+        Home Assistant does not define a 'UNLOADED' state. Use NOT_LOADED to represent
+        an entry that is not loaded. See the official lifecycle states in the developer docs.
     """
     if entry.disabled_by:
         return False
     return entry.state not in {
         ConfigEntryState.NOT_LOADED,
-        ConfigEntryState.UNLOADED,
         ConfigEntryState.UNLOAD_IN_PROGRESS,
     }
 
@@ -643,7 +646,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     Order of operations (important):
       1) Multi-entry guard: if more than one *active* entry exists, choose a deterministic
-         'primary' entry and abort all others with a Repair issue (avoid mutual abort); clear default.
+         'primary' entry and abort non-primary entries with a Repair issue (avoid mutual abort);
+         clear default on conflicts. The primary proceeds with setup (issue remains to inform user).
       2) Initialize and register TokenCache (includes legacy migration).
       3) Soft-migrate options and unique_ids; acquire and wire the shared FCM provider.
       4) Seed token cache from entry data (secrets bundle or individual tokens).
@@ -656,32 +660,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """
     # --- Multi-entry guard (robust & early) -----------------------------------
     all_entries = hass.config_entries.async_entries(DOMAIN)
-    # An active entry is one that is not disabled and is currently loaded or trying to load.
     active_entries = [e for e in all_entries if _is_active_entry(e)]
 
     if len(active_entries) > 1:
-        # If there are multiple active entries, create a repair issue and fail setup for all of them.
-        # This prevents race conditions and ensures a consistent state.
+        primary = _primary_active_entry(all_entries)
+        # Keep a repair issue to inform the user about duplicates
         ir.async_create_issue(
             hass,
             DOMAIN,
             "multiple_config_entries",
-            is_fixable=False,  # User must manually delete the entries.
+            is_fixable=False,  # User must manually delete the extra entries.
             severity=ir.IssueSeverity.ERROR,
             translation_key="multiple_config_entries",
             translation_placeholders={
                 "entries": ", ".join([e.title or e.entry_id for e in active_entries])
             },
         )
-        _LOGGER.error(
-            "Multiple config entries found for %s. Integration setup aborted for entry '%s'. "
-            "Please remove all but one entry from Settings > Devices & Services to resolve this issue.",
-            DOMAIN,
-            entry.entry_id
-        )
-        return False
+        if primary and primary.entry_id != entry.entry_id:
+            _LOGGER.error(
+                "Multiple %s config entries detected. Primary chosen: '%s'. "
+                "Aborting setup of non-primary entry '%s'.",
+                DOMAIN,
+                primary.title or primary.entry_id,
+                entry.title or entry.entry_id,
+            )
+            return False
+        # If this entry is primary, continue with setup (issue stays until user resolves).
     else:
-        # If the condition is resolved (only one entry left), remove the repair issue.
+        # If the condition is resolved (only one active entry left), remove the repair issue.
         ir.async_delete_issue(hass, DOMAIN, "multiple_config_entries")
 
     # Monotonic performance markers (captured even before coordinator exists)
