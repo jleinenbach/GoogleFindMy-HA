@@ -73,7 +73,6 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import (
     EVENT_DEVICE_REGISTRY_UPDATED,
-    DeviceEntryDisabler,
 )
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -643,7 +642,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 return ident
         return None
 
-    def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
+    def _ensure_service_device_exists(self, entry: 'ConfigEntry | None' = None) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
     
         This keeps diagnostic entities (e.g. polling/auth-status) grouped under a stable
@@ -768,6 +767,52 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             len(present),
             len(enabled),
         )
+
+    # --- NEW: Create/refresh DR entries for end devices (entry-scoped) -----
+    def _ensure_registry_for_devices(
+        self, devices: List[Dict[str, Any]], ignored: Set[str]
+    ) -> int:
+        """Ensure end-device DR entries exist and link via the per-entry service device.
+
+        Returns:
+            Count of devices that were created or updated.
+        """
+        entry_id = self._entry_id()
+        if not entry_id:
+            return 0
+
+        dev_reg = dr.async_get(self.hass)
+        created = 0
+
+        for d in devices:
+            dev_id = d.get("id")
+            if not isinstance(dev_id, str) or dev_id in ignored:
+                continue
+
+            identifiers = {(DOMAIN, dev_id)}
+            dev = dev_reg.async_get_device(identifiers=identifiers)
+
+            # Only set a real label; never write placeholders on cold boot
+            raw_name = (d.get("name") or "").strip()
+            use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
+
+            if dev is None:
+                dev = dev_reg.async_get_or_create(
+                    config_entry_id=entry_id,
+                    identifiers=identifiers,
+                    manufacturer="Google",
+                    model="Find My Device",
+                    name=use_name,
+                    via_device_id=getattr(self, "_service_device_id", None),
+                )
+                created += 1
+            else:
+                # Keep name fresh if not user-overridden and a new upstream label is available
+                if use_name and not dev.name_by_user and dev.name != use_name:
+                    dev_reg.async_update_device(device_id=dev.id, name=use_name)
+                    created += 1  # count as an update for logging parity
+
+        return created
 
     # --- NEW: Repairs + Auth state helpers ---------------------------------
     def _get_account_email(self) -> str:
@@ -2064,6 +2109,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         R = 6371000.0  # Earth radius in meters
         lat1_r, lon1_r = radians(float(lat1)), radians(float(lon1))
+        lat2_r, lon2_r = radians(float(lat2)), float(lon2) if isinstance(lon2, (int, float)) else float(lon2)  # type: ignore[arg-type]
         lat2_r, lon2_r = radians(float(lat2)), radians(float(lon2))
         dlat = lat2_r - lat1_r
         dlon = lon2_r - lon1_r
