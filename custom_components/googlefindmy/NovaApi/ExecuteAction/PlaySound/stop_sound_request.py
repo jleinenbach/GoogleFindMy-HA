@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Optional, Callable, Awaitable, Any
 
 import aiohttp
 from aiohttp import ClientSession
@@ -46,17 +46,36 @@ async def async_submit_stop_sound_request(
     gcm_registration_id: str,
     *,
     session: Optional[ClientSession] = None,
+    # Entry-scope & flow-friendly optional parameters (all pass-through / optional):
+    namespace: Optional[str] = None,
+    username: Optional[str] = None,
+    token: Optional[str] = None,
+    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
+    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
+    refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
 ) -> Optional[str]:
     """Submit a 'Stop Sound' action using the shared async Nova client.
 
     This function handles the network request and robustly catches common API
     and network errors, returning None in those cases to prevent crashes.
 
+    Notes on parameters:
+        - ``session``: Optional aiohttp session reuse. Supported by the Nova client.
+        - ``namespace``: Entry-scope hint (e.g., config_entry.entry_id). Forwarded to
+          newer Nova clients when supported; safely ignored on older ones.
+        - ``username``, ``token``, ``cache_get``, ``cache_set``, ``refresh_override``:
+          Optional overrides to support isolated flow validation or custom cache I/O.
+
     Args:
         canonic_device_id: The canonical ID of the target device.
         gcm_registration_id: The FCM registration token for push notifications.
-        session: (Deprecated) The aiohttp ClientSession. No longer used as the
-                 nova client handles session management internally.
+        session: Optional aiohttp ClientSession to reuse (preferred in HA).
+        namespace: Optional entry-scoped namespace to avoid cross-entry cache bleed.
+        username: Optional Google account e-mail for the request context.
+        token: Optional direct ADM token to bypass cache for this call.
+        cache_get: Optional async getter for TTL/aux metadata (flow-local).
+        cache_set: Optional async setter for TTL/aux metadata (flow-local).
+        refresh_override: Optional async function producing a fresh ADM token.
 
     Returns:
         A hex string of the response payload on success (can be empty),
@@ -65,8 +84,32 @@ async def async_submit_stop_sound_request(
     """
     hex_payload = stop_sound_request(canonic_device_id, gcm_registration_id)
     try:
-        # The async Nova client manages session reuse internally; do not pass session through.
-        return await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+        # Prefer the most recent Nova client signature that accepts `namespace=...`.
+        try:
+            return await async_nova_request(
+                NOVA_ACTION_API_SCOPE,
+                hex_payload,
+                username=username,
+                session=session,
+                token=token,
+                cache_get=cache_get,
+                cache_set=cache_set,
+                refresh_override=refresh_override,
+                namespace=namespace,  # may raise TypeError on older clients
+            )
+        except TypeError:
+            # Backward-compat path: older Nova clients without `namespace`.
+            return await async_nova_request(
+                NOVA_ACTION_API_SCOPE,
+                hex_payload,
+                username=username,
+                session=session,
+                token=token,
+                cache_get=cache_get,
+                cache_set=cache_set,
+                refresh_override=refresh_override,
+            )
+
     except asyncio.CancelledError:
         raise
     except NovaRateLimitError:
