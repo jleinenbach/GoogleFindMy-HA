@@ -27,7 +27,7 @@ Security & privacy:
 - Email addresses are normalized (lowercased) before being used as unique IDs.
 
 Docstring & comments:
-- All docstrings and inline comments are written in English as requested.
+- All docstrings and inline comments are written in English.
 """
 
 from __future__ import annotations
@@ -273,7 +273,7 @@ def _extract_oauth_candidates_from_secrets(data: Dict[str, Any]) -> List[Tuple[s
     """Return plausible tokens in preferred order from a secrets bundle.
 
     Priority:
-      1) 'aas_token' (Account Authentication Service token) — often the most stable here
+      1) 'aas_token' (Account Authentication Service token)
       2) Flat OAuth-ish keys ('oauth_token', 'access_token', etc.)
       3) 'fcm_credentials.installation.token' (installation JWT)
       4) 'fcm_credentials.fcm.registration.token' (registration token)
@@ -389,7 +389,7 @@ async def async_pick_working_token(email: str, candidates: List[Tuple[str, str]]
 
 
 # ---------------------------
-# Shared interpreter for either/or credential choice
+# Shared interpreter for either/or credential choice (initial flow & options)
 # ---------------------------
 def _interpret_credentials_choice(
     user_input: Dict[str, Any],
@@ -445,6 +445,68 @@ def _interpret_credentials_choice(
 
 
 # ---------------------------
+# Reauth-specific helpers
+# ---------------------------
+_REAUTH_FIELD_SECRETS = "secrets_json"
+_REAUTH_FIELD_TOKEN = "new_oauth_token"
+
+
+def _interpret_reauth_choice(user_input: Dict[str, Any]) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
+    """Interpret reauth input where the email is fixed by the entry.
+
+    Returns:
+        (method, payload, error_key)
+        - method: "secrets" | "manual" | None
+        - payload: dict (parsed secrets) for "secrets", str (token) for "manual"
+        - error_key: translation key if validation fails
+    """
+    secrets_raw = (user_input.get(_REAUTH_FIELD_SECRETS) or "").strip()
+    token_raw = (user_input.get(_REAUTH_FIELD_TOKEN) or "").strip()
+
+    has_secrets = bool(secrets_raw)
+    has_token = bool(token_raw)
+
+    # Exactly one must be provided
+    if (has_secrets and has_token) or (not has_secrets and not has_token):
+        return None, None, "choose_one"
+
+    if has_secrets:
+        try:
+            parsed = json.loads(secrets_raw)
+            if not isinstance(parsed, dict):
+                raise TypeError()
+        except (json.JSONDecodeError, TypeError):
+            return None, None, "invalid_json"
+
+        # Extract minimal plausibility from secrets (must contain at least 1 candidate token + an email)
+        email = _extract_email_from_secrets(parsed)
+        candidates = _extract_oauth_candidates_from_secrets(parsed)
+        if not (email and _email_valid(email) and candidates):
+            return None, None, "invalid_token"
+        return "secrets", parsed, None
+
+    # Manual token path (email is fixed from the entry)
+    if not (_token_plausible(token_raw) and not _disqualifies_oauth_for_persistence(token_raw)):
+        return None, None, "invalid_token"
+
+    return "manual", token_raw, None
+
+
+def _normalize_email(email: str | None) -> str:
+    """Normalize emails consistently for unique_id / comparisons."""
+    return (email or "").strip().lower()
+
+
+def _find_entry_by_email(hass, email: str) -> Optional[ConfigEntry]:
+    """Return an existing entry that matches the normalized email, if any."""
+    target = _normalize_email(email)
+    for e in hass.config_entries.async_entries(DOMAIN):
+        if _normalize_email(e.data.get(CONF_GOOGLE_EMAIL)) == target:
+            return e
+    return None
+
+
+# ---------------------------
 # Config Flow
 # ---------------------------
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -495,7 +557,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 assert method == "secrets" and email and cands
                 # Early unique_id to avoid duplicate flows/entries for this account
-                uid = email.strip().lower()
+                uid = _normalize_email(email)
                 await self.async_set_unique_id(uid)
                 self._abort_if_unique_id_configured()
 
@@ -536,7 +598,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 assert method == "manual" and email and cands
                 # Early unique_id
-                uid = email.strip().lower()
+                uid = _normalize_email(email)
                 await self.async_set_unique_id(uid)
                 self._abort_if_unique_id_configured()
 
@@ -570,7 +632,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: Dict[str, str] = {}
 
         # Safety: ensure unique_id is set (should already be done)
-        email_for_uid = (self._auth_data.get(CONF_GOOGLE_EMAIL) or "").strip().lower()
+        email_for_uid = _normalize_email(self._auth_data.get(CONF_GOOGLE_EMAIL))
         if email_for_uid and not self.unique_id:
             await self.async_set_unique_id(email_for_uid)
             self._abort_if_unique_id_configured()
@@ -675,82 +737,146 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Collect and validate new credentials, then update+reload the entry."""
+        """Collect and validate new credentials for this entry, then update+reload.
+
+        UX requirements:
+        - The email address is fixed by the existing entry and must not be editable.
+        - The form accepts exactly one of:
+          * Full `secrets.json` (multiline) OR
+          * A new OAuth token (single-line).
+        - If `secrets.json` belongs to a different Google account:
+          * If another entry with that email already exists -> abort("already_configured")
+          * Else -> show `email_mismatch` error (user should add a new integration instead).
+        """
         errors: Dict[str, str] = {}
 
-        # Schema with empty fields (never echo secrets)
+        # Resolve the fixed entry/email once; used for both validation and placeholder.
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        assert entry is not None
+        fixed_email = _normalize_email(entry.data.get(CONF_GOOGLE_EMAIL))
+
+        # Schema with only secrets/token (never echo secrets; no email field)
         if selector is not None:
             schema = vol.Schema(
                 {
-                    vol.Optional("secrets_json"): selector({"text": {"multiline": True}}),
-                    vol.Optional(CONF_OAUTH_TOKEN): str,
-                    vol.Optional(CONF_GOOGLE_EMAIL): str,
+                    vol.Optional(_REAUTH_FIELD_SECRETS): selector({"text": {"multiline": True}}),
+                    vol.Optional(_REAUTH_FIELD_TOKEN): str,
                 }
             )
         else:
             schema = vol.Schema(
                 {
-                    vol.Optional("secrets_json"): str,
-                    vol.Optional(CONF_OAUTH_TOKEN): str,
-                    vol.Optional(CONF_GOOGLE_EMAIL): str,
+                    vol.Optional(_REAUTH_FIELD_SECRETS): str,
+                    vol.Optional(_REAUTH_FIELD_TOKEN): str,
                 }
             )
 
         if user_input is not None:
-            method, email, cands, err = _interpret_credentials_choice(
-                user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
-            )
+            method, payload, err = _interpret_reauth_choice(user_input)
             if err:
                 if err == "invalid_json":
-                    errors["secrets_json"] = "invalid_json"
+                    errors[_REAUTH_FIELD_SECRETS] = "invalid_json"
                 else:
                     errors["base"] = err
             else:
                 try:
-                    assert email and cands
-                    chosen = await async_pick_working_token(email, cands)
-                    if not chosen:
-                        errors["base"] = "cannot_connect"
-                    else:
-                        to_persist = chosen
-                        if _disqualifies_oauth_for_persistence(to_persist):
-                            alt = next((v for (_src, v) in cands if not _disqualifies_oauth_for_persistence(v)), None)
-                            if alt:
-                                to_persist = alt
-                                _LOGGER.debug("Reauth: non-OAuth-shaped token validated; persisting alternative.")
-                            else:
-                                _LOGGER.warning("Reauth: only non-OAuth-shaped token available; persisting validated value.")
+                    if method == "manual":
+                        # Validate the single manual token against the fixed email.
+                        token = str(payload)
+                        chosen = await async_pick_working_token(fixed_email, [("manual", token)])
+                        if not chosen:
+                            errors["base"] = "cannot_connect"
+                        else:
+                            to_persist = chosen
+                            # In the unlikely case the token looks non-OAuth-shaped, we still persist the validated value.
+                            if _disqualifies_oauth_for_persistence(to_persist):
+                                _LOGGER.warning("Reauth: validated token is non-OAuth-shaped; persisting as provided.")
+                            updated_data = dict(entry.data)
+                            updated_data.update(
+                                {
+                                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                    CONF_OAUTH_TOKEN: to_persist,
+                                    CONF_GOOGLE_EMAIL: fixed_email,
+                                }
+                            )
+                            return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
 
-                        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
-                        assert entry is not None
-                        updated_data = dict(entry.data)
-                        updated_data.update(
-                            {
-                                DATA_AUTH_METHOD: (_AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL),
-                                CONF_OAUTH_TOKEN: to_persist,
-                                CONF_GOOGLE_EMAIL: email,
-                            }
-                        )
-                        return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
+                    elif method == "secrets":
+                        parsed: Dict[str, Any] = dict(payload)  # type: ignore[assignment]
+                        extracted_email = _normalize_email(_extract_email_from_secrets(parsed))
+                        cands = _extract_oauth_candidates_from_secrets(parsed)
+
+                        # If secrets.json belongs to a different account, apply the CF-3 rules:
+                        if extracted_email and extracted_email != fixed_email:
+                            existing = _find_entry_by_email(self.hass, extracted_email)
+                            if existing is not None:
+                                # That account is already configured elsewhere -> abort.
+                                return self.async_abort(reason="already_configured")
+                            # Otherwise, we forbid account switching in reauth.
+                            errors["base"] = "email_mismatch"
+                        else:
+                            # Validate candidates; defer on guard.
+                            chosen = await async_pick_working_token(fixed_email, cands)
+                            if not chosen:
+                                errors["base"] = "cannot_connect"
+                            else:
+                                to_persist = chosen
+                                if _disqualifies_oauth_for_persistence(to_persist):
+                                    alt = next((v for (_src, v) in cands if not _disqualifies_oauth_for_persistence(v)), None)
+                                    if alt:
+                                        to_persist = alt
+                                        _LOGGER.debug("Reauth: non-OAuth-shaped token validated; persisting alternative from secrets.")
+                                    else:
+                                        _LOGGER.warning("Reauth: only non-OAuth-shaped token available; persisting validated value.")
+
+                                updated_data = dict(entry.data)
+                                updated_data.update(
+                                    {
+                                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                        CONF_OAUTH_TOKEN: to_persist,
+                                        CONF_GOOGLE_EMAIL: fixed_email,
+                                    }
+                                )
+                                return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Accept the first candidate and allow setup to validate with entry-scoped cache
-                        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
-                        assert entry is not None
-                        updated_data = dict(entry.data)
-                        updated_data.update(
-                            {
-                                DATA_AUTH_METHOD: (_AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL),
-                                CONF_OAUTH_TOKEN: cands[0][1],
-                                CONF_GOOGLE_EMAIL: email,
-                            }
-                        )
-                        return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
+                        if method == "manual":
+                            token = str(payload)
+                            updated_data = dict(entry.data)
+                            updated_data.update(
+                                {
+                                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                    CONF_OAUTH_TOKEN: token,
+                                    CONF_GOOGLE_EMAIL: fixed_email,
+                                }
+                            )
+                            return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
+                        if method == "secrets":
+                            parsed = dict(payload)  # type: ignore[assignment]
+                            cands = _extract_oauth_candidates_from_secrets(parsed)
+                            token_first = cands[0][1] if cands else ""
+                            updated_data = dict(entry.data)
+                            updated_data.update(
+                                {
+                                    DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                    CONF_OAUTH_TOKEN: token_first,
+                                    CONF_GOOGLE_EMAIL: fixed_email,
+                                }
+                            )
+                            return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
+
                     _LOGGER.error("Reauth validation failed: %s", err2)
                     key = _map_api_exc_to_error_key(err2)
                     errors["base"] = key
 
-        return self.async_show_form(step_id="reauth_confirm", data_schema=schema, errors=errors)
+        # Pass the fixed email via description placeholders so the UI can display it as text.
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"email": fixed_email},
+        )
 
 
 # ---------------------------
