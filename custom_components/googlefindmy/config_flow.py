@@ -314,6 +314,13 @@ def _extract_oauth_candidates_from_secrets(data: Dict[str, Any]) -> List[Tuple[s
     return cands
 
 
+def _cand_labels(cands: List[Tuple[str, str]]) -> str:
+    """Return a short, safe label list for candidates (no secrets)."""
+    labels = [src for src, _ in cands][:5]
+    tail = "…" if len(cands) > 5 else ""
+    return ", ".join(labels) + tail
+
+
 # ---------------------------
 # API probing helpers (signature-robust)
 # ---------------------------
@@ -372,18 +379,20 @@ async def async_pick_working_token(email: str, candidates: List[Tuple[str, str]]
         try:
             api = await _async_new_api_for_probe(email=email, token=token)
             await _try_probe_devices(api, email=email, token=token)
-            _LOGGER.debug("Token from '%s' validated successfully.", source)
+            _LOGGER.debug("Token probe OK (source=%s, email=%s).", source, email)
             return token
         except Exception as err:  # noqa: BLE001 - capture library/network/auth
             if _is_multi_entry_guard_error(err):
-                _LOGGER.warning(
-                    "Token from '%s': multi-entry guard detected; deferring validation to setup.",
+                _LOGGER.info(
+                    "Auth guard: multiple config entries detected; deferring token validation to setup "
+                    "(source=%s, email=%s).",
                     source,
+                    email,
                 )
                 return token
             # For diagnostics, map (but do not leak specifics). Keep going.
             key = _map_api_exc_to_error_key(err)
-            _LOGGER.debug("Token from '%s' failed probe (mapped=%s).", source, key)
+            _LOGGER.debug("Token probe failed (source=%s, mapped=%s, email=%s).", source, key, email)
             continue
     return None
 
@@ -530,10 +539,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Ask the user to choose how to provide credentials."""
         if user_input is not None:
             method = user_input.get("auth_method")
+            _LOGGER.debug("User step: method selected = %s", method)
             if method == _AUTH_METHOD_SECRETS:
                 return await self.async_step_secrets_json()
             if method == _AUTH_METHOD_INDIVIDUAL:
                 return await self.async_step_individual_tokens()
+        _LOGGER.debug("User step: presenting auth method selection form.")
         return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
 
     # ------------------ Step: secrets.json path ------------------
@@ -546,25 +557,43 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             schema = vol.Schema({vol.Required("secrets_json"): selector({"text": {"multiline": True}})})
 
         if user_input is not None:
+            raw = (user_input.get("secrets_json") or "")
+            _LOGGER.debug(
+                "Secrets step: received input (chars=%d). Starting parse/validation.",
+                len(raw),
+            )
             method, email, cands, err = _interpret_credentials_choice(
                 user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
             )
             if err:
                 if err == "invalid_json":
                     errors["secrets_json"] = "invalid_json"
+                    _LOGGER.debug("Secrets step: invalid JSON in secrets.json.")
                 else:
                     errors["base"] = err
+                    _LOGGER.debug("Secrets step: input error '%s' (empty/mixed/invalid).", err)
             else:
                 assert method == "secrets" and email and cands
+                _LOGGER.debug(
+                    "Secrets step: parsed OK (email=%s, candidates=%d: %s).",
+                    _normalize_email(email),
+                    len(cands),
+                    _cand_labels(cands),
+                )
                 # Early unique_id to avoid duplicate flows/entries for this account
                 uid = _normalize_email(email)
                 await self.async_set_unique_id(uid)
+                _LOGGER.debug("Secrets step: set unique_id=%s and checked for duplicates.", uid)
                 self._abort_if_unique_id_configured()
 
                 # Online validation of candidates (defer only if guard is raised)
                 chosen = await async_pick_working_token(email, cands)
                 if not chosen:
                     errors["base"] = "cannot_connect"
+                    _LOGGER.info(
+                        "Secrets step: no candidate token validated online (email=%s) -> cannot_connect.",
+                        uid,
+                    )
                 else:
                     # Persist an OAuth-shaped candidate if possible; otherwise keep the validated value.
                     to_persist = chosen
@@ -572,17 +601,29 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         alt = next((v for (_src, v) in cands if not _disqualifies_oauth_for_persistence(v)), None)
                         if alt:
                             to_persist = alt
-                            _LOGGER.debug("Secrets path: non-OAuth-shaped token validated; persisting alternative candidate.")
+                            _LOGGER.debug(
+                                "Secrets step: validated non-OAuth-shaped token; persisting alternative OAuth-shaped candidate."
+                            )
                         else:
-                            _LOGGER.warning("Secrets path: only non-OAuth-shaped token available; persisting validated value.")
+                            _LOGGER.warning(
+                                "Secrets step: only non-OAuth-shaped token available; persisting validated value."
+                            )
 
                     self._auth_data = {
                         DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
                         CONF_OAUTH_TOKEN: to_persist,
                         CONF_GOOGLE_EMAIL: email,
                     }
+                    _LOGGER.info(
+                        "Secrets step: staged credentials for email=%s (method=secrets).",
+                        uid,
+                    )
                     return await self.async_step_device_selection()
 
+        if errors:
+            _LOGGER.debug("Secrets step: showing form with errors=%s", errors)
+        else:
+            _LOGGER.debug("Secrets step: presenting form.")
         return self.async_show_form(step_id="secrets_json", data_schema=schema, errors=errors)
 
     # ------------------ Step: manual token + email ------------------
@@ -590,30 +631,44 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Collect manual OAuth token and Google email, then validate."""
         errors: Dict[str, str] = {}
         if user_input is not None:
+            _LOGGER.debug("Manual token step: received input (email present=%s).", bool(user_input.get(CONF_GOOGLE_EMAIL)))
             method, email, cands, err = _interpret_credentials_choice(
                 user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
             )
             if err:
                 errors["base"] = err
+                _LOGGER.debug("Manual token step: input error '%s'.", err)
             else:
                 assert method == "manual" and email and cands
-                # Early unique_id
                 uid = _normalize_email(email)
                 await self.async_set_unique_id(uid)
+                _LOGGER.debug("Manual token step: set unique_id=%s and checked for duplicates.", uid)
                 self._abort_if_unique_id_configured()
 
                 # Validate the single manual token (defer only on guard)
                 chosen = await async_pick_working_token(email, cands)
                 if not chosen:
                     errors["base"] = "cannot_connect"
+                    _LOGGER.info(
+                        "Manual token step: token did not validate online (email=%s) -> cannot_connect.",
+                        uid,
+                    )
                 else:
                     self._auth_data = {
                         DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
                         CONF_OAUTH_TOKEN: chosen,
                         CONF_GOOGLE_EMAIL: email,
                     }
+                    _LOGGER.info(
+                        "Manual token step: staged credentials for email=%s (method=manual).",
+                        uid,
+                    )
                     return await self.async_step_device_selection()
 
+        if errors:
+            _LOGGER.debug("Manual token step: showing form with errors=%s", errors)
+        else:
+            _LOGGER.debug("Manual token step: presenting form.")
         return self.async_show_form(step_id="individual_tokens", data_schema=STEP_INDIVIDUAL_DATA_SCHEMA, errors=errors)
 
     # ------------------ Shared: build API for final probe ------------------
@@ -635,19 +690,28 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         email_for_uid = _normalize_email(self._auth_data.get(CONF_GOOGLE_EMAIL))
         if email_for_uid and not self.unique_id:
             await self.async_set_unique_id(email_for_uid)
+            _LOGGER.debug("Device selection: unique_id set late to %s.", email_for_uid)
             self._abort_if_unique_id_configured()
 
         # Attempt a single device probe (optional; setup will re-validate anyway)
         if not self._available_devices:
             try:
                 api, username, token = await self._async_build_api_and_username()
+                _LOGGER.debug("Device selection: probing devices for email=%s.", _normalize_email(username))
                 devices = await _try_probe_devices(api, email=username, token=token)
                 if devices:
-                    # Keep a compact tuple (name, id) list for potential UX usage
                     self._available_devices = [(d.get("name") or d.get("id") or "", d.get("id") or "") for d in devices]
+                    _LOGGER.debug("Device selection: probe returned %d device(s).", len(self._available_devices))
+                else:
+                    _LOGGER.debug("Device selection: probe returned no devices.")
             except Exception as err:  # noqa: BLE001
                 if _is_multi_entry_guard_error(err):
-                    _LOGGER.warning("Device probe hit a multi-entry guard; deferring validation to setup.")
+                    _LOGGER.info(
+                        "Auth guard: device probe deferred to setup due to multiple config entries "
+                        "(email=%s, entry_id=%s).",
+                        self._auth_data.get(CONF_GOOGLE_EMAIL),
+                        getattr(getattr(self, 'config_entry', None), 'entry_id', None),
+                    )
                 else:
                     key = _map_api_exc_to_error_key(err)
                     if key == "invalid_auth":
@@ -656,6 +720,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors["base"] = "cannot_connect"
                     else:
                         errors["base"] = "unknown"
+                    _LOGGER.debug("Device selection: probe failed (mapped=%s).", key)
 
         # Build options schema dynamically based on available constants
         schema_fields: Dict[Any, Any] = {
@@ -676,7 +741,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         base_schema = vol.Schema(schema_fields)
 
         if errors:
-            # Keep the same step with errors surfaced; schema is shown to allow retries.
+            _LOGGER.debug("Device selection: showing form with errors=%s", errors)
             return self.async_show_form(step_id="device_selection", data_schema=base_schema, errors=errors)
 
         # Default values (only for present fields)
@@ -715,6 +780,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 options_payload[real_key] = user_input.get(real_key, defaults.get(real_key))
 
             try:
+                _LOGGER.info(
+                    "Creating config entry for email=%s (with options).",
+                    _normalize_email(self._auth_data.get(CONF_GOOGLE_EMAIL)),
+                )
                 return self.async_create_entry(
                     title=self._auth_data.get(CONF_GOOGLE_EMAIL) or "Google Find My Device",
                     data=data_payload,
@@ -722,6 +791,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             except TypeError:
                 # Older HA cores do not support options in create_entry; coalesce to data.
+                _LOGGER.info(
+                    "Creating config entry for email=%s (options merged into data for legacy core).",
+                    _normalize_email(self._auth_data.get(CONF_GOOGLE_EMAIL)),
+                )
                 shadow = dict(data_payload)
                 shadow.update(options_payload)
                 return self.async_create_entry(
@@ -729,11 +802,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     data=shadow,
                 )
 
+        _LOGGER.debug("Device selection: presenting form.")
         return self.async_show_form(step_id="device_selection", data_schema=schema_with_defaults)
 
     # ------------------ Reauthentication ------------------
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
         """Start a reauthentication flow linked to an existing entry context."""
+        _LOGGER.debug("Reauth: starting for existing entry.")
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -772,12 +847,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         if user_input is not None:
+            _LOGGER.debug("Reauth: input received for fixed_email=%s.", fixed_email)
             method, payload, err = _interpret_reauth_choice(user_input)
             if err:
                 if err == "invalid_json":
                     errors[_REAUTH_FIELD_SECRETS] = "invalid_json"
+                    _LOGGER.debug("Reauth: invalid JSON in secrets.")
                 else:
                     errors["base"] = err
+                    _LOGGER.debug("Reauth: input error '%s'.", err)
             else:
                 try:
                     if method == "manual":
@@ -786,9 +864,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         chosen = await async_pick_working_token(fixed_email, [("manual", token)])
                         if not chosen:
                             errors["base"] = "cannot_connect"
+                            _LOGGER.info("Reauth: manual token did not validate -> cannot_connect (email=%s).", fixed_email)
                         else:
                             to_persist = chosen
-                            # In the unlikely case the token looks non-OAuth-shaped, we still persist the validated value.
                             if _disqualifies_oauth_for_persistence(to_persist):
                                 _LOGGER.warning("Reauth: validated token is non-OAuth-shaped; persisting as provided.")
                             updated_data = dict(entry.data)
@@ -799,33 +877,48 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     CONF_GOOGLE_EMAIL: fixed_email,
                                 }
                             )
+                            _LOGGER.info("Reauth: updating entry and reloading (email=%s, method=manual).", fixed_email)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
 
                     elif method == "secrets":
                         parsed: Dict[str, Any] = dict(payload)  # type: ignore[assignment]
                         extracted_email = _normalize_email(_extract_email_from_secrets(parsed))
                         cands = _extract_oauth_candidates_from_secrets(parsed)
+                        _LOGGER.debug(
+                            "Reauth: secrets parsed (extracted_email=%s, candidates=%d: %s).",
+                            extracted_email,
+                            len(cands),
+                            _cand_labels(cands),
+                        )
 
                         # If secrets.json belongs to a different account, apply the CF-3 rules:
                         if extracted_email and extracted_email != fixed_email:
                             existing = _find_entry_by_email(self.hass, extracted_email)
                             if existing is not None:
-                                # That account is already configured elsewhere -> abort.
+                                _LOGGER.info(
+                                    "Reauth: secrets belong to already-configured account (%s) -> abort already_configured.",
+                                    extracted_email,
+                                )
                                 return self.async_abort(reason="already_configured")
-                            # Otherwise, we forbid account switching in reauth.
                             errors["base"] = "email_mismatch"
+                            _LOGGER.debug(
+                                "Reauth: email mismatch (fixed=%s, provided=%s).",
+                                fixed_email,
+                                extracted_email,
+                            )
                         else:
                             # Validate candidates; defer on guard.
                             chosen = await async_pick_working_token(fixed_email, cands)
                             if not chosen:
                                 errors["base"] = "cannot_connect"
+                                _LOGGER.info("Reauth: token(s) did not validate -> cannot_connect (email=%s).", fixed_email)
                             else:
                                 to_persist = chosen
                                 if _disqualifies_oauth_for_persistence(to_persist):
                                     alt = next((v for (_src, v) in cands if not _disqualifies_oauth_for_persistence(v)), None)
                                     if alt:
                                         to_persist = alt
-                                        _LOGGER.debug("Reauth: non-OAuth-shaped token validated; persisting alternative from secrets.")
+                                        _LOGGER.debug("Reauth: non-OAuth-shaped token -> persisting OAuth-shaped alternative.")
                                     else:
                                         _LOGGER.warning("Reauth: only non-OAuth-shaped token available; persisting validated value.")
 
@@ -837,9 +930,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                         CONF_GOOGLE_EMAIL: fixed_email,
                                     }
                                 )
+                                _LOGGER.info("Reauth: updating entry and reloading (email=%s, method=secrets).", fixed_email)
                                 return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
+                        _LOGGER.info(
+                            "Auth guard: reauth deferred to setup (multiple entries) "
+                            "(fixed_email=%s, entry_id=%s, method=%s).",
+                            fixed_email,
+                            getattr(entry, "entry_id", None),
+                            method,
+                        )
                         # Accept the first candidate and allow setup to validate with entry-scoped cache
                         if method == "manual":
                             token = str(payload)
@@ -996,6 +1097,7 @@ class OptionsFlowHandler(OptionsFlowBase):
                 if k in user_input:
                     new_options[k] = user_input[k]
             # Returning create_entry triggers automatic reload when supported.
+            _LOGGER.info("Options: updating non-secret settings for entry_id=%s.", entry.entry_id)
             return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(
@@ -1013,6 +1115,7 @@ class OptionsFlowHandler(OptionsFlowBase):
         ignored_map, _migrated = coerce_ignored_mapping(raw)
 
         if not ignored_map:
+            _LOGGER.debug("Visibility: no ignored devices for entry_id=%s.", entry.entry_id)
             return self.async_abort(reason="no_ignored_devices")
 
         if callable(ignored_choices_for_ui):
@@ -1033,6 +1136,11 @@ class OptionsFlowHandler(OptionsFlowBase):
             new_options = dict(entry.options)
             new_options[OPT_IGNORED_DEVICES] = ignored_map
             new_options[OPT_OPTIONS_SCHEMA_VERSION] = 2
+            _LOGGER.info(
+                "Visibility: restored %d device(s) from ignored list (entry_id=%s).",
+                len(to_restore),
+                entry.entry_id,
+            )
             return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(step_id="visibility", data_schema=schema)
@@ -1064,6 +1172,11 @@ class OptionsFlowHandler(OptionsFlowBase):
             )
 
         if user_input is not None:
+            _LOGGER.debug(
+                "Credentials update: received input (has secrets=%s, has token+email=%s).",
+                bool(user_input.get("new_secrets_json")),
+                bool(user_input.get("new_oauth_token") and user_input.get("new_google_email")),
+            )
             method, email, cands, err = _interpret_credentials_choice(
                 user_input,
                 secrets_field="new_secrets_json",
@@ -1073,23 +1186,35 @@ class OptionsFlowHandler(OptionsFlowBase):
             if err:
                 if err == "invalid_json":
                     errors["new_secrets_json"] = "invalid_json"
+                    _LOGGER.debug("Credentials update: invalid JSON in secrets.")
                 else:
                     errors["base"] = err
+                    _LOGGER.debug("Credentials update: input error '%s'.", err)
             else:
                 try:
                     assert email and cands
+                    _LOGGER.debug(
+                        "Credentials update: parsed OK (email=%s, candidates=%d: %s).",
+                        _normalize_email(email),
+                        len(cands),
+                        _cand_labels(cands),
+                    )
                     chosen = await async_pick_working_token(email, cands)
                     if not chosen:
                         errors["base"] = "cannot_connect"
+                        _LOGGER.info(
+                            "Credentials update: token(s) did not validate online (email=%s) -> cannot_connect.",
+                            _normalize_email(email),
+                        )
                     else:
                         to_persist = chosen
                         if _disqualifies_oauth_for_persistence(to_persist):
                             alt = next((v for (_src, v) in cands if not _disqualifies_oauth_for_persistence(v)), None)
                             if alt:
                                 to_persist = alt
-                                _LOGGER.debug("Options credentials: non-OAuth-shaped token validated; persisting alternative.")
+                                _LOGGER.debug("Credentials update: non-OAuth-shaped token -> persisting alternative.")
                             else:
-                                _LOGGER.warning("Options credentials: only non-OAuth-shaped token available; persisting validated value.")
+                                _LOGGER.warning("Credentials update: only non-OAuth-shaped token; persisting validated value.")
 
                         entry = self.config_entry
                         updated_data = dict(entry.data)
@@ -1102,6 +1227,11 @@ class OptionsFlowHandler(OptionsFlowBase):
                         )
                         self.hass.config_entries.async_update_entry(entry, data=updated_data)
                         self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+                        _LOGGER.info(
+                            "Credentials update: entry updated and reload scheduled (email=%s, method=%s).",
+                            _normalize_email(email),
+                            method,
+                        )
                         return self.async_abort(reason="reconfigure_successful")
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
@@ -1117,6 +1247,11 @@ class OptionsFlowHandler(OptionsFlowBase):
                         )
                         self.hass.config_entries.async_update_entry(entry, data=updated_data)
                         self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+                        _LOGGER.info(
+                            "Auth guard: credentials update deferred to setup (email=%s, method=%s).",
+                            _normalize_email(email),
+                            method,
+                        )
                         return self.async_abort(reason="reconfigure_successful")
                     _LOGGER.error("Credentials update failed: %s", err2)
                     key = _map_api_exc_to_error_key(err2)
