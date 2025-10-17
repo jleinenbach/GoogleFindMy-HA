@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/button.py
 """Button platform for Google Find My Device.
 
 This module exposes per-device buttons that trigger actions on Google Find My
@@ -37,6 +38,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,   # <-- use the constant (C2)
     SERVICE_LOCATE_DEVICE,
     service_device_identifier,
 )
@@ -44,7 +46,7 @@ from .coordinator import GoogleFindMyCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-# Reusable entity description with translations in strings.json
+# Reusable entity description with translations in en.json
 PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
     key="play_sound",
     translation_key="play_sound",
@@ -268,19 +270,27 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
             md5( f"{ha_uuid}:{entry_id}:{week|static}" )[:16]
         """
         config_entry = getattr(self.coordinator, "config_entry", None)
-        if config_entry:
-            # Lazy import (helper provided by __init__.py)
+
+        # Prefer central options helper if available; fall back to direct reads.
+        try:
             from . import _opt  # type: ignore
             token_expiration_enabled = _opt(
                 config_entry,
-                "map_view_token_expiration",
+                OPT_MAP_VIEW_TOKEN_EXPIRATION,
                 DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
             )
-            entry_id = getattr(config_entry, "entry_id", "") or ""
-        else:
-            token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-            entry_id = ""
+        except Exception:
+            if config_entry:
+                token_expiration_enabled = config_entry.options.get(
+                    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+                    config_entry.data.get(
+                        OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+                    ),
+                )
+            else:
+                token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
 
+        entry_id = getattr(config_entry, "entry_id", "") if config_entry else ""
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
         if token_expiration_enabled:
             week = str(int(time.time() // 604800))  # 7-day bucket
