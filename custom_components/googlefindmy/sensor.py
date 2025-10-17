@@ -59,14 +59,20 @@ LAST_SEEN_DESCRIPTION = SensorEntityDescription(
     device_class=SensorDeviceClass.TIMESTAMP,
 )
 
-# NOTE: HA Quality Scale (Platinum): entity descriptions define translation_key,
-# icon and state_class; keys must match coordinator.stats counters exactly.
-# `skipped_duplicates` was removed from the coordinator and is intentionally absent here.
+# NOTE:
+# - Translation keys are aligned with en.json (entity.sensor.*), keeping the set in sync.
+# - `skipped_duplicates` is intentionally absent (removed upstream).
 STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
     "background_updates": SensorEntityDescription(
         key="background_updates",
         translation_key="stat_background_updates",
         icon="mdi:cloud-download",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    "polled_updates": SensorEntityDescription(
+        key="polled_updates",
+        translation_key="stat_polled_updates",
+        icon="mdi:download-network",
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
     "crowd_sourced_updates": SensorEntityDescription(
@@ -75,23 +81,34 @@ STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
         icon="mdi:account-group",
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
-    # Unified counter for all updates dropped by the significance filter.
+    "history_fallback_used": SensorEntityDescription(
+        key="history_fallback_used",
+        translation_key="stat_history_fallback_used",
+        icon="mdi:history",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    "timeouts": SensorEntityDescription(
+        key="timeouts",
+        translation_key="stat_timeouts",
+        icon="mdi:timer-off",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    "invalid_coords": SensorEntityDescription(
+        key="invalid_coords",
+        translation_key="stat_invalid_coords",
+        icon="mdi:map-marker-alert",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    "low_quality_dropped": SensorEntityDescription(
+        key="low_quality_dropped",
+        translation_key="stat_low_quality_dropped",
+        icon="mdi:target-off",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
     "non_significant_dropped": SensorEntityDescription(
         key="non_significant_dropped",
         translation_key="stat_non_significant_dropped",
         icon="mdi:filter-variant-remove",
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    "invalid_ts_drop_count": SensorEntityDescription(
-        key="invalid_ts_drop_count",
-        translation_key="stat_invalid_ts_dropped",
-        icon="mdi:clock-alert-outline",
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    "future_ts_drop_count": SensorEntityDescription(
-        key="future_ts_drop_count",
-        translation_key="stat_future_ts_dropped",
-        icon="mdi:clock-fast",
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
 }
@@ -154,13 +171,16 @@ async def async_setup_entry(
         )
 
     if enable_stats:
-        created_stats = []
+        created_stats: list[str] = []
         for stat_key, desc in STATS_DESCRIPTIONS.items():
-            # Check if stat exists in coordinator before creating sensor
+            # Only create sensors for counters that actually exist in the coordinator
             if hasattr(coordinator, "stats") and stat_key in coordinator.stats:
                 entities.append(GoogleFindMyStatsSensor(coordinator, stat_key, desc))
                 created_stats.append(stat_key)
-        _LOGGER.debug("Stats sensors created: %s", ", ".join(created_stats))
+        if created_stats:
+            _LOGGER.debug("Stats sensors created: %s", ", ".join(created_stats))
+        else:
+            _LOGGER.debug("Stats option enabled but no known counters were present in coordinator.stats")
 
     # Per-device last_seen sensors from current snapshot
     if coordinator.data:
@@ -205,7 +225,7 @@ async def async_setup_entry(
 
 
 class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
-    """Diagnostic counters for the integration.
+    """Diagnostic counters for the integration (entry-scoped).
 
     Naming policy (HA Quality Scale – Platinum):
     - Do **not** set a hard-coded `_attr_name`. We rely on `entity_description.translation_key`
@@ -230,9 +250,9 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         self._stat_key = stat_key
         self.entity_description = description
         entry_id = getattr(getattr(coordinator, "config_entry", None), "entry_id", "default")
-        # Namespace by entry_id to avoid collisions if multiple config entries are supported.
+        # Entry-scoped unique_id avoids collisions in multi-account setups.
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_{stat_key}"
-        # Intentionally no `_attr_name` here; translations drive the visible name.
+        # Plain unit label; TOTAL_INCREASING counters represent event counts.
         self._attr_native_unit_of_measurement = "updates"
 
     @property
@@ -245,10 +265,9 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Expose a single integration device for diagnostic sensors.
+        """Expose a single integration service device for diagnostic sensors.
 
-        We attach the counters to a SERVICE device to keep UI tidy and avoid per-device duplication.
-        The identifiers are namespaced by entry_id to prevent collisions with multiple entries.
+        All counters live on the per-entry SERVICE device to keep the UI tidy.
         """
         entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", "default")
         ident = service_device_identifier(entry_id)
@@ -258,7 +277,6 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
             manufacturer=SERVICE_DEVICE_MANUFACTURER,
             model=SERVICE_DEVICE_MODEL,
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
-            # Mark as a service device to hide the "Delete device" action in HA UI.
             entry_type=dr.DeviceEntryType.SERVICE,
         )
 
