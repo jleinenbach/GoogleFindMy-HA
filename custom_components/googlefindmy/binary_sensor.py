@@ -10,7 +10,8 @@ from Home Assistant's system facilities (e.g., the Repairs issue registry).
 Design goals:
 - Keep all network I/O **out** of entity code; entities are consumers of
   coordinator state and HA registries only.
-- Use stable, namespaced `unique_id`s to support multi-account setups.
+- Use stable, entry-scoped `unique_id`s to support multi-account setups:
+  "<entry_id>:<sensor_key>" (e.g., "abcd1234:polling").
 - Route all sensors to the **service device** so users find diagnostics in
   one place.
 - Prefer translation keys over hardcoded names/icons where supported.
@@ -84,12 +85,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up Google Find My Device binary sensor entities (per config entry).
 
-    This registers both diagnostic sensors:
-    - A *polling* sensor reflecting whether a sequential poll is currently running.
-    - An *auth_status* sensor reflecting whether authentication needs user action.
-
-    Both entities are attached to the per-entry service device and use
-    translation-based names (see `translations/*.json`).
+    Registers both diagnostic sensors under the per-entry service device.
     """
     coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[BinarySensorEntity] = [
@@ -110,11 +106,6 @@ class GoogleFindMyPollingSensor(
     Semantics:
         - `on`  → a sequential device polling cycle is currently in progress.
         - `off` → no sequential poll is running at the moment.
-
-    Implementation details:
-        - Uses the coordinator's public `is_polling` property (with a defensive
-          fallback for older versions).
-        - No network I/O; state changes propagate via the coordinator.
     """
 
     _attr_has_entity_name = True
@@ -127,9 +118,8 @@ class GoogleFindMyPollingSensor(
         """Initialize the polling sensor."""
         super().__init__(coordinator)
         self._entry_id = entry.entry_id
-        # Namespaced unique_id for multi-account safety
-        self._attr_unique_id = f"{DOMAIN}_{self._entry_id}_polling"
-        # Name is derived from translation_key; no explicit _attr_name.
+        # Entry-scoped unique_id: "<entry_id>:polling"
+        self._attr_unique_id = f"{self._entry_id}:polling"
 
     @property
     def is_on(self) -> bool:
@@ -173,19 +163,6 @@ class GoogleFindMyAuthStatusSensor(
         - `on`  → Authentication problem detected for this config entry
                   (e.g., invalid/expired token). User action is required.
         - `off` → No active authentication problem known.
-
-    Signal sources:
-        - **Repairs issue registry**: Existence of the entry-scoped issue
-          `issue_id_for(entry_id)` (domain=`googlefindmy`) indicates a known auth
-          problem (preferred, idempotent).
-        - **Coordinator bus events**: We listen for `googlefindmy.authentication_error`
-          and `googlefindmy.authentication_ok` to update state quickly between
-          coordinator refreshes. Events must include the `entry_id` to target
-          the correct sensor in multi-account setups.
-
-    Notes:
-        - No network I/O occurs in this entity.
-        - The sensor lives under the *service device* alongside other diagnostics.
     """
 
     _attr_has_entity_name = True
@@ -203,7 +180,8 @@ class GoogleFindMyAuthStatusSensor(
         """Initialize the authentication status sensor."""
         super().__init__(coordinator)
         self._entry_id = entry.entry_id
-        self._attr_unique_id = f"{DOMAIN}_{self._entry_id}_auth_status"
+        # Entry-scoped unique_id: "<entry_id>:auth_status"
+        self._attr_unique_id = f"{self._entry_id}:auth_status"
         self._event_state = None
         self._unsub_err = None
         self._unsub_ok = None
@@ -259,9 +237,6 @@ class GoogleFindMyAuthStatusSensor(
         1) If we have an event-driven state (_event_state is not None), prefer it.
         2) Otherwise, query the Repairs issue registry for the per-entry issue.
            Existence of the issue is interpreted as "problem = True".
-
-        This dual-source approach ensures the sensor is responsive to events
-        while remaining accurate across restarts (Repairs issues persist).
         """
         # 1) Event-driven fast path
         if self._event_state is not None:
