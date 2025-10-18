@@ -51,6 +51,7 @@ from .const import (
     FCM_SEND_URL,
     GCM_CHECKIN_URL,
     GCM_REGISTER_URL,
+    GCM_REGISTER3_URL,  # NEW: alternate endpoint constant
     GCM_SERVER_KEY_B64,
     SDK_VERSION,
 )
@@ -178,12 +179,17 @@ class FcmRegister:
 
     @staticmethod
     def _toggle_gcm_register_variant(url: str) -> str:
-        """Swap .../register <-> .../register3 once (404 mitigation)."""
-        if url.endswith("/register3"):
-            return url[:-1]  # drop '3' -> .../register
-        if url.endswith("/register"):
-            return url + "3"
-        return url
+        """Toggle between the canonical /c2dm/register and /c2dm/register3 endpoints.
+
+        Uses constants to avoid brittle path-suffix checks and to ensure we always
+        flip exactly once between the two known endpoints.
+        """
+        if url == GCM_REGISTER_URL:
+            return GCM_REGISTER3_URL
+        if url == GCM_REGISTER3_URL:
+            return GCM_REGISTER_URL
+        # Defensive default: start from the base endpoint.
+        return GCM_REGISTER_URL
 
     # ---------------------------------------------------------------------
     # GCM Check-in
@@ -378,7 +384,7 @@ class FcmRegister:
                         alt = self._toggle_gcm_register_variant(url)
                         _logger.warning(
                             "GCM register: 404/HTML received at %s (status=%s, ctype=%s); "
-                            "retrying with alternate endpoint %s",
+                            "toggling endpoint to %s and retrying",
                             url, response_status, content_type or "-", alt,
                         )
                         url = alt
@@ -399,6 +405,10 @@ class FcmRegister:
                         error_code = (v or "").strip().upper()
 
                 if token:
+                    _logger.info(
+                        "GCM register succeeded via %s",
+                        "/c2dm/register3" if url == GCM_REGISTER3_URL else "/c2dm/register",
+                    )
                     return {
                         "token": token,
                         "app_id": gcm_app_id,
@@ -420,7 +430,10 @@ class FcmRegister:
                     )
                 else:
                     # Unexpected body without token/error
-                    last_error = f"Unexpected register response (status={response_status}, ctype={content_type}): {response_text[:200]}"
+                    last_error = (
+                        f"Unexpected register response (status={response_status}, "
+                        f"ctype={content_type}): {response_text[:200]}"
+                    )
                     _logger.warning(
                         "GCM register unexpected response at %s (attempt %d/%d): %s",
                         url, attempt, retries, last_error,
