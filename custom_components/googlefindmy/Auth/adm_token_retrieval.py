@@ -17,6 +17,9 @@ Key points
 - Async-first: `async_get_adm_token()` is the primary API.
 - Legacy sync facade: `get_adm_token()` is provided for CLI/offline usage only
   and will raise a RuntimeError if called from within the HA event loop.
+- Single-flight protection: per-username lock prevents parallel token exchanges.
+- Auth failure handling: `BadAuthentication` is **not** retried; we raise
+  `ConfigEntryAuthFailed` to trigger Home Assistant's reauth flow.
 
 Cache keys
 ----------
@@ -31,9 +34,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional, Awaitable, Callable, Any
+from typing import Optional, Awaitable, Callable, Any, Dict
 
 import gpsoauth
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
 from custom_components.googlefindmy.Auth.username_provider import (
@@ -52,6 +56,17 @@ _ANDROID_ID: int = 0x38918A453D071993
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 _APP_ID: str = "com.google.android.apps.adm"
 
+# Per-username single-flight locks to avoid parallel ADM exchanges
+_singleflight_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(user: str) -> asyncio.Lock:
+    """Return (and create if needed) a single-flight lock for the given user."""
+    lock = _singleflight_locks.get(user)
+    if lock is None:
+        lock = _singleflight_locks[user] = asyncio.Lock()
+    return lock
+
 
 async def _seed_username_in_cache(username: str) -> None:
     """Ensure the canonical username cache key is populated (idempotent)."""
@@ -62,6 +77,32 @@ async def _seed_username_in_cache(username: str) -> None:
             _LOGGER.debug("Seeded username cache key '%s' with '%s'.", username_string, username)
     except Exception as exc:  # defensive: never fail token flow on seeding
         _LOGGER.debug("Username cache seeding skipped: %s", exc)
+
+
+def _extract_auth_token_from_gpsoauth_response(resp: Dict[str, Any]) -> str:
+    """Extract an ADM scope token from gpsoauth response.
+
+    The gpsoauth library/endpoint may return either 'Auth' (common for perform_oauth)
+    or 'Token' (older shapes) for successful responses. If an auth error is indicated
+    (e.g. {'Error': 'BadAuthentication'}), we escalate with ConfigEntryAuthFailed to
+    ensure the integration triggers a proper reauth flow.
+    """
+    if not isinstance(resp, dict):
+        raise RuntimeError(f"gpsoauth returned invalid response type: {type(resp).__name__}")
+
+    # Explicit auth error from server → never retry, trigger reauth
+    err = (resp.get("Error") or resp.get("error") or "").strip()
+    if err.lower() == "badauthentication":
+        raise ConfigEntryAuthFailed("BadAuthentication returned by gpsoauth")
+
+    # Success keys (accept both)
+    if "Auth" in resp and isinstance(resp["Auth"], str) and resp["Auth"]:
+        return resp["Auth"]
+    if "Token" in resp and isinstance(resp["Token"], str) and resp["Token"]:
+        return resp["Token"]
+
+    # Unknown/unsupported shape
+    raise RuntimeError(f"gpsoauth.perform_oauth returned invalid response (no Auth/Token): {resp}")
 
 
 async def _perform_oauth_with_aas(username: str) -> str:
@@ -79,9 +120,7 @@ async def _perform_oauth_with_aas(username: str) -> str:
             app=_APP_ID,
             client_sig=_CLIENT_SIG,
         )
-        if not resp or "Auth" not in resp:
-            raise RuntimeError(f"gpsoauth.perform_oauth returned invalid response: {resp}")
-        return resp["Auth"]
+        return _extract_auth_token_from_gpsoauth_response(resp)
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _run)
@@ -100,9 +139,7 @@ async def _perform_oauth_with_provided_aas(username: str, aas_token: str) -> str
             app=_APP_ID,
             client_sig=_CLIENT_SIG,
         )
-        if not resp or "Auth" not in resp:
-            raise RuntimeError(f"gpsoauth.perform_oauth returned invalid response: {resp}")
-        return resp["Auth"]
+        return _extract_auth_token_from_gpsoauth_response(resp)
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _run)
@@ -132,6 +169,7 @@ async def async_get_adm_token_isolated(
       ADM token string.
 
     Raises:
+      ConfigEntryAuthFailed if gpsoauth indicates BadAuthentication.
       RuntimeError if input is insufficient or exchange fails after retries.
     """
     if not isinstance(username, str) or not username:
@@ -174,6 +212,10 @@ async def async_get_adm_token_isolated(
 
             return tok
 
+        except ConfigEntryAuthFailed:
+            # Never retry on explicit authentication failures
+            _LOGGER.warning("Isolated ADM exchange failed due to BadAuthentication (username redacted).")
+            raise
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < attempts - 1:
@@ -182,7 +224,7 @@ async def async_get_adm_token_isolated(
                     "Isolated ADM exchange failed (attempt %s/%s): %s — retrying in %.1fs",
                     attempt + 1,
                     attempts,
-                    exc,
+                    exc.__class__.__name__,
                     sleep_s,
                 )
                 await asyncio.sleep(sleep_s)
@@ -213,6 +255,7 @@ async def async_get_adm_token(
         The ADM token string.
 
     Raises:
+        ConfigEntryAuthFailed: If gpsoauth indicates an authentication failure.
         RuntimeError: If the username is invalid or token generation fails after all retries.
     """
     user = username or await async_get_username()
@@ -226,37 +269,50 @@ async def async_get_adm_token(
     if isinstance(token, str) and token:
         return token
 
-    # Generate with bounded retries
-    last_exc: Optional[Exception] = None
-    attempts = retries + 1
-    for attempt in range(attempts):
-        try:
-            await _seed_username_in_cache(user)
-            tok = await _perform_oauth_with_aas(user)
+    # Single-flight: prevent parallel exchanges for the same user
+    lock = _lock_for(user)
+    async with lock:
+        # Double-check cache after acquiring the lock
+        token = await async_get_cached_value(cache_key)
+        if isinstance(token, str) and token:
+            return token
 
-            # Persist token & issued-at metadata
-            await async_set_cached_value(cache_key, tok)
-            await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
-            if not await async_get_cached_value(f"adm_probe_startup_left_{user}"):
-                await async_set_cached_value(f"adm_probe_startup_left_{user}", 3)
-            return tok
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < attempts - 1:
-                sleep_s = backoff * (2**attempt)
-                _LOGGER.info(
-                    "ADM token generation failed (attempt %s/%s): %s — retrying in %.1fs",
-                    attempt + 1,
-                    attempts,
-                    exc,
-                    sleep_s,
-                )
-                await asyncio.sleep(sleep_s)
-                continue
-            _LOGGER.error("ADM token generation failed after %s attempts: %s", attempts, exc)
+        # Generate with bounded retries (auth failures are *not* retried)
+        last_exc: Optional[Exception] = None
+        attempts = max(1, retries + 1)
+        for attempt in range(attempts):
+            try:
+                await _seed_username_in_cache(user)
+                tok = await _perform_oauth_with_aas(user)
 
-    assert last_exc is not None
-    raise last_exc
+                # Persist token & issued-at metadata
+                await async_set_cached_value(cache_key, tok)
+                await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
+                if not await async_get_cached_value(f"adm_probe_startup_left_{user}"):
+                    await async_set_cached_value(f"adm_probe_startup_left_{user}", 3)
+                return tok
+
+            except ConfigEntryAuthFailed:
+                # Immediate escalation: no more retries; HA will trigger reauth
+                _LOGGER.error("ADM token generation aborted due to BadAuthentication (username redacted).")
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < attempts - 1:
+                    sleep_s = backoff * (2**attempt)
+                    _LOGGER.info(
+                        "ADM token generation failed (attempt %s/%s): %s — retrying in %.1fs",
+                        attempt + 1,
+                        attempts,
+                        exc.__class__.__name__,
+                        sleep_s,
+                    )
+                    await asyncio.sleep(sleep_s)
+                    continue
+                _LOGGER.error("ADM token generation failed after %s attempts: %s", attempts, exc)
+
+        assert last_exc is not None
+        raise last_exc
 
 
 # --------------------- Legacy sync facade (CLI/offline only) ---------------------
