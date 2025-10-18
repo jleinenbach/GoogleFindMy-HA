@@ -1,7 +1,10 @@
 # custom_components/googlefindmy/__init__.py
 """Google Find My Device integration for Home Assistant.
 
-Version: 2.6.4 — Multi-account preparation (E2)
+Version: 2.6.5 — Multi-account enabled (E3)
+- Multi-account support: multiple config entries are allowed concurrently.
+- Duplicate-account protection: if two entries use the same Google email, we raise a
+  Repair issue and abort the later entry to avoid mixing credentials/state.
 - Entry-scoped TokenCache usage only (no global facade calls).
 - Device owner index scaffold (entry_id → canonical_id mapping container).
 - Prepared (not executed) migration for entry-scoped device identifiers.
@@ -9,9 +12,9 @@ Version: 2.6.4 — Multi-account preparation (E2)
 Highlights (cumulative)
 -----------------------
 - Entry-scoped TokenCache (HA Store backend) with migration from legacy secrets.json.
-- Multi-entry safety: robust detection of multiple *active* entries -> Repair issue and early abort
-  with deterministic tie-break to avoid "mutual abort".  (Feature gate for MA will come later)
-- Deterministic default-entry choice (previous behavior) REMOVED for MA prep: we no longer set a
+- Multi-entry: allow multiple *active* entries; prevent duplicate entries targeting
+  the same Google account (email) across entries.
+- Deterministic default-entry choice (previous behavior) REMOVED for MA: we do not set a
   TokenCache "default" in this module; all reads/writes are entry-scoped.
 - One-time migration that namespaces entity unique_ids by entry_id (idempotent, collision-aware).
 - Services are registered at integration level (async_setup) so they are always visible.
@@ -578,6 +581,39 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
 # ------------------------------ Setup / Unload -----------------------------
 
 
+def _normalize_email(value: str | None) -> str:
+    """Normalize an email for comparisons/unique-id semantics (lowercased, trimmed)."""
+    return (value or "").strip().lower()
+
+
+def _extract_email_from_entry(entry: ConfigEntry) -> str:
+    """Best-effort extraction of the Google email from a config entry.
+
+    Preferred:
+      - entry.data[CONF_GOOGLE_EMAIL]
+
+    Fallbacks (legacy secrets bundle):
+      - entry.data[DATA_SECRET_BUNDLE]['username'] or ['Email'] if present.
+
+    Returns:
+      Normalized email string or empty string if unavailable.
+    """
+    email = entry.data.get(CONF_GOOGLE_EMAIL)
+    if isinstance(email, str) and email:
+        return _normalize_email(email)
+
+    try:
+        secrets = entry.data.get(DATA_SECRET_BUNDLE) or {}
+        if isinstance(secrets, dict):
+            cand = secrets.get("username") or secrets.get("Email")
+            if isinstance(cand, str) and cand:
+                return _normalize_email(cand)
+    except Exception:
+        pass
+
+    return ""
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the integration namespace and register global services.
 
@@ -615,36 +651,53 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """Set up a config entry.
 
     Order of operations (important):
-      1) Multi-entry guard (strict single-entry for now; MA gate planned later).
+      1) Multi-entry policy: allow multiple entries; prevent duplicate-account entries.
       2) Initialize and register TokenCache (entry-scoped, no default).
       3) Soft-migrate options and unique_ids; acquire and wire the shared FCM provider.
       4) Seed token cache from entry data (secrets bundle or individual tokens).
       5) Build coordinator, register views, forward platforms.
       6) Schedule initial refresh after HA is fully started.
     """
-    # --- Multi-entry guard (robust & early) -----------------------------------
+    # --- Multi-entry policy: allow MA; block duplicate-account (same email) ----
     all_entries = hass.config_entries.async_entries(DOMAIN)
     active_entries = [e for e in all_entries if _is_active_entry(e)]
 
-    if len(active_entries) > 1:
-        ir.async_create_issue(
-            hass,
-            DOMAIN,
-            "multiple_config_entries",
-            is_fixable=False,
-            severity=ir.IssueSeverity.ERROR,
-            translation_key="multiple_config_entries",
-            translation_placeholders={"entries": ", ".join([e.title or e.entry_id for e in active_entries])},
-        )
-        _LOGGER.error(
-            "Multiple config entries found for %s. Integration setup aborted for entry '%s'. "
-            "Please remove all but one entry from Settings > Devices & Services to resolve this issue.",
-            DOMAIN,
-            entry.entry_id,
-        )
-        return False
-    else:
+    # Legacy issue cleanup: we no longer block on multiple config entries
+    try:
         ir.async_delete_issue(hass, DOMAIN, "multiple_config_entries")
+    except Exception:
+        pass
+
+    # Duplicate-account detection (same normalized email across entries)
+    current_email = _extract_email_from_entry(entry)
+    if current_email:
+        dupes = [
+            e
+            for e in active_entries
+            if e.entry_id != entry.entry_id and _extract_email_from_entry(e) == current_email
+        ]
+        if dupes:
+            # Create a repair issue and abort only this entry; the existing one remains active.
+            titles = ", ".join([d.title or d.entry_id for d in dupes])
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                f"duplicate_account_{entry.entry_id}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="duplicate_account_entries",
+                translation_placeholders={
+                    "email": current_email,
+                    "entries": titles,
+                },
+            )
+            _LOGGER.error(
+                "Duplicate Google account detected for '%s' (email=%s). "
+                "This config entry will not be loaded to prevent conflicts.",
+                entry.title or entry.entry_id,
+                current_email,
+            )
+            return False
 
     pm_setup_start = time.monotonic()
 
