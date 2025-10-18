@@ -1,13 +1,14 @@
 # custom_components/googlefindmy/__init__.py
 """Google Find My Device integration for Home Assistant.
 
-Version: 2.6.5 — Multi-account enabled (E3)
+Version: 2.6.6 — Multi-account enabled (E3) + owner-index routing attach
 - Multi-account support: multiple config entries are allowed concurrently.
 - Duplicate-account protection: if two entries use the same Google email, we raise a
   Repair issue and abort the later entry to avoid mixing credentials/state.
 - Entry-scoped TokenCache usage only (no global facade calls).
 - Device owner index scaffold (entry_id → canonical_id mapping container).
 - Prepared (not executed) migration for entry-scoped device identifiers.
+- NEW: Attach HA context to the shared FCM receiver to enable owner-index fallback routing.
 
 Highlights (cumulative)
 -----------------------
@@ -518,6 +519,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         - Creates and initializes the singleton if missing.
         - Registers provider callbacks for API and LocateTracker once.
         - Maintains a reference counter to support multiple entries.
+        - NEW: attaches HA context to enable owner-index fallback routing.
     """
     bucket = hass.data.setdefault(DOMAIN, {})
     fcm_lock = bucket.setdefault("fcm_lock", asyncio.Lock())
@@ -533,6 +535,16 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
             ok = await fcm.async_initialize()
             if not ok:
                 raise ConfigEntryNotReady("Failed to initialize FCM receiver")
+
+            # --- NEW: Attach HA context for owner-index fallback routing ---
+            try:
+                attach = getattr(fcm, "attach_hass", None)
+                if callable(attach):
+                    attach(hass)
+                    _LOGGER.debug("Attached HA context to FCM receiver (owner-index routing enabled).")
+            except Exception as err:
+                _LOGGER.debug("FCM attach_hass skipped: %s", err)
+
             bucket["fcm_receiver"] = fcm
             _LOGGER.info("Shared FCM receiver initialized")
 
