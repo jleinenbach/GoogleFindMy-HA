@@ -241,21 +241,21 @@ async def get_location_data_for_device(
     cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
     refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
     namespace: Optional[str] = None,
+    cache: Optional["TokenCache"] = None,  # type: ignore[name-defined]
 ) -> list:
     """Get location data for a device (async, HA-compatible).
 
-    This function orchestrates the entire process of requesting a device's location.
-    It registers a temporary callback with the FCM receiver, sends the location
-    request, and waits for the asynchronous response to arrive via the callback.
+    Orchestrates:
+    - Register a temporary callback with the FCM receiver,
+    - Send the locate request via Nova,
+    - Await the FCM-delivered response and decrypt it.
 
-    Notes
-    -----
-    - The long-lived FCM receiver is provided by integration setup via a provider.
-      This function only registers/unregisters callbacks; it does not start/stop the receiver.
-    - If a Home Assistant aiohttp.ClientSession is provided, it will be reused for the Nova call.
-    - **Multi-entry safety:** When `namespace` is provided (e.g., the entry_id), this function
-      builds namespaced cache wrappers for TTL metadata to avoid collisions with other entries,
-      unless explicit `cache_get/cache_set` overrides are already supplied.
+    Multi-entry safety
+    ------------------
+    - When `namespace` is provided (e.g., entry_id), **TTL metadata** is namespaced.
+    - When `cache` is provided, `async_nova_request` will prefer that entry-local
+      TokenCache for **username**, **token content**, and (if no `cache_get/set`
+      overrides are provided) **TTL metadata** as well.
 
     Args:
         canonic_device_id: The canonical ID of the device to locate.
@@ -267,6 +267,7 @@ async def get_location_data_for_device(
         cache_set: Optional async setter for TTL/aux metadata.
         refresh_override: Optional async function to refresh a token in isolation.
         namespace: Optional entry-scoped namespace (e.g., config_entry.entry_id).
+        cache: Optional TokenCache for entry-scoped username/token/metadata storage.
 
     Returns:
         A list of dictionaries containing location data, or an empty list on failure.
@@ -347,6 +348,8 @@ async def get_location_data_for_device(
                 cache_get=ns_get,
                 cache_set=ns_set,
                 refresh_override=refresh_override,
+                namespace=namespace,
+                cache=cache,  # NEW: pass entry-scoped TokenCache through
             )
         except asyncio.CancelledError:
             raise
