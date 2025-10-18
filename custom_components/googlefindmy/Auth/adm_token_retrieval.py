@@ -26,13 +26,19 @@ Security notes (logging):
 - We never log tokens or raw auth responses. Error details are summarized (type/keys),
   and account emails are masked for privacy.
 
-Minimal, backward-compatible improvements over previous iteration:
-1) Ensure the service string is normalized to the full OAuth2 scope (alias→scope).
-2) Seed a canonical username into the cache (idempotent). **New**: when an entry-scoped
-   TokenCache is provided, only that cache is written/read. The facade is used only as
-   a fallback for single-entry deployments.
-3) In isolated validation (used by config flow), restore writing the bootstrap probe
-   counter to the (flow-local) cache when available.
+Entry-scoped behavior:
+- When an entry-scoped `TokenCache` is provided to `async_get_adm_token(..., cache=...)`,
+  we inject an **entry-scoped `aas_provider`** that resolves AAS via
+  `async_get_aas_token(cache=cache)`. This prevents accidental fallbacks to any
+  global AAS source and closes the end-to-end entry scoping for the ADM flow.
+
+-------------------------------------------------------------------------------
+Changelog (English)
+-------------------------------------------------------------------------------
+- Inject an entry-scoped `aas_provider` into ADM issuance when a `TokenCache` is
+  supplied, preventing accidental fallback to global AAS tokens.
+- Kept the public API unchanged; minimal internal refactor of `_generate_adm_token(...)`.
+- Updated docstrings/comments and added a DEBUG log for observability.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ from .token_cache import (
     async_set_cached_value,
 )
 from .username_provider import async_get_username, username_string
+from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -144,17 +151,28 @@ async def _seed_username_in_cache(username: str, *, cache: TokenCache | None) ->
 # Core token generation (delegates to central token retriever)
 # ---------------------------------------------------------------------------
 
-async def _generate_adm_token(username: str) -> str:
+async def _generate_adm_token(username: str, *, cache: TokenCache | None) -> str:
     """
-    Generate a new ADM token by directly calling the central token retriever.
+    Generate a new ADM token by delegating to the central token retriever,
+    injecting an **entry-scoped AAS provider** when `cache` is supplied.
 
-    This function keeps logic simple by delegating the entire token exchange
-    process to `async_request_token`, while ensuring the service name matches the
-    expected scope via `_normalize_service`.
+    This keeps the logic simple and closes the end-to-end entry scoping:
+    ADM <-OAuth(AAS from same cache)-> AAS.
     """
-    _LOGGER.debug("Generating new ADM token for account %s", _mask_email(username))
+    _LOGGER.debug(
+        "Generating new ADM token for account %s%s",
+        _mask_email(username),
+        " (entry-scoped AAS provider)" if cache is not None else "",
+    )
     service = _normalize_service("android_device_manager")
-    return await async_request_token(username, service)
+
+    # Prefer an entry-scoped AAS provider when a cache is supplied; otherwise
+    # fall back to the default provider inside async_request_token.
+    aas_provider: Optional[Callable[[], Awaitable[str]]] = None
+    if cache is not None:
+        aas_provider = lambda: async_get_aas_token(cache=cache)
+
+    return await async_request_token(username, service, aas_provider=aas_provider)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +215,7 @@ async def async_get_adm_token(
     cache_key = f"adm_token_{user}"
 
     async def _generator() -> str:
-        return await _generate_adm_token(user)
+        return await _generate_adm_token(user, cache=cache)
 
     last_exc: Optional[Exception] = None
     attempts = max(1, retries + 1)
