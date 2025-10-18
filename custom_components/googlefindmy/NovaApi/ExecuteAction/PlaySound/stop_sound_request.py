@@ -24,6 +24,8 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
+
 
 def stop_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
     """Build the hex payload for a 'Stop Sound' action (pure builder).
@@ -53,6 +55,8 @@ async def async_submit_stop_sound_request(
     cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
     cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
     refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+    # NEW: entry-scoped TokenCache to keep credentials and TTL metadata local
+    cache: Optional[TokenCache] = None,
 ) -> Optional[str]:
     """Submit a 'Stop Sound' action using the shared async Nova client.
 
@@ -61,8 +65,10 @@ async def async_submit_stop_sound_request(
 
     Notes on parameters:
         - ``session``: Optional aiohttp session reuse. Supported by the Nova client.
-        - ``namespace``: Entry-scope hint (e.g., config_entry.entry_id). Forwarded to
-          newer Nova clients when supported; safely ignored on older ones.
+        - ``namespace``: Entry-scope hint (e.g., config_entry.entry_id). Helps avoid
+          cross-entry cache bleed for TTL metadata and related keys.
+        - ``cache``: Entry-scoped TokenCache for **username**, **ADM token content**,
+          and (when not overridden) **TTL metadata** I/O.
         - ``username``, ``token``, ``cache_get``, ``cache_set``, ``refresh_override``:
           Optional overrides to support isolated flow validation or custom cache I/O.
 
@@ -76,6 +82,7 @@ async def async_submit_stop_sound_request(
         cache_get: Optional async getter for TTL/aux metadata (flow-local).
         cache_set: Optional async setter for TTL/aux metadata (flow-local).
         refresh_override: Optional async function producing a fresh ADM token.
+        cache: Optional entry-local TokenCache (multi-account safe).
 
     Returns:
         A hex string of the response payload on success (can be empty),
@@ -84,32 +91,18 @@ async def async_submit_stop_sound_request(
     """
     hex_payload = stop_sound_request(canonic_device_id, gcm_registration_id)
     try:
-        # Prefer the most recent Nova client signature that accepts `namespace=...`.
-        try:
-            return await async_nova_request(
-                NOVA_ACTION_API_SCOPE,
-                hex_payload,
-                username=username,
-                session=session,
-                token=token,
-                cache_get=cache_get,
-                cache_set=cache_set,
-                refresh_override=refresh_override,
-                namespace=namespace,  # may raise TypeError on older clients
-            )
-        except TypeError:
-            # Backward-compat path: older Nova clients without `namespace`.
-            return await async_nova_request(
-                NOVA_ACTION_API_SCOPE,
-                hex_payload,
-                username=username,
-                session=session,
-                token=token,
-                cache_get=cache_get,
-                cache_set=cache_set,
-                refresh_override=refresh_override,
-            )
-
+        return await async_nova_request(
+            NOVA_ACTION_API_SCOPE,
+            hex_payload,
+            username=username,
+            session=session,
+            token=token,
+            cache_get=cache_get,
+            cache_set=cache_set,
+            refresh_override=refresh_override,
+            namespace=namespace,
+            cache=cache,
+        )
     except asyncio.CancelledError:
         raise
     except NovaRateLimitError:
