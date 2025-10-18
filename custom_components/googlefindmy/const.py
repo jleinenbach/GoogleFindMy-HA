@@ -311,6 +311,16 @@ FCM_MONITOR_INTERVAL_S: int = 1
 FCM_ABORT_ON_SEQ_ERROR_COUNT: int = 3
 
 # --------------------------------------------------------------------------------------
+# FCM/GCM registration endpoints (used by Auth.firebase_messaging client)
+# --------------------------------------------------------------------------------------
+# Base endpoint MUST be the legacy /c2dm/register; the registration routine will
+# toggle once to /c2dm/register3 upon specific server responses (404/HTML).
+# Do NOT hardwire /register3 here to keep the toggle logic effective.
+GCM_BASE_URL: str = "https://android.clients.google.com"
+GCM_REGISTER_URL: str = f"{GCM_BASE_URL}/c2dm/register"
+GCM_REGISTER3_URL: str = f"{GCM_BASE_URL}/c2dm/register3"
+
+# --------------------------------------------------------------------------------------
 # Events & Repairs (auth status)
 # --------------------------------------------------------------------------------------
 # Events fired by the coordinator to allow user automations.
@@ -436,6 +446,10 @@ __all__ = [
     "FCM_CONNECTION_RETRY_COUNT",
     "FCM_MONITOR_INTERVAL_S",
     "FCM_ABORT_ON_SEQ_ERROR_COUNT",
+    # New: registration endpoints for toggle logic in the FCM client
+    "GCM_BASE_URL",
+    "GCM_REGISTER_URL",
+    "GCM_REGISTER3_URL",
     "EVENT_AUTH_ERROR",
     "EVENT_AUTH_OK",
     "TRANSLATION_KEY_AUTH_STATUS",
