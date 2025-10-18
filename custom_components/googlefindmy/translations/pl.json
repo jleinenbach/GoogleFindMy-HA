@@ -40,7 +40,7 @@
       },
       "reauth_confirm": {
         "title": "Ponowne uwierzytelnienie",
-        "description": "Twoje poświadczenia są nieprawidłowe lub wygasły. Podaj poniżej nowe.\n\nWskazówka: możesz wkleić pełną zawartość nowego pliku secrets.json **albo** podać nowy token OAuth i adres e-mail.",
+        "description": "Poświadczenia dla **{email}** są nieprawidłowe lub wygasły. Podaj poniżej nowe.\n\nWskazówka: możesz wkleić pełną zawartość nowego pliku secrets.json **albo** podać nowy token OAuth i adres e-mail.",
         "data": {
           "secrets_json": "Nowy secrets.json (pełna zawartość)",
           "oauth_token": "Nowy token OAuth",
@@ -251,6 +251,10 @@
     "multiple_config_entries": {
       "title": "Wykryto wiele wpisów konfiguracji",
       "description": "Obecnie istnieje więcej niż jeden wpis konfiguracji dla tej integracji:\n\n{entries}\n\nObsługiwany jest tylko jeden wpis. Przejdź do **Ustawienia → Urządzenia i usługi**, otwórz **Google Find My Device** i usuń duplikaty tak, aby pozostał tylko jeden. Następnie przeładuj integrację (lub uruchom ponownie Home Assistant)."
+    },
+    "unique_id_collision": {
+      "title": "Wykryto konflikt unikalnych ID encji",
+      "description": "Niektóre encje dla **{entry}** używają już nowego formatu unikalnych ID i kolidują z migracją.\n\n**Liczba:** {count}\n**Przykłady:** {entities}\n\nAby rozwiązać problem:\n1) Otwórz **Ustawienia → Urządzenia i usługi → Encje** i wyszukaj wskazane encje.\n2) Usuń lub zmień nazwy kolidujących encji, albo usuń porzucone wpisy z innych integracji.\n3) Przeładuj integrację (lub uruchom ponownie Home Assistant). Migracja zostanie ponowiona automatycznie."
     }
   },
   "exceptions": {

@@ -504,6 +504,7 @@ class GoogleFindMyAPI:
                 result_hex = await async_request_device_list(
                     username,
                     session=sess,
+                    cache=self._cache,
                     token=token,
                     cache_get=cg,
                     cache_set=cs,

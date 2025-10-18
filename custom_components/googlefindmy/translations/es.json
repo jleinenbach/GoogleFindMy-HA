@@ -40,7 +40,7 @@
       },
       "reauth_confirm": {
         "title": "Volver a autenticar",
-        "description": "Tus credenciales parecen no ser válidas o han caducado. Proporciona nuevas credenciales a continuación.\n\nConsejo: puedes pegar el contenido completo de un secrets.json reciente **o** facilitar un nuevo token OAuth y correo electrónico.",
+        "description": "Las credenciales de **{email}** parecen no ser válidas o han caducado. Proporciona nuevas credenciales a continuación.\n\nConsejo: puedes pegar el contenido completo de un secrets.json reciente **o** facilitar un nuevo token OAuth y correo electrónico.",
         "data": {
           "secrets_json": "Nuevo secrets.json (contenido completo)",
           "oauth_token": "Nuevo token OAuth",
@@ -251,6 +251,10 @@
     "multiple_config_entries": {
       "title": "Se detectaron varias entradas de configuración",
       "description": "Actualmente hay más de una entrada de configuración para esta integración:\n\n{entries}\n\nSolo se admite una única entrada. Ve a **Ajustes → Dispositivos y servicios**, abre **Google Find My Device** y elimina las entradas duplicadas hasta que quede exactamente una. Después recarga la integración (o reinicia Home Assistant)."
+    },
+    "unique_id_collision": {
+      "title": "Conflicto de ID único de entidad detectado",
+      "description": "Algunas entidades de **{entry}** ya usan el nuevo formato de ID único y entran en conflicto con la migración.\n\n**Cantidad:** {count}\n**Ejemplos:** {entities}\n\nPara resolverlo:\n1) Abre **Ajustes → Dispositivos y servicios → Entidades** y busca las entidades indicadas.\n2) Elimina o renombra las entidades en conflicto, o borra entradas abandonadas de otras integraciones.\n3) Recarga la integración (o reinicia Home Assistant). La migración volverá a intentarse automáticamente."
     }
   },
   "exceptions": {
