@@ -12,21 +12,23 @@ devices, requesting locations).
 
 Design & Fix for BadAuthentication:
 - Async-first: `async_get_adm_token()` is the primary API.
-- **PATCH**: This version reverts to the direct token retrieval method used in older,
-  functional versions. It removes the dependency on `aas_token_retrieval.py` which
-  introduced overly strict validations and caused `BadAuthentication` errors for
-  configurations relying on a cached `aas_token`.
-- It now directly calls `async_request_token` from `token_retrieval.py`, delegating
-  the entire authentication chain to a single, specialized module. This simplifies
-  the logic and restores compatibility.
-- The `async_get_adm_token_isolated` function, which is required by the config flow,
-  has been retained to prevent import errors during setup.
-- Blocking `gpsoauth` calls are executed in a thread executor to avoid blocking
-  Home Assistant's event loop.
+- Delegates token issuance to a central retriever: `token_retrieval.async_request_token`.
+  A small alias→scope mapping guarantees that the service string is accepted even if
+  the retriever expects the full OAuth2 scope.
+- **Retry policy**: Transient network/library errors are retried with bounded backoff.
+  Clear, non-recoverable auth errors (e.g., "BadAuthentication") are NOT retried.
+- Blocking `gpsoauth` calls (isolated flow) are executed in a thread executor to
+  avoid blocking Home Assistant's event loop.
 
 Security notes (logging):
 - We never log tokens or raw auth responses. Error details are summarized (type/keys),
   and account emails are masked for privacy.
+
+Minimal, backward-compatible improvements over previous iteration:
+1) Ensure the service string is normalized to the full OAuth2 scope (alias→scope).
+2) Seed a canonical username into the shared cache (idempotent), as older code did.
+3) In isolated validation (used by config flow), restore writing the bootstrap probe
+   counter to the (flow-local) cache when available.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ from .token_cache import (
     async_get_cached_value_or_set,
     async_set_cached_value,
 )
-from .username_provider import async_get_username
+from .username_provider import async_get_username, username_string
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,17 +71,53 @@ def _mask_email(email: str | None) -> str:
     masked_local = (local[0] + "***") if len(local) > 1 else "*"
     return f"{masked_local}@{domain}"
 
+
 def _clip(s: str, limit: int = 200) -> str:
     """Clip long strings to a safe length for logs."""
+    s = str(s)
     return s if len(s) <= limit else (s[: limit - 1] + "…")
+
 
 def _summarize_response(obj: Any) -> str:
     """Summarize a gpsoauth response without leaking sensitive data."""
     if isinstance(obj, dict):
-        # Only reveal keys; never values
         keys = ", ".join(sorted(obj.keys()))
         return f"dict(keys=[{keys}])"
     return f"{type(obj).__name__}"
+
+
+def _normalize_service(service: str) -> str:
+    """Map known aliases to the expected OAuth2 scope (defensive)."""
+    s = (service or "").strip().lower()
+    if s in {"android_device_manager", "adm"}:
+        return "oauth2:https://www.googleapis.com/auth/android_device_manager"
+    # Fallback: allow callers to pass a full scope already
+    return service
+
+
+def _is_non_retryable_auth(err: Exception) -> bool:
+    """Return True if the error indicates a non-recoverable auth problem."""
+    text = _clip(err)
+    # Typical shapes to consider non-retryable
+    if "BadAuthentication" in text:
+        return True
+    if "invalid_grant" in text.lower():
+        return True
+    if "Missing 'Auth' in gpsoauth response" in text:
+        # Most often wraps {"Error": "..."} from gpsoauth; treat as non-retryable
+        return True
+    return False
+
+
+async def _seed_username_in_cache(username: str) -> None:
+    """Ensure the canonical username cache key is populated (idempotent)."""
+    try:
+        cached = await async_get_cached_value(username_string)
+        if cached != username and isinstance(username, str) and username:
+            await async_set_cached_value(username_string, username)
+            _LOGGER.debug("Seeded username cache key '%s' with '%s'.", username_string, username)
+    except Exception as exc:  # Defensive: never fail token flow on seeding.
+        _LOGGER.debug("Username cache seeding skipped: %s", _clip(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -90,18 +128,13 @@ async def _generate_adm_token(username: str) -> str:
     """
     Generate a new ADM token by directly calling the central token retriever.
 
-    This function restores the simpler, more robust logic of older versions by
-    delegating the entire token exchange process to `async_request_token`.
-
-    Args:
-        username: The Google account e-mail for the request context.
-
-    Returns:
-        The generated ADM token string.
+    This function keeps logic simple by delegating the entire token exchange
+    process to `async_request_token`, while ensuring the service name matches the
+    expected scope via `_normalize_service`.
     """
     _LOGGER.debug("Generating new ADM token for account %s", _mask_email(username))
-    # The underlying function will handle AAS acquisition/exchange as needed.
-    return await async_request_token(username, "android_device_manager")
+    service = _normalize_service("android_device_manager")
+    return await async_request_token(username, service)
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +167,9 @@ async def async_get_adm_token(
     if not user:
         raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token.")
 
+    # Back-compat improvement: ensure username is seeded in cache (idempotent).
+    await _seed_username_in_cache(user)
+
     cache_key = f"adm_token_{user}"
 
     async def _generator() -> str:
@@ -144,7 +180,7 @@ async def async_get_adm_token(
 
     for attempt in range(attempts):
         try:
-            # Only generates if not cached
+            # Only generates if not cached; avoids multiple token exchanges under load
             token = await async_get_cached_value_or_set(cache_key, _generator)
 
             # Persist TTL metadata (best-effort)
@@ -157,30 +193,31 @@ async def async_get_adm_token(
 
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            if attempt < attempts - 1:
-                sleep_s = backoff * (2 ** attempt)
-                _LOGGER.info(
-                    "ADM token generation failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
-                    attempt + 1,
-                    attempts,
+            # Non-retryable? Log once and stop immediately.
+            if _is_non_retryable_auth(exc) or attempt >= attempts - 1:
+                _LOGGER.error(
+                    "ADM token generation failed%s for %s: %s",
+                    "" if attempt >= attempts - 1 else " (non-retryable)",
                     _mask_email(user),
-                    _clip(str(exc)),
-                    sleep_s,
+                    _clip(exc),
                 )
-                # Clear potentially bad cache entry before retrying (best-effort)
-                try:
-                    await async_set_cached_value(cache_key, None)
-                except Exception:  # noqa: BLE001
-                    pass
-                await asyncio.sleep(sleep_s)
-                continue
+                break
 
-            _LOGGER.error(
-                "ADM token generation failed after %d attempts for %s: %s",
+            # Retryable path: clear any stale cache value and back off
+            try:
+                await async_set_cached_value(cache_key, None)
+            except Exception:  # best-effort
+                pass
+            sleep_s = backoff * (2 ** attempt)
+            _LOGGER.info(
+                "ADM token generation failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
+                attempt + 1,
                 attempts,
                 _mask_email(user),
-                _clip(str(exc)),
+                _clip(exc),
+                sleep_s,
             )
+            await asyncio.sleep(sleep_s)
 
     assert last_exc is not None
     raise last_exc
@@ -245,7 +282,7 @@ async def async_get_adm_token_isolated(
 ) -> str:
     """
     Perform a *real* AAS→ADM exchange **without touching the global cache**.
-    This function is required by the config_flow for credential validation.
+    This function is required by the config flow for credential validation.
 
     Args:
         username: The Google account e-mail.
@@ -281,36 +318,49 @@ async def async_get_adm_token_isolated(
     for attempt in range(attempts):
         try:
             tok = await _perform_oauth_with_provided_aas(user, src_aas)
+
+            # Best-effort: persist TTL metadata via provided flow-local cache.
             if cache_set is not None:
-                # Best-effort metadata write (flow-local)
                 try:
                     await cache_set(f"adm_token_{user}", tok)
-                    await cache_set(f"adm_token_issued_at_{user}", time.time())
-                except Exception as meta_exc:  # noqa: BLE001
-                    _LOGGER.debug("Isolated TTL metadata write skipped: %s", _clip(str(meta_exc)))
+                    if cache_get is not None:
+                        has_issued = await cache_get(f"adm_token_issued_at_{user}")
+                    else:
+                        has_issued = None
+                    if not has_issued:
+                        await cache_set(f"adm_token_issued_at_{user}", time.time())
+                    # Restore bootstrap probe counter (regression fix #3):
+                    if cache_get is not None:
+                        existing = await cache_get(f"adm_probe_startup_left_{user}")
+                    else:
+                        existing = None
+                    if not existing:
+                        await cache_set(f"adm_probe_startup_left_{user}", 3)
+                except Exception as meta_exc:  # never fail the exchange on metadata issues
+                    _LOGGER.debug("Isolated TTL metadata write skipped: %s", _clip(meta_exc))
+
             return tok
 
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            if attempt < attempts - 1:
-                sleep_s = backoff * (2 ** attempt)
-                _LOGGER.info(
-                    "Isolated ADM exchange failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
-                    attempt + 1,
-                    attempts,
+            if _is_non_retryable_auth(exc) or attempt >= attempts - 1:
+                _LOGGER.error(
+                    "Isolated ADM exchange failed%s for %s: %s",
+                    "" if attempt >= attempts - 1 else " (non-retryable)",
                     _mask_email(user),
-                    _clip(str(exc)),
-                    sleep_s,
+                    _clip(exc),
                 )
-                await asyncio.sleep(sleep_s)
-                continue
-
-            _LOGGER.error(
-                "Isolated ADM exchange failed after %d attempts for %s: %s",
+                break
+            sleep_s = backoff * (2 ** attempt)
+            _LOGGER.info(
+                "Isolated ADM exchange failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
+                attempt + 1,
                 attempts,
                 _mask_email(user),
-                _clip(str(exc)),
+                _clip(exc),
+                sleep_s,
             )
+            await asyncio.sleep(sleep_s)
 
     assert last_exc is not None
     raise last_exc
