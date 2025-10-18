@@ -31,6 +31,16 @@ Runtime telemetry (for diagnostics)
 * `last_start_monotonic`: monotonic timestamp just before the client (re)starts.
 * `last_stop_monotonic`: monotonic timestamp at the end of `async_stop()`.
 * `start_count`: number of times the client was started by the supervisor.
+
+Multi-account preparation (entry-scoped)
+----------------------------------------
+* Credentials are **written to each entry's TokenCache** when available; global
+  cache falls back only if no coordinator is registered yet (cold start).
+* FCM token/endpoint → entry routing scaffold:
+  - Map the active registration **token → set(entry_id)**.
+  - On incoming push, prefer routing to the subset of coordinators whose entry_id
+    is mapped from the push envelope's target token; fall back to all on ambiguity.
+* Backwards compatible: with a single active entry, behavior is unchanged.
 """
 
 from __future__ import annotations
@@ -42,7 +52,7 @@ import json
 import logging
 import random
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Set
 
 from custom_components.googlefindmy.Auth.token_cache import (
     async_get_cached_value,
@@ -89,7 +99,7 @@ class FcmReceiverHA:
         * Initialize and supervise the FCM push client.
         * Handle per-request callbacks for specific devices.
         * Fan out background updates to a coordinator.
-        * Persist credential updates to the TokenCache.
+        * Persist credential updates to the TokenCache (entry-scoped when possible).
 
     Contract:
         * `async_initialize()` must be called before use.
@@ -117,7 +127,7 @@ class FcmReceiverHA:
         self.project_id = "google.com:api-project-289722593072"
         self.app_id = "1:289722593072:android:3cfcf5bc359f0308"
         self.api_key = "AIzaSyD_gko3P392v6how2H7UpdeXQ0v2HLettc"
-        self.message_sender_id = "289722593072"
+        self.message_sender_id = "289722593072"  # numeric Sender ID (project number)
 
         # ---------------- Debounce state (push path) ----------------
         # Latest pending payload per device; flushed after short debounce.
@@ -132,6 +142,11 @@ class FcmReceiverHA:
         self.last_start_monotonic: float = 0.0
         self.last_stop_monotonic: float = 0.0
         self.start_count: int = 0
+
+        # ---------------- Multi-account routing scaffold -------------
+        # Map FCM token -> set of entry_ids that currently use this token.
+        # Note: With a shared receiver instance there is typically one token.
+        self._token_to_entries: dict[str, Set[str]] = {}
 
     # -------------------- Convenience readiness --------------------
 
@@ -158,8 +173,16 @@ class FcmReceiverHA:
 
         Returns:
             True if the receiver is ready to start; False on a non-fatal failure.
+
+        Persistence strategy:
+            * If no coordinator is registered yet (cold start), read credentials from
+              the legacy/global async cache (back-compat).
+            * As soon as coordinators register, credentials are **written** to each
+              entry's TokenCache and subsequent updates keep them in sync.
         """
         # Load FCM credentials from the async TokenCache (string or dict supported).
+        # Cold-start path: use legacy/global cache; when a coordinator registers we will
+        # mirror credentials into the entry-scoped caches.
         creds: Any = await async_get_cached_value("fcm_credentials")
         if isinstance(creds, str):
             try:
@@ -184,7 +207,7 @@ class FcmReceiverHA:
             project_id=self.project_id,
             app_id=self.app_id,
             api_key=self.api_key,
-            messaging_sender_id=self.message_sender_id,
+            messaging_sender_id=self.message_sender_id,  # numeric sender id required
             bundle_id="com.google.android.apps.adm",
         )
 
@@ -238,7 +261,9 @@ class FcmReceiverHA:
             await self._start_listening()
 
         token = self.get_fcm_token()
-        if not token:
+        if token:
+            self._update_token_routing(token)  # keep routing table in sync
+        else:
             _LOGGER.warning("FCM credentials/token not available after registration")
         return token
 
@@ -250,10 +275,29 @@ class FcmReceiverHA:
     # -------------------- Coordinator wiring (sync by contract) --------------------
 
     def register_coordinator(self, coordinator: Any) -> None:
-        """Register a coordinator to receive background location updates."""
+        """Register a coordinator to receive background location updates.
+
+        Side effects:
+            * Adds coordinator to the fan-out list.
+            * If credentials/token are available, mirror them into this entry's TokenCache
+              and update the token→entry routing table.
+        """
         if coordinator not in self.coordinators:
             self.coordinators.append(coordinator)
             _LOGGER.debug("Coordinator registered (total=%d)", len(self.coordinators))
+
+        # Best-effort: persist current credentials to this entry's cache
+        try:
+            cache = getattr(coordinator, "cache", None)
+            if cache is not None and self.credentials is not None:
+                asyncio.create_task(cache.set("fcm_credentials", self.credentials))
+        except Exception as err:
+            _LOGGER.debug("Entry-scoped credentials persistence skipped: %s", err)
+
+        # Update token routing table with the new coordinator's entry_id if token exists
+        token = self.get_fcm_token()
+        if token:
+            self._update_token_routing(token)
 
     def unregister_coordinator(self, coordinator: Any) -> None:
         """Unregister a coordinator (sync; safe for async_on_unload)."""
@@ -282,9 +326,15 @@ class FcmReceiverHA:
         if not self.pc:
             return False
         try:
-            token = await self.pc.checkin_or_register()
-            if token:
-                _LOGGER.info("FCM registered, token: %s…", str(token)[:20])
+            token_or_creds = await self.pc.checkin_or_register()
+            if token_or_creds:
+                # The client typically returns a credentials dict; keep previous log format concise.
+                _LOGGER.info("FCM registered successfully")
+                # Ensure our in-memory credentials are current (client will also call _on_credentials_updated)
+                # but in case the client doesn't, try to read token now and update routing.
+                token = self.get_fcm_token()
+                if token:
+                    self._update_token_routing(token)
                 return True
             _LOGGER.warning("FCM registration returned no token")
             return False
@@ -416,23 +466,30 @@ class FcmReceiverHA:
                 _LOGGER.debug("FCM response has no canonical id")
                 return
 
-            # Direct per-request callback?
+            # Determine most-specific coordinator subset by push target token (if present)
+            token = self._extract_push_token(obj)
+            target_coordinators = self._coordinators_for_token(token)
+
+            # Direct per-request callback bypasses fan-out when available
             cb = self.location_update_callbacks.get(canonic_id)
             if cb:
                 asyncio.create_task(self._run_callback_async(cb, canonic_id, hex_string))
                 return
 
-            # Check if any coordinator would process this device (ignore-aware).
+            # Check if any chosen coordinator would process this device (ignore-aware).
             any_tracked = False
-            for coordinator in self.coordinators.copy():
+            for coordinator in target_coordinators:
                 if self._is_tracked(coordinator, canonic_id):
                     any_tracked = True
                 else:
                     _LOGGER.debug("Skipping FCM update for ignored device %s", canonic_id[:8])
 
             if not any_tracked:
-                # None of the registered coordinators will accept this device → drop.
-                _LOGGER.debug("No registered coordinator will process %s; dropping FCM update", canonic_id[:8])
+                _LOGGER.debug(
+                    "No registered coordinator will process %s (token=%s); dropping FCM update",
+                    canonic_id[:8],
+                    (token[:8] + "…") if token else "n/a",
+                )
                 return
 
             # Decode + enqueue; per-coordinator filtering and cache updates happen on flush.
@@ -502,6 +559,68 @@ class FcmReceiverHA:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Failed to extract canonical id from FCM response: %s", err)
         return None
+
+    @staticmethod
+    def _extract_push_token(envelope: dict[str, Any]) -> Optional[str]:
+        """Extract the push target token from the envelope (best-effort).
+
+        The FCM library typically includes a `to` field with the registration token.
+        We also check for common alternates to be robust across library versions.
+        """
+        try:
+            token = envelope.get("to") or envelope.get("token")
+            if not token and isinstance(envelope.get("message"), dict):
+                token = envelope["message"].get("token")
+            if isinstance(token, str) and token:
+                return token
+        except Exception:
+            pass
+        return None
+
+    def _coordinators_for_token(self, token: Optional[str]) -> list[Any]:
+        """Return the best coordinator subset for a given push token.
+
+        Strategy:
+            - If `token` is known in `_token_to_entries`, select only coordinators
+              whose `config_entry.entry_id` is listed.
+            - Otherwise, fall back to **all** registered coordinators (single-entry-safe).
+        """
+        if not token:
+            return self.coordinators.copy()
+        entry_ids = self._token_to_entries.get(token)
+        if not entry_ids:
+            return self.coordinators.copy()
+        res: list[Any] = []
+        for c in self.coordinators:
+            try:
+                entry = getattr(c, "config_entry", None)
+                if entry is not None and entry.entry_id in entry_ids:
+                    res.append(c)
+            except Exception:
+                # defensive: include coordinator to avoid dropping data
+                res.append(c)
+        return res or self.coordinators.copy()
+
+    def _update_token_routing(self, token: str) -> None:
+        """Update the token→entry mapping using currently registered coordinators.
+
+        This keeps routing precise even if multiple entries are active in the future.
+        """
+        try:
+            if not isinstance(token, str) or not token:
+                return
+            entry_ids: Set[str] = set()
+            for c in self.coordinators:
+                entry = getattr(c, "config_entry", None)
+                if entry is not None and getattr(entry, "entry_id", None):
+                    entry_ids.add(entry.entry_id)
+            if entry_ids:
+                prev = self._token_to_entries.get(token)
+                self._token_to_entries[token] = entry_ids
+                if prev != entry_ids:
+                    _LOGGER.debug("Updated FCM token routing: token=%s… -> %s", token[:8], ",".join(sorted(entry_ids)))
+        except Exception as err:
+            _LOGGER.debug("Token routing update skipped: %s", err)
 
     async def _run_callback_async(
         self, callback: Callable[[str, str], None], canonic_id: str, hex_string: str
@@ -700,15 +819,42 @@ class FcmReceiverHA:
             except json.JSONDecodeError:
                 _LOGGER.debug("FCM credentials arrived as non-JSON string; storing raw value.")
         self.credentials = normalized if isinstance(normalized, dict) else None
+
+        # Update token routing from the fresh credentials if possible
+        token = self.get_fcm_token()
+        if token:
+            self._update_token_routing(token)
+
         asyncio.create_task(self._async_save_credentials())
         _LOGGER.info("FCM credentials updated")
 
     async def _async_save_credentials(self) -> None:
-        """Persist current credentials to the async TokenCache."""
-        try:
-            await async_set_cached_value("fcm_credentials", self.credentials)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Failed to save FCM credentials: %s", err)
+        """Persist current credentials to entry-scoped TokenCaches (best-effort).
+
+        Behavior:
+            * If one or more coordinators are registered, write to **each** coordinator's
+              entry-scoped cache (key: 'fcm_credentials').
+            * If no coordinator is registered yet (cold start), fall back to the legacy
+              async facade to avoid losing credentials across restarts.
+        """
+        # Persist to entry-scoped caches when possible
+        wrote_any = False
+        for coordinator in self.coordinators.copy():
+            try:
+                cache = getattr(coordinator, "cache", None)
+                if cache is None:
+                    continue
+                await cache.set("fcm_credentials", self.credentials)
+                wrote_any = True
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Failed to save FCM credentials to entry cache: %s", err)
+
+        # Back-compat fallback if no entry cache was available yet
+        if not wrote_any:
+            try:
+                await async_set_cached_value("fcm_credentials", self.credentials)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.error("Failed to save FCM credentials (fallback): %s", err)
 
     def request_stop(self) -> None:
         """Signal a cooperative stop without awaiting.
