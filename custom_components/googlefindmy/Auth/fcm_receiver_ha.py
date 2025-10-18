@@ -29,21 +29,21 @@ Multi-account support (entry-scoped clients)
   coordinators are considered. Optionally, an owner-index fallback can be used
   when a Home Assistant instance is attached (see `attach_hass`).
 
-Push-path debouncing
---------------------
-* Multiple FCM messages for the same device can arrive in bursts. To avoid churning the
-  coordinator and entities, we **debounce per device**:
-    - `_pending[device_id]` holds the latest decoded payload.
-    - `_schedule_flush(device_id)` (re)starts a short timer (default 250 ms).
-    - `_flush(device_id)` fans the single coalesced payload out to the *target*
-      coordinators for the routed entry only (not a broadcast).
+Precise fan-out (debounce with routing context)
+-----------------------------------------------
+* We debounce per **(entry_id, device_id)**:
+    - `_pending[(entry_id, device_id)]` holds the latest decoded payload **plus** the
+      routed target entry set.
+    - `_schedule_flush(entry_id, device_id)` (re)starts a short timer (default 250 ms).
+    - `_flush(entry_id, device_id)` fans the coalesced payload out only to coordinators
+      for the routed entries (no broadcast).
 
 Runtime telemetry (for diagnostics)
 -----------------------------------
 * Per-receiver metrics retained for compatibility:
   `last_start_monotonic`, `last_stop_monotonic`, `start_count` (aggregate view).
 * Logs include routing details:
-  `push_received(entry=<id>|unknown, device=..., fanout_targets=n, route=token|owner_index|fallback)`.
+  `push_received(entry=<id>|unknown, device=..., fanout_targets=n, route=token|owner_index|client|fallback)`.
 
 Retry/404 mitigation (unchanged behavior)
 -----------------------------------------
@@ -61,7 +61,7 @@ import json
 import logging
 import random
 import time
-from typing import Any, Callable, Optional, Set
+from typing import Any, Callable, Optional, Set, Tuple
 
 from custom_components.googlefindmy.Auth.token_cache import (
     async_get_cached_value,  # fallback for cold start with no coordinators
@@ -145,9 +145,10 @@ class FcmReceiverHA:
         # Routing tables
         self._token_to_entries: dict[str, Set[str]] = {}  # token -> set(entry_id)
 
-        # Debounce state (push path)
-        self._pending: dict[str, dict] = {}
-        self._flush_tasks: dict[str, asyncio.Task] = {}
+        # Debounce state (push path): keyed by (entry_id, device_id)
+        self._pending: dict[Tuple[str, str], dict] = {}
+        self._pending_targets: dict[Tuple[str, str], Optional[Set[str]]] = {}
+        self._flush_tasks: dict[Tuple[str, str], asyncio.Task] = {}
         self._debounce_ms: int = 250
 
         # Aggregate telemetry
@@ -402,6 +403,7 @@ class FcmReceiverHA:
             * Mirrors current credentials into this entry's TokenCache (if available).
             * Starts (or ensures) a supervisor for the coordinator's entry.
             * Updates token→entry routing for any available token.
+            * Loads previously persisted routing tokens (`fcm_routing_tokens`) and maps them to this entry.
         """
         if coordinator not in self.coordinators:
             self.coordinators.append(coordinator)
@@ -425,6 +427,19 @@ class FcmReceiverHA:
         if token:
             self._update_token_routing(token, {entry.entry_id})
             asyncio.create_task(self._persist_routing_token(entry.entry_id, token))
+
+        # Load persisted routing tokens for this entry and map them as well
+        if cache is not None:
+            async def _load_tokens() -> None:
+                try:
+                    existing = await cache.get("fcm_routing_tokens")
+                    if isinstance(existing, (list, tuple, set)):
+                        for t in existing:
+                            if isinstance(t, str) and t:
+                                self._update_token_routing(t, {entry.entry_id})
+                except Exception as err:
+                    _LOGGER.debug("[entry=%s] Failed to load persisted routing tokens: %s", entry.entry_id, err)
+            asyncio.create_task(_load_tokens())
 
         # Start supervisor for this entry
         asyncio.create_task(self._start_supervisor_for_entry(entry.entry_id, cache))
@@ -532,8 +547,8 @@ class FcmReceiverHA:
                 _LOGGER.debug("No registered coordinator will process %s; dropping FCM update", canonic_id[:8])
                 return
 
-            # Decode + enqueue; per-coordinator filtering and cache updates happen on flush.
-            asyncio.create_task(self._process_background_update(canonic_id, hex_string))
+            # Decode + enqueue with routing context; per-coordinator filtering happens on flush.
+            asyncio.create_task(self._process_background_update(entry_id, canonic_id, hex_string, target_entries))
 
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Error processing FCM notification: %s", err)
@@ -652,8 +667,18 @@ class FcmReceiverHA:
 
     # -------------------- Push-path decode → debounce → flush --------------------
 
-    async def _process_background_update(self, canonic_id: str, hex_string: str) -> None:
-        """Decode location, enqueue for debounce, and schedule a flush."""
+    async def _process_background_update(
+        self,
+        entry_id: str,
+        canonic_id: str,
+        hex_string: str,
+        target_entries: Optional[Set[str]],
+    ) -> None:
+        """Decode location, enqueue for debounce, and schedule a flush (with routing context).
+
+        The routing context (target entry set) is stored alongside the pending payload to
+        enable precise fan-out in `_flush(...)`.
+        """
         try:
             location_data = await asyncio.get_event_loop().run_in_executor(
                 None, self._decode_background_location, hex_string
@@ -665,44 +690,52 @@ class FcmReceiverHA:
             payload = dict(location_data)
             payload.setdefault("last_updated", time.time())
 
-            self._pending[canonic_id] = payload
-            self._schedule_flush(canonic_id)
+            key = (next(iter(target_entries)) if (target_entries and len(target_entries) == 1) else entry_id, canonic_id)
+            # Store the payload and the full routing target set (may be None for broadcast fallback)
+            self._pending[key] = payload
+            self._pending_targets[key] = set(target_entries) if target_entries else None
+
+            self._schedule_flush(key)
 
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Error processing background update for %s: %s", canonic_id, err)
 
-    def _schedule_flush(self, device_id: str) -> None:
-        """(Re)schedule a short debounce before fanning out updates."""
-        existing = self._flush_tasks.pop(device_id, None)
+    def _schedule_flush(self, key: Tuple[str, str]) -> None:
+        """(Re)schedule a short debounce before fanning out updates for (entry, device)."""
+        existing = self._flush_tasks.pop(key, None)
         if existing and not existing.done():
             existing.cancel()
 
         async def _delayed() -> None:
             try:
                 await asyncio.sleep(self._debounce_ms / 1000.0)
-                await self._flush(device_id)
+                await self._flush(key)
             except asyncio.CancelledError:
                 return
             except Exception as err:
-                _LOGGER.error("Flush task for %s failed: %s", device_id, err)
+                _LOGGER.error("Flush task for %s/%s failed: %s", key[0], key[1], err)
 
-        task = asyncio.create_task(_delayed(), name=f"{DOMAIN}.fcm_flush[{device_id[:8]}]")
-        self._flush_tasks[device_id] = task
+        task = asyncio.create_task(_delayed(), name=f"{DOMAIN}.fcm_flush[{key[0]}:{key[1][:8]}]")
+        self._flush_tasks[key] = task
 
-    async def _flush(self, device_id: str) -> None:
-        """Flush the latest pending payload to target coordinators only."""
-        payload = self._pending.pop(device_id, None)
-        self._flush_tasks.pop(device_id, None)
+    async def _flush(self, key: Tuple[str, str]) -> None:
+        """Flush the latest pending payload to target coordinators only.
+
+        Args:
+            key: Tuple of (entry_id_hint, device_id). The exact target entries are taken
+                 from `_pending_targets[key]`, which may be a set or None (broadcast fallback).
+        """
+        payload = self._pending.pop(key, None)
+        entries = self._pending_targets.pop(key, None)
+        self._flush_tasks.pop(key, None)
         if not payload:
             return
 
-        # Determine likely owner entry via recent token routing (best-effort)
-        # We can't recover the push token here, so use all coordinators; significance gating happens inside coordinator.
-        target_coordinators = self.coordinators.copy()
+        target_coordinators = self._coordinators_for_entries(entries)
 
         for coordinator in target_coordinators:
             try:
-                if not self._is_tracked(coordinator, device_id):
+                if not self._is_tracked(coordinator, key[1]):
                     continue
 
                 coordinator_payload = dict(payload)
@@ -712,13 +745,13 @@ class FcmReceiverHA:
                 ghf = getattr(coordinator, "google_home_filter", None)
                 if semantic_name and ghf is not None:
                     try:
-                        should_filter, replacement_attrs = ghf.should_filter_detection(device_id, semantic_name)
+                        should_filter, replacement_attrs = ghf.should_filter_detection(key[1], semantic_name)
                     except Exception as gf_err:
-                        _LOGGER.debug("Google Home filter error for %s: %s", device_id[:8], gf_err)
+                        _LOGGER.debug("Google Home filter error for %s: %s", key[1][:8], gf_err)
                         should_filter, replacement_attrs = False, None
 
                     if should_filter:
-                        _LOGGER.debug("Filtered Google Home detection for %s (push path)", device_id[:8])
+                        _LOGGER.debug("Filtered Google Home detection for %s (push path)", key[1][:8])
                         continue
 
                     if replacement_attrs:
@@ -731,14 +764,14 @@ class FcmReceiverHA:
 
                 update_cache = getattr(coordinator, "update_device_cache", None)
                 if callable(update_cache):
-                    update_cache(device_id, coordinator_payload)
+                    update_cache(key[1], coordinator_payload)
                 else:
                     try:
-                        coordinator._device_location_data[device_id] = coordinator_payload  # noqa: SLF001
+                        coordinator._device_location_data[key[1]] = coordinator_payload  # noqa: SLF001
                         _LOGGER.debug("Fallback: wrote to coordinator._device_location_data directly")
                         coordinator.increment_stat("background_updates")
                     except Exception as err:  # noqa: BLE001
-                        _LOGGER.error("Coordinator cache update failed for %s: %s", device_id, err)
+                        _LOGGER.error("Coordinator cache update failed for %s: %s", key[1], err)
                         continue
 
                 if coordinator_payload.get("is_own_report") is False:
@@ -749,12 +782,12 @@ class FcmReceiverHA:
 
                 push = getattr(coordinator, "push_updated", None)
                 if callable(push):
-                    push([device_id])
+                    push([key[1]])
                 else:
                     await coordinator.async_request_refresh()
 
             except Exception as err:
-                _LOGGER.debug("Failed to fan-out push update for %s to one coordinator: %s", device_id[:8], err)
+                _LOGGER.debug("Failed to fan-out push update for %s to one coordinator: %s", key[1][:8], err)
 
     # -------------------- Decode helper --------------------
 
