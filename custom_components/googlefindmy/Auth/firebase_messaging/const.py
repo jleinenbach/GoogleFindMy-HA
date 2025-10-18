@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/Auth/firebase_messaging/const.py
 #
 # firebase-messaging
 # https://github.com/sdb9696/firebase-messaging
@@ -25,10 +26,29 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Constants module."""
+"""Constants module for the FCM/GC(M) transport layer.
 
-GCM_REGISTER_URL = "https://android.clients.google.com/c2dm/register3"
-GCM_CHECKIN_URL = "https://android.clients.google.com/checkin"
+Notes on GCM register endpoints
+-------------------------------
+We intentionally set the *base* register URL to ``/c2dm/register`` (without the trailing "3")
+and expose a secondary ``/c2dm/register3`` variant. The registration routine is expected to
+start with ``GCM_REGISTER_URL`` and toggle to ``GCM_REGISTER3_URL`` *only* when it encounters
+a 404/HTML response, as some backends still require the "3" suffix.
+
+Do **not** default to ``/register3`` here; the fallback logic relies on toggling from the base.
+"""
+
+# --- GCM/legacy endpoints (with toggle support) ---------------------------------------
+
+GCM_BASE_URL = "https://android.clients.google.com"
+# Start with the base endpoint; registration code may toggle to *_REGISTER3_URL on 404/HTML.
+GCM_REGISTER_URL = f"{GCM_BASE_URL}/c2dm/register"
+# Secondary variant used by the single-toggle fallback in the registration routine.
+GCM_REGISTER3_URL = f"{GCM_BASE_URL}/c2dm/register3"
+
+GCM_CHECKIN_URL = f"{GCM_BASE_URL}/checkin"
+
+# Public key used by the C2DM/FCM registration legacy flow (binary and urlsafe base64)
 GCM_SERVER_KEY_BIN = (
     b"\x04\x33\x94\xf7\xdf\xa1\xeb\xb1\xdc\x03\xa2\x5e\x15\x71\xdb\x48\xd3"
     + b"\x2e\xed\xed\xb2\x34\xdb\xb7\x47\x3a\x0c\x8f\xc4\xcc\xe1\x6f\x3c"
@@ -41,6 +61,8 @@ GCM_SERVER_KEY_B64 = (
     + "j8TM4W88jITfq7ZmPvIM1Iv-4_l2LxQcYwhqby2xGpWwzjfAnG4"
 )
 
+# --- FCM HTTP APIs --------------------------------------------------------------------
+
 FCM_SUBSCRIBE_URL = "https://fcm.googleapis.com/fcm/connect/subscribe/"
 FCM_SEND_URL = "https://fcm.googleapis.com/fcm/send/"
 
@@ -50,7 +72,11 @@ FCM_INSTALLATION = "https://firebaseinstallations.googleapis.com/v1/"
 AUTH_VERSION = "FIS_v2"
 SDK_VERSION = "w:0.6.6"
 
+# --- Misc (kept from upstream for compatibility) --------------------------------------
+
 DOORBELLS_ENDPOINT = "/clients_api/doorbots/{0}"
+
+# --- MCS (Mobile Client-Server) socket constants -------------------------------------
 
 MCS_VERSION = 41
 MCS_HOST = "mtalk.google.com"
