@@ -7,12 +7,36 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Optional, Callable, Awaitable
 
 import gpsoauth
 
 # Use the async-first API; the legacy sync wrapper is intentionally unsupported.
 from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
+
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class InvalidAasTokenError(RuntimeError):
+    """Raised when the cached AAS token is rejected by gpsoauth."""
+
+
+def _is_invalid_aas_error_text(text: str) -> bool:
+    """Return True when the error string indicates an invalid AAS token."""
+
+    lowered = text.lower()
+    if "badauthentication" in lowered:
+        return True
+    if "needsbrowser" in lowered:
+        return True
+    if "unauthorized" in lowered or "forbidden" in lowered:
+        return True
+    if "invalid" in lowered:
+        if "token" in lowered or "auth" in lowered or "credential" in lowered:
+            return True
+    return False
 
 
 # Constants used by gpsoauth for the OAuth exchange flow.
@@ -34,6 +58,7 @@ def _perform_oauth_sync(username: str, aas_token: str, scope: str, play_services
         The OAuth access token (string) for the requested scope.
 
     Raises:
+        InvalidAasTokenError: If gpsoauth explicitly rejects the supplied AAS token.
         RuntimeError: If the gpsoauth exchange fails or returns an invalid response.
     """
     request_app = "com.google.android.gms" if play_services else "com.google.android.apps.adm"
@@ -50,10 +75,22 @@ def _perform_oauth_sync(username: str, aas_token: str, scope: str, play_services
             raise ValueError("No response from gpsoauth.perform_oauth")
 
         if "Auth" not in auth_response:
-            raise KeyError(f"'Auth' not found in response: {auth_response}")
+            error_detail = str(auth_response.get("Error", "")).strip()
+            if error_detail and _is_invalid_aas_error_text(error_detail):
+                raise InvalidAasTokenError(
+                    f"gpsoauth rejected the AAS token while requesting scope '{scope}': {error_detail}"
+                )
+            raise KeyError("'Auth' not found in gpsoauth response")
 
         return auth_response["Auth"]
+    except InvalidAasTokenError:
+        raise
     except Exception as e:  # noqa: BLE001
+        message = str(e)
+        if message and _is_invalid_aas_error_text(message):
+            raise InvalidAasTokenError(
+                f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
+            ) from e
         raise RuntimeError(f"Failed to get auth token for scope '{scope}': {e}") from e
 
 
@@ -130,6 +167,9 @@ async def async_request_token(
 
     Returns:
         OAuth access token string for the requested scope.
+
+    Raises:
+        InvalidAasTokenError: If gpsoauth rejects the cached AAS token during the exchange.
     """
     # Get the AAS token from injected token → injected provider → default provider.
     if aas_token is None:
@@ -140,6 +180,13 @@ async def async_request_token(
 
     # Offload the blocking OAuth exchange to a worker thread.
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, lambda: _perform_oauth_sync(username, aas_token, scope, play_services)
-    )
+    try:
+        return await loop.run_in_executor(
+            None, lambda: _perform_oauth_sync(username, aas_token, scope, play_services)
+        )
+    except InvalidAasTokenError:
+        _LOGGER.warning(
+            "gpsoauth rejected the cached AAS token while requesting scope '%s'; a fresh AAS token will be required.",
+            scope,
+        )
+        raise

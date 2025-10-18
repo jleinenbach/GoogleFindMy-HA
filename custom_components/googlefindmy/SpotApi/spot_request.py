@@ -17,7 +17,9 @@ from custom_components.googlefindmy.Auth.username_provider import (
     get_username,          # sync wrapper (CLI/dev; deprecated for HA)
     async_get_username,    # async-first (HA)
 )
+from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
 from custom_components.googlefindmy.SpotApi.grpc_parser import GrpcParser
+from custom_components.googlefindmy.const import DATA_AAS_TOKEN
 
 # Sync helpers for CLI/dev usage (never call inside the HA event loop)
 from custom_components.googlefindmy.Auth.spot_token_retrieval import (
@@ -224,7 +226,7 @@ async def _invalidate_token_async(
         elif kind == "spot":
             await cache.set(f"spot_token_{username}", None)
             # AAS should be entry-scoped; invalidate in the same cache to force fresh chain
-            await cache.set("aas_token", None)
+            await cache.set(DATA_AAS_TOKEN, None)
         return
 
     # Fallback to global async facades
@@ -232,7 +234,17 @@ async def _invalidate_token_async(
         await async_set_cached_value(f"adm_token_{username}", None)
     elif kind == "spot":
         await async_set_cached_value(f"spot_token_{username}", None)
-        await async_set_cached_value("aas_token", None)
+        await async_set_cached_value(DATA_AAS_TOKEN, None)
+
+
+async def _clear_aas_token_async(*, cache: TokenCache | None = None) -> None:
+    """Clear the cached AAS token in the selected cache (entry-scoped when provided)."""
+
+    if cache is not None:
+        await cache.set(DATA_AAS_TOKEN, None)
+        return
+
+    await async_set_cached_value(DATA_AAS_TOKEN, None)
 
 # ------------------------------ SYNC API (CLI/dev) ------------------------------
 
@@ -426,16 +438,34 @@ async def async_spot_request(
 
     refreshed_once = False
     retries_used = 0
+    aas_reset_once = False
 
     async with httpx.AsyncClient(http2=True, timeout=30.0) as client:
         while True:
             attempt = retries_used + 1
             prefer_adm = refreshed_once  # after first auth failure, prefer ADM path on retry
+            try:
+                token, kind, token_user = await _pick_auth_token_async(
+                    prefer_adm=prefer_adm,
+                    cache=cache,
+                )
+            except InvalidAasTokenError as aas_err:
+                if not aas_reset_once:
+                    _LOGGER.warning(
+                        "SPOT %s: cached AAS token rejected while selecting auth token; clearing and retrying once.",
+                        api_scope,
+                    )
+                    await _clear_aas_token_async(cache=cache)
+                    aas_reset_once = True
+                    continue
 
-            token, kind, token_user = await _pick_auth_token_async(
-                prefer_adm=prefer_adm,
-                cache=cache,
-            )
+                _LOGGER.error(
+                    "SPOT %s: cached AAS token rejected after refresh; re-authentication required.",
+                    api_scope,
+                )
+                raise SpotAuthPermanentError(
+                    "AAS token invalid after refresh; re-authentication required."
+                ) from aas_err
 
             headers = {
                 "User-Agent": "com.google.android.gms/244433022 grpc-java-cronet/1.69.0-SNAPSHOT",
@@ -496,6 +526,7 @@ async def async_spot_request(
                         api_scope, src, kind, token_user,
                     )
                     await _invalidate_token_async(kind, token_user, cache=cache)
+                    aas_reset_once = True
                     refreshed_once = True
                     # immediate retry (do not consume backoff budget)
                     continue
