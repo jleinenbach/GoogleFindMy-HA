@@ -244,6 +244,37 @@ class _EphemeralCache:
         else:
             self._data[key] = value
 
+    async def get(self, name: str) -> Any:
+        """Return a cached value (TokenCache compatibility alias)."""
+
+        return await self.async_get_cached_value(name)
+
+    async def set(self, name: str, value: Any) -> None:
+        """Store a value in the cache (TokenCache compatibility alias)."""
+
+        await self.async_set_cached_value(name, value)
+
+    async def get_or_set(
+        self, name: str, generator: Callable[[], Awaitable[Any] | Any]
+    ) -> Any:
+        """Return cached value or compute/store it via the provided generator."""
+
+        existing = await self.get(name)
+        if existing is not None:
+            return existing
+
+        result = generator()
+        if asyncio.iscoroutine(result):
+            result = await result
+
+        await self.set(name, result)
+        return result
+
+    async def all(self) -> Dict[str, Any]:
+        """Return a shallow copy of all cached values."""
+
+        return dict(self._data)
+
 
 # ----------------------------- API class ------------------------------------
 class GoogleFindMyAPI:
