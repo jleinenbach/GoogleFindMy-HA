@@ -10,11 +10,11 @@ This module provides an asynchronous API to obtain the per-user *owner key* that
 required to decrypt location payloads.
 
 Multi-account design (entry-scoped):
-- Accepts an optional entry-scoped TokenCache. When provided, **all** reads/writes
-  are performed strictly against that cache (no global fallback).
+- Callers **must** provide the entry-scoped TokenCache. All reads/writes are
+  performed strictly against that cache; global facades have been removed.
 - Keys are stored per user under `owner_key_<username>`. A legacy non-scoped
   `owner_key` is migrated *within the same cache scope* (if present).
-- Username resolution prefers the same entry-scoped cache.
+- Username resolution uses the same entry-scoped cache.
 
 Normalization & validation:
 - Owner keys are normalized to **hex strings** in storage.
@@ -35,18 +35,13 @@ import re
 from binascii import Error as BinasciiError, unhexlify
 from typing import Any, Awaitable, Callable, Optional
 
-from custom_components.googlefindmy.Auth.token_cache import (
-    TokenCache,
-    async_get_cached_value,
-    async_get_cached_value_or_set,
-    async_set_cached_value,
-)
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.Auth.username_provider import (
     async_get_username,
     username_string,
 )
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import decrypt_owner_key
-from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import get_shared_key
+from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import async_get_shared_key
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
     get_eid_info,
@@ -123,6 +118,7 @@ async def _run_in_executor(func, *args):
 async def _retrieve_owner_key(
     username: str,
     *,
+    cache: TokenCache,
     eid_info_getter: Optional[Callable[[], Awaitable[Any]]] = None,
     shared_key_getter: Optional[Callable[[], Awaitable[bytes]]] = None,
 ) -> str:
@@ -159,8 +155,7 @@ async def _retrieve_owner_key(
     if shared_key_getter is not None:
         shared_key: Any = await shared_key_getter()
     else:
-        # May involve cache I/O/crypto initialization -> run in executor
-        shared_key = await _run_in_executor(get_shared_key)
+        shared_key = await async_get_shared_key(cache=cache)
 
     if not isinstance(shared_key, (bytes, bytearray)) or not shared_key:
         raise RuntimeError("Shared key is missing or empty; cannot decrypt owner key")
@@ -194,57 +189,39 @@ async def _retrieve_owner_key(
 async def _get_or_generate_user_owner_key_hex(
     username: str,
     *,
-    cache: TokenCache | None,
+    cache: TokenCache,
     eid_info_getter: Optional[Callable[[], Awaitable[Any]]] = None,
     shared_key_getter: Optional[Callable[[], Awaitable[bytes]]] = None,
 ) -> str:
     """Return the per-user owner key (hex string), migrating and generating if needed.
 
     Cache behavior:
-        - If `cache` is provided, all operations are performed against that cache only.
-        - Otherwise, global async cache facades are used.
-        - Legacy `owner_key` (non-scoped) is migrated *within the selected cache scope*.
+        - All operations are performed against the provided entry-scoped cache.
+        - Legacy `owner_key` (non-scoped) is migrated *within the same cache scope*.
     """
     user_key_name = _user_cache_key(username)
 
     # 1) Per-user cache hit?
-    if cache is not None:
-        user_key = await cache.get(user_key_name)
-        if isinstance(user_key, str) and user_key:
-            return user_key
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
 
-        # 2) Legacy migration (within the same cache scope only)
-        legacy = await cache.get(_OWNER_KEY_CACHE_PREFIX)
-        if isinstance(legacy, str) and legacy:
-            await cache.set(user_key_name, legacy)
-            _LOGGER.debug("Migrated legacy 'owner_key' (entry-scoped) to user-scoped cache for %s", username)
-            return legacy
-
-        # 3) Generate fresh value and cache under the user-specific key.
-        return await cache.get_or_set(
-            user_key_name,
-            lambda: _retrieve_owner_key(
-                username,
-                eid_info_getter=eid_info_getter,
-                shared_key_getter=shared_key_getter,
-            ),
-        )
-
-    # --- Global facades path (legacy single-account setups) ---
-    user_key = await async_get_cached_value(user_key_name)
+    user_key = await cache.get(user_key_name)
     if isinstance(user_key, str) and user_key:
         return user_key
 
-    legacy = await async_get_cached_value(_OWNER_KEY_CACHE_PREFIX)
+    # 2) Legacy migration (within the same cache scope only)
+    legacy = await cache.get(_OWNER_KEY_CACHE_PREFIX)
     if isinstance(legacy, str) and legacy:
-        await async_set_cached_value(user_key_name, legacy)
-        _LOGGER.debug("Migrated legacy 'owner_key' to user-scoped cache for %s", username)
+        await cache.set(user_key_name, legacy)
+        _LOGGER.debug("Migrated legacy 'owner_key' (entry-scoped) to user-scoped cache for %s", username)
         return legacy
 
-    return await async_get_cached_value_or_set(
+    # 3) Generate fresh value and cache under the user-specific key.
+    return await cache.get_or_set(
         user_key_name,
         lambda: _retrieve_owner_key(
             username,
+            cache=cache,
             eid_info_getter=eid_info_getter,
             shared_key_getter=shared_key_getter,
         ),
@@ -258,7 +235,7 @@ async def _get_or_generate_user_owner_key_hex(
 
 async def async_get_owner_key(
     *,
-    cache: TokenCache | None = None,
+    cache: TokenCache,
     username: Optional[str] = None,
     eid_info_getter: Optional[Callable[[], Awaitable[Any]]] = None,
     shared_key_getter: Optional[Callable[[], Awaitable[bytes]]] = None,
@@ -279,18 +256,17 @@ async def async_get_owner_key(
     Raises:
         RuntimeError: if the key is missing/invalid or has incorrect length.
     """
-    # Resolve username (prefer entry-scoped cache when provided).
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    # Resolve username (prefer entry-scoped cache).
     if username:
         user = username
     else:
-        if cache is not None:
-            # Try direct lookup; fallback to provider with entry-scoped cache
-            val = await cache.get(username_string)
-            user = str(val) if isinstance(val, str) and val else None
-            if not user:
-                user = await async_get_username(cache=cache)  # type: ignore[arg-type]
-        else:
-            user = await async_get_username()
+        val = await cache.get(username_string)
+        user = str(val) if isinstance(val, str) and val else None
+        if not user:
+            user = await async_get_username(cache=cache)
 
     if not isinstance(user, str) or not user:
         raise RuntimeError("Username is not configured; cannot retrieve owner key.")
@@ -318,20 +294,13 @@ async def async_get_owner_key(
                 exc,
             )
             # Clear per-user & legacy cache to prevent repeated failures on the same invalid data
-            if cache is not None:
-                await cache.set(_user_cache_key(user), None)
-                await cache.set(_OWNER_KEY_CACHE_PREFIX, None)
-            else:
-                await async_set_cached_value(_user_cache_key(user), None)
-                await async_set_cached_value(_OWNER_KEY_CACHE_PREFIX, None)
+            await cache.set(_user_cache_key(user), None)
+            await cache.set(_OWNER_KEY_CACHE_PREFIX, None)
             raise RuntimeError("Invalid owner_key format (expect 32-byte key in hex or base64).") from exc
         else:
             # Self-heal: normalize the cache to hex for future consistency
             _LOGGER.info("Successfully decoded owner key from a non-hex format; normalizing cache to hex.")
-            if cache is not None:
-                await cache.set(_user_cache_key(user), key_bytes.hex())
-            else:
-                await async_set_cached_value(_user_cache_key(user), key_bytes.hex())
+            await cache.set(_user_cache_key(user), key_bytes.hex())
 
     # 3) Final validation: the owner key must be exactly 32 bytes long
     if len(key_bytes) != 32:
@@ -341,12 +310,8 @@ async def async_get_owner_key(
             user,
             len(key_bytes),
         )
-        if cache is not None:
-            await cache.set(_user_cache_key(user), None)
-            await cache.set(_OWNER_KEY_CACHE_PREFIX, None)
-        else:
-            await async_set_cached_value(_user_cache_key(user), None)
-            await async_set_cached_value(_OWNER_KEY_CACHE_PREFIX, None)
+        await cache.set(_user_cache_key(user), None)
+        await cache.set(_OWNER_KEY_CACHE_PREFIX, None)
         raise RuntimeError("Owner key must be exactly 32 bytes long.")
 
     return key_bytes
