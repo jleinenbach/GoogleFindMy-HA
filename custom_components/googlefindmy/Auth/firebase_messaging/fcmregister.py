@@ -51,7 +51,6 @@ from .const import (
     FCM_SEND_URL,
     GCM_CHECKIN_URL,
     GCM_REGISTER_URL,
-    GCM_REGISTER3_URL,  # NEW: alternate endpoint constant
     GCM_SERVER_KEY_B64,
     SDK_VERSION,
 )
@@ -176,20 +175,6 @@ class FcmRegister:
         if "error 404" in tl or "that’s an error" in tl or "that's an error" in tl:
             return True
         return False
-
-    @staticmethod
-    def _toggle_gcm_register_variant(url: str) -> str:
-        """Toggle between the canonical /c2dm/register and /c2dm/register3 endpoints.
-
-        Uses constants to avoid brittle path-suffix checks and to ensure we always
-        flip exactly once between the two known endpoints.
-        """
-        if url == GCM_REGISTER_URL:
-            return GCM_REGISTER3_URL
-        if url == GCM_REGISTER3_URL:
-            return GCM_REGISTER_URL
-        # Defensive default: start from the base endpoint.
-        return GCM_REGISTER_URL
 
     # ---------------------------------------------------------------------
     # GCM Check-in
@@ -333,7 +318,6 @@ class FcmRegister:
         headers = {
             "Authorization": f"AidLogin {android_id}:{security_token}",
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "Android-GCM/1.5",
         }
         body = {
             "app": self.config.chrome_id,
@@ -353,7 +337,6 @@ class FcmRegister:
             )
 
         url = GCM_REGISTER_URL
-        tried_variant = False
         last_error: str | Exception | None = None
 
         # Non-retryable error codes returned by GCM register body (Error=<CODE>)
@@ -377,21 +360,8 @@ class FcmRegister:
                     content_type = (resp.headers.get("Content-Type") or "").lower()
                     response_text = await resp.text()
 
-                # Detect HTML/404 error pages even when status==200.
+                # Detect HTML error pages even when status==200.
                 html_like = ("text/html" in content_type) or self._looks_like_html(response_text)
-                if response_status == 404 or html_like:
-                    if not tried_variant:
-                        alt = self._toggle_gcm_register_variant(url)
-                        _logger.warning(
-                            "GCM register: 404/HTML received at %s (status=%s, ctype=%s); "
-                            "toggling endpoint to %s and retrying",
-                            url, response_status, content_type or "-", alt,
-                        )
-                        url = alt
-                        tried_variant = True
-                        # Quick retry without consuming an attempt slot
-                        await asyncio.sleep(0.5)
-                        continue
 
                 # Parse body lines for structured keys
                 token = None
@@ -405,10 +375,7 @@ class FcmRegister:
                         error_code = (v or "").strip().upper()
 
                 if token:
-                    _logger.info(
-                        "GCM register succeeded via %s",
-                        "/c2dm/register3" if url == GCM_REGISTER3_URL else "/c2dm/register",
-                    )
+                    _logger.info("GCM register succeeded via %s", url)
                     return {
                         "token": token,
                         "app_id": gcm_app_id,
@@ -434,6 +401,8 @@ class FcmRegister:
                         f"Unexpected register response (status={response_status}, "
                         f"ctype={content_type}): {response_text[:200]}"
                     )
+                    if html_like:
+                        last_error += " [html]"
                     _logger.warning(
                         "GCM register unexpected response at %s (attempt %d/%d): %s",
                         url, attempt, retries, last_error,
