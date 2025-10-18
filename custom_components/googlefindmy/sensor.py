@@ -491,9 +491,11 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         # Link this end device to the single per-entry service device
         entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", None)
         via = service_device_identifier(entry_id) if entry_id else None
+        dev_id = self._device["id"]
+        entry_scoped_identifier = f"{entry_id}:{dev_id}" if entry_id else dev_id
 
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device["id"])},
+            identifiers={(DOMAIN, entry_scoped_identifier)},
             name=use_name,  # may be None; that's OK when identifiers are provided
             manufacturer="Google",
             model="Find My Device",
