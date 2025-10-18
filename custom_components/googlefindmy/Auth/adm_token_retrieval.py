@@ -17,6 +17,8 @@ Design & Fix for BadAuthentication:
   the retriever expects the full OAuth2 scope.
 - **Retry policy**: Transient network/library errors are retried with bounded backoff.
   Clear, non-recoverable auth errors (e.g., "BadAuthentication") are NOT retried.
+  Additionally, HTTP-style signals such as 401/403 or "unauthorized"/"forbidden" in
+  error messages are treated as non-retryable as well.
 - Blocking `gpsoauth` calls (isolated flow) are executed in a thread executor to
   avoid blocking Home Assistant's event loop.
 
@@ -104,10 +106,14 @@ def _is_non_retryable_auth(err: Exception) -> bool:
     # Typical shapes to consider non-retryable
     if "BadAuthentication" in text:
         return True
-    if "invalid_grant" in text.lower():
+    low = text.lower()
+    if "invalid_grant" in low:
         return True
-    if "Missing 'Auth' in gpsoauth response" in text:
+    if "missing 'auth' in gpsoauth response" in text:
         # Most often wraps {"Error": "..."} from gpsoauth; treat as non-retryable
+        return True
+    # Treat obvious HTTP-style auth denials as non-retryable as well
+    if "401" in low or "403" in low or "unauthorized" in low or "forbidden" in low:
         return True
     return False
 
