@@ -51,7 +51,7 @@ from typing import Any, Awaitable, Callable, Optional
 import gpsoauth
 
 # Prefer relative imports inside the package for robustness
-from .token_retrieval import async_request_token
+from .token_retrieval import async_request_token, InvalidAasTokenError
 from .token_cache import (
     TokenCache,
     async_get_cached_value,
@@ -109,6 +109,8 @@ def _normalize_service(service: str) -> str:
 
 def _is_non_retryable_auth(err: Exception) -> bool:
     """Return True if the error indicates a non-recoverable auth problem."""
+    if isinstance(err, InvalidAasTokenError):
+        return True
     text = _clip(err)
     # Typical shapes to consider non-retryable
     if "BadAuthentication" in text:

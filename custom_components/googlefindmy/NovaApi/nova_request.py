@@ -55,6 +55,7 @@ from custom_components.googlefindmy.Auth.adm_token_retrieval import (
     # Isolated refresh (for config flow validation without global cache)
     async_get_adm_token_isolated,
 )
+from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
 from custom_components.googlefindmy.Auth.token_cache import (
     get_cached_value,
     set_cached_value,
@@ -62,7 +63,7 @@ from custom_components.googlefindmy.Auth.token_cache import (
     async_set_cached_value,
     TokenCache,  # NEW: for entry-scoped cache access in async path
 )
-from ..const import NOVA_API_USER_AGENT
+from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -350,7 +351,17 @@ class AsyncTTLPolicy(TTLPolicy):
             await self._set(f"{self._ns}adm_token_{self.username}", None)  # best-effort clear
         except Exception:
             pass
-        tok = await self._refresh()  # async callable
+        try:
+            tok = await self._refresh()  # async callable
+        except InvalidAasTokenError as err:
+            self.log.error(
+                "ADM token refresh failed because the cached AAS token was rejected; re-authentication is required."
+            )
+            try:
+                await self._set(f"{self._ns}{DATA_AAS_TOKEN}", None)
+            except Exception:
+                pass
+            raise NovaAuthError(401, "AAS token invalid during ADM refresh") from err
         if tok:
             self._set_auth("Bearer " + tok)
             await self._set(self.k_issued, now)
@@ -476,7 +487,17 @@ async def _get_initial_token_async(
     if not token:
         _logger.info("Attempting to generate new ADM token (async, entry-scoped=%s)...", bool(cache))
         # Ensure refresh also uses the same entry-scoped cache
-        token = await async_get_adm_token_api(username, cache=cache)
+        try:
+            token = await async_get_adm_token_api(username, cache=cache)
+        except InvalidAasTokenError as err:
+            _logger.error(
+                "ADM token generation failed because the cached AAS token was rejected; re-authentication required."
+            )
+            if cache is not None:
+                await cache.set(DATA_AAS_TOKEN, None)
+            else:
+                await async_set_cached_value(f"{ns}{DATA_AAS_TOKEN}", None)
+            raise NovaAuthError(401, "AAS token invalid during ADM token generation") from err
         if token:
             if cache is not None:
                 await cache.set(f"{ns}adm_token_issued_at_{username}", time.time())
