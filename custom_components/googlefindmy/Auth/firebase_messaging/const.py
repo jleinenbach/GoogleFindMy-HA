@@ -26,25 +26,14 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Constants module for the FCM/GC(M) transport layer.
+"""Constants module for the FCM/GC(M) transport layer."""
 
-Notes on GCM register endpoints
--------------------------------
-We intentionally set the *base* register URL to ``/c2dm/register`` (without the trailing "3")
-and expose a secondary ``/c2dm/register3`` variant. The registration routine is expected to
-start with ``GCM_REGISTER_URL`` and toggle to ``GCM_REGISTER3_URL`` *only* when it encounters
-a 404/HTML response, as some backends still require the "3" suffix.
-
-Do **not** default to ``/register3`` here; the fallback logic relies on toggling from the base.
-"""
-
-# --- GCM/legacy endpoints (with toggle support) ---------------------------------------
+# --- GCM/legacy endpoints -------------------------------------------------------------
 
 GCM_BASE_URL = "https://android.clients.google.com"
-# Start with the base endpoint; registration code may toggle to *_REGISTER3_URL on 404/HTML.
-GCM_REGISTER_URL = f"{GCM_BASE_URL}/c2dm/register"
-# Secondary variant used by the single-toggle fallback in the registration routine.
-GCM_REGISTER3_URL = f"{GCM_BASE_URL}/c2dm/register3"
+# Chromium and GoogleFindMyTools always target the ``/register3`` endpoint. Align with
+# that behaviour to avoid 404 responses when Google rejects legacy /register calls.
+GCM_REGISTER_URL = f"{GCM_BASE_URL}/c2dm/register3"
 
 GCM_CHECKIN_URL = f"{GCM_BASE_URL}/checkin"
 

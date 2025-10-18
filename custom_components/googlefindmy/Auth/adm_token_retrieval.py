@@ -52,12 +52,7 @@ import gpsoauth
 
 # Prefer relative imports inside the package for robustness
 from .token_retrieval import async_request_token, InvalidAasTokenError
-from .token_cache import (
-    TokenCache,
-    async_get_cached_value,
-    async_get_cached_value_or_set,
-    async_set_cached_value,
-)
+from .token_cache import TokenCache
 from .username_provider import async_get_username, username_string
 from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
 
@@ -127,24 +122,20 @@ def _is_non_retryable_auth(err: Exception) -> bool:
     return False
 
 
-async def _seed_username_in_cache(username: str, *, cache: TokenCache | None) -> None:
-    """
-    Ensure the canonical username cache key is populated (idempotent).
+async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
+    """Ensure the canonical username cache key is populated (idempotent)."""
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
 
-    When an entry-scoped `cache` is provided, only that cache is used. Otherwise,
-    the legacy facades are used to preserve single-entry behavior.
-    """
     try:
-        if cache is not None:
-            cached = await cache.get(username_string)
-            if cached != username and isinstance(username, str) and username:
-                await cache.set(username_string, username)
-                _LOGGER.debug("Seeded username cache key '%s' with '%s' (entry-scoped).", username_string, username)
-        else:
-            cached = await async_get_cached_value(username_string)
-            if cached != username and isinstance(username, str) and username:
-                await async_set_cached_value(username_string, username)
-                _LOGGER.debug("Seeded username cache key '%s' with '%s' (default cache).", username_string, username)
+        cached = await cache.get(username_string)
+        if cached != username and isinstance(username, str) and username:
+            await cache.set(username_string, username)
+            _LOGGER.debug(
+                "Seeded username cache key '%s' with '%s' (entry-scoped).",
+                username_string,
+                username,
+            )
     except Exception as exc:  # Defensive: never fail token flow on seeding.
         _LOGGER.debug("Username cache seeding skipped: %s", _clip(exc))
 
@@ -153,7 +144,7 @@ async def _seed_username_in_cache(username: str, *, cache: TokenCache | None) ->
 # Core token generation (delegates to central token retriever)
 # ---------------------------------------------------------------------------
 
-async def _generate_adm_token(username: str, *, cache: TokenCache | None) -> str:
+async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
     """
     Generate a new ADM token by delegating to the central token retriever,
     injecting an **entry-scoped AAS provider** when `cache` is supplied.
@@ -162,17 +153,15 @@ async def _generate_adm_token(username: str, *, cache: TokenCache | None) -> str
     ADM <-OAuth(AAS from same cache)-> AAS.
     """
     _LOGGER.debug(
-        "Generating new ADM token for account %s%s",
+        "Generating new ADM token for account %s (entry scoped)",
         _mask_email(username),
-        " (entry-scoped AAS provider)" if cache is not None else "",
     )
     service = _normalize_service("android_device_manager")
 
-    # Prefer an entry-scoped AAS provider when a cache is supplied; otherwise
-    # fall back to the default provider inside async_request_token.
-    aas_provider: Optional[Callable[[], Awaitable[str]]] = None
-    if cache is not None:
-        aas_provider = lambda: async_get_aas_token(cache=cache)
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    aas_provider: Callable[[], Awaitable[str]] = lambda: async_get_aas_token(cache=cache)
 
     return await async_request_token(username, service, aas_provider=aas_provider)
 
@@ -186,7 +175,7 @@ async def async_get_adm_token(
     *,
     retries: int = 2,
     backoff: float = 1.0,
-    cache: TokenCache | None = None,
+    cache: TokenCache,
 ) -> str:
     """
     Return a cached ADM token or generate a new one (async-first API).
@@ -197,8 +186,8 @@ async def async_get_adm_token(
         username: Optional explicit username. If None, it's resolved from cache.
         retries: Number of retry attempts on failure (only for transient issues).
         backoff: Initial backoff delay in seconds for retries.
-        cache: Optional entry-scoped TokenCache. If provided, **only this cache**
-            is used for reads/writes. If None, legacy default-cache facades are used.
+        cache: Entry-scoped TokenCache used for all reads/writes. Legacy global
+            facades are no longer available.
 
     Returns:
         The ADM token string.
@@ -206,8 +195,11 @@ async def async_get_adm_token(
     Raises:
         RuntimeError: If the username is invalid or token generation fails after all retries.
     """
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
     # Use the passed username if available; only fallback to provider when missing.
-    user = (username or await async_get_username(cache) or "").strip().lower()
+    user = (username or await async_get_username(cache=cache) or "").strip().lower()
     if not user:
         raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token.")
 
@@ -225,25 +217,16 @@ async def async_get_adm_token(
     for attempt in range(attempts):
         try:
             # Only generates if not cached; avoids multiple token exchanges under load
-            if cache is not None:
-                token = await cache.get_or_set(cache_key, _generator)
-            else:
-                token = await async_get_cached_value_or_set(cache_key, _generator)
+            token = await cache.get_or_set(cache_key, _generator)
 
             # Persist TTL metadata (best-effort; entry-scoped if possible)
             issued_key = f"adm_token_issued_at_{user}"
             probe_key = f"adm_probe_startup_left_{user}"
 
-            if cache is not None:
-                if not await cache.get(issued_key):
-                    await cache.set(issued_key, time.time())
-                if not await cache.get(probe_key):
-                    await cache.set(probe_key, 3)
-            else:
-                if not await async_get_cached_value(issued_key):
-                    await async_set_cached_value(issued_key, time.time())
-                if not await async_get_cached_value(probe_key):
-                    await async_set_cached_value(probe_key, 3)
+            if not await cache.get(issued_key):
+                await cache.set(issued_key, time.time())
+            if not await cache.get(probe_key):
+                await cache.set(probe_key, 3)
 
             return token
 
@@ -261,10 +244,7 @@ async def async_get_adm_token(
 
             # Retryable path: clear any stale cache value and back off
             try:
-                if cache is not None:
-                    await cache.set(cache_key, None)
-                else:
-                    await async_set_cached_value(cache_key, None)
+                await cache.set(cache_key, None)
             except Exception:
                 pass  # best-effort
 
@@ -452,5 +432,10 @@ def get_adm_token(
                 "Use `await async_get_adm_token()` instead."
             )
     except RuntimeError:
-        # No running loop -> allowed (CLI/offline usage)
-        return asyncio.run(async_get_adm_token(username, retries=retries, backoff=backoff))
+        # No running loop -> legacy path is no longer available without entry context.
+        pass
+
+    raise RuntimeError(
+        "Legacy get_adm_token() is no longer supported without providing the entry TokenCache. "
+        "Use `await async_get_adm_token(..., cache=...)` instead."
+    )
