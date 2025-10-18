@@ -339,8 +339,8 @@ class FcmRegister:
             "app": self.config.chrome_id,
             "X-subtype": gcm_app_id,
             "device": android_id,
-            # IMPORTANT: Use **numeric** sender/project number, not server key b64.
-            "sender": self.config.messaging_sender_id,
+            # IMPORTANT: GCM register expects the server key (base64), not the numeric sender ID.
+            "sender": GCM_SERVER_KEY_B64,
         }
         if self._log_debug_verbose:
             _logger.debug(
