@@ -19,17 +19,13 @@ Features
 - Robust retry logic (401 -> refresh & retry; 5xx/429 -> exponential backoff).
 - All auth/cache access in the async path uses the async token cache API.
 
-Multi-account & entry-scoped cache
+Entry-scoped / multi-account aware
 ----------------------------------
-- When an entry-scoped TokenCache is supplied via `cache=...`, *all* reads/writes
-  (username lookup, ADM token, TTL metadata and refresh) are performed strictly
-  against that cache — with an optional `namespace` prefix to further avoid key
-  collisions if desired. This makes the async path fully multi-account safe.
-
-Notes
------
-- The sync path uses `httpx` and MUST NOT be called from within the event loop.
-- The async path is preferred throughout the integration code.
+- `async_nova_request` now accepts an optional `cache: TokenCache` and `namespace`.
+  When provided, **username**, **token lookups**, and **TTL metadata** will be
+  read/written against that entry-local cache and namespaced keys. Call sites may
+  still pass `cache_get`/`cache_set` for flow-local validation; these override
+  TTL metadata I/O only (content tokens remain in the TokenCache/global cache).
 """
 
 from __future__ import annotations
@@ -47,14 +43,11 @@ from datetime import datetime, timezone
 import aiohttp
 import httpx
 
-from custom_components.googlefindmy.Auth.username_provider import (
-    get_username,
-    async_get_username,
-)
+from custom_components.googlefindmy.Auth.username_provider import get_username, async_get_username
 from custom_components.googlefindmy.Auth.adm_token_retrieval import (
     get_adm_token,
     async_get_adm_token as async_get_adm_token_api,
-    # Isolated refresh (for config flow validation without global cache)
+    # New: isolated refresh (for config flow validation without global cache)
     async_get_adm_token_isolated,
 )
 from custom_components.googlefindmy.Auth.token_cache import (
@@ -445,39 +438,64 @@ def _get_initial_token_sync(username: str, _logger, ns_prefix: str = "") -> str:
 async def _get_initial_token_async(
     username: str,
     _logger,
-    *,
     ns_prefix: str = "",
+    *,
     cache: TokenCache | None = None,
+    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
+    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
 ) -> str:
-    """
-    Get or create the initial ADM token in async path and ensure TTL metadata is recorded.
+    """Get or create the initial ADM token in async path and record TTL metadata.
 
-    When `cache` is provided, all reads/writes are performed against that entry-scoped
-    cache only (optionally namespaced via `ns_prefix`). This makes token retrieval
-    fully multi-account safe.
+    Entry-scoped behavior:
+    - If `cache` is provided, token lookups/writes use that TokenCache (content).
+    - TTL/aux metadata prefers `cache_get`/`cache_set` (flow-local); otherwise
+      uses `cache.get/cache.set` when `cache` is given; otherwise global async facades.
     """
     ns = (ns_prefix or "").strip()
     if ns and not ns.endswith(":"):
         ns += ":"
 
-    # Select storage based on entry-scoped cache presence
-    get = cache.get if cache is not None else async_get_cached_value
-    set_ = cache.set if cache is not None else async_set_cached_value
+    # --- Read token from cache (prefer entry-local cache if provided) ---
+    if cache is not None:
+        token = (
+            await cache.get(f"{ns}adm_token_{username}")
+            or await cache.get(f"{ns}adm_token")
+            or await cache.get(f"adm_token_{username}")
+            or await cache.get("adm_token")
+        )
+    else:
+        token = (
+            await async_get_cached_value(f"{ns}adm_token_{username}")
+            or await async_get_cached_value(f"{ns}adm_token")
+            or await async_get_cached_value(f"adm_token_{username}")
+            or await async_get_cached_value("adm_token")
+        )
 
-    # Look up token in the chosen storage only
-    token = (
-        await get(f"{ns}adm_token_{username}")
-        or await get(f"{ns}adm_token")
-    )
-
+    # --- Generate if missing ---
     if not token:
-        scope_msg = " (entry-scoped)" if cache is not None else ""
-        _logger.info("Attempting to generate new ADM token (async%s)...", scope_msg)
+        _logger.info("Attempting to generate new ADM token (async)...")
         token = await async_get_adm_token_api(username, cache=cache)
         if token:
-            await set_(f"{ns}adm_token_issued_at_{username}", time.time())
-            if not await get(f"{ns}adm_probe_startup_left_{username}"):
-                await set_(f"{ns}adm_probe_startup_left_{username}", 3)
+            # Persist TTL metadata (best-effort)
+            issued_key = f"{ns}adm_token_issued_at_{username}"
+            probe_key = f"{ns}adm_probe_startup_left_{username}"
+
+            # Prefer flow-local overrides for metadata
+            if cache_set is not None and cache_get is not None:
+                if not await cache_get(issued_key):
+                    await cache_set(issued_key, time.time())
+                if not await cache_get(probe_key):
+                    await cache_set(probe_key, 3)
+            elif cache is not None:
+                if not await cache.get(issued_key):
+                    await cache.set(issued_key, time.time())
+                if not await cache.get(probe_key):
+                    await cache.set(probe_key, 3)
+            else:
+                if not await async_get_cached_value(issued_key):
+                    await async_set_cached_value(issued_key, time.time())
+                if not await async_get_cached_value(probe_key):
+                    await async_set_cached_value(probe_key, 3)
 
     if not token:
         raise ValueError("No ADM token available - please reconfigure authentication")
@@ -672,42 +690,38 @@ async def async_nova_request(
     session: Optional[aiohttp.ClientSession] = None,
     # Optional: initial token for config-flow isolation (bypass cache lookups)
     token: Optional[str] = None,
-    # Optional entry-scoped TokenCache – when supplied, all reads/writes are entry-local.
-    cache: TokenCache | None = None,
     # Optional overrides for flow-local validation (avoid global cache conflicts)
     cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
     cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
     refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
     # Optional: entry-specific namespace for cache keys (e.g., entry_id)
     namespace: Optional[str] = None,
+    # NEW: entry-scoped TokenCache for content tokens & fallback TTL metadata
+    cache: Optional[TokenCache] = None,
 ) -> str:
     """
-    Asynchronous Nova API request for Home Assistant (fully multi-account safe).
+    Asynchronous Nova API request for Home Assistant.
 
-    This is the preferred method for all communication with the Nova API from
-    within Home Assistant, as it is non-blocking and integrates with HA's
-    shared aiohttp session.
+    Preferred method for all communication with the Nova API inside Home Assistant.
 
     Args:
         api_scope: Nova API scope suffix (appended to the base URL).
         hex_payload: Hex string body.
-        username: Optional username. If omitted, read from async username provider
-            (entry-scoped when `cache` is provided).
+        username: Optional username. If omitted, read from entry cache (when provided)
+                  or the global async username provider.
         session: Optional aiohttp session to reuse.
         token: Optional, direct ADM token to bypass cache lookups (for config flow).
-        cache: Optional entry-scoped TokenCache. If provided, *all* reads/writes
-            (username, ADM token, TTL metadata and refresh) are performed strictly
-            against this cache. Optionally combine with `namespace` to avoid collisions.
         cache_get/cache_set: Optional async functions to read/write TTL metadata
             to a *flow-local* cache (dict-like). When provided, they fully replace
-            the token cache for TTL policy use.
+            the token cache for TTL metadata only.
         refresh_override: Optional async function returning a fresh token. Use
-            this to perform a *real* AAS→ADM refresh isolated from globals
-            (e.g. via `async_get_adm_token_isolated(...)`).
+            this to perform a *real* AAS→ADM refresh isolated from globals.
         namespace: Optional key namespace (e.g., config entry_id) to avoid cache collisions.
+        cache: Optional TokenCache for entry-scoped token & metadata storage.
 
     Returns:
         Hex-encoded response body.
+
     Raises:
         ValueError: if the hex_payload is invalid or username is unavailable.
         NovaAuthError: on 4xx client errors.
@@ -722,7 +736,15 @@ async def async_nova_request(
         user = username
         initial_token = token
     else:
-        user = username or await async_get_username(cache)
+        if username:
+            user = username
+        else:
+            # Entry-scoped username resolution when possible
+            if cache is not None:
+                maybe_user = await cache.get("username")
+                user = maybe_user if isinstance(maybe_user, str) and maybe_user else None
+            else:
+                user = await async_get_username()
         if not user:
             raise ValueError("Username is not available for async_nova_request.")
         initial_token = await _get_initial_token_async(
@@ -730,6 +752,8 @@ async def async_nova_request(
             _LOGGER,
             ns_prefix=(namespace or ""),
             cache=cache,
+            cache_get=cache_get,
+            cache_set=cache_set,
         )
 
     headers = {
@@ -746,14 +770,18 @@ async def async_nova_request(
         raise ValueError("Invalid hex payload for Nova request") from e
 
     # Select cache/refresh providers (allow flow-local overrides)
-    if cache_get and cache_set:
+    if cache_get is not None:
         get_fn = cache_get
-        set_fn = cache_set
     elif cache is not None:
         get_fn = cache.get
-        set_fn = cache.set
     else:
         get_fn = async_get_cached_value
+
+    if cache_set is not None:
+        set_fn = cache_set
+    elif cache is not None:
+        set_fn = cache.set
+    else:
         set_fn = async_set_cached_value
 
     rf_fn: Callable[[], Awaitable[Optional[str]]] = (
