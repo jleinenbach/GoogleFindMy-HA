@@ -4,24 +4,26 @@
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
 """
-Shared key retrieval for Google Find My Device (async-first).
+Shared key retrieval for Google Find My Device (async-first, entry-scoped capable).
 
 This module provides an asynchronous API to obtain the 32-byte *shared key*
-used to decrypt E2EE payloads. The value is cached (per config entry via the
-integration's async token cache) as a **hex string** under the key "shared_key".
+used to decrypt E2EE payloads.
 
-Key properties:
-- **Async-first**: `async_get_shared_key()` is the primary API.
-- **Executor offloading**: any blocking/interactive flows are executed in a thread.
-- **Normalization**: the cached value is normalized to a lowercase hex string.
-- **Validation**: decoded key must be exactly 32 bytes (256 bit).
-- **Fallbacks**:
-  1) Read from cache (hex expected, base64 accepted once and auto-normalized).
-  2) Derive from FCM credentials (private key), if available (non-interactive).
-  3) As a last resort (CLI only), run the interactive shared-key flow.
+Multi-account / entry-scoped design:
+- When an entry-scoped `TokenCache` is supplied, **all** reads/writes are done
+  strictly against that cache (no global fallback).
+- In entry-scoped mode, the canonical cache key is `"shared_key"` (per entry).
+- In global (legacy) mode, a per-user key `"shared_key_<username>"` is used,
+  with one-time migration from legacy `"shared_key"` if present.
 
-The legacy sync facade `get_shared_key()` is kept for import compatibility for
-CLI scripts, but it is **not** safe to call from the Home Assistant event loop.
+Normalization & validation:
+- Values are stored as lowercase **hex strings**.
+- On read, base64/base64url/PEM-like values are accepted once and normalized.
+- Decoded key must be exactly 32 bytes (256 bit).
+
+Retrieval strategy (when not cached):
+1) Derive from FCM credentials (non-interactive, HA-friendly).
+2) As a last resort (CLI only), run the interactive shared-key flow.
 """
 
 from __future__ import annotations
@@ -35,20 +37,24 @@ from binascii import Error as BinasciiError, unhexlify
 from typing import Any, Optional
 
 from custom_components.googlefindmy.Auth.token_cache import (
+    TokenCache,
     async_get_cached_value,
     async_get_cached_value_or_set,
     async_set_cached_value,
 )
+from custom_components.googlefindmy.Auth.username_provider import (
+    async_get_username,
+    username_string,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-_CACHE_KEY = "shared_key"  # stored as lowercase hex string
+_CACHE_KEY_BASE = "shared_key"  # canonical per-entry key in entry-scoped mode
 
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-
 
 def _decode_hex_32(s: str) -> bytes:
     """Decode a string as hex and ensure it is exactly 32 bytes.
@@ -109,16 +115,15 @@ async def _run_in_executor(func, *args):
 
 
 # -----------------------------------------------------------------------------
-# Retrieval strategies
+# Retrieval strategies (cache-aware)
 # -----------------------------------------------------------------------------
 
-
-async def _derive_from_fcm_credentials() -> str:
+async def _derive_from_fcm_credentials(*, cache: TokenCache | None) -> str:
     """Try deriving the shared key from FCM credentials (non-interactive path).
 
     The FCM credential layout typically contains a private key in base64/base64url form.
     We derive deterministic 32-byte material by using the **last 32 bytes** of the DER
-    payload, preserving the original behavior while avoiding interactive flows.
+    payload, preserving prior behavior while avoiding interactive flows.
 
     Returns:
         str: lowercase hex string of 32 bytes.
@@ -126,7 +131,11 @@ async def _derive_from_fcm_credentials() -> str:
     Raises:
         RuntimeError: if credentials are not present/invalid or too short.
     """
-    creds: Any = await async_get_cached_value("fcm_credentials")
+    if cache is not None:
+        creds: Any = await cache.get("fcm_credentials")
+    else:
+        creds = await async_get_cached_value("fcm_credentials")
+
     if isinstance(creds, str):
         try:
             creds = json.loads(creds)
@@ -196,7 +205,7 @@ async def _interactive_flow_hex() -> str:
         return _decode_base64_like_32(s).hex()
 
 
-async def _retrieve_shared_key_hex() -> str:
+async def _retrieve_shared_key_hex(*, cache: TokenCache | None) -> str:
     """Strategy chain to obtain a hex-encoded shared key (32 bytes).
 
     Order:
@@ -211,7 +220,7 @@ async def _retrieve_shared_key_hex() -> str:
     """
     # 1) Non-interactive derivation (preferred for HA)
     try:
-        return await _derive_from_fcm_credentials()
+        return await _derive_from_fcm_credentials(cache=cache)
     except Exception as err:
         _LOGGER.debug("FCM-derivation for shared key not available: %s", err)
 
@@ -228,18 +237,90 @@ async def _retrieve_shared_key_hex() -> str:
 
 
 # -----------------------------------------------------------------------------
-# Public API (async-first)
+# Cache orchestration (entry-scoped vs global legacy)
 # -----------------------------------------------------------------------------
 
+def _user_scoped_key(username: str) -> str:
+    return f"{_CACHE_KEY_BASE}_{username}"
 
-async def async_get_shared_key() -> bytes:
-    """Return the 32-byte shared key.
+
+async def _get_or_generate_shared_key_hex(
+    *,
+    cache: TokenCache | None,
+    username: Optional[str],
+) -> str:
+    """Return the shared key hex string with proper scoping & one-time migration.
+
+    Entry-scoped mode (cache is provided):
+        - Primary key: "shared_key" (per entry).
+        - If missing and a user-scoped legacy key exists in this cache (rare), migrate it.
+        - Otherwise generate via strategy chain and store under "shared_key".
+
+    Global legacy mode (no cache provided):
+        - Primary key: "shared_key_<username>" (per-user).
+        - If missing, migrate from legacy "shared_key" to user-scoped key if present.
+        - Otherwise generate via strategy chain and store under "shared_key_<username>".
+    """
+    if cache is not None:
+        # Primary key in entry-scoped mode
+        existing = await cache.get(_CACHE_KEY_BASE)
+        if isinstance(existing, str) and existing.strip():
+            return existing
+
+        # Optional: migrate from user-scoped legacy key within the same cache (defensive)
+        if isinstance(username, str) and username:
+            legacy_user_key = await cache.get(_user_scoped_key(username))
+            if isinstance(legacy_user_key, str) and legacy_user_key.strip():
+                await cache.set(_CACHE_KEY_BASE, legacy_user_key)
+                _LOGGER.debug("Migrated legacy user-scoped shared_key to entry-scoped key")
+                return legacy_user_key
+
+        # Generate fresh and persist
+        return await cache.get_or_set(_CACHE_KEY_BASE, lambda: _retrieve_shared_key_hex(cache=cache))
+
+    # --- Global legacy mode below ---
+    # Need a username to scope keys safely
+    if not isinstance(username, str) or not username:
+        # Resolve from global cache (best-effort)
+        resolved = await async_get_cached_value(username_string)
+        username = str(resolved) if isinstance(resolved, str) and resolved else await async_get_username()
+
+    if not isinstance(username, str) or not username:
+        raise RuntimeError("Username is not configured; cannot resolve shared_key in global mode.")
+
+    user_key = _user_scoped_key(username)
+
+    # Per-user primary key
+    existing = await async_get_cached_value(user_key)
+    if isinstance(existing, str) and existing.strip():
+        return existing
+
+    # One-time migration from legacy global "shared_key"
+    legacy = await async_get_cached_value(_CACHE_KEY_BASE)
+    if isinstance(legacy, str) and legacy.strip():
+        await async_set_cached_value(user_key, legacy)
+        _LOGGER.debug("Migrated legacy global shared_key to per-user key: %s", user_key)
+        return legacy
+
+    # Generate and store under per-user key
+    return await async_get_cached_value_or_set(user_key, lambda: _retrieve_shared_key_hex(cache=None))
+
+
+# -----------------------------------------------------------------------------
+# Public API (async-first, entry-scoped capable)
+# -----------------------------------------------------------------------------
+
+async def async_get_shared_key(
+    *,
+    cache: TokenCache | None = None,
+    username: Optional[str] = None,
+) -> bytes:
+    """Return the 32-byte shared key (entry-scoped capable).
 
     Behavior:
-        - Reads from the async token cache key "shared_key" (hex).
-        - If absent, derives it (prefer FCM credentials) or runs the interactive flow
-          when a TTY is detected (CLI only), then stores a normalized hex string.
-        - Normalizes base64/base64url or PEM-like stored values to hex on first read.
+        - Entry-scoped mode (preferred in HA): use per-entry key "shared_key".
+        - Global legacy mode: use per-user key "shared_key_<username>" with migration.
+        - Normalizes base64/base64url/PEM-like stored values to hex on first read.
         - Enforces a strict 32-byte length.
 
     Returns:
@@ -248,35 +329,35 @@ async def async_get_shared_key() -> bytes:
     Raises:
         RuntimeError: if a valid key cannot be obtained or normalized.
     """
-    raw = await async_get_cached_value(_CACHE_KEY)
-    if isinstance(raw, str) and raw.strip():
-        s = raw.strip()
-        # Try hex fast-path
-        try:
-            return _decode_hex_32(s)
-        except ValueError:
-            # Accept base64/base64url, then self-heal to hex
-            b = _decode_base64_like_32(s)
-            await async_set_cached_value(_CACHE_KEY, b.hex())
-            _LOGGER.info("Normalized cached shared_key (base64) to hex")
-            return b
+    hex_value = await _get_or_generate_shared_key_hex(cache=cache, username=username)
 
-    # Cache miss -> compute via strategy chain, then persist
-    hex_value = await async_get_cached_value_or_set(_CACHE_KEY, _retrieve_shared_key_hex)
-
-    # Validate persisted value and return as bytes
+    # Validate and return as bytes; self-heal non-hex to hex
     try:
         return _decode_hex_32(hex_value)
-    except ValueError as exc:
-        # Clear invalid cache to avoid repeated failures
-        await async_set_cached_value(_CACHE_KEY, None)
-        raise RuntimeError(f"Persisted shared_key is invalid: {exc}") from exc
+    except ValueError:
+        # Try base64-like and normalize
+        b = _decode_base64_like_32(hex_value)
+        if cache is not None:
+            await cache.set(_CACHE_KEY_BASE, b.hex())
+        else:
+            # Determine where to write in global mode
+            user = username
+            if not isinstance(user, str) or not user:
+                # Try resolve for normalization path
+                resolved = await async_get_cached_value(username_string)
+                user = str(resolved) if isinstance(resolved, str) and resolved else await async_get_username()
+            if isinstance(user, str) and user:
+                await async_set_cached_value(_user_scoped_key(user), b.hex())
+            else:
+                # Fallback to legacy slot if user resolution failed
+                await async_set_cached_value(_CACHE_KEY_BASE, b.hex())
+        _LOGGER.info("Normalized cached shared_key to hex")
+        return b
 
 
 # -----------------------------------------------------------------------------
 # Legacy sync facade (CLI compatibility)
 # -----------------------------------------------------------------------------
-
 
 def get_shared_key() -> bytes:  # pragma: no cover
     """Sync facade for CLI tools (NOT for Home Assistant event loop).
