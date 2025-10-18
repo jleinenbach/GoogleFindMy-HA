@@ -10,84 +10,70 @@ minimal API to read/write the configured Google account e-mail.
 
 Design:
 - Async-first: `async_get_username` / `async_set_username` are the primary API.
-- Optional entry scoping: when a `TokenCache` instance is provided, **all**
-  reads/writes are performed strictly against that cache. If `cache` is omitted,
-  the legacy global async facades are used (backwards compatible for single-entry setups).
-- Legacy sync wrappers are provided for backward compatibility but will raise
-  a RuntimeError if called from within the Home Assistant event loop to prevent
-  deadlocks. They remain safe for use from worker threads only.
+- Entry scoped: callers **must** provide the `TokenCache` instance that belongs
+  to their config entry. This enforces strict multi-account isolation.
+- Legacy sync wrappers are retained for compatibility with out-of-tree tooling
+  but will raise when the global cache facade is no longer available.
 
 Persistence:
-- The underlying persistence is handled by the entry-scoped TokenCache (HA Store)
-  when provided, otherwise by the global async cache facades.
+- The underlying persistence is handled by the entry-scoped TokenCache (HA
+  Store). Global cache facades are no longer used inside the async code paths.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
-from typing import Optional
 
-from .token_cache import (
-    TokenCache,
-    async_get_cached_value,
-    async_set_cached_value,
-    # Legacy sync facades (safe only outside the event loop)
-    get_cached_value as _legacy_get_cached_value,
-    set_cached_value as _legacy_set_cached_value,
-)
-
-_LOGGER = logging.getLogger(__name__)
+from .token_cache import TokenCache
 
 # Single well-known cache key for the Google account e-mail
 username_string = "username"
 
 
-async def async_get_username(cache: TokenCache | None = None) -> Optional[str]:
+async def async_get_username(*, cache: TokenCache) -> str | None:
     """Return the configured Google account e-mail.
 
-    When `cache` is provided, the username is read strictly from that entry's
-    TokenCache. Otherwise, the legacy global async cache facade is used.
+    The username is read strictly from the provided entry-scoped TokenCache.
 
     Args:
-        cache: Optional entry-scoped TokenCache instance.
+        cache: Entry-scoped TokenCache instance.
 
     Returns:
         The username (e-mail) if present and a string, otherwise ``None``.
     """
-    if cache is not None:
-        try:
-            val = await cache.get(username_string)
-        except Exception:
-            # Defensive: fall through to None on cache I/O errors
-            val = None
-    else:
-        val = await async_get_cached_value(username_string)
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    try:
+        val = await cache.get(username_string)
+    except Exception:
+        # Defensive: fall through to None on cache I/O errors
+        val = None
     return str(val).strip().lower() if isinstance(val, str) and val else None
 
 
-async def async_set_username(username: str, *, cache: TokenCache | None = None) -> None:
+async def async_set_username(username: str, *, cache: TokenCache) -> None:
     """Seed or update the username in the token cache (entry-scoped when provided).
 
     Normalizes the e-mail to lower-case and trims whitespace before writing.
 
     Args:
         username: The Google account e-mail to persist.
-        cache: Optional entry-scoped TokenCache instance.
+        cache: Entry-scoped TokenCache instance.
 
     Raises:
         ValueError: If the provided username is empty/invalid.
     """
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
     if not isinstance(username, str):
         raise ValueError("Username must be a string.")
     norm = username.strip().lower()
     if not norm or "@" not in norm:
         raise ValueError("Username must be a non-empty e-mail address.")
 
-    if cache is not None:
-        await cache.set(username_string, norm)
-    else:
-        await async_set_cached_value(username_string, norm)
+    await cache.set(username_string, norm)
 
 
 # ----------------------- Legacy sync wrappers (compat) -----------------------
@@ -118,17 +104,9 @@ def get_username() -> str:
             "Use `await async_get_username()` instead."
         )
 
-    username = _legacy_get_cached_value(username_string)
-    if isinstance(username, str) and username:
-        return str(username).strip().lower()
-
-    # Fail fast instead of returning a placeholder that would cause PERMISSION_DENIED later.
-    _LOGGER.error(
-        "No Google username configured in cache key '%s'. Please configure the account in the UI.",
-        username_string,
-    )
     raise RuntimeError(
-        "Google username is not configured. Open the integration UI and set the account."
+        "Legacy get_username() is no longer supported without providing the entry TokenCache. "
+        "Use `await async_get_username(cache=...)` instead."
     )
 
 
@@ -163,7 +141,10 @@ def set_username(username: str) -> None:
             "Use `await async_set_username(...)` instead."
         )
 
-    _legacy_set_cached_value(username_string, norm)
+    raise RuntimeError(
+        "Legacy set_username() is no longer supported without providing the entry TokenCache. "
+        "Use `await async_set_username(..., cache=...)` instead."
+    )
 
 
 __all__ = [

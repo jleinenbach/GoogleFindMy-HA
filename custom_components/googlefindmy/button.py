@@ -246,8 +246,12 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
             info_kwargs["name"] = use_name
 
         via = self._service_device_identifier()
+        entry_id = self._entry_id
+        dev_id = self._device["id"]
+        entry_scoped_identifier = f"{entry_id}:{dev_id}" if entry_id else dev_id
+
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device["id"])},
+            identifiers={(DOMAIN, entry_scoped_identifier)},
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
