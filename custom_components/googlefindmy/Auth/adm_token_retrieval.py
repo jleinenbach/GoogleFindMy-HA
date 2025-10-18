@@ -26,7 +26,9 @@ Security notes (logging):
 
 Minimal, backward-compatible improvements over previous iteration:
 1) Ensure the service string is normalized to the full OAuth2 scope (alias→scope).
-2) Seed a canonical username into the shared cache (idempotent), as older code did.
+2) Seed a canonical username into the cache (idempotent). **New**: when an entry-scoped
+   TokenCache is provided, only that cache is written/read. The facade is used only as
+   a fallback for single-entry deployments.
 3) In isolated validation (used by config flow), restore writing the bootstrap probe
    counter to the (flow-local) cache when available.
 """
@@ -43,6 +45,7 @@ import gpsoauth
 # Prefer relative imports inside the package for robustness
 from .token_retrieval import async_request_token
 from .token_cache import (
+    TokenCache,
     async_get_cached_value,
     async_get_cached_value_or_set,
     async_set_cached_value,
@@ -72,7 +75,7 @@ def _mask_email(email: str | None) -> str:
     return f"{masked_local}@{domain}"
 
 
-def _clip(s: str, limit: int = 200) -> str:
+def _clip(s: Any, limit: int = 200) -> str:
     """Clip long strings to a safe length for logs."""
     s = str(s)
     return s if len(s) <= limit else (s[: limit - 1] + "…")
@@ -109,13 +112,24 @@ def _is_non_retryable_auth(err: Exception) -> bool:
     return False
 
 
-async def _seed_username_in_cache(username: str) -> None:
-    """Ensure the canonical username cache key is populated (idempotent)."""
+async def _seed_username_in_cache(username: str, *, cache: TokenCache | None) -> None:
+    """
+    Ensure the canonical username cache key is populated (idempotent).
+
+    When an entry-scoped `cache` is provided, only that cache is used. Otherwise,
+    the legacy facades are used to preserve single-entry behavior.
+    """
     try:
-        cached = await async_get_cached_value(username_string)
-        if cached != username and isinstance(username, str) and username:
-            await async_set_cached_value(username_string, username)
-            _LOGGER.debug("Seeded username cache key '%s' with '%s'.", username_string, username)
+        if cache is not None:
+            cached = await cache.get(username_string)
+            if cached != username and isinstance(username, str) and username:
+                await cache.set(username_string, username)
+                _LOGGER.debug("Seeded username cache key '%s' with '%s' (entry-scoped).", username_string, username)
+        else:
+            cached = await async_get_cached_value(username_string)
+            if cached != username and isinstance(username, str) and username:
+                await async_set_cached_value(username_string, username)
+                _LOGGER.debug("Seeded username cache key '%s' with '%s' (default cache).", username_string, username)
     except Exception as exc:  # Defensive: never fail token flow on seeding.
         _LOGGER.debug("Username cache seeding skipped: %s", _clip(exc))
 
@@ -146,6 +160,7 @@ async def async_get_adm_token(
     *,
     retries: int = 2,
     backoff: float = 1.0,
+    cache: TokenCache | None = None,
 ) -> str:
     """
     Return a cached ADM token or generate a new one (async-first API).
@@ -154,8 +169,10 @@ async def async_get_adm_token(
 
     Args:
         username: Optional explicit username. If None, it's resolved from cache.
-        retries: Number of retry attempts on failure.
+        retries: Number of retry attempts on failure (only for transient issues).
         backoff: Initial backoff delay in seconds for retries.
+        cache: Optional entry-scoped TokenCache. If provided, **only this cache**
+            is used for reads/writes. If None, legacy default-cache facades are used.
 
     Returns:
         The ADM token string.
@@ -163,12 +180,13 @@ async def async_get_adm_token(
     Raises:
         RuntimeError: If the username is invalid or token generation fails after all retries.
     """
+    # Use the passed username if available; only fallback to provider when missing.
     user = (username or await async_get_username() or "").strip().lower()
     if not user:
         raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token.")
 
-    # Back-compat improvement: ensure username is seeded in cache (idempotent).
-    await _seed_username_in_cache(user)
+    # Ensure username is present in the selected cache (idempotent).
+    await _seed_username_in_cache(user, cache=cache)
 
     cache_key = f"adm_token_{user}"
 
@@ -181,13 +199,25 @@ async def async_get_adm_token(
     for attempt in range(attempts):
         try:
             # Only generates if not cached; avoids multiple token exchanges under load
-            token = await async_get_cached_value_or_set(cache_key, _generator)
+            if cache is not None:
+                token = await cache.get_or_set(cache_key, _generator)
+            else:
+                token = await async_get_cached_value_or_set(cache_key, _generator)
 
-            # Persist TTL metadata (best-effort)
-            if not await async_get_cached_value(f"adm_token_issued_at_{user}"):
-                await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
-            if not await async_get_cached_value(f"adm_probe_startup_left_{user}"):
-                await async_set_cached_value(f"adm_probe_startup_left_{user}", 3)
+            # Persist TTL metadata (best-effort; entry-scoped if possible)
+            issued_key = f"adm_token_issued_at_{user}"
+            probe_key = f"adm_probe_startup_left_{user}"
+
+            if cache is not None:
+                if not await cache.get(issued_key):
+                    await cache.set(issued_key, time.time())
+                if not await cache.get(probe_key):
+                    await cache.set(probe_key, 3)
+            else:
+                if not await async_get_cached_value(issued_key):
+                    await async_set_cached_value(issued_key, time.time())
+                if not await async_get_cached_value(probe_key):
+                    await async_set_cached_value(probe_key, 3)
 
             return token
 
@@ -205,9 +235,13 @@ async def async_get_adm_token(
 
             # Retryable path: clear any stale cache value and back off
             try:
-                await async_set_cached_value(cache_key, None)
-            except Exception:  # best-effort
-                pass
+                if cache is not None:
+                    await cache.set(cache_key, None)
+                else:
+                    await async_set_cached_value(cache_key, None)
+            except Exception:
+                pass  # best-effort
+
             sleep_s = backoff * (2 ** attempt)
             _LOGGER.info(
                 "ADM token generation failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
@@ -323,19 +357,23 @@ async def async_get_adm_token_isolated(
             if cache_set is not None:
                 try:
                     await cache_set(f"adm_token_{user}", tok)
+
+                    issued_key = f"adm_token_issued_at_{user}"
                     if cache_get is not None:
-                        has_issued = await cache_get(f"adm_token_issued_at_{user}")
+                        has_issued = await cache_get(issued_key)
                     else:
                         has_issued = None
                     if not has_issued:
-                        await cache_set(f"adm_token_issued_at_{user}", time.time())
-                    # Restore bootstrap probe counter (regression fix #3):
+                        await cache_set(issued_key, time.time())
+
+                    # Restore bootstrap probe counter (regression fix #3)
+                    probe_key = f"adm_probe_startup_left_{user}"
                     if cache_get is not None:
-                        existing = await cache_get(f"adm_probe_startup_left_{user}")
+                        existing = await cache_get(probe_key)
                     else:
                         existing = None
                     if not existing:
-                        await cache_set(f"adm_probe_startup_left_{user}", 3)
+                        await cache_set(probe_key, 3)
                 except Exception as meta_exc:  # never fail the exchange on metadata issues
                     _LOGGER.debug("Isolated TTL metadata write skipped: %s", _clip(meta_exc))
 
