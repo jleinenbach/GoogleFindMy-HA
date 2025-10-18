@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/Auth/firebase_messaging/fcmregister.py
 #
 # firebase-messaging
 # https://github.com/sdb9696/firebase-messaging
@@ -153,9 +154,27 @@ class FcmRegister:
 
     @staticmethod
     def _looks_like_html(text: str) -> bool:
-        """Rudimentary check to decide if a response body is HTML (e.g., 404 page)."""
-        t = (text or "").lstrip().upper()
-        return t.startswith("<!DOCTYPE") or t.startswith("<HTML") or "<H1>" in t
+        """Heuristic check to decide if a response body is HTML (e.g., 404 page).
+
+        Notes:
+            We intentionally keep this robust because Google may return a branded
+            HTML error page with status 200. We check for:
+            - Leading '<!doctype' or '<html'
+            - Presence of both '<html' and '<title>'
+            - Known strings from Google error pages
+        """
+        if not text:
+            return False
+        t = text.lstrip()
+        head = t[:64].lower()
+        if head.startswith("<!doctype") or head.startswith("<html"):
+            return True
+        tl = t.lower()
+        if "<html" in tl and "<title" in tl:
+            return True
+        if "error 404" in tl or "that’s an error" in tl or "that's an error" in tl:
+            return True
+        return False
 
     @staticmethod
     def _toggle_gcm_register_variant(url: str) -> str:
@@ -331,6 +350,15 @@ class FcmRegister:
         tried_variant = False
         last_error: str | Exception | None = None
 
+        # Non-retryable error codes returned by GCM register body (Error=<CODE>)
+        NON_RETRYABLE = {
+            "AUTHENTICATION_FAILED",
+            "INVALID_PARAMETERS",
+            "INVALID_SENDER",
+            "MISSING_SENDER",
+            "PHONE_REGISTRATION_ERROR",  # treat as deterministic for desktop-style clients
+        }
+
         for attempt in range(1, retries + 1):
             try:
                 async with self._session.post(
@@ -340,15 +368,18 @@ class FcmRegister:
                     timeout=self.CLIENT_TIMEOUT,
                 ) as resp:
                     response_status = resp.status
+                    content_type = (resp.headers.get("Content-Type") or "").lower()
                     response_text = await resp.text()
 
-                if response_status == 404 or self._looks_like_html(response_text):
-                    # Frequently caused by using the wrong variant (register vs register3).
+                # Detect HTML/404 error pages even when status==200.
+                html_like = ("text/html" in content_type) or self._looks_like_html(response_text)
+                if response_status == 404 or html_like:
                     if not tried_variant:
                         alt = self._toggle_gcm_register_variant(url)
                         _logger.warning(
-                            "GCM register: 404/HTML received at %s; retrying with alternate endpoint %s",
-                            url, alt,
+                            "GCM register: 404/HTML received at %s (status=%s, ctype=%s); "
+                            "retrying with alternate endpoint %s",
+                            url, response_status, content_type or "-", alt,
                         )
                         url = alt
                         tried_variant = True
@@ -356,34 +387,44 @@ class FcmRegister:
                         await asyncio.sleep(0.5)
                         continue
 
-                if "Error" in response_text:
-                    last_error = response_text.strip()
-                    if "PHONE_REGISTRATION_ERROR" in response_text:
-                        _logger.warning(
-                            "GCM register: PHONE_REGISTRATION_ERROR at %s (attempt %d/%d) – backing off",
-                            url, attempt, retries,
+                # Parse body lines for structured keys
+                token = None
+                error_code = None
+                for line in response_text.splitlines():
+                    k, _, v = line.partition("=")
+                    k = k.strip().lower()
+                    if k == "token":
+                        token = v.strip()
+                    elif k == "error":
+                        error_code = (v or "").strip().upper()
+
+                if token:
+                    return {
+                        "token": token,
+                        "app_id": gcm_app_id,
+                        "android_id": android_id,
+                        "security_token": security_token,
+                    }
+
+                if error_code:
+                    last_error = f"Error={error_code}"
+                    if error_code in NON_RETRYABLE:
+                        _logger.error(
+                            "GCM register returned non-retryable error at %s: %s — giving up",
+                            url, last_error,
                         )
-                    else:
-                        _logger.warning(
-                            "GCM register error at %s (attempt %d/%d): %s",
-                            url, attempt, retries, response_text.strip(),
-                        )
+                        return None
+                    _logger.warning(
+                        "GCM register error at %s (attempt %d/%d): %s",
+                        url, attempt, retries, last_error,
+                    )
                 else:
-                    # Typical response: "token=<...>" possibly with extra lines
-                    token = None
-                    for line in response_text.splitlines():
-                        k, sep, v = line.partition("=")
-                        if sep and k.strip().lower() == "token":
-                            token = v.strip()
-                            break
-                    if token:
-                        return {
-                            "token": token,
-                            "app_id": gcm_app_id,
-                            "android_id": android_id,
-                            "security_token": security_token,
-                        }
-                    last_error = f"Unexpected register response (status={response_status}): {response_text[:200]}"
+                    # Unexpected body without token/error
+                    last_error = f"Unexpected register response (status={response_status}, ctype={content_type}): {response_text[:200]}"
+                    _logger.warning(
+                        "GCM register unexpected response at %s (attempt %d/%d): %s",
+                        url, attempt, retries, last_error,
+                    )
 
             except Exception as e:
                 last_error = e
@@ -393,7 +434,7 @@ class FcmRegister:
                 )
 
             if attempt < retries:
-                # Exponential backoff with cap and small jitter
+                # Exponential backoff with cap and small jitter (network/transient only)
                 delay = min(1.5 * (2 ** (attempt - 1)), 30.0)
                 delay *= (0.9 + 0.2 * secrets.randbits(4) / 15.0)
                 await asyncio.sleep(delay)
