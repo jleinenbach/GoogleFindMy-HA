@@ -21,6 +21,7 @@ from custom_components.googlefindmy.ProtoDecoders.decoder import (
     parse_device_list_protobuf,
     get_canonic_ids,
 )
+from custom_components.googlefindmy.Auth.token_cache import TokenCache  # entry-scoped cache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ async def async_request_device_list(
     username: Optional[str] = None,
     *,
     session: Optional[ClientSession] = None,
+    # Entry-scoped TokenCache (recommended in HA coordinators)
+    cache: Optional[TokenCache] = None,
     # Flow-local / entry-scoped overrides (all optional):
     token: Optional[str] = None,
     cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
@@ -70,21 +73,21 @@ async def async_request_device_list(
     3) Short-lived fallback session managed by nova_request.
 
     Entry-scope & cache isolation:
-    - When `cache_get`/`cache_set` are supplied **and** a `namespace` is provided,
-      this function wraps the given cache I/O with a namespacing prefix
-      (`f"{namespace}:{key}"`). This keeps TTL metadata distinct across multiple
-      config entries even for the same Google account.
-    - If no cache functions are supplied, nova_request will use its defaults.
+    - Preferred: pass the entry's TokenCache via `cache` plus a `namespace` (e.g., entry_id).
+      In this mode, all username/ADM/TTL reads & writes remain strictly entry-local.
+    - Alternatively (e.g. config flows), you can inject `cache_get`/`cache_set` (and optionally
+      a `namespace`). When provided, these override the TokenCache for TTL metadata.
 
     Args:
         username: Google account username (email). If None, nova_request will
-                  resolve it via its async cache helpers.
+                  resolve it via its async cache helpers (entry-scoped when `cache` is set).
         session: aiohttp ClientSession to reuse (recommended in HA).
+        cache: Entry-scoped TokenCache to enforce multi-account isolation.
         token: Optional direct ADM token for config-flow isolation.
         cache_get: Optional async getter for TTL/aux metadata (flow-local).
         cache_set: Optional async setter for TTL/aux metadata (flow-local).
         refresh_override: Optional async function to obtain a new token, isolated
-                          from global caches (e.g., AAS→ADM refresh during flows).
+                          from global/entry caches (e.g., AAS→ADM refresh during flows).
         namespace: Optional entry-scoped namespace used to prefix cache keys.
 
     Returns:
@@ -96,7 +99,7 @@ async def async_request_device_list(
     """
     hex_payload = create_device_list_request()
 
-    # Optionally wrap cache I/O with an entry-scoped namespace.
+    # Optionally wrap flow-local cache I/O with a namespace (only if overrides are supplied).
     ns_get = cache_get
     ns_set = cache_set
     if namespace:
@@ -110,15 +113,18 @@ async def async_request_device_list(
             ns_set = _ns_set
 
     # Delegate HTTP to Nova client (handles session provider & timeouts).
+    # Pass through entry-scoped TokenCache (preferred) and the namespace.
     return await async_nova_request(
         NOVA_LIST_DEVICES_API_SCOPE,
         hex_payload,
         username=username,
         session=session,
         token=token,
-        cache_get=ns_get,
-        cache_set=ns_set,
+        cache=cache,              # ← ensure entry-local reads/writes where available
+        cache_get=ns_get,         # ← only used if provided; otherwise TokenCache is used
+        cache_set=ns_set,         # ← only used if provided; otherwise TokenCache is used
         refresh_override=refresh_override,
+        namespace=namespace,
     )
 
 
