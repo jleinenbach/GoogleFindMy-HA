@@ -205,7 +205,7 @@ async def async_get_adm_token(
         RuntimeError: If the username is invalid or token generation fails after all retries.
     """
     # Use the passed username if available; only fallback to provider when missing.
-    user = (username or await async_get_username() or "").strip().lower()
+    user = (username or await async_get_username(cache) or "").strip().lower()
     if not user:
         raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token.")
 
