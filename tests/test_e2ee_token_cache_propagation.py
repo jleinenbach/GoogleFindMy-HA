@@ -277,3 +277,76 @@ def test_async_get_eid_info_threads_cache(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured["cache"] is cache
     assert isinstance(response, DummyResponse)
     assert response.payload == b"response"
+
+
+def test_sync_decrypt_location_response_forwards_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The synchronous facade must forward the TokenCache to the async helper."""
+
+    from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
+        decrypt_locations,
+    )
+
+    captured: dict[str, object] = {}
+
+    async def fake_async_decrypt(device_update, *, cache):  # type: ignore[no-untyped-def]
+        captured["device_update"] = device_update
+        captured["cache"] = cache
+        return ["ok"]
+
+    monkeypatch.setattr(
+        decrypt_locations,
+        "async_decrypt_location_response_locations",
+        fake_async_decrypt,
+    )
+
+    cache = object()
+    device_update = object()
+
+    result = decrypt_locations.decrypt_location_response_locations(
+        device_update, cache=cache  # type: ignore[arg-type]
+    )
+
+    assert result == ["ok"]
+    assert captured["device_update"] is device_update
+    assert captured["cache"] is cache
+
+
+def test_fcm_background_decode_uses_entry_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Background FCM decoding must supply the entry TokenCache."""
+
+    from custom_components.googlefindmy.Auth import fcm_receiver_ha
+
+    receiver = fcm_receiver_ha.FcmReceiverHA()
+    cache = object()
+    receiver._entry_caches["entry"] = cache
+
+    captured: dict[str, object] = {}
+
+    def fake_parse(hex_string: str) -> str:
+        captured["hex"] = hex_string
+        return "parsed"
+
+    def fake_sync_decrypt(device_update, *, cache):  # type: ignore[no-untyped-def]
+        captured["device_update"] = device_update
+        captured["cache"] = cache
+        return [{"latitude": 1.0}]
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.ProtoDecoders.decoder.parse_device_update_protobuf",
+        fake_parse,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations.decrypt_location_response_locations",
+        fake_sync_decrypt,
+    )
+
+    result = receiver._decode_background_location("entry", "payload")
+
+    assert result == {"latitude": 1.0}
+    assert captured["hex"] == "payload"
+    assert captured["device_update"] == "parsed"
+    assert captured["cache"] is cache

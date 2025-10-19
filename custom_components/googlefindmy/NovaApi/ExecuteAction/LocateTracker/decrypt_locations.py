@@ -565,6 +565,8 @@ async def async_decrypt_location_response_locations(
 
 def decrypt_location_response_locations(
     device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
+    *,
+    cache: "TokenCache",
 ) -> List[Dict[str, Any]]:
     """Synchronous legacy facade.
 
@@ -581,7 +583,9 @@ def decrypt_location_response_locations(
     except RuntimeError:
         # No running loop in this thread → safe to use asyncio.run
         return asyncio.run(
-            async_decrypt_location_response_locations(device_update_protobuf)
+            async_decrypt_location_response_locations(
+                device_update_protobuf, cache=cache
+            )
         )
     else:
         # A loop is running in this thread → don't deadlock
@@ -594,6 +598,6 @@ def decrypt_location_response_locations(
 if __name__ == "__main__":  # Developer self-check only; not used by Home Assistant
     res = parse_device_update_protobuf("")  # type: ignore[arg-type]
     try:
-        decrypt_location_response_locations(res)
+        decrypt_location_response_locations(res, cache=None)  # type: ignore[arg-type]
     except Exception as exc:
         print(f"Self-check encountered exception (expected outside HA runtime): {exc}")
