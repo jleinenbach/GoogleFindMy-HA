@@ -98,39 +98,15 @@ async def async_submit_start_sound_request(
     ns_set = cache_set
 
     if cache is not None:
-        if namespace:
-            prefix = f"{namespace}:"
-
-            if ns_get is None:
-                async def _ns_get(key: str) -> Any:
-                    return await cache.async_get_cached_value(prefix + key)
-
-                ns_get = _ns_get
-
-            if ns_set is None:
-                async def _ns_set(key: str, value: Any) -> None:
-                    await cache.async_set_cached_value(prefix + key, value)
-
-                ns_set = _ns_set
-        else:
-            if ns_get is None:
-                ns_get = cache.async_get_cached_value
-            if ns_set is None:
-                ns_set = cache.async_set_cached_value
-    elif namespace:
-        prefix = f"{namespace}:"
-
         if ns_get is None:
-            async def _ns_get_default(key: str) -> Any:
-                return await _cache_get_default(prefix + key)
-
-            ns_get = _ns_get_default
-
+            ns_get = cache.async_get_cached_value
         if ns_set is None:
-            async def _ns_set_default(key: str, value: Any) -> None:
-                await _cache_set_default(prefix + key, value)
-
-            ns_set = _ns_set_default
+            ns_set = cache.async_set_cached_value
+    else:
+        if ns_get is None:
+            ns_get = _cache_get_default
+        if ns_set is None:
+            ns_set = _cache_set_default
 
     try:
         # Submit via Nova (now entry-scoped when `cache`/`namespace` provided)

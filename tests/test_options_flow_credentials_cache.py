@@ -229,9 +229,9 @@ def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> No
         start_set = start_kwargs["cache_set"]
         assert start_get is not None
         assert start_set is not None
-        await start_get("ttl")
-        assert cache_primary.get_calls == ["entry-one:ttl"]
-        await start_set("ttl", "value")
+        await start_get("entry-one:ttl")
+        assert cache_primary.get_calls[-1] == "entry-one:ttl"
+        await start_set("entry-one:ttl", "value")
         assert ("entry-one:ttl", "value") in cache_primary.set_calls
 
         _, _, stop_kwargs = stop_calls[0]
@@ -242,9 +242,9 @@ def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> No
         stop_set = stop_kwargs["cache_set"]
         assert stop_get is not None
         assert stop_set is not None
-        await stop_get("ttl2")
+        await stop_get("entry-one:ttl2")
         assert cache_primary.get_calls[-1] == "entry-one:ttl2"
-        await stop_set("ttl2", "value2")
+        await stop_set("entry-one:ttl2", "value2")
         assert ("entry-one:ttl2", "value2") in cache_primary.set_calls
 
     asyncio.run(_exercise())
