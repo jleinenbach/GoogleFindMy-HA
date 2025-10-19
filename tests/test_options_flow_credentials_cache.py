@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Dict, List
 import pytest
 
 from custom_components.googlefindmy import config_flow
+from custom_components.googlefindmy.api import GoogleFindMyAPI
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
@@ -149,5 +150,101 @@ def test_options_flow_rotating_token_clears_cached_aas(monkeypatch: pytest.Monke
 
         await hass.drain_tasks()
         assert hass.config_entries.reloaded == [entry.entry_id]
+
+    asyncio.run(_exercise())
+
+
+def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure Play/Stop Sound submissions use the provided TokenCache with namespacing."""
+
+    from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
+        start_sound_request as start_module,
+        stop_sound_request as stop_module,
+    )
+
+    class _FakeCache:
+        """Minimal cache tracking get/set keys to verify namespacing."""
+
+        def __init__(self, entry_id: str) -> None:
+            self.entry_id = entry_id
+            self._data: Dict[str, Any] = {}
+            self.get_calls: List[str] = []
+            self.set_calls: List[tuple[str, Any]] = []
+
+        async def async_get_cached_value(self, key: str) -> Any:
+            self.get_calls.append(key)
+            return self._data.get(key)
+
+        async def async_set_cached_value(self, key: str, value: Any) -> None:
+            self.set_calls.append((key, value))
+            if value is None:
+                self._data.pop(key, None)
+            else:
+                self._data[key] = value
+
+    async def _fail_get(key: str) -> Any:
+        raise AssertionError("Global cache fallback must not be used for Play Sound")
+
+    async def _fail_set(key: str, value: Any) -> None:
+        raise AssertionError("Global cache fallback must not be used for Play Sound")
+
+    monkeypatch.setattr(start_module, "_cache_get_default", _fail_get)
+    monkeypatch.setattr(start_module, "_cache_set_default", _fail_set)
+    monkeypatch.setattr(stop_module, "_cache_get_default", _fail_get)
+    monkeypatch.setattr(stop_module, "_cache_set_default", _fail_set)
+
+    async def _exercise() -> None:
+        cache_primary = _FakeCache("entry-one")
+        cache_secondary = _FakeCache("entry-two")
+
+        api_primary = GoogleFindMyAPI(cache=cache_primary)
+        _ = GoogleFindMyAPI(cache=cache_secondary)
+
+        monkeypatch.setattr(api_primary, "_get_fcm_token_for_action", lambda: "tok-1234567890", raising=False)
+
+        start_calls: List[tuple[str, str, Dict[str, Any]]] = []
+        stop_calls: List[tuple[str, str, Dict[str, Any]]] = []
+
+        async def _fake_start(scope: str, payload: str, **kwargs: Any) -> str:
+            start_calls.append((scope, payload, kwargs))
+            return "start-ok"
+
+        async def _fake_stop(scope: str, payload: str, **kwargs: Any) -> str:
+            stop_calls.append((scope, payload, kwargs))
+            return "stop-ok"
+
+        monkeypatch.setattr(start_module, "async_nova_request", _fake_start)
+        monkeypatch.setattr(stop_module, "async_nova_request", _fake_stop)
+
+        assert await api_primary.async_play_sound("device-42")
+        assert await api_primary.async_stop_sound("device-42")
+
+        assert start_calls and stop_calls
+
+        _, _, start_kwargs = start_calls[0]
+        assert start_kwargs["cache"] is cache_primary
+        assert start_kwargs["namespace"] == "entry-one"
+
+        start_get = start_kwargs["cache_get"]
+        start_set = start_kwargs["cache_set"]
+        assert start_get is not None
+        assert start_set is not None
+        await start_get("ttl")
+        assert cache_primary.get_calls == ["entry-one:ttl"]
+        await start_set("ttl", "value")
+        assert ("entry-one:ttl", "value") in cache_primary.set_calls
+
+        _, _, stop_kwargs = stop_calls[0]
+        assert stop_kwargs["cache"] is cache_primary
+        assert stop_kwargs["namespace"] == "entry-one"
+
+        stop_get = stop_kwargs["cache_get"]
+        stop_set = stop_kwargs["cache_set"]
+        assert stop_get is not None
+        assert stop_set is not None
+        await stop_get("ttl2")
+        assert cache_primary.get_calls[-1] == "entry-one:ttl2"
+        await stop_set("ttl2", "value2")
+        assert ("entry-one:ttl2", "value2") in cache_primary.set_calls
 
     asyncio.run(_exercise())
