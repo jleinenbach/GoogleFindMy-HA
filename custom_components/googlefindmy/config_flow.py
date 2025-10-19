@@ -598,6 +598,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     }
                     if parsed_secrets is not None:
                         self._auth_data[DATA_SECRET_BUNDLE] = parsed_secrets
+                    if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
+                        self._auth_data[DATA_AAS_TOKEN] = to_persist
                     return await self.async_step_device_selection()
 
         return self.async_show_form(step_id="secrets_json", data_schema=schema, errors=errors)
@@ -720,6 +722,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
             if DATA_SECRET_BUNDLE in self._auth_data:
                 data_payload[DATA_SECRET_BUNDLE] = self._auth_data[DATA_SECRET_BUNDLE]
+            aas_token = self._auth_data.get(DATA_AAS_TOKEN)
+            if isinstance(aas_token, str) and aas_token:
+                data_payload[DATA_AAS_TOKEN] = aas_token
 
             options_payload: Dict[str, Any] = {}
             for k in schema_fields.keys():
@@ -801,6 +806,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
                                 CONF_OAUTH_TOKEN: chosen,
                             }
+                            if isinstance(chosen, str) and chosen.startswith("aas_et/"):
+                                updated_data[DATA_AAS_TOKEN] = chosen
+                            else:
+                                updated_data.pop(DATA_AAS_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
 
@@ -839,16 +848,23 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     CONF_OAUTH_TOKEN: to_persist,
                                     DATA_SECRET_BUNDLE: parsed,
                                 }
+                                if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
+                                    updated_data[DATA_AAS_TOKEN] = to_persist
                                 return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept first candidate and reload
                         if method == "manual":
+                            manual_token = str(payload)
                             updated_data = {
                                 **entry.data,
                                 DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: str(payload),
+                                CONF_OAUTH_TOKEN: manual_token,
                             }
+                            if manual_token.startswith("aas_et/"):
+                                updated_data[DATA_AAS_TOKEN] = manual_token
+                            else:
+                                updated_data.pop(DATA_AAS_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                         if method == "secrets":
@@ -861,6 +877,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 CONF_OAUTH_TOKEN: token_first,
                                 DATA_SECRET_BUNDLE: parsed,
                             }
+                            if isinstance(token_first, str) and token_first.startswith("aas_et/"):
+                                updated_data[DATA_AAS_TOKEN] = token_first
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                     errors["base"] = _map_api_exc_to_error_key(err2)
 

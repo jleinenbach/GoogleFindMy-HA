@@ -10,6 +10,36 @@ from typing import Any, Dict
 import pytest
 
 from custom_components.googlefindmy.Auth import aas_token_retrieval
+from custom_components.googlefindmy.Auth.username_provider import username_string
+from custom_components.googlefindmy.const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
+
+
+class _DummyCache:
+    """Minimal async cache implementing the TokenCache interface used in tests."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, Any] = {}
+
+    async def get(self, name: str) -> Any:
+        return self._data.get(name)
+
+    async def set(self, name: str, value: Any) -> None:
+        if value is None:
+            self._data.pop(name, None)
+        else:
+            self._data[name] = value
+
+    async def all(self) -> dict[str, Any]:
+        return dict(self._data)
+
+    async def get_or_set(self, name: str, generator):  # type: ignore[override]
+        if name in self._data:
+            return self._data[name]
+        result = generator()
+        if asyncio.iscoroutine(result):
+            result = await result
+        await self.set(name, result)
+        return result
 
 
 def test_exchange_oauth_for_aas_logs_inputs(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
@@ -67,3 +97,30 @@ def test_exchange_oauth_for_aas_missing_token_logs_warning(monkeypatch: pytest.M
     warnings = [record.message for record in caplog.records if record.levelno >= logging.WARNING]
     assert any("gpsoauth response missing 'Token'" in message for message in warnings)
     assert any("BadAuthentication" in message for message in warnings)
+
+
+def test_async_get_aas_token_short_circuits_for_cached_master(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cached AAS token must be reused without calling gpsoauth.exchange_token."""
+
+    cache = _DummyCache()
+
+    async def _prepare() -> None:
+        await cache.set(username_string, "user@example.com")
+        await cache.set(CONF_OAUTH_TOKEN, "aas_et/MASTER_TOKEN")
+
+    asyncio.run(_prepare())
+
+    called = False
+
+    def _fail_exchange(*_: Any, **__: Any) -> Dict[str, Any]:
+        nonlocal called
+        called = True
+        raise AssertionError("gpsoauth.exchange_token should not be invoked when an AAS token is cached")
+
+    monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", _fail_exchange)
+
+    result = asyncio.run(aas_token_retrieval.async_get_aas_token(cache=cache))
+
+    assert result == "aas_et/MASTER_TOKEN"
+    assert not called
+    assert asyncio.run(cache.get(DATA_AAS_TOKEN)) == "aas_et/MASTER_TOKEN"

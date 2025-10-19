@@ -230,6 +230,21 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:
             oauth_token = None  # Force fallback path
 
     # 2) Fallback: scan ADM tokens if no explicit OAuth token exists or it was disqualified
+    if oauth_token and oauth_token.startswith("aas_et/"):
+        if not username:
+            raise ValueError(
+                "No username available; please ensure the account e-mail is configured."
+            )
+        _LOGGER.debug(
+            "Cached value for '%s' already looks like an AAS token; reusing without gpsoauth.exchange_token.",
+            CONF_OAUTH_TOKEN,
+        )
+        try:
+            await cache.set(DATA_AAS_TOKEN, oauth_token)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Failed to persist cached AAS token shortcut: %s", _clip(err))
+        return oauth_token
+
     if not oauth_token:
         all_cached = await cache.all()
         for key, value in all_cached.items():
