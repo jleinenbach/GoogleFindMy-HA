@@ -11,8 +11,9 @@
 ## 1) What must be in **every** PR (lean checklist)
 
 - **Purpose & scope.** PR title/description state *what* changes and *why*, and which user scenarios are affected.
-- **Tests — creation & update (MUST).** For any code change, ship unit/integration tests that cover the change; for every bug fix, add a **regression test** (see §3.2). Never reduce existing coverage without a follow-up to restore it.
-- **Tests — automatic corrections (MUST).** If CI/lint/static checks report **unambiguous test errors** (syntax/import/obvious assertion drift after a signature change), the agent **auto-fixes** the failing tests in the PR (see §3.1).
+- **Tests — creation & update (MUST).** For any code change, ship unit/integration tests that cover the change; for every bug fix, add a **regression test** (see §3.2). Never reduce existing coverage without a follow-up to restore it.  
+  - **Auto-corrections applied:** trivial test failures (syntax, imports, obvious assertion drift) are automatically fixed by the agent when unambiguous (see §3.1).  
+  - **Regression test added:** for `fix:` commits (or `fix/...` branches), a minimal regression test is created if none existed (see §3.2).
 - **Coverage targets.** Keep **config flow at 100 %**; repo total **≥ 95 %**. If temporarily lower due to necessary code removal, **open a follow-up issue** to restore coverage and reference it in the PR.
 - **Behavioral safety.** No secrets/PII in logs; user-visible errors use translated `translation_key`s; entities report `unavailable` on communication failures.
 - **Docs/i18n (only when user-facing behavior changes).** Update `README.md` and `translations/*`; no hard-coded UI strings in Python.
@@ -80,6 +81,8 @@ If necessary changes reduce coverage below target, **open a follow-up issue** to
 
 ## 4) **Token cache handling** (hard requirement; regression-prevention)
 
+**WARNING: Incorrect token cache handling can lead to severe security vulnerabilities (cross-account data exposure). Strict adherence to these rules is mandatory.**
+
 - **Single source of truth:** Keep an **entry-scoped** `TokenCache` (HA Store if applicable). No extra globals.
 - **Pass explicitly:** Thread the `TokenCache` through every call chain (`__init__` → API/clients → coordinator → entities). **No implicit lookups** or module-level fallbacks.
 - **Refresh strategy:**  
@@ -91,7 +94,18 @@ If necessary changes reduce coverage below target, **open a follow-up issue** to
 
 ---
 
-## 5) Expected **test types & coverage focus**
+## 5) Security & privacy guards
+
+- **Never log** tokens, email addresses, precise coordinates, device IDs, or raw API payloads.  
+- **Diagnostics redaction:** use a central `TO_REDACT` list in `diagnostics.py`.  
+- **HTTP views & map tokens:** no secrets in URLs; server-side validation; short-lived, entry-scoped tokens.  
+- **Data minimization:** store only what is necessary (HA Store); document retention in README.  
+- **Network:** set timeouts; use backoff; fail closed on uncertainty.  
+- **Redact rigorously:** ensure not only direct secrets but also potentially identifying **derived information** (e.g., user-provided device names if sensitive, correlated external IDs) are redacted from logs and diagnostics.
+
+---
+
+## 6) Expected **test types & coverage focus**
 
 Prioritize a small but protective suite:
 
@@ -102,16 +116,6 @@ Prioritize a small but protective suite:
 5. **Services** — success/error paths with localized messages; throttling/rate-limits where applicable.  
 6. **Discovery & dynamic devices** (if supported) — discovery announcement, IP update from discovery info, add/remove devices post-setup.  
 7. **Token cache** — expiry detection, refresh, failure propagation, no hidden fallbacks (see §4).
-
----
-
-## 6) Minimal scaffolds & fixtures (pragmatic defaults)
-
-- Use core HA fixtures (`hass`, `enable_custom_integrations`, temp stores).  
-- Avoid real network: inject sessions; mock HTTP/gRPC clients at the boundary.  
-- Keep **one** lightweight helper to build test config entries/entities.  
-- Prefer `pytest.mark.parametrize` over copy-pasted tests.  
-- Stable names: `test_config_flow.py`, `test_diagnostics.py`, `test_entities.py`, `test_services.py`, `test_token_cache.py` (as needed).
 
 ---
 
@@ -150,7 +154,7 @@ Add to the PR description:
 
 ## 10) Local commands (VERIFY)
 
-### bash:
+**bash:**
 pre-commit run --all-files     # style, lint, markdown, typing checks (repo-defined)
 python3 -m script.hassfest     # manifest/translations/brands/structure validation
 pytest -q                      # must pass; config_flow 100 %, repo ≥ 95 %
