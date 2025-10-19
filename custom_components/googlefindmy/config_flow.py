@@ -60,6 +60,7 @@ except Exception:  # noqa: BLE001
     selector = None  # type: ignore[assignment]
 
 from .api import GoogleFindMyAPI
+from .Auth.adm_token_retrieval import _mask_email as _mask_email_for_logs
 
 from .const import (
     # Core domain & credential keys
@@ -367,13 +368,30 @@ async def async_pick_working_token(
                 email=email, token=token, secrets_bundle=secrets_bundle
             )
             await _try_probe_devices(api, email=email, token=token)
-            _LOGGER.debug("Token probe OK (source=%s, email=%s).", source, email)
+            _LOGGER.debug(
+                "Token probe OK (source=%s, email=%s).",
+                source,
+                _mask_email_for_logs(email),
+            )
             return token
         except Exception as err:  # noqa: BLE001
             key = _map_api_exc_to_error_key(err)
-            _LOGGER.debug("Token probe failed (source=%s, mapped=%s, email=%s).", source, key, email)
+            _LOGGER.debug(
+                "Token probe failed (source=%s, mapped=%s, email=%s).",
+                source,
+                key,
+                _mask_email_for_logs(email),
+            )
             continue
     return None
+
+
+def _cand_labels(candidates: List[Tuple[str, str]]) -> str:
+    """Return a redacted, human-readable list of token candidate sources."""
+    sources = {source for source, _token in candidates if source}
+    if not sources:
+        return "none"
+    return ", ".join(sorted(sources))
 
 
 # ---------------------------
@@ -558,6 +576,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     secrets_bundle=parsed_secrets,
                 )
                 if not chosen:
+                    _LOGGER.warning(
+                        "Token validation failed for %s. No working token found among candidates (%s).",
+                        _mask_email_for_logs(email),
+                        _cand_labels(cands),
+                    )
                     errors["base"] = "cannot_connect"
                 else:
                     # Persist validated token; prefer non-JWT candidate when possible
@@ -597,6 +620,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 chosen = await async_pick_working_token(email, cands)
                 if not chosen:
+                    _LOGGER.warning(
+                        "Token validation failed for %s. No working token found among candidates (%s).",
+                        _mask_email_for_logs(email),
+                        _cand_labels(cands),
+                    )
                     errors["base"] = "cannot_connect"
                 else:
                     self._auth_data = {
@@ -759,6 +787,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         token = str(payload)
                         chosen = await async_pick_working_token(fixed_email, [("manual", token)])
                         if not chosen:
+                            _LOGGER.warning(
+                                "Token validation failed for %s. No working token found among candidates (%s).",
+                                _mask_email_for_logs(fixed_email),
+                                _cand_labels([("manual", token)]),
+                            )
                             errors["base"] = "cannot_connect"
                         else:
                             if _disqualifies_for_persistence(chosen):
@@ -786,6 +819,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 fixed_email, cands, secrets_bundle=parsed
                             )
                             if not chosen:
+                                _LOGGER.warning(
+                                    "Token validation failed for %s. No working token found among candidates (%s).",
+                                    _mask_email_for_logs(fixed_email),
+                                    _cand_labels(cands),
+                                )
                                 errors["base"] = "cannot_connect"
                             else:
                                 # Prefer non-JWT if available
@@ -1027,6 +1065,11 @@ class OptionsFlowHandler(OptionsFlowBase):
                         else:
                             chosen = await async_pick_working_token(email, [("manual", token)])
                             if not chosen:
+                                _LOGGER.warning(
+                                    "Token validation failed for %s. No working token found among candidates (%s).",
+                                    _mask_email_for_logs(email),
+                                    _cand_labels([("manual", token)]),
+                                )
                                 errors["base"] = "cannot_connect"
                             else:
                                 updated_data = {
@@ -1055,6 +1098,11 @@ class OptionsFlowHandler(OptionsFlowBase):
                                     email, cands, secrets_bundle=parsed
                                 )
                                 if not chosen:
+                                    _LOGGER.warning(
+                                        "Token validation failed for %s. No working token found among candidates (%s).",
+                                        _mask_email_for_logs(email),
+                                        _cand_labels(cands),
+                                    )
                                     errors["base"] = "cannot_connect"
                                 else:
                                     to_persist = chosen

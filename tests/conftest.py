@@ -1,3 +1,4 @@
+# tests/conftest.py
 """Test configuration and environment stubs for integration tests."""
 
 from __future__ import annotations

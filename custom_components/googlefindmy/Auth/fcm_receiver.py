@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/Auth/fcm_receiver.py
 """Backward-compatibility shim for legacy FCM receiver.
 
 This module used to expose a standalone FCM stack via `FcmReceiver`. The integration

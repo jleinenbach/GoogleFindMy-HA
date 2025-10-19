@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/location_recorder.py
 """Location history using Home Assistant's recorder properly."""
 import logging
 import time
