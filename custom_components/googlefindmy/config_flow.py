@@ -370,14 +370,6 @@ async def async_pick_working_token(
             _LOGGER.debug("Token probe OK (source=%s, email=%s).", source, email)
             return token
         except Exception as err:  # noqa: BLE001
-            if _is_multi_entry_guard_error(err):
-                _LOGGER.info(
-                    "Auth guard: multiple config entries detected; deferring token validation to setup "
-                    "(source=%s, email=%s).",
-                    source,
-                    email,
-                )
-                return token
             key = _map_api_exc_to_error_key(err)
             _LOGGER.debug("Token probe failed (source=%s, mapped=%s, email=%s).", source, key, email)
             continue
