@@ -31,9 +31,9 @@
 # --- GCM/legacy endpoints -------------------------------------------------------------
 
 GCM_BASE_URL = "https://android.clients.google.com"
-# Chromium and GoogleFindMyTools always target the ``/register3`` endpoint. Align with
-# that behaviour to avoid 404 responses when Google rejects legacy /register calls.
-GCM_REGISTER_URL = f"{GCM_BASE_URL}/c2dm/register3"
+GCM_REGISTER_URL = f"{GCM_BASE_URL}/c2dm/register"
+# Secondary variant used by the single-toggle fallback in the registration routine.
+GCM_REGISTER3_URL = f"{GCM_BASE_URL}/c2dm/register3"
 
 GCM_CHECKIN_URL = f"{GCM_BASE_URL}/checkin"
 

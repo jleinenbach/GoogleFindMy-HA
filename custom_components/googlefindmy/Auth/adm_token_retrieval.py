@@ -414,33 +414,3 @@ async def async_get_adm_token_isolated(
     assert last_exc is not None
     raise last_exc
 
-
-# --------------------- Legacy sync facade (CLI/offline only) ---------------------
-
-def get_adm_token(
-    username: Optional[str] = None,
-    *,
-    retries: int = 2,
-    backoff: float = 1.0,
-) -> str:
-    """
-    Synchronous facade for CLI/offline usage; not allowed in the HA event loop.
-
-    Raises:
-        RuntimeError: If called from within a running event loop.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            raise RuntimeError(
-                "Sync get_adm_token() called from the event loop. "
-                "Use `await async_get_adm_token()` instead."
-            )
-    except RuntimeError:
-        # No running loop -> legacy path is no longer available without entry context.
-        pass
-
-    raise RuntimeError(
-        "Legacy get_adm_token() is no longer supported without providing the entry TokenCache. "
-        "Use `await async_get_adm_token(..., cache=...)` instead."
-    )

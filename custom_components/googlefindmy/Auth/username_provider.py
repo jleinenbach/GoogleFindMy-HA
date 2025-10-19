@@ -9,11 +9,9 @@ This module exposes a single well-known cache key (`username_string`) and a
 minimal API to read/write the configured Google account e-mail.
 
 Design:
-- Async-first: `async_get_username` / `async_set_username` are the primary API.
+- Async-first: `async_get_username` / `async_set_username` are the supported API.
 - Entry scoped: callers **must** provide the `TokenCache` instance that belongs
   to their config entry. This enforces strict multi-account isolation.
-- Legacy sync wrappers are retained for compatibility with out-of-tree tooling
-  but will raise when the global cache facade is no longer available.
 
 Persistence:
 - The underlying persistence is handled by the entry-scoped TokenCache (HA
@@ -21,8 +19,6 @@ Persistence:
 """
 
 from __future__ import annotations
-
-import asyncio
 
 from .token_cache import TokenCache
 
@@ -76,81 +72,8 @@ async def async_set_username(username: str, *, cache: TokenCache) -> None:
     await cache.set(username_string, norm)
 
 
-# ----------------------- Legacy sync wrappers (compat) -----------------------
-
-def get_username() -> str:
-    """Legacy sync getter for the username.
-
-    IMPORTANT:
-        - Must NOT be called from inside the Home Assistant event loop.
-        - Prefer `await async_get_username()` instead.
-
-    Returns:
-        The username (e-mail) string if present.
-
-    Raises:
-        RuntimeError: If called from the event loop (risk of deadlock) or if the
-            username is missing in the cache (fail-fast to avoid later API errors).
-    """
-    # Prevent deadlocks: disallow sync access from the HA event loop.
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop => safe to proceed with legacy sync facade.
-        pass
-    else:
-        raise RuntimeError(
-            "Sync get_username() called from within the event loop. "
-            "Use `await async_get_username()` instead."
-        )
-
-    raise RuntimeError(
-        "Legacy get_username() is no longer supported without providing the entry TokenCache. "
-        "Use `await async_get_username(cache=...)` instead."
-    )
-
-
-def set_username(username: str) -> None:
-    """Legacy sync setter for the username.
-
-    IMPORTANT:
-        - Must NOT be called from inside the Home Assistant event loop.
-        - Prefer `await async_set_username(...)` instead.
-
-    Args:
-        username: The Google account e-mail to persist.
-
-    Raises:
-        RuntimeError: If called from the event loop (risk of deadlock).
-        ValueError: If the provided username is invalid.
-    """
-    if not isinstance(username, str):
-        raise ValueError("Username must be a string.")
-    norm = username.strip().lower()
-    if not norm or "@" not in norm:
-        raise ValueError("Username must be a non-empty e-mail address.")
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop => safe to proceed with legacy sync facade.
-        pass
-    else:
-        raise RuntimeError(
-            "Sync set_username() called from within the event loop. "
-            "Use `await async_set_username(...)` instead."
-        )
-
-    raise RuntimeError(
-        "Legacy set_username() is no longer supported without providing the entry TokenCache. "
-        "Use `await async_set_username(..., cache=...)` instead."
-    )
-
-
 __all__ = [
     "username_string",
     "async_get_username",
     "async_set_username",
-    "get_username",
-    "set_username",
 ]
