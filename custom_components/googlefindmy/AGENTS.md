@@ -3,6 +3,7 @@
 > **Scope & authority**
 >
 > **Directory scope:** applies to `custom_components/googlefindmy/**` and tests under `tests/**`.
+> **File headers:** Every Python file within scope must begin with a comment containing its repository-relative path (e.g., `# tests/test_example.py`).
 > **Precedence:** (1) Official **Home Assistant Developer Docs** → (2) this AGENTS.md → (3) repository conventions. This file never overrides security/legal policies.
 > **Non-blocking:** Missing optional artifacts (README sections, `quality_scale.yaml`, CODEOWNERS, CI files) **must not block** urgent fixes. The agent proposes a minimal stub or follow-up task instead.
 > **References:** This contract relies on the sources listed below; for a curated, extended list of links, see [BOOKMARKS.md](./BOOKMARKS.md).
