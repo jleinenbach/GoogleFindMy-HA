@@ -1,0 +1,176 @@
+# quality_scale.yaml – Tracking the Integration Quality Scale rules (for hassfest & review)
+# The rule IDs below match the official Developer Docs:
+# https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/
+
+tier: platinum
+
+# Replace with the upstream maintainer handle from which your fork originated.
+owner: "@BSkando"
+
+rules:
+  bronze:
+    - id: action-setup
+      status: done
+      evidence: []
+    - id: appropriate-polling
+      status: done
+      evidence: []
+    - id: brands
+      status: done
+      evidence: []
+    - id: common-modules
+      status: done
+      evidence: []
+    - id: config-flow-test-coverage
+      status: done
+      evidence: []
+    - id: config-flow
+      status: done
+      evidence: []
+    - id: dependency-transparency
+      status: done
+      evidence: []
+    - id: docs-actions
+      status: done
+      evidence: []
+    - id: docs-high-level-description
+      status: done
+      evidence: []
+    - id: docs-installation-instructions
+      status: done
+      evidence: []
+    - id: docs-removal-instructions
+      status: done
+      evidence: []
+    - id: entity-event-setup
+      status: done
+      evidence: []
+    - id: entity-unique-id
+      status: done
+      evidence: []
+    - id: has-entity-name
+      status: done
+      evidence: []
+    - id: runtime-data
+      status: done
+      evidence: []
+    - id: test-before-configure
+      status: done
+      evidence: []
+    - id: test-before-setup
+      status: done
+      evidence: []
+    - id: unique-config-entry
+      status: done
+      evidence: []
+
+  silver:
+    - id: action-exceptions
+      status: done
+      evidence: []
+    - id: config-entry-unloading
+      status: done
+      evidence: []
+    - id: docs-configuration-parameters
+      status: done
+      evidence: []
+    - id: docs-installation-parameters
+      status: done
+      evidence: []
+    - id: entity-unavailable
+      status: done
+      evidence: []
+    - id: integration-owner
+      status: done
+      evidence: []
+    - id: log-when-unavailable
+      status: done
+      evidence: []
+    - id: parallel-updates
+      status: done
+      evidence: []
+    - id: reauthentication-flow
+      status: done
+      evidence: []
+    - id: test-coverage
+      status: done
+      evidence: []
+
+  gold:
+    - id: devices
+      status: done
+      evidence: []
+    - id: diagnostics
+      status: done
+      evidence: []
+    - id: discovery-update-info
+      status: done
+      evidence: []
+    - id: discovery
+      status: done
+      evidence: []
+    - id: docs-data-update
+      status: done
+      evidence: []
+    - id: docs-examples
+      status: done
+      evidence: []
+    - id: docs-known-limitations
+      status: done
+      evidence: []
+    - id: docs-supported-devices
+      status: done
+      evidence: []
+    - id: docs-supported-functions
+      status: done
+      evidence: []
+    - id: docs-troubleshooting
+      status: done
+      evidence: []
+    - id: docs-use-cases
+      status: done
+      evidence: []
+    - id: dynamic-devices
+      status: done
+      evidence: []
+    - id: entity-category
+      status: done
+      evidence: []
+    - id: entity-device-class
+      status: done
+      evidence: []
+    - id: entity-disabled-by-default
+      status: done
+      evidence: []
+    - id: entity-translations
+      status: done
+      evidence: []
+    - id: exception-translations
+      status: done
+      evidence: []
+    - id: icon-translations
+      status: done
+      evidence: []
+    - id: reconfiguration-flow
+      status: done
+      evidence: []
+    - id: repair-issues
+      status: done
+      evidence: []
+    - id: stale-devices
+      status: done
+      evidence: []
+
+  platinum:
+    - id: async-dependency
+      status: done
+      evidence: []
+    - id: inject-websession
+      status: done
+      evidence: []
+    - id: strict-typing
+      status: done
+      evidence: []
+
+# Optional: documented exemptions (only if truly necessary)
+exemptions: []
