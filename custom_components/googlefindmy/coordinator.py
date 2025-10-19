@@ -69,6 +69,7 @@ from homeassistant.components.recorder import (
 )
 from homeassistant.config_entries import ConfigEntryAuthFailed
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import (
@@ -1567,7 +1568,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         except Exception as exc:
             # Record and raise as UpdateFailed per coordinator contract
             self.note_error(exc, where="_async_update_data")
-            raise UpdateFailed(exc) from exc
+            message = self._short_error_message(exc)
+            raise UpdateFailed(
+                f"Unexpected error during coordinator update: {message}"
+            ) from exc
 
     # ---------------------------- Polling Cycle -----------------------------
     async def _async_start_poll_cycle(self, devices: List[Dict[str, Any]]) -> None:
@@ -2772,9 +2776,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 pass
             return {}
         except Exception as err:
-            _LOGGER.error("Manual locate for %s failed: %s", name, err)
+            short_err = self._short_error_message(err)
+            _LOGGER.error("Manual locate for %s failed: %s", name, short_err)
             self.note_error(err, where="async_locate_device", device=name)
-            raise
+            raise HomeAssistantError(
+                f"Manual locate for '{name}' failed due to an unexpected error. "
+                "Check logs for details."
+            ) from err
         finally:
             self._locate_inflight.discard(device_id)
             # Push an update so buttons/entities can refresh availability

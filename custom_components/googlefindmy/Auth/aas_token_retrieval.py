@@ -40,6 +40,12 @@ import logging
 from typing import Any, Dict
 
 import gpsoauth
+
+try:  # pragma: no cover - defensive optional import layout
+    from gpsoauth import exceptions as gpsoauth_exceptions
+except Exception:  # noqa: BLE001
+    gpsoauth_exceptions = None  # type: ignore[assignment]
+
 from .token_cache import TokenCache
 from .username_provider import username_string
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
@@ -144,6 +150,20 @@ async def _exchange_oauth_for_aas(
     try:
         resp = await loop.run_in_executor(None, _run)
     except Exception as err:  # noqa: BLE001
+        if gpsoauth_exceptions and isinstance(err, gpsoauth_exceptions.AuthError):
+            _LOGGER.warning(
+                "gpsoauth authentication error for %s: %s",
+                _mask_email_for_logs(username),
+                _clip(err),
+            )
+            raise RuntimeError(
+                f"gpsoauth authentication failed: {_clip(err)}"
+            ) from err
+        _LOGGER.error(
+            "gpsoauth exchange failed unexpectedly for %s: %s",
+            _mask_email_for_logs(username),
+            _clip(err),
+        )
         raise RuntimeError(f"gpsoauth exchange failed: {_clip(err)}") from err
 
     _LOGGER.debug(

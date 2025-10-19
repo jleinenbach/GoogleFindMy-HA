@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional, Callable, Awaitable
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 import gpsoauth
 
 # Use the async-first API; the legacy sync wrapper is intentionally unsupported.
 from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
+
+
+if TYPE_CHECKING:
+    from .token_cache import TokenCache
 
 
 _LOGGER = logging.getLogger(__name__)

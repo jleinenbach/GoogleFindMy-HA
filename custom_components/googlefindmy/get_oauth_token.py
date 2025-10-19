@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/get_oauth_token.py
 #!/usr/bin/env python3
 """
 Standalone script to obtain Google OAuth token for Home Assistant integration.

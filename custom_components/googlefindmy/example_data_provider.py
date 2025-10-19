@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/example_data_provider.py
 """
 Example data provider for Google Find My Device integration.
 This module provides example/placeholder data for testing and development.
