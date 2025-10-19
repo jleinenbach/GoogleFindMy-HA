@@ -12,7 +12,7 @@ import logging
 import math
 import time
 from itertools import zip_longest
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from google.protobuf.message import DecodeError
 
@@ -42,6 +42,9 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_inf
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     async_get_owner_key,
 )
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,7 +103,9 @@ def is_mcu_tracker(device_registration: DeviceRegistration) -> bool:
     return device_registration.fastPairModelId == mcu_fast_pair_model_id
 
 
-async def async_retrieve_identity_key(device_registration: DeviceRegistration) -> bytes:
+async def async_retrieve_identity_key(
+    device_registration: DeviceRegistration, *, cache: "TokenCache"
+) -> bytes:
     """Retrieve the device Ephemeral Identity Key (EIK) asynchronously.
 
     Flow (async-first, HA-friendly):
@@ -109,10 +114,15 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
     - Decrypt EIK (CPU-bound → offload to thread).
     - Strictly validate length to avoid silent misuse downstream.
 
+    Args:
+        device_registration: Tracker registration metadata containing the encrypted EIK.
+        cache: Entry-scoped TokenCache used for owner key and username resolution.
+
     Raises:
         StaleOwnerKeyError: if tracker is encrypted with an older owner key.
         DecryptionError: for generic decryption failures.
         SpotApiEmptyResponseError: propagated if EID info trailers-only response indicates auth/session issue.
+        RuntimeError: if the TokenCache is missing (multi-account safety guard).
     """
     is_mcu = is_mcu_tracker(device_registration)
     encrypted_user_secrets = device_registration.encryptedUserSecrets
@@ -122,7 +132,12 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
         is_mcu,
     )
 
-    owner_key = await async_get_owner_key()
+    if cache is None:
+        raise RuntimeError(
+            "TokenCache instance is required to retrieve the tracker identity key."
+        )
+
+    owner_key = await async_get_owner_key(cache=cache)
 
     try:
         # CPU-heavy → do not block the event loop
@@ -138,7 +153,7 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
     except Exception as e:
         current_owner_key_version = None
         try:
-            e2ee_data = await async_get_eid_info()
+            e2ee_data = await async_get_eid_info(cache=cache)
             current_owner_key_version = (
                 e2ee_data.encryptedOwnerKeyAndMetadata.ownerKeyVersion
             )
@@ -313,7 +328,7 @@ def _infer_report_hint(status_value: Any) -> Optional[str]:
 
 # ----------------------------- Main decryptor ---------------------------------
 async def async_decrypt_location_response_locations(
-    device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
+    device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate, *, cache: "TokenCache"
 ) -> List[Dict[str, Any]]:
     """Decrypt and normalize location reports into HA-friendly dicts (async).
 
@@ -323,6 +338,10 @@ async def async_decrypt_location_response_locations(
       preventing bad data from leaking into higher layers (HA Platinum quality).
     - Robust against partial/invalid reports (log and continue).
     - No prints or process termination; errors bubble or are logged with context.
+
+    Args:
+        device_update_protobuf: Raw protobuf payload containing encrypted locations.
+        cache: Entry-scoped TokenCache forwarded to key/EID helpers.
 
     POPETS'25 reference (Böttger et al., 2025):
       - Integer-scaled coordinates and validation: §4
@@ -337,7 +356,9 @@ async def async_decrypt_location_response_locations(
         _LOGGER.error("Device registration metadata missing or invalid: %s", exc)
         raise
 
-    identity_key = await async_retrieve_identity_key(device_registration)
+    identity_key = await async_retrieve_identity_key(
+        device_registration, cache=cache
+    )
 
     try:
         locations_proto = (

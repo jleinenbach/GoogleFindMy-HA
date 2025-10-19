@@ -9,7 +9,16 @@ import asyncio
 import time
 import logging
 import traceback
-from typing import Optional, Callable, Protocol, runtime_checkable, Awaitable, Any
+from typing import (
+    TYPE_CHECKING,
+    Optional,
+    Callable,
+    Protocol,
+    runtime_checkable,
+    Awaitable,
+    Any,
+    cast,
+)
 
 import aiohttp
 
@@ -125,6 +134,7 @@ def _make_location_callback(
     canonic_device_id: str,
     ctx: _CallbackContext,
     loop: asyncio.AbstractEventLoop,
+    cache: "TokenCache",
 ) -> Callable[[str, str], None]:
     """Factory that creates an FCM callback bound to a context object.
 
@@ -191,7 +201,9 @@ def _make_location_callback(
             async def _decrypt_and_store():
                 """Asynchronous part of the callback to decrypt and store data."""
                 try:
-                    location_data = await async_decrypt_location_response_locations(device_update)
+                    location_data = await async_decrypt_location_response_locations(
+                        device_update, cache=cache_ref
+                    )
                 except (StaleOwnerKeyError, DecryptionError, SpotApiEmptyResponseError) as err:
                     _LOGGER.error("Failed to process location data for %s: %s", name, err)
                     ctx.data = []
@@ -267,7 +279,7 @@ async def get_location_data_for_device(
         cache_set: Optional async setter for TTL/aux metadata.
         refresh_override: Optional async function to refresh a token in isolation.
         namespace: Optional entry-scoped namespace (e.g., config_entry.entry_id).
-        cache: Optional TokenCache for entry-scoped username/token/metadata storage.
+        cache: TokenCache providing entry-scoped username/token/metadata storage.
 
     Returns:
         A list of dictionaries containing location data, or an empty list on failure.
@@ -284,6 +296,12 @@ async def get_location_data_for_device(
     registered = False
     ctx = _CallbackContext()
     loop = asyncio.get_running_loop()
+
+    if cache is None:
+        raise RuntimeError(
+            "TokenCache instance is required to decrypt E2EE location responses."
+        )
+    cache_ref = cast("TokenCache", cache)
 
     # Build namespaced cache wrappers if requested and no explicit overrides were given.
     ns_get: Optional[Callable[[str], Awaitable[Any]]] = cache_get
@@ -318,7 +336,11 @@ async def get_location_data_for_device(
         try:
             _LOGGER.debug("Registering FCM location updates for %s...", name)
             callback = _make_location_callback(
-                name=name, canonic_device_id=canonic_device_id, ctx=ctx, loop=loop
+                name=name,
+                canonic_device_id=canonic_device_id,
+                ctx=ctx,
+                loop=loop,
+                cache=cache_ref,
             )
             fcm_token = await fcm_receiver.async_register_for_location_updates(
                 canonic_device_id, callback
@@ -412,3 +434,6 @@ if __name__ == '__main__':
     asyncio.run(
         get_location_data_for_device(get_example_data("sample_canonic_device_id"), "Test")
     )
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.Auth.token_cache import TokenCache
+
