@@ -795,13 +795,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             await cache.async_set_cached_value(DATA_AAS_TOKEN, aas_token_entry)
             _LOGGER.debug("Stored pre-provided AAS token in TokenCache (entry-scoped)")
     elif (oauth_token or aas_token_entry) and google_email:
-        token_to_save = oauth_token or aas_token_entry
-        if isinstance(token_to_save, str) and token_to_save:
-            await _async_save_individual_credentials(cache, token_to_save, google_email)
-            _LOGGER.debug("Persisted individual credentials to token cache (entry-scoped)")
-        if isinstance(aas_token_entry, str) and aas_token_entry:
-            await cache.async_set_cached_value(DATA_AAS_TOKEN, aas_token_entry)
-            _LOGGER.debug("Stored AAS token provided alongside manual credentials")
+        await _async_seed_manual_credentials(
+            cache,
+            oauth_token,
+            aas_token_entry,
+            google_email,
+        )
     else:
         _LOGGER.error(
             "No credentials found in config entry (neither secrets_data nor oauth_token+google_email)"
@@ -952,6 +951,29 @@ async def _async_save_secrets_data(cache: TokenCache, secrets_data: dict) -> Non
                 await cache.async_set_cached_value(key, json.dumps(value))
         except (OSError, TypeError) as err:
             _LOGGER.warning("Failed to save '%s' to persistent cache: %s", key, err)
+
+
+async def _async_seed_manual_credentials(
+    cache: TokenCache,
+    oauth_token: str | None,
+    aas_token_entry: str | None,
+    google_email: str,
+) -> None:
+    """Persist manual credential updates and clear stale AAS tokens when absent."""
+
+    token_to_save = oauth_token or aas_token_entry
+    if isinstance(token_to_save, str) and token_to_save:
+        await _async_save_individual_credentials(cache, token_to_save, google_email)
+        _LOGGER.debug("Persisted individual credentials to token cache (entry-scoped)")
+
+    if isinstance(aas_token_entry, str) and aas_token_entry:
+        await cache.async_set_cached_value(DATA_AAS_TOKEN, aas_token_entry)
+        _LOGGER.debug("Stored AAS token provided alongside manual credentials")
+    else:
+        await cache.async_set_cached_value(DATA_AAS_TOKEN, None)
+        _LOGGER.debug(
+            "Cleared entry-scoped AAS token so a fresh value is minted from the new OAuth token"
+        )
 
 
 async def _async_save_individual_credentials(cache: TokenCache, oauth_token: str, google_email: str) -> None:
