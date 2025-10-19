@@ -456,7 +456,7 @@ async def _get_initial_token_async(
     _logger,
     *,
     ns_prefix: str = "",
-    cache: TokenCache | None = None,
+    cache: TokenCache,
 ) -> str:
     """Get or create the initial ADM token (async) and ensure TTL metadata is recorded.
 
@@ -467,25 +467,17 @@ async def _get_initial_token_async(
     if ns and not ns.endswith(":"):
         ns += ":"
 
-    # --- Token lookup (prefer entry-scoped cache when provided) ---
-    if cache is not None:
-        token = (
-            await cache.get(f"{ns}adm_token_{username}")
-            or await cache.get(f"{ns}adm_token")
-            or await cache.get(f"adm_token_{username}")
-            or await cache.get("adm_token")
-        )
-    else:
-        token = (
-            await async_get_cached_value(f"{ns}adm_token_{username}")
-            or await async_get_cached_value(f"{ns}adm_token")
-            or await async_get_cached_value(f"adm_token_{username}")
-            or await async_get_cached_value("adm_token")
-        )
+    # --- Token lookup (entry-scoped cache) ---
+    token = (
+        await cache.get(f"{ns}adm_token_{username}")
+        or await cache.get(f"{ns}adm_token")
+        or await cache.get(f"adm_token_{username}")
+        or await cache.get("adm_token")
+    )
 
     # --- Generate if missing ---
     if not token:
-        _logger.info("Attempting to generate new ADM token (async, entry-scoped=%s)...", bool(cache))
+        _logger.info("Attempting to generate new ADM token (async, entry-scoped=True)...")
         # Ensure refresh also uses the same entry-scoped cache
         try:
             token = await async_get_adm_token_api(username, cache=cache)
@@ -493,20 +485,12 @@ async def _get_initial_token_async(
             _logger.error(
                 "ADM token generation failed because the cached AAS token was rejected; re-authentication required."
             )
-            if cache is not None:
-                await cache.set(DATA_AAS_TOKEN, None)
-            else:
-                await async_set_cached_value(f"{ns}{DATA_AAS_TOKEN}", None)
+            await cache.set(DATA_AAS_TOKEN, None)
             raise NovaAuthError(401, "AAS token invalid during ADM token generation") from err
         if token:
-            if cache is not None:
-                await cache.set(f"{ns}adm_token_issued_at_{username}", time.time())
-                if not await cache.get(f"{ns}adm_probe_startup_left_{username}"):
-                    await cache.set(f"{ns}adm_probe_startup_left_{username}", 3)
-            else:
-                await async_set_cached_value(f"{ns}adm_token_issued_at_{username}", time.time())
-                if not await async_get_cached_value(f"{ns}adm_probe_startup_left_{username}"):
-                    await async_set_cached_value(f"{ns}adm_probe_startup_left_{username}", 3)
+            await cache.set(f"{ns}adm_token_issued_at_{username}", time.time())
+            if not await cache.get(f"{ns}adm_probe_startup_left_{username}"):
+                await cache.set(f"{ns}adm_probe_startup_left_{username}", 3)
 
     if not token:
         raise ValueError("No ADM token available - please reconfigure authentication")
@@ -584,6 +568,9 @@ def nova_request(api_scope: str, hex_payload: str, *, namespace: Optional[str] =
     except RuntimeError:
         # No running loop in this thread → OK
         pass
+
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
 
     url = f"https://android.googleapis.com/nova/{api_scope}"
     username = get_username()
@@ -697,6 +684,7 @@ def nova_request(api_scope: str, hex_payload: str, *, namespace: Optional[str] =
 async def async_nova_request(
     api_scope: str,
     hex_payload: str,
+    *,
     username: Optional[str] = None,
     session: Optional[aiohttp.ClientSession] = None,
     # Optional: initial token for config-flow isolation (bypass cache lookups)
@@ -707,8 +695,8 @@ async def async_nova_request(
     refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
     # Optional: entry-specific namespace for cache keys (e.g., entry_id)
     namespace: Optional[str] = None,
-    # NEW: entry-scoped TokenCache for strict multi-account separation
-    cache: TokenCache | None = None,
+    # Entry-scoped TokenCache for strict multi-account separation
+    cache: TokenCache,
 ) -> str:
     """
     Asynchronous Nova API request for Home Assistant (entry-scoped capable).
@@ -718,26 +706,25 @@ async def async_nova_request(
     shared aiohttp session.
 
     Entry-scope & cache behavior:
-        - If `cache` is provided, *all* username lookups, token retrieval, and TTL
-          metadata reads/writes use this cache exclusively.
+        - All username lookups, token retrieval, and TTL metadata reads/writes use
+          the provided entry-scoped cache exclusively.
         - `namespace` (e.g., config entry_id) is appended as a prefix to cache keys
           to avoid collisions when multiple entries share a backing store.
-        - If `cache` is not provided, falls back to async global cache helpers.
-        - If `cache_get`/`cache_set` are provided, they override the default helpers
-          only when `cache` is None.
+        - If flow-local `cache_get`/`cache_set` are provided, they override the
+          default helpers but are expected to operate on the same entry scope.
 
     Args:
         api_scope: Nova API scope suffix (appended to the base URL).
         hex_payload: Hex string body.
-        username: Optional username. If omitted, resolved from cache (entry-scoped when provided).
+        username: Optional username. If omitted, resolved from the entry-scoped cache.
         session: Optional aiohttp session to reuse.
         token: Optional, direct ADM token to bypass cache lookups (for config flow).
-        cache_get/cache_set: Optional async functions for TTL metadata (used only when `cache` is None).
+        cache_get/cache_set: Optional async functions for TTL metadata (flow-local overrides).
         refresh_override: Optional async function returning a fresh token. Use
             this to perform a *real* AAS→ADM refresh isolated from globals
             (e.g. via `async_get_adm_token_isolated(...)`).
         namespace: Optional key namespace (e.g., config entry_id) to avoid cache collisions.
-        cache: Optional entry-scoped TokenCache for strict multi-account separation.
+        cache: Entry-scoped TokenCache for strict multi-account separation.
 
     Returns:
         Hex-encoded response body.
@@ -759,15 +746,10 @@ async def async_nova_request(
         if username:
             user = username
         else:
-            # Entry-scoped username lookup when a TokenCache is supplied
-            if cache is not None:
-                val = await cache.get(username_string)
-                user = str(val) if isinstance(val, str) and val else None
-                if not user:
-                    # Fallback to provider (supports optional cache param)
-                    user = await async_get_username(cache=cache)  # type: ignore[arg-type]
-            else:
-                user = await async_get_username()
+            val = await cache.get(username_string)
+            user = str(val) if isinstance(val, str) and val else None
+            if not user:
+                user = await async_get_username(cache=cache)  # type: ignore[arg-type]
         if not user:
             raise ValueError("Username is not available for async_nova_request.")
         initial_token = await _get_initial_token_async(user, _LOGGER, ns_prefix=(namespace or ""), cache=cache)
@@ -785,40 +767,32 @@ async def async_nova_request(
     except (binascii.Error, ValueError) as e:
         raise ValueError("Invalid hex payload for Nova request") from e
 
-    # Select cache/refresh providers (prefer entry-scoped TokenCache when provided)
+    # Select cache/refresh providers (entry-scoped TokenCache)
     ns_prefix = (namespace or "").strip()
     if ns_prefix and not ns_prefix.endswith(":"):
         ns_prefix += ":"
 
-    if cache is not None:
-        # Entry-scoped async wrappers (no extra namespacing beyond policy's key computation)
-        async def _get(key: str) -> Any:
-            return await cache.get(key)
+    async def _cache_get(key: str) -> Any:
+        if cache_get is not None:
+            return await cache_get(key)
+        return await cache.get(key)
 
-        async def _set(key: str, value: Any) -> None:
-            await cache.set(key, value)
+    async def _cache_set(key: str, value: Any) -> None:
+        if cache_set is not None:
+            await cache_set(key, value)
+            return
+        await cache.set(key, value)
 
-        get_fn = _get
-        set_fn = _set
-
-        # Refresh must come from the same entry-scoped cache
-        rf_fn: Callable[[], Awaitable[Optional[str]]]
-        if refresh_override is not None:
-            rf_fn = refresh_override
-        else:
-            rf_fn = lambda: async_get_adm_token_api(user, cache=cache)  # noqa: E731
+    if refresh_override is not None:
+        rf_fn: Callable[[], Awaitable[Optional[str]]] = refresh_override
     else:
-        # Fall back to global async facades or provided flow-local overrides
-        get_fn = cache_get or async_get_cached_value
-        set_fn = cache_set or async_set_cached_value
-
-        rf_fn = refresh_override or (lambda: async_get_adm_token_api(user))
+        rf_fn = lambda: async_get_adm_token_api(user, cache=cache)  # noqa: E731
 
     policy = AsyncTTLPolicy(
         username=user,
         logger=_LOGGER,
-        get_value=get_fn,
-        set_value=set_fn,
+        get_value=_cache_get,
+        set_value=_cache_set,
         refresh_fn=rf_fn,
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
         ns_prefix=(namespace or ""),
