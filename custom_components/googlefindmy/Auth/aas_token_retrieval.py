@@ -47,7 +47,7 @@ from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Constant Android ID used for token exchange via gpsoauth (16-hex-digit integer).
+# Legacy fallback Android ID for gpsoauth exchange when FCM credentials are missing.
 _ANDROID_ID: int = 0x38918A453D071993
 
 
@@ -110,12 +110,15 @@ def _is_non_retryable_auth(err: Exception) -> bool:
 # Core exchange (executor offload)
 # ---------------------------------------------------------------------------
 
-async def _exchange_oauth_for_aas(username: str, oauth_token: str) -> Dict[str, Any]:
+async def _exchange_oauth_for_aas(
+    username: str, oauth_token: str, android_id: int
+) -> Dict[str, Any]:
     """Run the blocking gpsoauth exchange in an executor.
 
     Args:
         username: Google account e-mail.
         oauth_token: OAuth token to exchange.
+        android_id: Android ID tied to the FCM credentials for this account.
 
     Returns:
         The raw dictionary response from gpsoauth containing at least a 'Token' key.
@@ -126,7 +129,7 @@ async def _exchange_oauth_for_aas(username: str, oauth_token: str) -> Dict[str, 
 
     def _run() -> Dict[str, Any]:
         # gpsoauth.exchange_token(username, oauth_token, android_id) is blocking.
-        return gpsoauth.exchange_token(username, oauth_token, _ANDROID_ID)
+        return gpsoauth.exchange_token(username, oauth_token, android_id)
 
     loop = asyncio.get_running_loop()
     try:
@@ -213,8 +216,33 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:
             "No username available; please ensure the account e-mail is configured."
         )
 
+    # 2b) Resolve the Android ID tied to the stored FCM credentials.
+    fcm_creds = await cache.get("fcm_credentials")
+    android_id: int | None = None
+    if isinstance(fcm_creds, dict):
+        gcm_block = fcm_creds.get("gcm")
+        candidate = None
+        if isinstance(gcm_block, dict):
+            candidate = gcm_block.get("android_id")
+        if isinstance(candidate, int):
+            android_id = candidate
+        elif isinstance(candidate, str):
+            try:
+                android_id = int(candidate, 0)
+            except (TypeError, ValueError):
+                _LOGGER.debug("android_id value from FCM credentials is not numeric")
+        elif candidate is not None:
+            _LOGGER.debug("Unsupported android_id type in FCM credentials: %s", type(candidate))
+
+    if android_id is None:
+        _LOGGER.warning(
+            "FCM credentials missing android_id; falling back to static identifier. "
+            "Generate fresh secrets.json if authentication fails."
+        )
+        android_id = _ANDROID_ID
+
     # 3) Exchange OAuth → AAS (blocking call executed in executor).
-    resp = await _exchange_oauth_for_aas(username, oauth_token)
+    resp = await _exchange_oauth_for_aas(username, oauth_token, android_id)
 
     # 4) Persist normalized email if gpsoauth returns it (keeps cache consistent).
     if isinstance(resp.get("Email"), str) and resp["Email"]:
