@@ -168,6 +168,53 @@ def _get_async_refresh_lock() -> asyncio.Lock:
     return _async_refresh_lock
 
 
+async def _get_initial_token_async(
+    username: str,
+    logger: logging.Logger,
+    *,
+    ns_prefix: str = "",
+    cache: TokenCache,
+) -> str:
+    """Return an ADM token for *username* from the entry-scoped cache or API."""
+
+    if cache is None:
+        raise ValueError("TokenCache instance is required for Nova requests.")
+
+    normalized_user = (username or "").strip().lower()
+    if not normalized_user:
+        raise ValueError("Username is empty/invalid; cannot retrieve ADM token.")
+
+    prefix = (ns_prefix or "").strip()
+    if prefix and not prefix.endswith(":"):
+        prefix += ":"
+
+    cache_key = f"{prefix}adm_token_{normalized_user}"
+
+    cached = await cache.get(cache_key)
+    if isinstance(cached, str) and cached:
+        return cached
+
+    if prefix:
+        fallback_key = f"adm_token_{normalized_user}"
+        fallback = await cache.get(fallback_key)
+        if isinstance(fallback, str) and fallback:
+            try:
+                await cache.set(cache_key, fallback)
+            except Exception as err:  # pragma: no cover - defensive logging
+                logger.debug("Failed to mirror ADM token to namespaced key '%s': %s", cache_key, err)
+            return fallback
+
+    token = await async_get_adm_token_api(normalized_user, cache=cache)
+
+    if prefix:
+        try:
+            await cache.set(cache_key, token)
+        except Exception as err:  # pragma: no cover - defensive logging
+            logger.debug("Failed to persist ADM token to namespaced key '%s': %s", cache_key, err)
+
+    return token
+
+
 # ------------------------ TTL policy (shared core) ------------------------
 class TTLPolicy:
     """Token TTL/probe policy (synchronous I/O).

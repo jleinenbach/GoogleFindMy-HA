@@ -36,10 +36,12 @@ class _DummySession:
 
     def __init__(self, responses: list[_DummyResponse]) -> None:
         self._responses = responses
+        self.calls: list[dict[str, Any]] = []
 
     def post(self, *_args: object, **_kwargs: object) -> _DummyResponse:
         if not self._responses:
             raise AssertionError("No responses left for nova_request test")
+        self.calls.append({"args": _args, "kwargs": _kwargs})
         return self._responses.pop(0)
 
 
@@ -94,3 +96,44 @@ def test_async_nova_request_returns_auth_error_on_repeated_401() -> None:
     assert err.value.status == 401
     assert isinstance(err.value.detail, str)
     assert "Unauthorized" in err.value.detail
+
+
+def test_async_nova_request_fetches_token_when_not_supplied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nova should resolve an ADM token when `token` kwarg is omitted."""
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(200, b"\x10\x20")])
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        calls.append({"username": username, "cache": cache, "retries": retries, "backoff": backoff})
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="User@Example.COM",
+            cache=cache,
+            session=session,
+        )
+
+    result = asyncio.run(_exercise())
+
+    assert result == "1020"
+    assert calls and calls[0]["username"] == "user@example.com"
+    assert session.calls
+    headers = session.calls[0]["kwargs"].get("headers", {})
+    assert headers.get("Authorization") == "Bearer resolved-token"
