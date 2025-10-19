@@ -10,11 +10,12 @@ This module provides an asynchronous API to obtain the 32-byte *shared key*
 used to decrypt E2EE payloads.
 
 Multi-account / entry-scoped design:
-- When an entry-scoped `TokenCache` is supplied, **all** reads/writes are done
-  strictly against that cache (no global fallback).
-- In entry-scoped mode, the canonical cache key is `"shared_key"` (per entry).
-- In global (legacy) mode, a per-user key `"shared_key_<username>"` is used,
-  with one-time migration from legacy `"shared_key"` if present.
+- Callers **must** supply the entry-scoped `TokenCache`. All reads/writes are
+  performed against that cache; global facades have been removed to avoid
+  cross-account leakage.
+- The canonical cache key is `"shared_key"` (per entry).
+- For backwards compatibility within the same entry, the helper still migrates
+  previously stored user-scoped keys (e.g. `"shared_key_<username>"`).
 
 Normalization & validation:
 - Values are stored as lowercase **hex strings**.
@@ -36,16 +37,7 @@ import re
 from binascii import Error as BinasciiError, unhexlify
 from typing import Any, Optional
 
-from custom_components.googlefindmy.Auth.token_cache import (
-    TokenCache,
-    async_get_cached_value,
-    async_get_cached_value_or_set,
-    async_set_cached_value,
-)
-from custom_components.googlefindmy.Auth.username_provider import (
-    async_get_username,
-    username_string,
-)
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -118,7 +110,7 @@ async def _run_in_executor(func, *args):
 # Retrieval strategies (cache-aware)
 # -----------------------------------------------------------------------------
 
-async def _derive_from_fcm_credentials(*, cache: TokenCache | None) -> str:
+async def _derive_from_fcm_credentials(*, cache: TokenCache) -> str:
     """Try deriving the shared key from FCM credentials (non-interactive path).
 
     The FCM credential layout typically contains a private key in base64/base64url form.
@@ -131,10 +123,10 @@ async def _derive_from_fcm_credentials(*, cache: TokenCache | None) -> str:
     Raises:
         RuntimeError: if credentials are not present/invalid or too short.
     """
-    if cache is not None:
-        creds: Any = await cache.get("fcm_credentials")
-    else:
-        creds = await async_get_cached_value("fcm_credentials")
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    creds: Any = await cache.get("fcm_credentials")
 
     if isinstance(creds, str):
         try:
@@ -205,7 +197,7 @@ async def _interactive_flow_hex() -> str:
         return _decode_base64_like_32(s).hex()
 
 
-async def _retrieve_shared_key_hex(*, cache: TokenCache | None) -> str:
+async def _retrieve_shared_key_hex(*, cache: TokenCache) -> str:
     """Strategy chain to obtain a hex-encoded shared key (32 bytes).
 
     Order:
@@ -246,64 +238,31 @@ def _user_scoped_key(username: str) -> str:
 
 async def _get_or_generate_shared_key_hex(
     *,
-    cache: TokenCache | None,
+    cache: TokenCache,
     username: Optional[str],
 ) -> str:
-    """Return the shared key hex string with proper scoping & one-time migration.
+    """Return the shared key hex string with proper scoping & one-time migration."""
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
 
-    Entry-scoped mode (cache is provided):
-        - Primary key: "shared_key" (per entry).
-        - If missing and a user-scoped legacy key exists in this cache (rare), migrate it.
-        - Otherwise generate via strategy chain and store under "shared_key".
-
-    Global legacy mode (no cache provided):
-        - Primary key: "shared_key_<username>" (per-user).
-        - If missing, migrate from legacy "shared_key" to user-scoped key if present.
-        - Otherwise generate via strategy chain and store under "shared_key_<username>".
-    """
-    if cache is not None:
-        # Primary key in entry-scoped mode
-        existing = await cache.get(_CACHE_KEY_BASE)
-        if isinstance(existing, str) and existing.strip():
-            return existing
-
-        # Optional: migrate from user-scoped legacy key within the same cache (defensive)
-        if isinstance(username, str) and username:
-            legacy_user_key = await cache.get(_user_scoped_key(username))
-            if isinstance(legacy_user_key, str) and legacy_user_key.strip():
-                await cache.set(_CACHE_KEY_BASE, legacy_user_key)
-                _LOGGER.debug("Migrated legacy user-scoped shared_key to entry-scoped key")
-                return legacy_user_key
-
-        # Generate fresh and persist
-        return await cache.get_or_set(_CACHE_KEY_BASE, lambda: _retrieve_shared_key_hex(cache=cache))
-
-    # --- Global legacy mode below ---
-    # Need a username to scope keys safely
-    if not isinstance(username, str) or not username:
-        # Resolve from global cache (best-effort)
-        resolved = await async_get_cached_value(username_string)
-        username = str(resolved) if isinstance(resolved, str) and resolved else await async_get_username()
-
-    if not isinstance(username, str) or not username:
-        raise RuntimeError("Username is not configured; cannot resolve shared_key in global mode.")
-
-    user_key = _user_scoped_key(username)
-
-    # Per-user primary key
-    existing = await async_get_cached_value(user_key)
+    # Primary key in entry-scoped mode
+    existing = await cache.get(_CACHE_KEY_BASE)
     if isinstance(existing, str) and existing.strip():
         return existing
 
-    # One-time migration from legacy global "shared_key"
-    legacy = await async_get_cached_value(_CACHE_KEY_BASE)
-    if isinstance(legacy, str) and legacy.strip():
-        await async_set_cached_value(user_key, legacy)
-        _LOGGER.debug("Migrated legacy global shared_key to per-user key: %s", user_key)
-        return legacy
+    # Optional: migrate from user-scoped legacy key within the same cache (defensive)
+    if isinstance(username, str) and username:
+        legacy_user_key = await cache.get(_user_scoped_key(username))
+        if isinstance(legacy_user_key, str) and legacy_user_key.strip():
+            await cache.set(_CACHE_KEY_BASE, legacy_user_key)
+            _LOGGER.debug("Migrated legacy user-scoped shared_key to entry-scoped key")
+            return legacy_user_key
 
-    # Generate and store under per-user key
-    return await async_get_cached_value_or_set(user_key, lambda: _retrieve_shared_key_hex(cache=None))
+    # Generate fresh and persist
+    return await cache.get_or_set(
+        _CACHE_KEY_BASE,
+        lambda: _retrieve_shared_key_hex(cache=cache),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -312,7 +271,7 @@ async def _get_or_generate_shared_key_hex(
 
 async def async_get_shared_key(
     *,
-    cache: TokenCache | None = None,
+    cache: TokenCache,
     username: Optional[str] = None,
 ) -> bytes:
     """Return the 32-byte shared key (entry-scoped capable).
@@ -329,6 +288,9 @@ async def async_get_shared_key(
     Raises:
         RuntimeError: if a valid key cannot be obtained or normalized.
     """
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
     hex_value = await _get_or_generate_shared_key_hex(cache=cache, username=username)
 
     # Validate and return as bytes; self-heal non-hex to hex
@@ -337,20 +299,7 @@ async def async_get_shared_key(
     except ValueError:
         # Try base64-like and normalize
         b = _decode_base64_like_32(hex_value)
-        if cache is not None:
-            await cache.set(_CACHE_KEY_BASE, b.hex())
-        else:
-            # Determine where to write in global mode
-            user = username
-            if not isinstance(user, str) or not user:
-                # Try resolve for normalization path
-                resolved = await async_get_cached_value(username_string)
-                user = str(resolved) if isinstance(resolved, str) and resolved else await async_get_username()
-            if isinstance(user, str) and user:
-                await async_set_cached_value(_user_scoped_key(user), b.hex())
-            else:
-                # Fallback to legacy slot if user resolution failed
-                await async_set_cached_value(_CACHE_KEY_BASE, b.hex())
+        await cache.set(_CACHE_KEY_BASE, b.hex())
         _LOGGER.info("Normalized cached shared_key to hex")
         return b
 
@@ -379,6 +328,9 @@ def get_shared_key() -> bytes:  # pragma: no cover
                 "Use `await async_get_shared_key()` instead."
             )
     except RuntimeError:
-        # No running loop -> OK for CLI usage
         pass
-    return asyncio.run(async_get_shared_key())
+
+    raise RuntimeError(
+        "Legacy get_shared_key() is no longer supported without providing the entry TokenCache. "
+        "Use `await async_get_shared_key(..., cache=...)` instead."
+    )

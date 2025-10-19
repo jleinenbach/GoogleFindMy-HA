@@ -160,7 +160,7 @@ def _invalidate_token(kind: str, username: str) -> None:
 async def _pick_auth_token_async(
     prefer_adm: bool = False,
     *,
-    cache: TokenCache | None = None,
+    cache: TokenCache,
 ) -> Tuple[str, str, str]:
     """
     Select a valid auth token (async). Prefer SPOT unless prefer_adm=True.
@@ -172,9 +172,12 @@ async def _pick_auth_token_async(
     - Use async username provider.
     - Prefer native async token retrieval.
     - Do NOT perform full-cache scans in the async path (avoid heavy ops).
-    - If a `cache` is provided, pass it through where supported.
+    - All operations read/write via the provided entry-scoped cache.
     """
-    user = await async_get_username()
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    user = await async_get_username(cache=cache)
     if not user:
         raise RuntimeError("Username is not configured; cannot select auth token.")
 
@@ -182,28 +185,18 @@ async def _pick_auth_token_async(
     if not prefer_adm:
         try:
             # Prefer async API; (optional) cache arg is supported by some impls
-            try:
-                tok = await async_get_spot_token(user)  # type: ignore[call-arg]
-            except TypeError:
-                # Older signature without username parameter
-                tok = await async_get_spot_token()  # type: ignore[misc]
+            tok = await async_get_spot_token(user, cache=cache)
             if tok:
                 return tok, "spot", user
         except Exception as e:
             _LOGGER.debug("Failed to get SPOT token for %s: %s; falling back to ADM", user, e)
 
     # Try ADM for the same user
-    if cache is not None:
-        tok = await cache.get(f"adm_token_{user}")
-    else:
-        tok = await async_get_cached_value(f"adm_token_{user}")
+    tok = await cache.get(f"adm_token_{user}")
 
     if not tok:
         try:
-            if cache is not None:
-                tok = await async_get_adm_token_api(user, cache=cache)
-            else:
-                tok = await async_get_adm_token_api(user)
+            tok = await async_get_adm_token_api(user, cache=cache)
         except Exception:
             tok = None
 
@@ -398,7 +391,7 @@ async def async_spot_request(
     api_scope: str,
     payload: bytes,
     *,
-    cache: TokenCache | None = None,
+    cache: TokenCache,
 ) -> bytes:
     """
     Perform a SPOT gRPC unary request over HTTP/2 (async, preferred in HA).
@@ -412,8 +405,13 @@ async def async_spot_request(
         (2) 200 + trailers-only  -> raise SpotTrailersOnlyError.
         (3) Non-200 HTTP         -> classify and retry where appropriate.
     - Clear signaling via SpotError hierarchy.
-    - Multi-account safe: when `cache` (entry-scoped) is supplied, token selection
-      and invalidation use that cache; otherwise default async facades are used.
+    - Multi-account safe: token selection and invalidation always use the provided
+      entry-scoped cache.
+
+    Args:
+        api_scope: Spot API method name (e.g., "GetEidInfoForE2eeDevices").
+        payload: Serialized protobuf request.
+        cache: Entry-scoped TokenCache used for username and token resolution.
 
     Returns:
         Raw protobuf payload (bytes).

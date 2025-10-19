@@ -40,7 +40,7 @@
       },
       "reauth_confirm": {
         "title": "Erneute Authentifizierung",
-        "description": "Deine Anmeldedaten sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben.",
+        "description": "Die Anmeldedaten für **{email}** sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben.",
         "data": {
           "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
           "oauth_token": "Neuer OAuth-Token",
@@ -251,6 +251,10 @@
     "multiple_config_entries": {
       "title": "Mehrere Konfigurationseinträge erkannt",
       "description": "Für diese Integration sind aktuell mehr als ein Konfigurationseintrag vorhanden:\n\n{entries}\n\nEs wird genau ein Eintrag unterstützt. Wechsle zu **Einstellungen → Geräte & Dienste**, öffne **Google Find My Device** und entferne doppelte Einträge, sodass genau einer übrig bleibt. Anschließend Integration neu laden oder Home Assistant neu starten."
+    },
+    "unique_id_collision": {
+      "title": "Entity-Unique-ID-Konflikt erkannt",
+      "description": "Einige Entitäten für **{entry}** verwenden bereits das neue Unique-ID-Format und kollidieren mit der Migration.\n\n**Anzahl:** {count}\n**Beispiele:** {entities}\n\nSo löst du das Problem:\n1) Öffne **Einstellungen → Geräte & Dienste → Entitäten** und suche nach den aufgeführten Entitäten.\n2) Entferne oder benenne kollidierende Entitäten um bzw. lösche verwaiste Einträge anderer Integrationen.\n3) Lade die Integration neu (oder starte Home Assistant neu). Die Migration wird automatisch erneut versucht."
     }
   },
   "exceptions": {

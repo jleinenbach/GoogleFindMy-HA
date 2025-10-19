@@ -208,7 +208,13 @@ class _EphemeralCache:
     in-memory only and never persisted to disk.
     """
 
-    def __init__(self, *, oauth_token: Optional[str], email: Optional[str]) -> None:
+    def __init__(
+        self,
+        *,
+        oauth_token: Optional[str],
+        email: Optional[str],
+        secrets_bundle: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Initialize the ephemeral cache with credentials.
 
         Args:
@@ -220,6 +226,17 @@ class _EphemeralCache:
             self._data[username_string] = email
         if isinstance(oauth_token, str) and oauth_token:
             self._data[CONF_OAUTH_TOKEN] = oauth_token
+
+        if isinstance(secrets_bundle, dict):
+            fcm_creds = secrets_bundle.get("fcm_credentials")
+            if fcm_creds is not None:
+                self._data["fcm_credentials"] = fcm_creds
+                _LOGGER.debug("_EphemeralCache: injected fcm_credentials for validation probe.")
+            else:
+                _LOGGER.debug(
+                    "_EphemeralCache: secrets bundle provided without fcm_credentials;"
+                    " validation may fall back to static android id."
+                )
 
     async def async_get_cached_value(self, key: str) -> Any:
         """Get a value from the in-memory cache.
@@ -243,6 +260,37 @@ class _EphemeralCache:
             self._data.pop(key, None)
         else:
             self._data[key] = value
+
+    async def get(self, name: str) -> Any:
+        """Return a cached value (TokenCache compatibility alias)."""
+
+        return await self.async_get_cached_value(name)
+
+    async def set(self, name: str, value: Any) -> None:
+        """Store a value in the cache (TokenCache compatibility alias)."""
+
+        await self.async_set_cached_value(name, value)
+
+    async def get_or_set(
+        self, name: str, generator: Callable[[], Awaitable[Any] | Any]
+    ) -> Any:
+        """Return cached value or compute/store it via the provided generator."""
+
+        existing = await self.get(name)
+        if existing is not None:
+            return existing
+
+        result = generator()
+        if asyncio.iscoroutine(result):
+            result = await result
+
+        await self.set(name, result)
+        return result
+
+    async def all(self) -> Dict[str, Any]:
+        """Return a shallow copy of all cached values."""
+
+        return dict(self._data)
 
 
 # ----------------------------- API class ------------------------------------
@@ -268,6 +316,7 @@ class GoogleFindMyAPI:
         session: Optional[ClientSession] = None,
         oauth_token: Optional[str] = None,
         google_email: Optional[str] = None,
+        secrets_bundle: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize the API wrapper.
 
@@ -286,7 +335,11 @@ class GoogleFindMyAPI:
             google_email: Optional Google account e-mail (flow validation only).
         """
         if cache is None and (oauth_token or google_email):
-            cache = _EphemeralCache(oauth_token=oauth_token, email=google_email)
+            cache = _EphemeralCache(
+                oauth_token=oauth_token,
+                email=google_email,
+                secrets_bundle=secrets_bundle,
+            )
         if cache is None:
             # Runtime misuse: the coordinator should always pass a cache; flows should
             # at least pass email/token. Fail early to surface programming errors.
@@ -504,6 +557,7 @@ class GoogleFindMyAPI:
                 result_hex = await async_request_device_list(
                     username,
                     session=sess,
+                    cache=self._cache,
                     token=token,
                     cache_get=cg,
                     cache_set=cs,

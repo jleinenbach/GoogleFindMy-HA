@@ -40,7 +40,7 @@
       },
       "reauth_confirm": {
         "title": "Riautenticazione",
-        "description": "Le tue credenziali sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email.",
+        "description": "Le credenziali di **{email}** sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email.",
         "data": {
           "secrets_json": "Nuovo secrets.json (contenuto completo)",
           "oauth_token": "Nuovo token OAuth",
@@ -251,6 +251,10 @@
     "multiple_config_entries": {
       "title": "Rilevate più voci di configurazione",
       "description": "Esistono attualmente più voci di configurazione per questa integrazione:\n\n{entries}\n\nÈ supportata una sola voce. Vai su **Impostazioni → Dispositivi e servizi**, apri **Google Find My Device** e rimuovi i duplicati finché non ne rimane una sola. Poi ricarica l’integrazione (o riavvia Home Assistant)."
+    },
+    "unique_id_collision": {
+      "title": "Rilevato conflitto di ID univoco dell’entità",
+      "description": "Alcune entità di **{entry}** utilizzano già il nuovo formato di ID univoco e sono in conflitto con la migrazione.\n\n**Conteggio:** {count}\n**Esempi:** {entities}\n\nPer risolvere:\n1) Apri **Impostazioni → Dispositivi e servizi → Entità** e cerca le entità elencate.\n2) Rimuovi o rinomina le entità in conflitto, oppure elimina le voci non più utilizzate di altre integrazioni.\n3) Ricarica l’integrazione (o riavvia Home Assistant). La migrazione verrà ripetuta automaticamente."
     }
   },
   "exceptions": {

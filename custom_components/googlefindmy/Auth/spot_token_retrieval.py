@@ -6,13 +6,13 @@
 """Spot token retrieval (async-first, HA-friendly; entry-scoped capable).
 
 Primary API:
-    - async_get_spot_token(username: Optional[str] = None, *, cache: TokenCache | None = None,
+    - async_get_spot_token(username: Optional[str] = None, *, cache: TokenCache,
                            aas_provider: Callable[[], Awaitable[str]] | None = None) -> str
 
 Design:
     - Async-first: obtains the Google username from the username provider when not supplied.
-      If an entry-scoped TokenCache is provided, **all** reads/writes are performed against
-      that cache; otherwise the legacy default-cache facades are used (single-entry setups).
+      Callers **must** provide the entry-scoped TokenCache so that all reads/writes are
+      performed against that cache, guaranteeing strict multi-account isolation.
     - Token generation prefers the async token retriever (`async_request_token`). We inject
       an AAS provider derived from the SAME cache (lambda: async_get_aas_token(cache=cache))
       when no custom provider is supplied. This ensures true end-to-end entry scoping.
@@ -23,8 +23,8 @@ Caching:
     - Cache key: f"spot_token_{username}" (stored in the selected cache).
 
 Multi-account compatibility:
-    - Passing an entry-scoped `cache` isolates tokens per config entry. Without a cache
-      argument, behavior remains backward-compatible and uses the legacy default cache.
+    - Passing the entry-scoped `cache` isolates tokens per config entry. Legacy global
+      cache fallbacks have been removed to prevent cross-account leakage.
 """
 
 from __future__ import annotations
@@ -34,10 +34,7 @@ import logging
 from typing import Optional, Callable, Awaitable
 
 from .username_provider import async_get_username
-from .token_cache import (
-    TokenCache,
-    async_get_cached_value_or_set,  # legacy default-cache facade
-)
+from .token_cache import TokenCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 async def _async_generate_spot_token(
     username: str,
     *,
+    cache: TokenCache,
     aas_provider: Optional[Callable[[], Awaitable[str]]] = None,
 ) -> str:
     """Generate a fresh Spot token for `username` without blocking the loop.
@@ -65,6 +63,7 @@ async def _async_generate_spot_token(
             username,
             "spot",
             True,  # play_services=True
+            cache=cache,
             aas_provider=aas_provider,
         )
         if not token:
@@ -84,7 +83,7 @@ async def _async_generate_spot_token(
 async def async_get_spot_token(
     username: Optional[str] = None,
     *,
-    cache: TokenCache | None = None,
+    cache: TokenCache,
     aas_provider: Optional[Callable[[], Awaitable[str]]] = None,
 ) -> str:
     """Return a Spot token for the given user (async, cached; entry-scoped when `cache` is provided).
@@ -100,10 +99,12 @@ async def async_get_spot_token(
     Raises:
         RuntimeError: if the username cannot be determined or token retrieval fails.
     """
-    # Resolve username (entry-scoped when cache is provided).
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    # Resolve username (entry-scoped).
     if not username:
-        # lazy import of entry-scoped variant (provider already supports default cache internally)
-        username = await async_get_username(cache) if cache is not None else await async_get_username()
+        username = await async_get_username(cache=cache)
 
     if not isinstance(username, str) or not username:
         raise RuntimeError("Google username is not configured; cannot obtain Spot token")
@@ -118,16 +119,13 @@ async def async_get_spot_token(
         aas_provider = _fallback_aas_provider
 
     async def _generator() -> str:
-        return await _async_generate_spot_token(username, aas_provider=aas_provider)
+        return await _async_generate_spot_token(
+            username,
+            cache=cache,
+            aas_provider=aas_provider,
+        )
 
-    if cache is not None:
-        # Entry-scoped cache path
-        return await cache.get_or_set(cache_key, _generator)
-    # Legacy default-cache facades (single-entry setups)
-    token = await async_get_cached_value_or_set(cache_key, _generator)
-    if not isinstance(token, str) or not token:
-        raise RuntimeError("Spot token retrieval produced an invalid value")
-    return token
+    return await cache.get_or_set(cache_key, _generator)
 
 
 # ----------------------- Legacy sync wrapper (CLI/tests) -----------------------
@@ -147,10 +145,12 @@ def get_spot_token(username: Optional[str] = None) -> str:
                 "Use `await async_get_spot_token(...)` instead."
             )
     except RuntimeError:
-        # No running loop -> safe to spin a private loop for CLI/tests.
         pass
 
-    return asyncio.run(async_get_spot_token(username))
+    raise RuntimeError(
+        "Legacy get_spot_token() is no longer supported without providing the entry TokenCache. "
+        "Use `await async_get_spot_token(..., cache=...)` instead."
+    )
 
 
 if __name__ == "__main__":
