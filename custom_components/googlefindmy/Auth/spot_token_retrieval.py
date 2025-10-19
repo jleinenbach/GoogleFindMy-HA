@@ -42,6 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 async def _async_generate_spot_token(
     username: str,
     *,
+    cache: TokenCache,
     aas_provider: Optional[Callable[[], Awaitable[str]]] = None,
 ) -> str:
     """Generate a fresh Spot token for `username` without blocking the loop.
@@ -62,6 +63,7 @@ async def _async_generate_spot_token(
             username,
             "spot",
             True,  # play_services=True
+            cache=cache,
             aas_provider=aas_provider,
         )
         if not token:
@@ -117,7 +119,11 @@ async def async_get_spot_token(
         aas_provider = _fallback_aas_provider
 
     async def _generator() -> str:
-        return await _async_generate_spot_token(username, aas_provider=aas_provider)
+        return await _async_generate_spot_token(
+            username,
+            cache=cache,
+            aas_provider=aas_provider,
+        )
 
     return await cache.get_or_set(cache_key, _generator)
 

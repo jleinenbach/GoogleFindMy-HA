@@ -145,6 +145,7 @@ async def async_request_token(
     scope: str,
     play_services: bool = False,
     *,
+    cache: TokenCache,
     aas_provider: Optional[Callable[[], Awaitable[str]]] = None,
     aas_token: Optional[str] = None,
 ) -> str:
@@ -162,6 +163,7 @@ async def async_request_token(
         username: Google account email.
         scope: OAuth scope suffix.
         play_services: Use the Play Services app id instead of ADM when True.
+        cache: Entry-scoped TokenCache to read/write intermediate credentials.
         aas_provider: Optional async callable that returns an AAS token.
         aas_token: Optional pre-fetched AAS token (takes precedence over provider).
 
@@ -172,11 +174,18 @@ async def async_request_token(
         InvalidAasTokenError: If gpsoauth rejects the cached AAS token during the exchange.
     """
     # Get the AAS token from injected token → injected provider → default provider.
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
     if aas_token is None:
         if aas_provider is not None:
             aas_token = await aas_provider()
         else:
-            aas_token = await async_get_aas_token()
+            async def _default_aas_provider() -> str:
+                return await async_get_aas_token(cache=cache)
+
+            aas_provider = _default_aas_provider
+            aas_token = await aas_provider()
 
     # Offload the blocking OAuth exchange to a worker thread.
     loop = asyncio.get_running_loop()

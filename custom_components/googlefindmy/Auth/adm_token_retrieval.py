@@ -163,7 +163,12 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
 
     aas_provider: Callable[[], Awaitable[str]] = lambda: async_get_aas_token(cache=cache)
 
-    return await async_request_token(username, service, aas_provider=aas_provider)
+    return await async_request_token(
+        username,
+        service,
+        cache=cache,
+        aas_provider=aas_provider,
+    )
 
 
 # ---------------------------------------------------------------------------

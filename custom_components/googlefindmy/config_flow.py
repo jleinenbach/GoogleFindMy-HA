@@ -67,6 +67,7 @@ from .const import (
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
     DATA_AUTH_METHOD,
+    DATA_SECRET_BUNDLE,
     # Options (non-secret runtime settings)
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
@@ -329,22 +330,42 @@ async def _try_probe_devices(api: GoogleFindMyAPI, *, email: str, token: str) ->
     return await api.async_get_basic_device_list()
 
 
-async def _async_new_api_for_probe(email: str, token: str) -> GoogleFindMyAPI:
+async def _async_new_api_for_probe(
+    email: str,
+    token: str,
+    *,
+    secrets_bundle: Optional[Dict[str, Any]] = None,
+) -> GoogleFindMyAPI:
     """Create a fresh, ephemeral API instance for pre-flight validation."""
     try:
-        return GoogleFindMyAPI(oauth_token=token, google_email=email)  # type: ignore[call-arg]
+        return GoogleFindMyAPI(
+            oauth_token=token,
+            google_email=email,
+            secrets_bundle=secrets_bundle,
+        )  # type: ignore[call-arg]
     except TypeError:
         try:
-            return GoogleFindMyAPI(token=token, email=email)  # type: ignore[call-arg]
+            return GoogleFindMyAPI(
+                token=token,
+                email=email,
+                secrets_bundle=secrets_bundle,
+            )  # type: ignore[call-arg]
         except TypeError:
             return GoogleFindMyAPI()  # type: ignore[call-arg]
 
 
-async def async_pick_working_token(email: str, candidates: List[Tuple[str, str]]) -> Optional[str]:
+async def async_pick_working_token(
+    email: str,
+    candidates: List[Tuple[str, str]],
+    *,
+    secrets_bundle: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
     """Try the candidate tokens in order until one passes a minimal online validation."""
     for source, token in candidates:
         try:
-            api = await _async_new_api_for_probe(email=email, token=token)
+            api = await _async_new_api_for_probe(
+                email=email, token=token, secrets_bundle=secrets_bundle
+            )
             await _try_probe_devices(api, email=email, token=token)
             _LOGGER.debug("Token probe OK (source=%s, email=%s).", source, email)
             return token
@@ -516,6 +537,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             raw = (user_input.get("secrets_json") or "")
             _LOGGER.debug("Secrets step: received input (chars=%d).", len(raw))
+            parsed_secrets: Optional[Dict[str, Any]] = None
+            try:
+                parsed_candidate = json.loads(raw)
+                if isinstance(parsed_candidate, dict):
+                    parsed_secrets = parsed_candidate
+                else:
+                    raise TypeError()
+            except (json.JSONDecodeError, TypeError):
+                parsed_secrets = None
             method, email, cands, err = _interpret_credentials_choice(
                 user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
             )
@@ -530,7 +560,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(uid)
                 self._abort_if_unique_id_configured()
 
-                chosen = await async_pick_working_token(email, cands)
+                chosen = await async_pick_working_token(
+                    email,
+                    cands,
+                    secrets_bundle=parsed_secrets,
+                )
                 if not chosen:
                     errors["base"] = "cannot_connect"
                 else:
@@ -547,6 +581,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_OAUTH_TOKEN: to_persist,
                         CONF_GOOGLE_EMAIL: email,
                     }
+                    if parsed_secrets is not None:
+                        self._auth_data[DATA_SECRET_BUNDLE] = parsed_secrets
                     return await self.async_step_device_selection()
 
         return self.async_show_form(step_id="secrets_json", data_schema=schema, errors=errors)
@@ -576,6 +612,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_OAUTH_TOKEN: chosen,
                         CONF_GOOGLE_EMAIL: email,
                     }
+                    self._auth_data.pop(DATA_SECRET_BUNDLE, None)
                     return await self.async_step_device_selection()
 
         return self.async_show_form(step_id="individual_tokens", data_schema=STEP_INDIVIDUAL_DATA_SCHEMA, errors=errors)
@@ -587,7 +624,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         oauth = self._auth_data.get(CONF_OAUTH_TOKEN)
         if not (email and oauth):
             raise HomeAssistantError("Missing credentials in setup flow.")
-        api = await _async_new_api_for_probe(email=email, token=oauth)
+        api = await _async_new_api_for_probe(
+            email=email,
+            token=oauth,
+            secrets_bundle=self._auth_data.get(DATA_SECRET_BUNDLE),
+        )
         return api, email, oauth
 
     # ------------------ Step: device selection & non-secret options ------------------
@@ -657,6 +698,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_OAUTH_TOKEN: self._auth_data.get(CONF_OAUTH_TOKEN),
                 CONF_GOOGLE_EMAIL: self._auth_data.get(CONF_GOOGLE_EMAIL),
             }
+            if DATA_SECRET_BUNDLE in self._auth_data:
+                data_payload[DATA_SECRET_BUNDLE] = self._auth_data[DATA_SECRET_BUNDLE]
 
             options_payload: Dict[str, Any] = {}
             for k in schema_fields.keys():
@@ -728,7 +771,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         else:
                             if _disqualifies_for_persistence(chosen):
                                 _LOGGER.warning("Reauth: token looks like a JWT; persisting anyway due to validation.")
-                            updated_data = {**entry.data, DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL, CONF_OAUTH_TOKEN: chosen}
+                            updated_data = {
+                                **entry.data,
+                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                CONF_OAUTH_TOKEN: chosen,
+                            }
+                            updated_data.pop(DATA_SECRET_BUNDLE, None)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
 
                     elif method == "secrets":
@@ -742,7 +790,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 return self.async_abort(reason="already_configured")
                             errors["base"] = "email_mismatch"
                         else:
-                            chosen = await async_pick_working_token(fixed_email, cands)
+                            chosen = await async_pick_working_token(
+                                fixed_email, cands, secrets_bundle=parsed
+                            )
                             if not chosen:
                                 errors["base"] = "cannot_connect"
                             else:
@@ -753,19 +803,34 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     alt = next((v for (_src, v) in cands if not _disqualifies_for_persistence(v)), None)
                                     if alt:
                                         to_persist = alt
-                                updated_data = {**entry.data, DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, CONF_OAUTH_TOKEN: to_persist}
+                                updated_data = {
+                                    **entry.data,
+                                    DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                    CONF_OAUTH_TOKEN: to_persist,
+                                    DATA_SECRET_BUNDLE: parsed,
+                                }
                                 return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept first candidate and reload
                         if method == "manual":
-                            updated_data = {**entry.data, DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL, CONF_OAUTH_TOKEN: str(payload)}
+                            updated_data = {
+                                **entry.data,
+                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                CONF_OAUTH_TOKEN: str(payload),
+                            }
+                            updated_data.pop(DATA_SECRET_BUNDLE, None)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                         if method == "secrets":
                             parsed = dict(payload)  # type: ignore[assignment]
                             cands = _extract_oauth_candidates_from_secrets(parsed)
                             token_first = cands[0][1] if cands else ""
-                            updated_data = {**entry.data, DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, CONF_OAUTH_TOKEN: token_first}
+                            updated_data = {
+                                **entry.data,
+                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                CONF_OAUTH_TOKEN: token_first,
+                                DATA_SECRET_BUNDLE: parsed,
+                            }
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                     errors["base"] = _map_api_exc_to_error_key(err2)
 
@@ -972,7 +1037,12 @@ class OptionsFlowHandler(OptionsFlowBase):
                             if not chosen:
                                 errors["base"] = "cannot_connect"
                             else:
-                                updated_data = {**entry.data, DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL, CONF_OAUTH_TOKEN: chosen}
+                                updated_data = {
+                                    **entry.data,
+                                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                    CONF_OAUTH_TOKEN: chosen,
+                                }
+                                updated_data.pop(DATA_SECRET_BUNDLE, None)
                                 self.hass.config_entries.async_update_entry(entry, data=updated_data)
                                 self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
                                 return self.async_abort(reason="reconfigure_successful")
@@ -989,7 +1059,9 @@ class OptionsFlowHandler(OptionsFlowBase):
                             if not cands:
                                 errors["base"] = "invalid_token"
                             else:
-                                chosen = await async_pick_working_token(email, cands)
+                                chosen = await async_pick_working_token(
+                                    email, cands, secrets_bundle=parsed
+                                )
                                 if not chosen:
                                     errors["base"] = "cannot_connect"
                                 else:
@@ -998,7 +1070,12 @@ class OptionsFlowHandler(OptionsFlowBase):
                                         alt = next((v for (_src, v) in cands if not _disqualifies_for_persistence(v)), None)
                                         if alt:
                                             to_persist = alt
-                                    updated_data = {**entry.data, DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, CONF_OAUTH_TOKEN: to_persist}
+                                    updated_data = {
+                                        **entry.data,
+                                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                        CONF_OAUTH_TOKEN: to_persist,
+                                        DATA_SECRET_BUNDLE: parsed,
+                                    }
                                     self.hass.config_entries.async_update_entry(entry, data=updated_data)
                                     self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
                                     return self.async_abort(reason="reconfigure_successful")
@@ -1007,11 +1084,21 @@ class OptionsFlowHandler(OptionsFlowBase):
                         # Defer: accept input and let setup validate with entry-scoped cache
                         entry = self.config_entry
                         if has_token:
-                            updated_data = {**entry.data, DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL, CONF_OAUTH_TOKEN: user_input["new_oauth_token"].strip()}
+                            updated_data = {
+                                **entry.data,
+                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                CONF_OAUTH_TOKEN: user_input["new_oauth_token"].strip(),
+                            }
+                            updated_data.pop(DATA_SECRET_BUNDLE, None)
                         else:
                             parsed = json.loads(user_input["new_secrets_json"])
                             cands = _extract_oauth_candidates_from_secrets(parsed)
-                            updated_data = {**entry.data, DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS, CONF_OAUTH_TOKEN: (cands[0][1] if cands else "")}
+                            updated_data = {
+                                **entry.data,
+                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                CONF_OAUTH_TOKEN: (cands[0][1] if cands else ""),
+                                DATA_SECRET_BUNDLE: parsed,
+                            }
                         self.hass.config_entries.async_update_entry(entry, data=updated_data)
                         self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
                         return self.async_abort(reason="reconfigure_successful")
