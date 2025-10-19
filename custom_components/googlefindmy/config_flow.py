@@ -32,6 +32,8 @@ Docstring & comments:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import re
@@ -811,6 +813,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             else:
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
+                            await self._async_clear_cached_aas_token(entry)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
 
                     elif method == "secrets":
@@ -850,6 +853,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 }
                                 if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
                                     updated_data[DATA_AAS_TOKEN] = to_persist
+                                elif DATA_AAS_TOKEN in updated_data:
+                                    updated_data.pop(DATA_AAS_TOKEN, None)
+                                await self._async_clear_cached_aas_token(entry)
                                 return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
@@ -866,6 +872,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             else:
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
+                            await self._async_clear_cached_aas_token(entry)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                         if method == "secrets":
                             parsed = dict(payload)  # type: ignore[assignment]
@@ -879,6 +886,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             }
                             if isinstance(token_first, str) and token_first.startswith("aas_et/"):
                                 updated_data[DATA_AAS_TOKEN] = token_first
+                            else:
+                                updated_data.pop(DATA_AAS_TOKEN, None)
+                            await self._async_clear_cached_aas_token(entry)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                     errors["base"] = _map_api_exc_to_error_key(err2)
 
@@ -889,27 +899,29 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"email": fixed_email},
         )
 
+    async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None:
+        """Best-effort removal of the cached AAS token for a manual reauth entry."""
 
-# ---------------------------
-# Options Flow
-# ---------------------------
-class OptionsFlowHandler(OptionsFlowBase):
-    """Options flow to update non-secret settings and optionally refresh credentials.
+        cache = self._get_entry_cache(entry)
+        if cache is None:
+            return
 
-    Notes:
-        - Device inclusion/exclusion is controlled by HA's device enable/disable.
-          We no longer present a `tracked_devices` multi-select here.
-        - Returning `async_create_entry` with the new options triggers a reload
-          automatically when using `OptionsFlowWithReload` (if available).
-    """
+        for attr in ("async_set_cached_value", "set"):
+            setter = getattr(cache, attr, None)
+            if not callable(setter):
+                continue
+            try:
+                result = setter(DATA_AAS_TOKEN, None)
+                if inspect.isawaitable(result):
+                    await result
+                return
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Clearing cached AAS token via %s failed: %s", attr, err)
+        _LOGGER.debug("No compatible cache setter found to clear the cached AAS token for entry %s", entry.entry_id)
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Display a small menu for settings, credentials refresh, or visibility."""
-        return self.async_show_menu(step_id="init", menu_options=["settings", "credentials", "visibility"])
-
-    # ---------- Helpers for live API/cache access ----------
     def _get_entry_cache(self, entry: ConfigEntry) -> Optional[Any]:
         """Return the TokenCache (or equivalent) for this entry if available."""
+
         rd = getattr(entry, "runtime_data", None)
         if rd is not None:
             for attr in ("_cache", "cache"):
@@ -931,6 +943,30 @@ class OptionsFlowHandler(OptionsFlowBase):
         if isinstance(data, dict):
             return data.get("cache") or data.get("_cache")
         return None
+
+
+# ---------------------------
+# Options Flow
+# ---------------------------
+class OptionsFlowHandler(OptionsFlowBase):
+    """Options flow to update non-secret settings and optionally refresh credentials.
+
+    Notes:
+        - Device inclusion/exclusion is controlled by HA's device enable/disable.
+          We no longer present a `tracked_devices` multi-select here.
+        - Returning `async_create_entry` with the new options triggers a reload
+          automatically when using `OptionsFlowWithReload` (if available).
+    """
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Display a small menu for settings, credentials refresh, or visibility."""
+        return self.async_show_menu(step_id="init", menu_options=["settings", "credentials", "visibility"])
+
+    # ---------- Helpers for live API/cache access ----------
+    def _get_entry_cache(self, entry: ConfigEntry) -> Optional[Any]:
+        """Proxy to the ConfigFlow cache lookup helper."""
+
+        return ConfigFlow._get_entry_cache(self, entry)
 
     async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
         """Construct API object from the live entry context (cache-first)."""

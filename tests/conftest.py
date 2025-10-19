@@ -31,10 +31,89 @@ def _stub_homeassistant() -> None:
     class ConfigEntryAuthFailed(Exception):
         pass
 
+    class ConfigFlow:
+        """Minimal stub matching the ConfigFlow API used in tests."""
+
+        VERSION = 1
+
+        def __init_subclass__(cls, **kwargs):  # type: ignore[override]
+            super().__init_subclass__()
+
+        def __init__(self) -> None:
+            self.context: dict[str, object] = {}
+            self.hass = None
+
+        async def async_show_form(self, *args, **kwargs):  # pragma: no cover - defensive
+            return {"type": "form"}
+
+        async def async_show_menu(self, *args, **kwargs):  # pragma: no cover - defensive
+            return {"type": "menu"}
+
+        async def async_abort(self, **kwargs):
+            return {"type": "abort", **kwargs}
+
+        def add_suggested_values_to_schema(self, schema, suggested):  # noqa: D401 - stub
+            return schema
+
+    class OptionsFlow:
+        """Minimal OptionsFlow stub for imports."""
+
+        async def async_show_form(self, *args, **kwargs):  # pragma: no cover - defensive
+            return {"type": "form"}
+
+        async def async_create_entry(self, *, title: str, data):  # pragma: no cover - defensive
+            return {"type": "create_entry", "title": title, "data": data}
+
+    class OptionsFlowWithReload(OptionsFlow):
+        """Placeholder inheriting OptionsFlow behaviour."""
+
     config_entries.ConfigEntry = ConfigEntry
     config_entries.ConfigEntryState = ConfigEntryState
     config_entries.ConfigEntryAuthFailed = ConfigEntryAuthFailed
+    config_entries.ConfigFlow = ConfigFlow
+    config_entries.OptionsFlow = OptionsFlow
+    config_entries.OptionsFlowWithReload = OptionsFlowWithReload
     sys.modules["homeassistant.config_entries"] = config_entries
+
+    vol_module = ModuleType("voluptuous")
+
+    class _Schema:
+        def __init__(self, schema):
+            self.schema = schema
+
+        def __call__(self, value):  # pragma: no cover - defensive
+            return value
+
+    class _Marker:
+        def __init__(self, key):
+            self.key = key
+            self.schema = {key}
+
+        def __hash__(self) -> int:  # pragma: no cover - defensive
+            return hash(self.key)
+
+        def __eq__(self, other: object) -> bool:  # pragma: no cover - defensive
+            if isinstance(other, _Marker):
+                return self.key == other.key
+            return self.key == other
+
+    def _identity(value):
+        return value
+
+    vol_module.Schema = _Schema
+    vol_module.Optional = lambda key, default=None: _Marker(key)
+    vol_module.Required = lambda key, description=None: _Marker(key)
+    vol_module.Any = lambda *items, **kwargs: _identity
+    vol_module.All = lambda *validators, **kwargs: _identity
+    vol_module.In = lambda items: _identity
+    vol_module.Range = lambda **kwargs: _identity
+    vol_module.Coerce = lambda typ: _identity
+
+    sys.modules["voluptuous"] = vol_module
+
+    data_entry_flow = ModuleType("homeassistant.data_entry_flow")
+    data_entry_flow.FlowResult = dict  # type: ignore[assignment]
+    sys.modules["homeassistant.data_entry_flow"] = data_entry_flow
 
     const_module = ModuleType("homeassistant.const")
 
@@ -85,6 +164,20 @@ def _stub_homeassistant() -> None:
         module = ModuleType(module_name)
         sys.modules[module_name] = module
         setattr(helpers_pkg, sub, module)
+
+    cv_module = ModuleType("homeassistant.helpers.config_validation")
+
+    def _multi_select(choices):  # pragma: no cover - defensive
+        return lambda value: value
+
+    cv_module.multi_select = _multi_select
+    sys.modules["homeassistant.helpers.config_validation"] = cv_module
+    setattr(helpers_pkg, "config_validation", cv_module)
+
+    aiohttp_client_module = ModuleType("homeassistant.helpers.aiohttp_client")
+    aiohttp_client_module.async_get_clientsession = lambda hass: None
+    sys.modules["homeassistant.helpers.aiohttp_client"] = aiohttp_client_module
+    setattr(helpers_pkg, "aiohttp_client", aiohttp_client_module)
 
     storage_module = ModuleType("homeassistant.helpers.storage")
 

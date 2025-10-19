@@ -1,0 +1,153 @@
+# tests/test_reauth_manual_token.py
+"""Regression tests for clearing cached AAS tokens during manual reauthentication."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Any, Dict
+
+import pytest
+
+from custom_components.googlefindmy import config_flow
+from custom_components.googlefindmy.Auth import aas_token_retrieval, adm_token_retrieval
+from custom_components.googlefindmy.Auth.username_provider import username_string
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    CONF_OAUTH_TOKEN,
+    DATA_AAS_TOKEN,
+    DOMAIN,
+)
+
+
+class _MemoryCache:
+    """In-memory async cache emulating the TokenCache contract for tests."""
+
+    def __init__(self) -> None:
+        self._data: Dict[str, Any] = {}
+
+    async def get(self, name: str) -> Any:
+        return self._data.get(name)
+
+    async def set(self, name: str, value: Any) -> None:
+        if value is None:
+            self._data.pop(name, None)
+        else:
+            self._data[name] = value
+
+    async def async_set_cached_value(self, name: str, value: Any) -> None:
+        await self.set(name, value)
+
+    async def get_or_set(self, name: str, generator):  # type: ignore[override]
+        if name in self._data:
+            return self._data[name]
+        result = generator()
+        if asyncio.iscoroutine(result):
+            result = await result
+        await self.set(name, result)
+        return result
+
+    async def all(self) -> Dict[str, Any]:  # pragma: no cover - helper for completeness
+        return dict(self._data)
+
+
+@dataclass
+class _RuntimeData:
+    """Runtime data shim providing a `.cache` attribute."""
+
+    cache: _MemoryCache
+
+
+class _DummyEntry:
+    """Lightweight ConfigEntry substitute for flow testing."""
+
+    def __init__(self, *, entry_id: str, data: Dict[str, Any], cache: _MemoryCache) -> None:
+        self.entry_id = entry_id
+        self.data = data
+        self.options: Dict[str, Any] = {}
+        self.title = "Test Entry"
+        self.runtime_data = _RuntimeData(cache)
+
+
+class _DummyConfigEntries:
+    """Expose async_get_entry for the config flow."""
+
+    def __init__(self, entry: _DummyEntry) -> None:
+        self._entry = entry
+
+    def async_get_entry(self, entry_id: str) -> _DummyEntry | None:
+        return self._entry if entry_id == self._entry.entry_id else None
+
+
+class _DummyHass:
+    """Small Home Assistant stub providing config_entries and data buckets."""
+
+    def __init__(self, entry: _DummyEntry, cache: _MemoryCache) -> None:
+        self.config_entries = _DummyConfigEntries(entry)
+        self.data: Dict[str, Any] = {DOMAIN: {entry.entry_id: _RuntimeData(cache)}}
+
+
+def test_manual_reauth_clears_cached_aas_and_mints_new_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After manual reauth, cached AAS tokens must be cleared and a new ADM flow must use fresh OAuth."""
+
+    async def _exercise() -> None:
+        cache = _MemoryCache()
+        await cache.async_set_cached_value(username_string, "user@example.com")
+        await cache.async_set_cached_value(CONF_OAUTH_TOKEN, "oauth-old")
+        await cache.async_set_cached_value(DATA_AAS_TOKEN, "aas_et/STABLE")
+
+        entry = _DummyEntry(
+            entry_id="entry-1",
+            data={
+                CONF_GOOGLE_EMAIL: "user@example.com",
+                CONF_OAUTH_TOKEN: "oauth-old",
+                DATA_AAS_TOKEN: "aas_et/STABLE",
+            },
+            cache=cache,
+        )
+        hass = _DummyHass(entry, cache)
+
+        flow = config_flow.ConfigFlow()
+        flow.hass = hass
+        flow.context = {"entry_id": entry.entry_id}
+        assert flow._get_entry_cache(entry) is cache
+
+        # Simulate manual reauth clearing the cached AAS token.
+        await cache.async_set_cached_value(DATA_AAS_TOKEN, None)
+        assert await cache.get(DATA_AAS_TOKEN) is None
+
+        new_oauth = "oauth-new"
+        entry.data = {
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            CONF_OAUTH_TOKEN: new_oauth,
+        }
+
+        # Simulate reload storing the new OAuth token and keeping AAS cleared.
+        await cache.async_set_cached_value(CONF_OAUTH_TOKEN, new_oauth)
+        await cache.async_set_cached_value(username_string, entry.data[CONF_GOOGLE_EMAIL])
+        await cache.async_set_cached_value(DATA_AAS_TOKEN, None)
+
+        assert await cache.get(DATA_AAS_TOKEN) is None
+        assert await cache.get(CONF_OAUTH_TOKEN) == new_oauth
+
+        observed: Dict[str, Any] = {}
+
+        async def _fake_exchange(username: str, oauth_token: str, android_id: int):
+            observed["oauth_token"] = oauth_token
+            return {"Token": "aas-new", "Email": username}
+
+        async def _fake_request_token(username: str, service: str, *, cache, aas_provider):
+            observed["service"] = service
+            observed["aas_token"] = await aas_provider()
+            return "adm-new"
+
+        monkeypatch.setattr(aas_token_retrieval, "_exchange_oauth_for_aas", _fake_exchange)
+        monkeypatch.setattr(adm_token_retrieval, "async_request_token", _fake_request_token)
+
+        token = await adm_token_retrieval.async_get_adm_token(cache=cache)
+
+        assert token == "adm-new"
+        assert observed["oauth_token"] == new_oauth
+        assert observed["aas_token"] == "aas-new"
+
+    asyncio.run(_exercise())
