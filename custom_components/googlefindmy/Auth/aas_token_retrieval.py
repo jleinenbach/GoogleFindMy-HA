@@ -48,7 +48,7 @@ except Exception:  # noqa: BLE001
 
 from .token_cache import TokenCache
 from .username_provider import username_string
-from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
+from ..const import CONF_ACCOUNT_OAUTH_TOKEN, CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -218,9 +218,21 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:
     cached_user = await cache.get(username_string)
     username: str | None = str(cached_user) if isinstance(cached_user, str) else None
 
-    # 1) Explicit OAuth token from cache
-    oauth_val = await cache.get(CONF_OAUTH_TOKEN)
-    oauth_token: str | None = str(oauth_val) if isinstance(oauth_val, str) else None
+    # 1) Explicit master token from cache (may be OAuth or already AAS)
+    master_val = await cache.get(CONF_ACCOUNT_OAUTH_TOKEN)
+    master_token: str | None = str(master_val) if isinstance(master_val, str) else None
+    oauth_token: str | None = None
+
+    if master_token:
+        if master_token.startswith("aas_et/"):
+            _LOGGER.debug("Using cached AAS master token from '%s'.", CONF_ACCOUNT_OAUTH_TOKEN)
+            return master_token
+        oauth_token = master_token
+
+    if oauth_token is None:
+        # 2) Fallback: OAuth token slot
+        oauth_val = await cache.get(CONF_OAUTH_TOKEN)
+        oauth_token = str(oauth_val) if isinstance(oauth_val, str) else None
 
     # Defensive negative validation for OAuth slot
     if oauth_token:
@@ -229,7 +241,7 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:
             _LOGGER.warning("Ignoring value from '%s': %s.", CONF_OAUTH_TOKEN, reason)
             oauth_token = None  # Force fallback path
 
-    # 2) Fallback: scan ADM tokens if no explicit OAuth token exists or it was disqualified
+    # 3) Fallback: scan ADM tokens if no explicit OAuth token exists or it was disqualified
     if not oauth_token:
         all_cached = await cache.all()
         for key, value in all_cached.items():
@@ -295,7 +307,12 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Failed to persist normalized username from gpsoauth: %s", _clip(err))
 
-    return str(resp["Token"])
+    token_out = str(resp["Token"])
+    try:
+        await cache.set(CONF_ACCOUNT_OAUTH_TOKEN, token_out)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Failed to persist AAS master token to cache: %s", _clip(err))
+    return token_out
 
 
 # ---------------------------------------------------------------------------

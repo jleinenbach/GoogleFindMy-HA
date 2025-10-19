@@ -66,6 +66,7 @@ from .const import (
     # Core domain & credential keys
     DOMAIN,
     CONF_OAUTH_TOKEN,
+    CONF_ACCOUNT_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
     DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
@@ -309,6 +310,22 @@ def _cand_labels(cands: List[Tuple[str, str]]) -> str:
     labels = [src for src, _ in cands][:5]
     tail = "…" if len(cands) > 5 else ""
     return ", ".join(labels) + tail
+
+
+_PERSIST_SLOT_KEY = "_persist_token_slot"
+
+
+def _persist_slot_for_token(token: str, *, source: Optional[str] = None) -> str:
+    """Return the config_entry.data key that should store the provided token."""
+
+    if not isinstance(token, str) or not token:
+        return CONF_OAUTH_TOKEN
+
+    normalized_source = (source or "").strip().lower()
+    if token.startswith("aas_et/") or normalized_source == "aas_token":
+        return CONF_ACCOUNT_OAUTH_TOKEN
+
+    return CONF_OAUTH_TOKEN
 
 
 # ---------------------------
@@ -591,11 +608,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         if alt:
                             to_persist = alt
 
+                    chosen_source = next((src for src, value in cands if value == to_persist), None)
+                    persist_slot = _persist_slot_for_token(to_persist, source=chosen_source)
                     self._auth_data = {
                         DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
                         CONF_OAUTH_TOKEN: to_persist,
                         CONF_GOOGLE_EMAIL: email,
                     }
+                    self._auth_data[_PERSIST_SLOT_KEY] = persist_slot
+                    if persist_slot == CONF_ACCOUNT_OAUTH_TOKEN:
+                        self._auth_data[CONF_ACCOUNT_OAUTH_TOKEN] = to_persist
+                    else:
+                        self._auth_data.pop(CONF_ACCOUNT_OAUTH_TOKEN, None)
                     if parsed_secrets is not None:
                         self._auth_data[DATA_SECRET_BUNDLE] = parsed_secrets
                     return await self.async_step_device_selection()
@@ -632,6 +656,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_OAUTH_TOKEN: chosen,
                         CONF_GOOGLE_EMAIL: email,
                     }
+                    persist_slot = _persist_slot_for_token(chosen, source="manual")
+                    self._auth_data[_PERSIST_SLOT_KEY] = persist_slot
+                    if persist_slot == CONF_ACCOUNT_OAUTH_TOKEN:
+                        self._auth_data[CONF_ACCOUNT_OAUTH_TOKEN] = chosen
+                    else:
+                        self._auth_data.pop(CONF_ACCOUNT_OAUTH_TOKEN, None)
                     self._auth_data.pop(DATA_SECRET_BUNDLE, None)
                     return await self.async_step_device_selection()
 
@@ -714,10 +744,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Data = credentials; options = runtime settings
             data_payload: Dict[str, Any] = {
                 DATA_AUTH_METHOD: self._auth_data.get(DATA_AUTH_METHOD),
-                # We persist AAS master tokens as well; they are required to mint service tokens.
-                CONF_OAUTH_TOKEN: self._auth_data.get(CONF_OAUTH_TOKEN),
                 CONF_GOOGLE_EMAIL: self._auth_data.get(CONF_GOOGLE_EMAIL),
             }
+            persist_slot = self._auth_data.get(_PERSIST_SLOT_KEY, CONF_OAUTH_TOKEN)
+            token_value = self._auth_data.get(CONF_OAUTH_TOKEN)
+            if token_value:
+                if persist_slot == CONF_ACCOUNT_OAUTH_TOKEN:
+                    data_payload[CONF_ACCOUNT_OAUTH_TOKEN] = token_value
+                else:
+                    data_payload[CONF_OAUTH_TOKEN] = token_value
             if DATA_SECRET_BUNDLE in self._auth_data:
                 data_payload[DATA_SECRET_BUNDLE] = self._auth_data[DATA_SECRET_BUNDLE]
 
@@ -796,11 +831,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         else:
                             if _disqualifies_for_persistence(chosen):
                                 _LOGGER.warning("Reauth: token looks like a JWT; persisting anyway due to validation.")
+                            persist_slot = _persist_slot_for_token(chosen, source="manual")
                             updated_data = {
                                 **entry.data,
                                 DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: chosen,
                             }
+                            if persist_slot == CONF_ACCOUNT_OAUTH_TOKEN:
+                                updated_data[CONF_ACCOUNT_OAUTH_TOKEN] = chosen
+                                updated_data.pop(CONF_OAUTH_TOKEN, None)
+                            else:
+                                updated_data[CONF_OAUTH_TOKEN] = chosen
+                                updated_data.pop(CONF_ACCOUNT_OAUTH_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
 
@@ -833,12 +874,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     alt = next((v for (_src, v) in cands if not _disqualifies_for_persistence(v)), None)
                                     if alt:
                                         to_persist = alt
+                                chosen_source = next((src for src, value in cands if value == to_persist), None)
+                                persist_slot = _persist_slot_for_token(to_persist, source=chosen_source)
                                 updated_data = {
                                     **entry.data,
                                     DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                    CONF_OAUTH_TOKEN: to_persist,
                                     DATA_SECRET_BUNDLE: parsed,
                                 }
+                                if persist_slot == CONF_ACCOUNT_OAUTH_TOKEN:
+                                    updated_data[CONF_ACCOUNT_OAUTH_TOKEN] = to_persist
+                                    updated_data.pop(CONF_OAUTH_TOKEN, None)
+                                else:
+                                    updated_data[CONF_OAUTH_TOKEN] = to_persist
+                                    updated_data.pop(CONF_ACCOUNT_OAUTH_TOKEN, None)
                                 return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
@@ -847,8 +895,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             updated_data = {
                                 **entry.data,
                                 DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: str(payload),
                             }
+                            fallback_slot = _persist_slot_for_token(str(payload), source="manual")
+                            if fallback_slot == CONF_ACCOUNT_OAUTH_TOKEN:
+                                updated_data[CONF_ACCOUNT_OAUTH_TOKEN] = str(payload)
+                                updated_data.pop(CONF_OAUTH_TOKEN, None)
+                            else:
+                                updated_data[CONF_OAUTH_TOKEN] = str(payload)
+                                updated_data.pop(CONF_ACCOUNT_OAUTH_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                         if method == "secrets":
@@ -858,9 +912,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             updated_data = {
                                 **entry.data,
                                 DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                CONF_OAUTH_TOKEN: token_first,
                                 DATA_SECRET_BUNDLE: parsed,
                             }
+                            fallback_slot = _persist_slot_for_token(token_first, source=cands[0][0] if cands else None)
+                            if fallback_slot == CONF_ACCOUNT_OAUTH_TOKEN:
+                                updated_data[CONF_ACCOUNT_OAUTH_TOKEN] = token_first
+                                updated_data.pop(CONF_OAUTH_TOKEN, None)
+                            else:
+                                updated_data[CONF_OAUTH_TOKEN] = token_first
+                                updated_data.pop(CONF_ACCOUNT_OAUTH_TOKEN, None)
                             return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
                     errors["base"] = _map_api_exc_to_error_key(err2)
 
@@ -924,7 +984,7 @@ class OptionsFlowHandler(OptionsFlowBase):
             except TypeError:
                 return GoogleFindMyAPI(cache=cache)  # type: ignore[call-arg]
 
-        oauth = entry.data.get(CONF_OAUTH_TOKEN)
+        oauth = entry.data.get(CONF_OAUTH_TOKEN) or entry.data.get(CONF_ACCOUNT_OAUTH_TOKEN)
         email = entry.data.get(CONF_GOOGLE_EMAIL)
         if oauth and email:
             try:

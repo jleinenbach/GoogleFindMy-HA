@@ -48,9 +48,11 @@ def service_device_identifier(entry_id: str) -> Tuple[str, str]:
 # --------------------------------------------------------------------------------------
 # Data (immutable / credentials): stored in config_entry.data
 CONF_OAUTH_TOKEN: str = "oauth_token"          # kept for backward compatibility
+# Dedicated config_entry.data key when an AAS master token is provided directly
+CONF_ACCOUNT_OAUTH_TOKEN: str = "account_oauth_token"
 # NOTE: This is a TokenCache key (persistent, rotating credential stored in HA Store),
-# NOT a config_entry.data key. Do not persist this inside entry.data.
-DATA_AAS_TOKEN: str = "aas_token"              # AAS token (TokenCache key; not in entry.data)
+# mirrored from CONF_ACCOUNT_OAUTH_TOKEN when present in entry.data.
+DATA_AAS_TOKEN: str = "aas_token"
 CONF_GOOGLE_EMAIL: str = "google_email"        # helper key when individual tokens are used
 DATA_SECRET_BUNDLE: str = "secrets_data"       # full GoogleFindMyTools secrets.json content
 DATA_AUTH_METHOD: str = "auth_method"          # "secrets_json" | "individual_tokens"
@@ -384,6 +386,7 @@ __all__ = [
     "LEGACY_SERVICE_IDENTIFIER",
     "service_device_identifier",
     "CONF_OAUTH_TOKEN",
+    "CONF_ACCOUNT_OAUTH_TOKEN",
     "DATA_AAS_TOKEN",
     "CONF_GOOGLE_EMAIL",
     "DATA_SECRET_BUNDLE",

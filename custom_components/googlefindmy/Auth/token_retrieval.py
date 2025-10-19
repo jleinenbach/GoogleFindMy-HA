@@ -14,6 +14,7 @@ import gpsoauth
 
 # Use the async-first API; the legacy sync wrapper is intentionally unsupported.
 from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
+from custom_components.googlefindmy.const import CONF_ACCOUNT_OAUTH_TOKEN
 
 
 if TYPE_CHECKING:
@@ -182,11 +183,15 @@ async def async_request_token(
         raise ValueError("TokenCache instance is required for multi-account safety.")
 
     if aas_token is None:
-        if aas_provider is not None:
-            aas_token = await aas_provider()
-        else:
-            async def _default_aas_provider() -> str:
-                return await async_get_aas_token(cache=cache)
+        master_val = await cache.get(CONF_ACCOUNT_OAUTH_TOKEN)
+        if isinstance(master_val, str) and master_val.startswith("aas_et/"):
+            aas_token = master_val
+        if aas_token is None:
+            if aas_provider is not None:
+                aas_token = await aas_provider()
+            else:
+                async def _default_aas_provider() -> str:
+                    return await async_get_aas_token(cache=cache)
 
             aas_provider = _default_aas_provider
             aas_token = await aas_provider()

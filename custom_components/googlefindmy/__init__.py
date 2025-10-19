@@ -75,7 +75,9 @@ from .const import (
     ATTR_DEVICE_IDS,
     ATTR_MODE,
     CONF_GOOGLE_EMAIL,
+    CONF_ACCOUNT_OAUTH_TOKEN,
     CONF_OAUTH_TOKEN,
+    DATA_AAS_TOKEN,
     DATA_SECRET_BUNDLE,
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_LOCATION_POLL_INTERVAL,
@@ -735,6 +737,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Early, idempotent seeding of TokenCache from entry.data (authoritative SSOT)
     try:
+        master_token = entry.data.get(CONF_ACCOUNT_OAUTH_TOKEN)
+        if master_token:
+            await cache.async_set_cached_value(CONF_ACCOUNT_OAUTH_TOKEN, master_token)
+            await cache.async_set_cached_value(DATA_AAS_TOKEN, master_token)
+            _LOGGER.debug("Seeded AAS master token into TokenCache from entry.data")
         if CONF_OAUTH_TOKEN in entry.data:
             await cache.async_set_cached_value(CONF_OAUTH_TOKEN, entry.data[CONF_OAUTH_TOKEN])
             _LOGGER.debug("Seeded oauth_token into TokenCache from entry.data")
@@ -780,14 +787,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Credentials seed: legacy bundle OR individual oauth_token+email must be present
     secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
+    master_token = entry.data.get(CONF_ACCOUNT_OAUTH_TOKEN)
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
 
     if secrets_data:
         await _async_save_secrets_data(cache, secrets_data)
         _LOGGER.debug("Persisted secrets.json bundle to token cache (entry-scoped)")
-    elif oauth_token and google_email:
-        await _async_save_individual_credentials(cache, oauth_token, google_email)
+    elif (master_token or oauth_token) and google_email:
+        token_to_save = master_token or oauth_token
+        await _async_save_individual_credentials(cache, token_to_save, google_email)
         _LOGGER.debug("Persisted individual credentials to token cache (entry-scoped)")
     else:
         _LOGGER.error(
@@ -944,7 +953,13 @@ async def _async_save_secrets_data(cache: TokenCache, secrets_data: dict) -> Non
 async def _async_save_individual_credentials(cache: TokenCache, oauth_token: str, google_email: str) -> None:
     """Persist individual credentials (oauth_token + email) to the *entry-scoped* token cache."""
     try:
-        await cache.async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
+        if isinstance(oauth_token, str) and oauth_token.startswith("aas_et/"):
+            await cache.async_set_cached_value(CONF_ACCOUNT_OAUTH_TOKEN, oauth_token)
+            await cache.async_set_cached_value(DATA_AAS_TOKEN, oauth_token)
+            await cache.async_set_cached_value(CONF_OAUTH_TOKEN, None)
+        else:
+            await cache.async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
+            await cache.async_set_cached_value(CONF_ACCOUNT_OAUTH_TOKEN, None)
         await cache.async_set_cached_value(username_string, google_email)
     except OSError as err:
         _LOGGER.warning("Failed to save individual credentials to cache: %s", err)

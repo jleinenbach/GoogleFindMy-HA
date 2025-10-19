@@ -47,6 +47,7 @@ from .const import (
     DEFAULT_ENABLE_STATS_ENTITIES,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     # secrets in entry.data (must never be exposed)
+    CONF_ACCOUNT_OAUTH_TOKEN,
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
 )
@@ -58,6 +59,7 @@ from .const import (
 # Keep this list generous; it is safe to over-redact (defense-in-depth).
 TO_REDACT: list[str] = [
     # Known integration secrets (entry.data)
+    CONF_ACCOUNT_OAUTH_TOKEN,
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
     # Common token/email/credential shapes
