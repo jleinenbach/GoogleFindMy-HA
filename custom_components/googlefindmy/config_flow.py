@@ -70,6 +70,7 @@ from .const import (
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
     DATA_AUTH_METHOD,
+    DATA_AAS_TOKEN,
     DATA_SECRET_BUNDLE,
     # Options (non-secret runtime settings)
     OPT_LOCATION_POLL_INTERVAL,
@@ -968,6 +969,11 @@ class OptionsFlowHandler(OptionsFlowBase):
 
         return ConfigFlow._get_entry_cache(self, entry)
 
+    async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None:
+        """Proxy to the ConfigFlow cache-clearing helper."""
+
+        await ConfigFlow._async_clear_cached_aas_token(self, entry)
+
     async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
         """Construct API object from the live entry context (cache-first)."""
         cache = self._get_entry_cache(entry)
@@ -1132,6 +1138,11 @@ class OptionsFlowHandler(OptionsFlowBase):
                                     CONF_OAUTH_TOKEN: chosen,
                                 }
                                 updated_data.pop(DATA_SECRET_BUNDLE, None)
+                                if isinstance(chosen, str) and chosen.startswith("aas_et/"):
+                                    updated_data[DATA_AAS_TOKEN] = chosen
+                                else:
+                                    updated_data.pop(DATA_AAS_TOKEN, None)
+                                await self._async_clear_cached_aas_token(entry)
                                 self.hass.config_entries.async_update_entry(entry, data=updated_data)
                                 self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
                                 return self.async_abort(reason="reconfigure_successful")
@@ -1170,6 +1181,11 @@ class OptionsFlowHandler(OptionsFlowBase):
                                         CONF_OAUTH_TOKEN: to_persist,
                                         DATA_SECRET_BUNDLE: parsed,
                                     }
+                                    if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
+                                        updated_data[DATA_AAS_TOKEN] = to_persist
+                                    else:
+                                        updated_data.pop(DATA_AAS_TOKEN, None)
+                                    await self._async_clear_cached_aas_token(entry)
                                     self.hass.config_entries.async_update_entry(entry, data=updated_data)
                                     self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
                                     return self.async_abort(reason="reconfigure_successful")
@@ -1178,21 +1194,32 @@ class OptionsFlowHandler(OptionsFlowBase):
                         # Defer: accept input and let setup validate with entry-scoped cache
                         entry = self.config_entry
                         if has_token:
+                            token_value = user_input["new_oauth_token"].strip()
                             updated_data = {
                                 **entry.data,
                                 DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: user_input["new_oauth_token"].strip(),
+                                CONF_OAUTH_TOKEN: token_value,
                             }
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
+                            if token_value.startswith("aas_et/"):
+                                updated_data[DATA_AAS_TOKEN] = token_value
+                            else:
+                                updated_data.pop(DATA_AAS_TOKEN, None)
                         else:
                             parsed = json.loads(user_input["new_secrets_json"])
                             cands = _extract_oauth_candidates_from_secrets(parsed)
+                            token_first = cands[0][1] if cands else ""
                             updated_data = {
                                 **entry.data,
                                 DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                CONF_OAUTH_TOKEN: (cands[0][1] if cands else ""),
+                                CONF_OAUTH_TOKEN: token_first,
                                 DATA_SECRET_BUNDLE: parsed,
                             }
+                            if isinstance(token_first, str) and token_first.startswith("aas_et/"):
+                                updated_data[DATA_AAS_TOKEN] = token_first
+                            else:
+                                updated_data.pop(DATA_AAS_TOKEN, None)
+                        await self._async_clear_cached_aas_token(entry)
                         self.hass.config_entries.async_update_entry(entry, data=updated_data)
                         self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
                         return self.async_abort(reason="reconfigure_successful")

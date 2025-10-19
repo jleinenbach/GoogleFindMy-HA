@@ -1,0 +1,153 @@
+# tests/test_options_flow_credentials_cache.py
+"""Regression tests for the options credential flow clearing cached AAS tokens."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+import inspect
+from typing import Any, Awaitable, Dict, List
+
+import pytest
+
+from custom_components.googlefindmy import config_flow
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    CONF_OAUTH_TOKEN,
+    DATA_AAS_TOKEN,
+    DOMAIN,
+)
+
+
+class _MemoryCache:
+    """In-memory cache implementing the token cache contract used by the flow."""
+
+    def __init__(self) -> None:
+        self._data: Dict[str, Any] = {}
+
+    async def get(self, name: str) -> Any:
+        return self._data.get(name)
+
+    async def async_set_cached_value(self, name: str, value: Any) -> None:
+        if value is None:
+            self._data.pop(name, None)
+        else:
+            self._data[name] = value
+
+    def set(self, name: str, value: Any) -> None:
+        if value is None:
+            self._data.pop(name, None)
+        else:
+            self._data[name] = value
+
+
+@dataclass
+class _RuntimeData:
+    """Runtime data stub providing a cache attribute."""
+
+    cache: _MemoryCache
+
+
+class _DummyEntry:
+    """Minimal ConfigEntry substitute for exercising the options flow."""
+
+    def __init__(self, *, entry_id: str, data: Dict[str, Any], cache: _MemoryCache) -> None:
+        self.entry_id = entry_id
+        self.data = data
+        self.options: Dict[str, Any] = {}
+        self.runtime_data = _RuntimeData(cache)
+
+
+class _DummyConfigEntries:
+    """Expose Home Assistant config entry helpers used by the flow under test."""
+
+    def __init__(self, entry: _DummyEntry) -> None:
+        self._entry = entry
+        self.updated_payloads: List[Dict[str, Any]] = []
+        self.reloaded: List[str] = []
+
+    def async_get_entry(self, entry_id: str) -> _DummyEntry | None:
+        return self._entry if entry_id == self._entry.entry_id else None
+
+    def async_update_entry(self, entry: _DummyEntry, *, data: Dict[str, Any]) -> None:
+        assert entry is self._entry
+        entry.data = data
+        self.updated_payloads.append(data)
+
+    async def async_reload(self, entry_id: str) -> None:
+        assert DATA_AAS_TOKEN not in self._entry.data
+        assert await self._entry.runtime_data.cache.get(DATA_AAS_TOKEN) is None
+        self.reloaded.append(entry_id)
+
+
+class _DummyHass:
+    """Small Home Assistant stub collecting scheduled tasks for inspection."""
+
+    def __init__(self, entry: _DummyEntry, cache: _MemoryCache) -> None:
+        self.config_entries = _DummyConfigEntries(entry)
+        self.data: Dict[str, Any] = {DOMAIN: {entry.entry_id: _RuntimeData(cache)}}
+        self._tasks: List[asyncio.Task[Any]] = []
+
+    def async_create_task(self, coro: Awaitable[Any]) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coro)
+        self._tasks.append(task)
+        return task
+
+    async def drain_tasks(self) -> None:
+        if not self._tasks:
+            return
+        await asyncio.gather(*self._tasks)
+
+
+def test_options_flow_rotating_token_clears_cached_aas(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replacing credentials in the options flow must drop cached AAS tokens."""
+
+    async def _exercise() -> None:
+        cache = _MemoryCache()
+        await cache.async_set_cached_value(DATA_AAS_TOKEN, "aas_et/OLD")
+
+        entry = _DummyEntry(
+            entry_id="entry-1",
+            data={
+                CONF_GOOGLE_EMAIL: "user@example.com",
+                CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+                DATA_AAS_TOKEN: "aas_et/OLD",
+            },
+            cache=cache,
+        )
+        hass = _DummyHass(entry, cache)
+
+        flow = config_flow.OptionsFlowHandler()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.config_entry = entry  # type: ignore[attr-defined]
+
+        async def _fake_pick(
+            email: str,
+            candidates: List[tuple[str, str]],
+            *,
+            secrets_bundle: Dict[str, Any] | None = None,
+        ) -> str | None:
+            return candidates[0][1] if candidates else None
+
+        monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+        new_token = "oauth-token-rotate-123456"
+        result = await flow.async_step_credentials({"new_oauth_token": new_token})
+        if inspect.isawaitable(result):
+            result = await result
+
+        assert isinstance(result, dict)
+        assert result.get("type") in {"abort", "form"}
+
+        assert hass.config_entries.updated_payloads
+        updated = hass.config_entries.updated_payloads[-1]
+        assert updated[CONF_OAUTH_TOKEN] == new_token
+        assert DATA_AAS_TOKEN not in updated
+        assert entry.data[CONF_OAUTH_TOKEN] == new_token
+        assert DATA_AAS_TOKEN not in entry.data
+        assert await cache.get(DATA_AAS_TOKEN) is None
+
+        await hass.drain_tasks()
+        assert hass.config_entries.reloaded == [entry.entry_id]
+
+    asyncio.run(_exercise())
