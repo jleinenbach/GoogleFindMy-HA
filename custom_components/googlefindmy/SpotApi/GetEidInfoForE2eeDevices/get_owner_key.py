@@ -44,6 +44,7 @@ from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import decrypt
 from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import async_get_shared_key
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
+    async_get_eid_info,
     get_eid_info,
 )
 
@@ -142,8 +143,7 @@ async def _retrieve_owner_key(
         eid_info = await eid_info_getter()
     else:
         try:
-            # Potentially performs I/O and parsing -> run in executor
-            eid_info = await _run_in_executor(get_eid_info)
+            eid_info = await async_get_eid_info(cache=cache)
         except SpotApiEmptyResponseError:
             _LOGGER.error(
                 "Owner key retrieval failed: SPOT returned empty/trailers-only body for "

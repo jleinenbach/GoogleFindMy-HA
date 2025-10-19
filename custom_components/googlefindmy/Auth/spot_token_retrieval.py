@@ -71,7 +71,21 @@ async def _async_generate_spot_token(
         _LOGGER.debug("async_request_token not available; falling back to sync retriever in a thread")
         from .token_retrieval import request_token  # sync path
 
-        token = await asyncio.to_thread(request_token, username, "spot", True)
+        if aas_provider is not None:
+            aas_token_value = await aas_provider()
+        else:
+            from .aas_token_retrieval import async_get_aas_token  # lazy import for fallback
+
+            aas_token_value = await async_get_aas_token(cache=cache)
+
+        token = await asyncio.to_thread(
+            request_token,
+            username,
+            "spot",
+            True,
+            aas_token=aas_token_value,
+            cache=cache,
+        )
         if not token:
             raise RuntimeError("request_token returned empty token")
         return token

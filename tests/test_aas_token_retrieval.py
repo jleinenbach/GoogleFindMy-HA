@@ -124,3 +124,29 @@ def test_async_get_aas_token_short_circuits_for_cached_master(monkeypatch: pytes
     assert result == "aas_et/MASTER_TOKEN"
     assert not called
     assert asyncio.run(cache.get(DATA_AAS_TOKEN)) == "aas_et/MASTER_TOKEN"
+
+
+def test_request_token_uses_supplied_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The synchronous request_token helper must forward the provided cache."""
+
+    from custom_components.googlefindmy.Auth import token_retrieval
+
+    recorded: dict[str, object] = {}
+
+    async def fake_async_get_aas_token(*, cache) -> str:  # type: ignore[no-untyped-def]
+        recorded["cache"] = cache
+        return "aas-token"
+
+    def fake_perform_oauth(username: str, aas_token: str, scope: str, play_services: bool) -> str:
+        recorded["oauth_params"] = (username, aas_token, scope, play_services)
+        return "spot-token"
+
+    monkeypatch.setattr(token_retrieval, "async_get_aas_token", fake_async_get_aas_token)
+    monkeypatch.setattr(token_retrieval, "_perform_oauth_sync", fake_perform_oauth)
+
+    sentinel_cache = object()
+    token = token_retrieval.request_token("user@example.com", "spot", cache=sentinel_cache)
+
+    assert token == "spot-token"
+    assert recorded["cache"] is sentinel_cache
+    assert recorded["oauth_params"] == ("user@example.com", "aas-token", "spot", False)
