@@ -750,10 +750,25 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self.credentials_updated_callback,
             http_client_session=self._http_client_session,
         )
-        self.credentials = await self.register.checkin_or_register()
-        # await self.register.fcm_refresh_install()
-        await self.register.close()
-        return self.credentials["fcm"]["registration"]["token"]
+
+        try:
+            self.credentials = await self.register.checkin_or_register()
+            if not self.credentials:
+                raise RuntimeError("FCM registration did not return credentials.")
+
+            registration = (
+                self.credentials.get("fcm", {})
+                .get("registration", {})
+                .get("token")
+            )
+            if not registration:
+                raise RuntimeError("FCM registration token missing from credentials.")
+
+            return registration
+        finally:
+            if self.register is not None:
+                await self.register.close()
+                self.register = None
 
     async def _start_heartbeat_sender(self) -> None:
         """Send client heartbeats at a fixed interval while started."""
