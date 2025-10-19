@@ -12,6 +12,7 @@
 
 ## 1) What must be in **every** PR (lean checklist)
 
+* **PR template alignment.** Complete [.github/PULL_REQUEST_TEMPLATE.md](../../.github/PULL_REQUEST_TEMPLATE.md) and keep the responses synchronized with the items listed below.
 * **Purpose & scope.** PR title/description state *what* changes and *why*, and which user scenarios are affected.
 * **Tests — creation & update (MUST).** Any code change ships unit/integration tests that cover the change; every bug fix includes a **regression test** (§3.2). Never reduce existing coverage without a follow-up to restore it.
 
