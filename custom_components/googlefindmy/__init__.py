@@ -76,6 +76,7 @@ from .const import (
     ATTR_MODE,
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
+    DATA_AAS_TOKEN,
     DATA_SECRET_BUNDLE,
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_LOCATION_POLL_INTERVAL,
@@ -738,6 +739,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         if CONF_OAUTH_TOKEN in entry.data:
             await cache.async_set_cached_value(CONF_OAUTH_TOKEN, entry.data[CONF_OAUTH_TOKEN])
             _LOGGER.debug("Seeded oauth_token into TokenCache from entry.data")
+        if DATA_AAS_TOKEN in entry.data:
+            await cache.async_set_cached_value(DATA_AAS_TOKEN, entry.data[DATA_AAS_TOKEN])
+            _LOGGER.debug("Seeded aas_token into TokenCache from entry.data")
         if CONF_GOOGLE_EMAIL in entry.data:
             await cache.async_set_cached_value(username_string, entry.data[CONF_GOOGLE_EMAIL])
             _LOGGER.debug("Seeded google_email into TokenCache from entry.data")
@@ -781,14 +785,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # Credentials seed: legacy bundle OR individual oauth_token+email must be present
     secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
+    aas_token_entry = entry.data.get(DATA_AAS_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
 
     if secrets_data:
         await _async_save_secrets_data(cache, secrets_data)
         _LOGGER.debug("Persisted secrets.json bundle to token cache (entry-scoped)")
-    elif oauth_token and google_email:
-        await _async_save_individual_credentials(cache, oauth_token, google_email)
-        _LOGGER.debug("Persisted individual credentials to token cache (entry-scoped)")
+        if isinstance(aas_token_entry, str) and aas_token_entry:
+            await cache.async_set_cached_value(DATA_AAS_TOKEN, aas_token_entry)
+            _LOGGER.debug("Stored pre-provided AAS token in TokenCache (entry-scoped)")
+    elif (oauth_token or aas_token_entry) and google_email:
+        token_to_save = oauth_token or aas_token_entry
+        if isinstance(token_to_save, str) and token_to_save:
+            await _async_save_individual_credentials(cache, token_to_save, google_email)
+            _LOGGER.debug("Persisted individual credentials to token cache (entry-scoped)")
+        if isinstance(aas_token_entry, str) and aas_token_entry:
+            await cache.async_set_cached_value(DATA_AAS_TOKEN, aas_token_entry)
+            _LOGGER.debug("Stored AAS token provided alongside manual credentials")
     else:
         _LOGGER.error(
             "No credentials found in config entry (neither secrets_data nor oauth_token+google_email)"
