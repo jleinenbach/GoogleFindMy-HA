@@ -96,17 +96,17 @@ async def async_submit_start_sound_request(
     # Prepare optional namespaced TTL cache wrappers if requested and not overridden
     ns_get = cache_get
     ns_set = cache_set
-    if namespace and (cache_get is None or cache_set is None):
-        prefix = f"{namespace}:"
 
-        async def _ns_get(key: str) -> Any:
-            return await _cache_get_default(prefix + key)
-
-        async def _ns_set(key: str, value: Any) -> None:
-            await _cache_set_default(prefix + key, value)
-
-        ns_get = ns_get or _ns_get
-        ns_set = ns_set or _ns_set
+    if cache is not None:
+        if ns_get is None:
+            ns_get = cache.async_get_cached_value
+        if ns_set is None:
+            ns_set = cache.async_set_cached_value
+    else:
+        if ns_get is None:
+            ns_get = _cache_get_default
+        if ns_set is None:
+            ns_set = _cache_set_default
 
     try:
         # Submit via Nova (now entry-scoped when `cache`/`namespace` provided)

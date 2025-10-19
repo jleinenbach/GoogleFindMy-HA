@@ -24,7 +24,11 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
-from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.Auth.token_cache import (
+    TokenCache,
+    async_get_cached_value as _cache_get_default,
+    async_set_cached_value as _cache_set_default,
+)
 
 
 def stop_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
@@ -90,6 +94,20 @@ async def async_submit_stop_sound_request(
         or network issues).
     """
     hex_payload = stop_sound_request(canonic_device_id, gcm_registration_id)
+    ns_get = cache_get
+    ns_set = cache_set
+
+    if cache is not None:
+        if ns_get is None:
+            ns_get = cache.async_get_cached_value
+        if ns_set is None:
+            ns_set = cache.async_set_cached_value
+    else:
+        if ns_get is None:
+            ns_get = _cache_get_default
+        if ns_set is None:
+            ns_set = _cache_set_default
+
     try:
         return await async_nova_request(
             NOVA_ACTION_API_SCOPE,
@@ -97,8 +115,8 @@ async def async_submit_stop_sound_request(
             username=username,
             session=session,
             token=token,
-            cache_get=cache_get,
-            cache_set=cache_set,
+            cache_get=ns_get,
+            cache_set=ns_set,
             refresh_override=refresh_override,
             namespace=namespace,
             cache=cache,

@@ -964,14 +964,13 @@ class GoogleFindMyAPI:
             # Delegate payload build + transport to the submitter; provide HA session.
             # NOTE: If Nova later requires an explicit username for action endpoints,
             # extend submitter signatures to accept and forward it consistently.
-            try:
-                result_hex = await async_submit_start_sound_request(
-                    device_id, token, session=self._session, namespace=self._namespace()
-                )
-            except TypeError:
-                result_hex = await async_submit_start_sound_request(
-                    device_id, token, session=self._session
-                )
+            result_hex = await async_submit_start_sound_request(
+                device_id,
+                token,
+                session=self._session,
+                namespace=self._namespace(),
+                cache=self._cache,
+            )
             ok = result_hex is not None
             if ok:
                 _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
@@ -1025,14 +1024,13 @@ class GoogleFindMyAPI:
             return False
         try:
             _LOGGER.info("Submitting Stop Sound (async) for %s", device_id)
-            try:
-                result_hex = await async_submit_stop_sound_request(
-                    device_id, token, session=self._session, namespace=self._namespace()
-                )
-            except TypeError:
-                result_hex = await async_submit_stop_sound_request(
-                    device_id, token, session=self._session
-                )
+            result_hex = await async_submit_stop_sound_request(
+                device_id,
+                token,
+                session=self._session,
+                namespace=self._namespace(),
+                cache=self._cache,
+            )
             ok = result_hex is not None
             if ok:
                 _LOGGER.info("Stop Sound (async) submitted successfully for %s", device_id)
