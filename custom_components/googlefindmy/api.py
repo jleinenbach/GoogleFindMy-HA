@@ -694,12 +694,24 @@ class GoogleFindMyAPI:
             # Prefer new signature with entry namespace; fall back gracefully.
             try:
                 records = await get_location_data_for_device(
-                    device_id, device_name, session=self._session, namespace=self._namespace()
+                    device_id,
+                    device_name,
+                    session=self._session,
+                    namespace=self._namespace(),
+                    cache=self._cache,
                 )
             except TypeError:
-                records = await get_location_data_for_device(
-                    device_id, device_name, session=self._session
-                )
+                try:
+                    records = await get_location_data_for_device(
+                        device_id,
+                        device_name,
+                        session=self._session,
+                        cache=self._cache,
+                    )
+                except TypeError:
+                    records = await get_location_data_for_device(
+                        device_id, device_name, session=self._session
+                    )
             best = self._select_best_location(records)
             if best:
                 _LOGGER.info(

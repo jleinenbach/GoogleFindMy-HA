@@ -61,12 +61,15 @@ import json
 import logging
 import random
 import time
-from typing import Any, Callable, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Optional, Set, Tuple
 
 from custom_components.googlefindmy.Auth.token_cache import (
     async_get_cached_value,  # fallback for cold start with no coordinators
     async_set_cached_value,  # fallback persistence if no entry cache available yet
 )
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 # Integration-level tunables (safe fallbacks if missing)
 try:
@@ -144,6 +147,9 @@ class FcmReceiverHA:
 
         # Routing tables
         self._token_to_entries: dict[str, Set[str]] = {}  # token -> set(entry_id)
+
+        # Entry-scoped TokenCache instances (for background decrypt path)
+        self._entry_caches: dict[str, "TokenCache"] = {}
 
         # Debounce state (push path): keyed by (entry_id, device_id)
         self._pending: dict[Tuple[str, str], dict] = {}
@@ -414,6 +420,9 @@ class FcmReceiverHA:
         if entry is None:
             return
 
+        if cache is not None:
+            self._entry_caches[entry.entry_id] = cache
+
         # Mirror any known credentials to this entry cache
         try:
             creds = self.creds.get(entry.entry_id) or self.creds.get("__legacy__")
@@ -446,11 +455,34 @@ class FcmReceiverHA:
 
     def unregister_coordinator(self, coordinator: Any) -> None:
         """Unregister a coordinator (sync; safe for async_on_unload)."""
+        entry = getattr(coordinator, "config_entry", None)
+        entry_id: Optional[str] = None
+        if entry is not None:
+            entry_id = getattr(entry, "entry_id", None)
+
         try:
             self.coordinators.remove(coordinator)
             _LOGGER.debug("Coordinator unregistered (total=%d)", len(self.coordinators))
         except ValueError:
             pass  # already removed
+
+        if entry_id:
+            replacement = None
+            for other in self.coordinators:
+                other_entry = getattr(other, "config_entry", None)
+                other_cache = getattr(other, "cache", None)
+                if (
+                    other_entry is not None
+                    and getattr(other_entry, "entry_id", None) == entry_id
+                    and other_cache is not None
+                ):
+                    replacement = other_cache
+                    break
+
+            if replacement is not None:
+                self._entry_caches[entry_id] = replacement
+            else:
+                self._entry_caches.pop(entry_id, None)
 
     # -------------------- Incoming notifications --------------------
 
@@ -681,7 +713,7 @@ class FcmReceiverHA:
         """
         try:
             location_data = await asyncio.get_event_loop().run_in_executor(
-                None, self._decode_background_location, hex_string
+                None, self._decode_background_location, entry_id, hex_string
             )
             if not location_data:
                 _LOGGER.debug("No location data in background update for %s", canonic_id)
@@ -791,7 +823,7 @@ class FcmReceiverHA:
 
     # -------------------- Decode helper --------------------
 
-    def _decode_background_location(self, hex_string: str) -> dict:
+    def _decode_background_location(self, entry_id: str, hex_string: str) -> dict:
         """Decode background location using protobuf decoders (CPU-bound)."""
         try:
             from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf  # type: ignore
@@ -800,7 +832,16 @@ class FcmReceiverHA:
             )
 
             device_update = parse_device_update_protobuf(hex_string)
-            locations = decrypt_location_response_locations(device_update) or []
+            cache = self._entry_caches.get(entry_id)
+            if cache is None:
+                _LOGGER.error(
+                    "No TokenCache available for entry %s during background decrypt", entry_id
+                )
+                return {}
+
+            locations = (
+                decrypt_location_response_locations(device_update, cache=cache) or []
+            )
             return locations[0] if locations else {}
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to decode background location data: %s", err)
@@ -918,3 +959,4 @@ class FcmReceiverHA:
                 if tok:
                     return tok
         return None
+
