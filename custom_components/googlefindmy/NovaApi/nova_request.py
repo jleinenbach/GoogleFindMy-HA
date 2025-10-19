@@ -36,6 +36,14 @@ from datetime import datetime, timezone
 
 import aiohttp
 
+try:
+    from bs4 import BeautifulSoup
+except ImportError:  # pragma: no cover - optional dependency, covered via fallback branch
+    BeautifulSoup = None  # type: ignore[assignment]
+    _BS4_AVAILABLE = False
+else:
+    _BS4_AVAILABLE = True
+
 from custom_components.googlefindmy.Auth.username_provider import (
     async_get_username,
     username_string,
@@ -54,6 +62,9 @@ from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 
 
 _LOGGER = logging.getLogger(__name__)
+
+if not _BS4_AVAILABLE:
+    _LOGGER.debug("BeautifulSoup4 not installed, error response beautification disabled.")
 
 # --- Retry constants ---
 NOVA_MAX_RETRIES = 3
@@ -74,6 +85,27 @@ def _redact(s: str) -> str:
     s = _RE_EMAIL.sub(r"\1***\3", s)
     s = _RE_HEX16.sub("<hex-redacted>", s)
     return s
+
+
+_ERROR_SNIPPET_MAX = 512
+
+
+def _beautify_text(resp_text: str) -> str:
+    """Return a human-readable snippet of a response body for logging purposes."""
+
+    if not resp_text:
+        return ""
+
+    if _BS4_AVAILABLE and BeautifulSoup is not None:
+        try:
+            text = BeautifulSoup(resp_text, "html.parser").get_text(separator=" ", strip=True)
+        except Exception as err:  # pragma: no cover - defensive logging path
+            _LOGGER.debug("Failed to parse error response body via BeautifulSoup: %s", err)
+        else:
+            if text:
+                return text[:_ERROR_SNIPPET_MAX]
+
+    return resp_text[:_ERROR_SNIPPET_MAX]
 
 
 # --- Custom Exceptions ---
