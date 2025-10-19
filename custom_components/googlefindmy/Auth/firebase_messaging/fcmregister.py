@@ -50,6 +50,7 @@ from .const import (
     FCM_REGISTRATION,
     FCM_SEND_URL,
     GCM_CHECKIN_URL,
+    GCM_REGISTER3_URL,
     GCM_REGISTER_URL,
     GCM_SERVER_KEY_B64,
     SDK_VERSION,
@@ -323,8 +324,8 @@ class FcmRegister:
             "app": self.config.chrome_id,
             "X-subtype": gcm_app_id,
             "device": android_id,
-            # IMPORTANT: GCM register expects the server key (base64), not the numeric sender ID.
-            "sender": GCM_SERVER_KEY_B64,
+            # IMPORTANT: GCM register expects the numeric sender ID (project number).
+            "sender": self.config.messaging_sender_id,
         }
         if self._log_debug_verbose:
             _logger.debug(
@@ -338,6 +339,7 @@ class FcmRegister:
 
         url = GCM_REGISTER_URL
         last_error: str | Exception | None = None
+        tried_variant = False
 
         # Non-retryable error codes returned by GCM register body (Error=<CODE>)
         NON_RETRYABLE = {
@@ -363,6 +365,23 @@ class FcmRegister:
                 # Detect HTML error pages even when status==200.
                 html_like = ("text/html" in content_type) or self._looks_like_html(response_text)
 
+                if (
+                    (response_status == 404 or html_like)
+                    and url == GCM_REGISTER_URL
+                    and not tried_variant
+                ):
+                    alt = GCM_REGISTER3_URL
+                    _logger.warning(
+                        "GCM register: 404/HTML received at %s (status=%s); toggling endpoint to %s and retrying immediately.",
+                        url,
+                        response_status,
+                        alt,
+                    )
+                    url = alt
+                    tried_variant = True
+                    await asyncio.sleep(0.5)
+                    continue
+
                 # Parse body lines for structured keys
                 token = None
                 error_code = None
@@ -375,7 +394,10 @@ class FcmRegister:
                         error_code = (v or "").strip().upper()
 
                 if token:
-                    _logger.info("GCM register succeeded via %s", url)
+                    success_url_indicator = (
+                        "/c2dm/register3" if tried_variant and url == GCM_REGISTER3_URL else "/c2dm/register"
+                    )
+                    _logger.info("GCM register succeeded via %s", success_url_indicator)
                     return {
                         "token": token,
                         "app_id": gcm_app_id,

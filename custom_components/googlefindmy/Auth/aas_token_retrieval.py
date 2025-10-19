@@ -40,7 +40,6 @@ import logging
 from typing import Any, Dict
 
 import gpsoauth
-
 from .token_cache import TokenCache
 from .username_provider import username_string
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
@@ -132,15 +131,39 @@ async def _exchange_oauth_for_aas(
         return gpsoauth.exchange_token(username, oauth_token, android_id)
 
     loop = asyncio.get_running_loop()
+    from .adm_token_retrieval import _mask_email as _mask_email_for_logs
+
+    _LOGGER.debug(
+        "Calling gpsoauth.exchange_token with username=%s, oauth_token_prefix=%s, oauth_token_len=%d, android_id=0x%X",
+        _mask_email_for_logs(username),
+        oauth_token[:10] + "..." if oauth_token else "None",
+        len(oauth_token) if oauth_token else 0,
+        android_id,
+    )
+
     try:
         resp = await loop.run_in_executor(None, _run)
     except Exception as err:  # noqa: BLE001
         raise RuntimeError(f"gpsoauth exchange failed: {_clip(err)}") from err
 
+    _LOGGER.debug(
+        "gpsoauth exchange response received: type=%s, keys=%s",
+        type(resp).__name__,
+        list(resp.keys()) if isinstance(resp, dict) else "N/A",
+    )
+
     if not isinstance(resp, dict) or not resp:
         raise RuntimeError(f"Invalid response from gpsoauth: {_summarize_response(resp)}")
     if "Token" not in resp:
         # Typical error shape may include {"Error": "..."}; do not leak values
+        error_details = resp.get("ErrorDetails") if isinstance(resp, dict) else None
+        if isinstance(resp, dict) and error_details is None:
+            error_details = resp.get("Error")
+        _LOGGER.warning(
+            "gpsoauth response missing 'Token'. Error details (if any): %s. Response keys: %s",
+            error_details,
+            list(resp.keys()) if isinstance(resp, dict) else "N/A",
+        )
         raise RuntimeError("Missing 'Token' in gpsoauth response")
     return resp
 
