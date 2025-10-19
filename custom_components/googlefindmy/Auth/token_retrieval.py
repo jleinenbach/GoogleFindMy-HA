@@ -8,16 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 import gpsoauth
 
 # Use the async-first API; the legacy sync wrapper is intentionally unsupported.
 from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
-
-
-if TYPE_CHECKING:
-    from .token_cache import TokenCache
+from custom_components.googlefindmy.Auth.token_cache import TokenCache, _get_default_cache
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -104,6 +101,7 @@ def request_token(
     play_services: bool = False,
     *,
     aas_token: Optional[str] = None,
+    cache: TokenCache | None = None,
 ) -> str:
     """Synchronous token request via gpsoauth (CLI/tests only).
 
@@ -119,6 +117,9 @@ def request_token(
         scope: OAuth scope suffix.
         play_services: Use the Play Services app id instead of ADM when True.
         aas_token: Optional AAS token to shortcut async cache lookup.
+        cache: Entry-scoped TokenCache instance used for resolving AAS tokens when
+            `aas_token` is not provided. Falls back to the default cache in
+            single-entry CLI/test scenarios.
 
     Raises:
         RuntimeError: if called while an event loop is running.
@@ -136,9 +137,16 @@ def request_token(
             "Use `await async_request_token(...)` in async contexts."
         )
 
+    # Resolve the TokenCache (required for multi-account isolation).
+    if cache is None:
+        try:
+            cache = _get_default_cache()
+        except Exception as err:  # noqa: BLE001 - propagate as ValueError for callers
+            raise ValueError("TokenCache instance is required for multi-account safety.") from err
+
     # Resolve the AAS token: prefer injected token; otherwise use async provider in an isolated loop.
     if aas_token is None:
-        aas_token = asyncio.run(async_get_aas_token())
+        aas_token = asyncio.run(async_get_aas_token(cache=cache))
 
     # Perform the blocking OAuth exchange.
     return _perform_oauth_sync(username, aas_token, scope, play_services)

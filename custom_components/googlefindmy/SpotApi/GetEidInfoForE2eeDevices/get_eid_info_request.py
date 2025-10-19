@@ -1,7 +1,6 @@
 # custom_components/googlefindmy/SpotApi/GetEidInfoForE2eeDevices/get_eid_info_request.py
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
-#
 """
 GetEidInfoForE2eeDevices request helpers (async-first).
 
