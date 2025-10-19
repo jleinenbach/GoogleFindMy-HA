@@ -6,27 +6,21 @@
 """
 Nova API request helpers (async-first) for Google Find My Device.
 
-This module exposes:
-- `async_nova_request(...)`: the primary, non-blocking API for Home Assistant.
-- `nova_request(...)`: a guarded sync facade intended for CLI/testing only. It will
-  raise a RuntimeError if called from within a running event loop.
+This module exposes `async_nova_request(...)`, the non-blocking API consumed by
+the Home Assistant integration.
 
 Features
 --------
 - Optional reuse of the Home Assistant-managed aiohttp ClientSession to avoid
   per-call pools (`register_hass()` / `unregister_hass()`).
-- Token TTL learning policy (sync/async variants) to proactively refresh ADM tokens.
+- Token TTL learning policy to proactively refresh ADM tokens while preventing
+  thundering herds.
 - Robust retry logic (401 -> refresh & retry; 5xx/429 -> exponential backoff).
 - **Entry-scoped, multi-account ready**: when a `TokenCache` is supplied via
   `async_nova_request(..., cache=...)`, *all* username lookups, token retrieval
   (initial and refresh), and TTL metadata reads/writes are performed strictly
   against that cache. Optionally, a `namespace` (e.g., entry_id) can be used to
   prefix cache keys, preventing collisions when multiple entries share a cache.
-
-Notes
------
-- The sync path uses `httpx` and MUST NOT be called from within the event loop.
-- The async path is preferred throughout the integration code.
 """
 
 from __future__ import annotations
@@ -37,29 +31,22 @@ import re
 import time
 import random
 import logging
-import threading
-from typing import Callable, Optional, Awaitable, Any
+from typing import Awaitable, Callable, Optional, Any
 from datetime import datetime, timezone
 
 import aiohttp
-import httpx
 
 from custom_components.googlefindmy.Auth.username_provider import (
-    get_username,
     async_get_username,
     username_string,
 )
 from custom_components.googlefindmy.Auth.adm_token_retrieval import (
-    get_adm_token,
     async_get_adm_token as async_get_adm_token_api,
     # Isolated refresh (for config flow validation without global cache)
     async_get_adm_token_isolated,
 )
 from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
 from custom_components.googlefindmy.Auth.token_cache import (
-    get_cached_value,
-    set_cached_value,
-    async_get_cached_value,
     async_set_cached_value,
     TokenCache,  # NEW: for entry-scoped cache access in async path
 )
@@ -138,7 +125,6 @@ def unregister_hass() -> None:
 
 
 # --- Refresh Locks ---
-_sync_refresh_lock = threading.Lock()
 _async_refresh_lock: asyncio.Lock | None = None
 
 
@@ -428,257 +414,12 @@ class AsyncTTLPolicy(TTLPolicy):
             return await self._do_refresh_async(now)
 
 
-def _get_initial_token_sync(username: str, _logger, ns_prefix: str = "") -> str:
-    """Get or create the initial ADM token in sync path and ensure TTL metadata is recorded."""
-    ns = (ns_prefix or "").strip()
-    if ns and not ns.endswith(":"):
-        ns += ":"
-    token = (
-        get_cached_value(f"{ns}adm_token_{username}")
-        or get_cached_value(f"{ns}adm_token")
-        or get_cached_value(f"adm_token_{username}")
-        or get_cached_value("adm_token")
+def nova_request(*_: object, **__: object) -> str:
+    """Legacy synchronous interface removed in favor of the async implementation."""
+
+    raise RuntimeError(
+        "Legacy sync nova_request() has been removed. Use async_nova_request(..., cache=...) instead."
     )
-    if not token:
-        _logger.info("Attempting to generate new ADM token...")
-        token = get_adm_token(username)
-        if token:
-            set_cached_value(f"{ns}adm_token_issued_at_{username}", time.time())
-            if not get_cached_value(f"{ns}adm_probe_startup_left_{username}"):
-                set_cached_value(f"{ns}adm_probe_startup_left_{username}", 3)
-    if not token:
-        raise ValueError("No ADM token available - please reconfigure authentication")
-    return token
-
-
-async def _get_initial_token_async(
-    username: str,
-    _logger,
-    *,
-    ns_prefix: str = "",
-    cache: TokenCache,
-) -> str:
-    """Get or create the initial ADM token (async) and ensure TTL metadata is recorded.
-
-    When `cache` is provided, all reads/writes are performed strictly against it.
-    Otherwise, default async cache facades are used (single-account legacy).
-    """
-    ns = (ns_prefix or "").strip()
-    if ns and not ns.endswith(":"):
-        ns += ":"
-
-    # --- Token lookup (entry-scoped cache) ---
-    token = (
-        await cache.get(f"{ns}adm_token_{username}")
-        or await cache.get(f"{ns}adm_token")
-        or await cache.get(f"adm_token_{username}")
-        or await cache.get("adm_token")
-    )
-
-    # --- Generate if missing ---
-    if not token:
-        _logger.info("Attempting to generate new ADM token (async, entry-scoped=True)...")
-        # Ensure refresh also uses the same entry-scoped cache
-        try:
-            token = await async_get_adm_token_api(username, cache=cache)
-        except InvalidAasTokenError as err:
-            _logger.error(
-                "ADM token generation failed because the cached AAS token was rejected; re-authentication required."
-            )
-            await cache.set(DATA_AAS_TOKEN, None)
-            raise NovaAuthError(401, "AAS token invalid during ADM token generation") from err
-        if token:
-            await cache.set(f"{ns}adm_token_issued_at_{username}", time.time())
-            if not await cache.get(f"{ns}adm_probe_startup_left_{username}"):
-                await cache.set(f"{ns}adm_probe_startup_left_{username}", 3)
-
-    if not token:
-        raise ValueError("No ADM token available - please reconfigure authentication")
-    return str(token)
-
-
-def _beautify_text(resp_text: str) -> str:
-    """
-    Best-effort pretty-printing of an error response body.
-    Optional dependency: BeautifulSoup4.
-    """
-    try:
-        # local import only when needed
-        from bs4 import BeautifulSoup
-        return BeautifulSoup(resp_text, "html.parser").get_text(strip=True)
-    except Exception:
-        return resp_text[:512]
-
-
-def _compute_delay(attempt: int, retry_after: Optional[str]) -> float:
-    """
-    Computes retry delay, respecting Retry-After (RFC 9110) or using exponential backoff with full jitter.
-    See: AWS Architecture Blog - Exponential Backoff And Jitter
-    """
-    delay = None
-    if retry_after:
-        try:
-            # seconds case
-            delay = float(retry_after)
-        except ValueError:
-            # HTTP-date case (RFC 7231 §7.1.3)
-            from email.utils import parsedate_to_datetime
-            try:
-                retry_dt = parsedate_to_datetime(retry_after)
-                delay = max(0.0, (retry_dt - datetime.now(timezone.utc)).total_seconds())
-            except Exception:
-                pass  # Fallback to backoff if date parsing fails
-
-    if delay is None:
-        # Exponential backoff with full jitter
-        backoff = (NOVA_BACKOFF_FACTOR ** (attempt - 1)) * NOVA_INITIAL_BACKOFF_S
-        delay = random.uniform(0.0, backoff)
-
-    capped_delay = min(delay, NOVA_MAX_RETRY_AFTER_S)
-    if delay is not None and delay > capped_delay:
-        _LOGGER.info("Retry-After delay of %.2fs capped to %.2fs by client policy.", delay, capped_delay)
-    return capped_delay
-
-
-def nova_request(api_scope: str, hex_payload: str, *, namespace: Optional[str] = None) -> str:
-    """
-    Synchronous Nova API request (CLI/testing only).
-
-    IMPORTANT:
-    This function is blocking and MUST NOT be called from within the Home Assistant
-    event loop. It will raise a RuntimeError if such usage is detected.
-    Use `async_nova_request` for all Home Assistant code.
-
-    Args:
-        api_scope: Nova API scope suffix (appended to the base URL).
-        hex_payload: Hex string body.
-        namespace: Optional key namespace (e.g., config entry_id) to avoid cache collisions.
-
-    Returns:
-        Hex-encoded response body.
-    Raises:
-        RuntimeError: if called from a running event loop.
-        ValueError: if the hex_payload is invalid.
-        NovaError (and subclasses): for API and network errors.
-    """
-    # Guard against misuse in the running event loop.
-    try:
-        if asyncio.get_running_loop().is_running():
-            raise RuntimeError("Sync nova_request() must not be called from the event loop.")
-    except RuntimeError:
-        # No running loop in this thread → OK
-        pass
-
-    if cache is None:
-        raise ValueError("TokenCache instance is required for multi-account safety.")
-
-    url = f"https://android.googleapis.com/nova/{api_scope}"
-    username = get_username()
-    ns = (namespace or "").strip()
-    token = _get_initial_token_sync(username, _LOGGER, ns_prefix=ns)
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Authorization": f"Bearer {token}",
-        "Accept-Language": "en-US",
-        "User-Agent": NOVA_API_USER_AGENT,
-    }
-    try:
-        payload = binascii.unhexlify(hex_payload)
-        if len(payload) > MAX_PAYLOAD_BYTES:
-            raise ValueError(f"Nova payload too large: {len(payload)} bytes")
-    except (binascii.Error, ValueError) as e:
-        raise ValueError("Invalid hex payload for Nova request") from e
-
-    policy = TTLPolicy(
-        username=username,
-        logger=_LOGGER,
-        get_value=get_cached_value,
-        set_value=set_cached_value,
-        refresh_fn=lambda: get_adm_token(username),
-        set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
-        ns_prefix=ns,
-    )
-    policy.pre_request()
-
-    refreshed_once = False
-    retries_used = 0
-    while True:
-        attempt = retries_used + 1
-        try:
-            timeout = httpx.Timeout(30.0, connect=10.0, read=30.0, write=30.0, pool=30.0)
-            response = httpx.post(url, headers=headers, content=payload, timeout=timeout, follow_redirects=False)
-            _LOGGER.debug("Nova API sync request to %s: status=%d", api_scope, response.status_code)
-
-            if response.status_code == 200:
-                return response.content.hex()
-
-            text_snippet = _redact(_beautify_text(response.text))
-
-            if response.status_code == 401:
-                lvl = logging.INFO if not refreshed_once else logging.WARNING
-                _LOGGER.log(lvl, "Nova API sync request to %s: 401 Unauthorized. Refreshing token.", api_scope)
-                with _sync_refresh_lock:
-                    current_issued = get_cached_value(policy.k_issued)
-                    if current_issued and time.time() - float(current_issued) < 2:
-                        _LOGGER.debug("Another task already refreshed the token; re-evaluating.")
-                    else:
-                        policy.on_401()
-
-                if not refreshed_once:
-                    refreshed_once = True
-                    continue  # Free retry, do not increment retries_used
-
-                raise NovaAuthError(response.status_code, "Unauthorized after token refresh")
-
-            if response.status_code in (408, 429, 500, 502, 503, 504):
-                if retries_used < NOVA_MAX_RETRIES:
-                    delay = _compute_delay(attempt, response.headers.get("Retry-After"))
-                    _LOGGER.info(
-                        "Nova API sync request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
-                        api_scope,
-                        response.status_code,
-                        delay,
-                        retries_used + 1,
-                        NOVA_MAX_RETRIES,
-                    )
-                    retries_used += 1
-                    time.sleep(delay)
-                    continue
-                else:
-                    _LOGGER.error(
-                        "Nova API sync request to %s failed after %d attempts with status %d.",
-                        api_scope,
-                        retries_used + 1,
-                        response.status_code,
-                    )
-                    if response.status_code == 429:
-                        raise NovaRateLimitError(f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts.")
-                    raise NovaHTTPError(response.status_code, f"Nova API failed after {NOVA_MAX_RETRIES} attempts.")
-
-            raise NovaAuthError(response.status_code, text_snippet)
-
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            if retries_used < NOVA_MAX_RETRIES:
-                delay = _compute_delay(attempt, None)
-                _LOGGER.info(
-                    "Nova API sync request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
-                    api_scope,
-                    type(e).__name__,
-                    delay,
-                    retries_used + 1,
-                    NOVA_MAX_RETRIES,
-                )
-                retries_used += 1
-                time.sleep(delay)
-                continue
-            else:
-                _LOGGER.error(
-                    "Nova API sync request to %s failed after %d attempts with %s.",
-                    api_scope,
-                    retries_used + 1,
-                    type(e).__name__,
-                )
-                raise NovaError(f"Nova API request failed after retries: {e}") from e
 
 
 async def async_nova_request(

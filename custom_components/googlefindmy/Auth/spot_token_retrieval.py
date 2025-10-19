@@ -16,9 +16,6 @@ Design:
     - Token generation prefers the async token retriever (`async_request_token`). We inject
       an AAS provider derived from the SAME cache (lambda: async_get_aas_token(cache=cache))
       when no custom provider is supplied. This ensures true end-to-end entry scoping.
-    - A guarded sync wrapper (`get_spot_token`) is provided for CLI/tests and will raise
-      if called from within a running event loop.
-
 Caching:
     - Cache key: f"spot_token_{username}" (stored in the selected cache).
 
@@ -128,35 +125,3 @@ async def async_get_spot_token(
     return await cache.get_or_set(cache_key, _generator)
 
 
-# ----------------------- Legacy sync wrapper (CLI/tests) -----------------------
-
-def get_spot_token(username: Optional[str] = None) -> str:
-    """Sync wrapper for CLI/tests.
-
-    IMPORTANT:
-        - Must NOT be called from inside the Home Assistant event loop.
-        - Prefer `await async_get_spot_token(...)` in all HA code paths.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            raise RuntimeError(
-                "get_spot_token() was called inside the event loop. "
-                "Use `await async_get_spot_token(...)` instead."
-            )
-    except RuntimeError:
-        pass
-
-    raise RuntimeError(
-        "Legacy get_spot_token() is no longer supported without providing the entry TokenCache. "
-        "Use `await async_get_spot_token(..., cache=...)` instead."
-    )
-
-
-if __name__ == "__main__":
-    # Simple CLI smoke test (requires cache + username to be initialized by the environment)
-    try:
-        print(get_spot_token())
-    except Exception as exc:  # pragma: no cover
-        _LOGGER.error("CLI Spot token retrieval failed: %s", exc)
-        raise

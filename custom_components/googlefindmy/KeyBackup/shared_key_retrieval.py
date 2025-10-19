@@ -303,34 +303,3 @@ async def async_get_shared_key(
         _LOGGER.info("Normalized cached shared_key to hex")
         return b
 
-
-# -----------------------------------------------------------------------------
-# Legacy sync facade (CLI compatibility)
-# -----------------------------------------------------------------------------
-
-def get_shared_key() -> bytes:  # pragma: no cover
-    """Sync facade for CLI tools (NOT for Home Assistant event loop).
-
-    - If called from within a running event loop, raises RuntimeError immediately.
-    - Otherwise, runs the async API via `asyncio.run()` and returns the bytes.
-
-    Returns:
-        bytes: a 32-byte shared key.
-
-    Raises:
-        RuntimeError: if called inside an event loop.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            raise RuntimeError(
-                "Sync get_shared_key() called from within the event loop. "
-                "Use `await async_get_shared_key()` instead."
-            )
-    except RuntimeError:
-        pass
-
-    raise RuntimeError(
-        "Legacy get_shared_key() is no longer supported without providing the entry TokenCache. "
-        "Use `await async_get_shared_key(..., cache=...)` instead."
-    )
