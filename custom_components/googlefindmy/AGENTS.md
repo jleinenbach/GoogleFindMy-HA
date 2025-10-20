@@ -23,6 +23,7 @@
 * **Docs/i18n (when user-facing behavior changes).** Update `README.md` and `translations/*`; no hard-coded UI strings in Python. **Never delete or shorten existing documentation or docstrings; only correct/augment them.**
 * **Deprecation check (concise).** Add 2–4 bullets with links to HA release notes/dev docs that might affect this change (§8).
 * **Quality-scale evidence (lightweight).** If a Quality-Scale rule is touched, append one evidence bullet in `quality_scale.yaml` (or propose adding the file). **Do not block** if it’s missing—note this in the PR.
+* **Historical context.** For regressions, reference implementations, or suspected newly introduced bugs, inspect the relevant commit history (e.g., `git log -- <file>`, `git show <commit>`, `git diff <old>..<new>`).
 
 > **Local run (VERIFY)**
 > **bash commands:**
@@ -52,6 +53,12 @@
 * May request **follow-ups** when repo-wide targets (coverage/typing/docs) are momentarily below goals, without blocking urgent bugfixes.
 
 *(If you use “Code / QA / Docs” sub-roles internally, map them onto this Contributor/Reviewer model; do not require three separate formal sign-offs.)*
+
+### 2.3 History analysis best practices
+
+* Review commit messages surrounding the affected modules to understand intent and regression windows.
+* Compare diffs across the relevant commits or branches to pinpoint behavioral changes before coding fixes.
+* Correlate suspect changes with coverage in `tests/`, updating or extending tests alongside code adjustments.
 
 ---
 
