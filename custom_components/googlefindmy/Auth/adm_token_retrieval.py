@@ -416,19 +416,12 @@ async def async_get_adm_token(
                         _clip(err),
                     )
                     current_method = None
-                if current_method == _AUTH_METHOD_INDIVIDUAL_TOKENS:
+                if current_method != _AUTH_METHOD_INDIVIDUAL_TOKENS:
                     _LOGGER.debug(
-                        "Resetting auth_method to '%s' after transient failure for %s.",
-                        (fallback_replaced_auth_method or original_auth_method or "<unset>"),
+                        "Ensuring OAuth fallback remains active after transient failure for %s.",
                         _mask_email(user),
                     )
-                    await cache.set(
-                        DATA_AUTH_METHOD,
-                        fallback_replaced_auth_method or original_auth_method,
-                    )
-                fallback_auth_method_overridden = False
-                fallback_replaced_auth_method = None
-            tried_oauth_fallback = False
+                    await cache.set(DATA_AUTH_METHOD, _AUTH_METHOD_INDIVIDUAL_TOKENS)
 
             sleep_s = backoff * (2 ** attempt)
             _LOGGER.info(
