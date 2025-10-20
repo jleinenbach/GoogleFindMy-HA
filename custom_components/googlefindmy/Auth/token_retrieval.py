@@ -130,15 +130,21 @@ def _perform_oauth_sync(
         if not auth_response:
             raise ValueError("No response from gpsoauth.perform_oauth")
 
-        if "Auth" not in auth_response:
-            error_detail = str(auth_response.get("Error", "")).strip()
-            if error_detail and _is_invalid_aas_error_text(error_detail):
-                raise InvalidAasTokenError(
-                    f"gpsoauth rejected the AAS token while requesting scope '{scope}': {error_detail}"
-                )
-            raise KeyError("'Auth' not found in gpsoauth response")
+        token_value = auth_response.get("Token")
+        if not isinstance(token_value, str) or not token_value:
+            legacy_value = auth_response.get("Auth")
+            if isinstance(legacy_value, str) and legacy_value:
+                token_value = legacy_value
 
-        return auth_response["Auth"]
+        if isinstance(token_value, str) and token_value:
+            return token_value
+
+        error_detail = str(auth_response.get("Error", "")).strip()
+        if error_detail and _is_invalid_aas_error_text(error_detail):
+            raise InvalidAasTokenError(
+                f"gpsoauth rejected the AAS token while requesting scope '{scope}': {error_detail}"
+            )
+        raise KeyError("Neither 'Token' nor 'Auth' found in gpsoauth response")
     except InvalidAasTokenError:
         raise
     except Exception as e:  # noqa: BLE001

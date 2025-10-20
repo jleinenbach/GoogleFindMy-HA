@@ -122,6 +122,10 @@ def _is_non_retryable_auth(err: Exception) -> bool:
     if "missing 'auth' in gpsoauth response" in text:
         # Most often wraps {"Error": "..."} from gpsoauth; treat as non-retryable
         return True
+    if "neither 'token' nor 'auth' found" in low:
+        return True
+    if "missing 'token'/'auth' in gpsoauth response" in low:
+        return True
     # Treat obvious HTTP-style auth denials as non-retryable as well
     if "401" in low or "403" in low or "unauthorized" in low or "forbidden" in low:
         return True
@@ -464,11 +468,18 @@ async def _perform_oauth_with_provided_aas(
         if not isinstance(resp, dict):
             # Never include the raw `resp` in logs/errors
             raise RuntimeError(f"gpsoauth.perform_oauth returned non-dict response ({type(resp).__name__})")
-        if "Auth" not in resp:
-            # Typical error shape: {"Error": "BadAuthentication"} (do not print full dict)
-            err = resp.get("Error", "unknown")
-            raise RuntimeError(f"Missing 'Auth' in gpsoauth response (error={err})")
-        return resp["Auth"]
+        token_value = resp.get("Token")
+        if not isinstance(token_value, str) or not token_value:
+            legacy_value = resp.get("Auth")
+            if isinstance(legacy_value, str) and legacy_value:
+                token_value = legacy_value
+
+        if isinstance(token_value, str) and token_value:
+            return token_value
+
+        # Typical error shape: {"Error": "BadAuthentication"} (do not print full dict)
+        err = resp.get("Error", "unknown")
+        raise RuntimeError(f"Missing 'Token'/'Auth' in gpsoauth response (error={err})")
 
     loop = asyncio.get_running_loop()
     try:
