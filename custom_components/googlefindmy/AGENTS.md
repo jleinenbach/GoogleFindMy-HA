@@ -20,7 +20,7 @@
   * **Regression test added:** for `fix:` commits (or `fix/...` branches), add a minimal regression test if none existed (§3.2).
 * **Coverage targets.** Keep **config flow at 100 %**; repo total **≥ 95 %**. If temporarily lower due to necessary code removal, **open a follow-up issue** to restore coverage and reference it in the PR.
 * **Behavioral safety.** No secrets/PII in logs; user-visible errors use translated `translation_key`s; entities report `unavailable` on communication failures.
-* **Docs/i18n (when user-facing behavior changes).** Update `README.md` and `translations/*`; no hard-coded UI strings in Python. **Never delete or shorten existing documentation or docstrings; only correct/augment them.**
+* **Docs/i18n (when user-facing behavior changes).** Update `README.md` and `translations/*`; no hard-coded UI strings in Python. Follow **Rule §9.DOC** for documentation/docstring preservation.
 * **Deprecation check (concise).** Add 2–4 bullets with links to HA release notes/dev docs that might affect this change (§8).
 * **Quality-scale evidence (lightweight).** If a Quality-Scale rule is touched, append one evidence bullet in `quality_scale.yaml` (or propose adding the file). **Do not block** if it’s missing—note this in the PR.
 * **Historical context.** For regressions, reference implementations, or suspected newly introduced bugs, inspect the relevant commit history (e.g., `git log -- <file>`, `git show <commit>`, `git diff <old>..<new>`).
@@ -170,7 +170,8 @@ Add to the PR description:
 * No hard-coded UI strings in Python. Keep `strings.json` / `translations/*.json` in sync.
 * Translate service and exception texts (`translation_key`).
 * Update README only when user-visible behavior/options change.
-* **Integrity rule:** never delete or shorten existing documentation or docstrings; only **correct** factual errors, grammar, or structure, and **augment** with missing details.
+* **Rule §9.DOC (canonical):** Keep documentation and docstrings accurate for existing features by correcting errors and augmenting missing details without shortening or deleting content. When functionality is intentionally removed or deprecated, remove or reduce the corresponding documentation to reflect that change while preserving historical clarity.
+  * **Decision algorithm:** IF functionality is intentionally removed/deprecated → update or remove the related documentation to match the removal (include deprecation context as needed); ELSE → correct/augment the documentation without shortening it.
 
 ---
 
@@ -189,7 +190,7 @@ Add to the PR description:
 * **PEP 8/PEP 257 mandatory.** Consistent formatting, clear docstrings; meaningful names.
 * **Typing is strict.** Use Python typing everywhere; prefer **PEP 695** generics where helpful.
 * **Exceptions.** Raise precise types; use **`raise … from …`** to preserve causal chains; avoid broad `except:`; never swallow errors silently.
-* **Docstrings.** Every public function/class has an English docstring (purpose first, then Args/Returns/Raises, short example). **Do not remove/shorten existing docs—only correct/extend them.**
+* **Docstrings.** Every public function/class has an English docstring (purpose first, then Args/Returns/Raises, short example) and follows **Rule §9.DOC**.
 * **File header path line (REQUIRED).** Every Python file must begin with a single-line comment containing its repository path. Example first line: `# custom_components/googlefindmy/binary_sensor.py`
 
 ### 11.2 Security baseline (OWASP / NIST / BSI)
@@ -260,11 +261,11 @@ Add to the PR description:
 
 * CI **security gate**: lint/type/tests/SBOM scan must pass.
 * Logs are **incident-ready** but privacy-preserving (use OWASP vocabulary).
-* All doc updates are additive or corrective; never delete valid prior content.
+* All doc updates comply with **Rule §9.DOC**.
 
 ### 11.9 Machine-checkable acceptance checklist (for the agent)
 
-* [ ] PEP 8/257 compliance; complete docstrings (only corrected/extended, never shortened).
+* [ ] PEP 8/257 compliance; complete docstrings maintained per **Rule §9.DOC**.
 * [ ] Strict typing incl. PEP 695 where relevant; no implicit `Any` in public APIs.
 * [ ] No `eval/exec`; subprocess without `shell=True`; parameterized I/O; safe loaders.
 * [ ] Archive extraction is traversal-safe; paths validated with `pathlib`.
