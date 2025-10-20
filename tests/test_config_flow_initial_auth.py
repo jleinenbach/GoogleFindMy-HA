@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any, Awaitable, Callable
 
 import pytest
 
+from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.api import GoogleFindMyAPI
-from custom_components.googlefindmy.const import DATA_AAS_TOKEN
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    CONF_OAUTH_TOKEN,
+    DATA_AAS_TOKEN,
+    DATA_AUTH_METHOD,
+)
 from custom_components.googlefindmy.Auth.username_provider import username_string
 
 
@@ -147,3 +154,85 @@ def test_async_initial_auth_preserves_aas_token_and_uses_adm(
     assert final_aas == aas_token
     assert processed_payloads == ["1020"]
     assert result == [{"id": "device-1"}]
+
+
+def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Manual flow must store aas_et tokens like the secrets path."""
+
+    async def _fake_pick(
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        assert secrets_bundle is None
+        return candidates[0][1] if candidates else None
+
+    async def _fake_probe(api: Any, *, email: str, token: str) -> list[dict[str, Any]]:
+        assert token.startswith("aas_et/")
+        return []
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+    monkeypatch.setattr(config_flow, "_try_probe_devices", _fake_probe)
+
+    class _ConfigEntries:
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return []
+
+    class _FlowHass:
+        def __init__(self) -> None:
+            self.config_entries = _ConfigEntries()
+            self.data: dict[str, Any] = {config_flow.DOMAIN: {}}
+
+    captured: dict[str, Any] = {}
+
+    async def _create_entry(
+        *,
+        title: str,
+        data: dict[str, Any],
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        captured["result"] = {"title": title, "data": data, "options": options}
+        return {"type": "create_entry", "title": title, "data": data, "options": options}
+
+    async def _exercise() -> None:
+        hass = _FlowHass()
+        flow = config_flow.ConfigFlow()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.context = {}
+        flow.unique_id = None  # type: ignore[attr-defined]
+
+        async def _set_unique_id(value: str) -> None:
+            flow.unique_id = value  # type: ignore[attr-defined]
+
+        flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+        flow._abort_if_unique_id_configured = lambda: None  # type: ignore[assignment]
+        flow.async_create_entry = _create_entry  # type: ignore[assignment]
+
+        manual_token = "aas_et/MANUAL_MASTER"
+        first = await flow.async_step_individual_tokens(
+            {
+                CONF_GOOGLE_EMAIL: "ManualUser@Example.COM",
+                CONF_OAUTH_TOKEN: manual_token,
+            }
+        )
+        if inspect.isawaitable(first):
+            first = await first
+        assert isinstance(first, dict)
+        assert first.get("type") == "form"
+
+        final = await flow.async_step_device_selection({})
+        if inspect.isawaitable(final):
+            final = await final
+        assert isinstance(final, dict)
+        assert final.get("type") == "create_entry"
+
+    asyncio.run(_exercise())
+
+    assert captured, "Expected config entry creation payload to be captured"
+    payload = captured["result"]
+    data = payload["data"]
+    assert data[CONF_OAUTH_TOKEN] == "aas_et/MANUAL_MASTER"
+    assert data[DATA_AAS_TOKEN] == "aas_et/MANUAL_MASTER"
+    assert data[DATA_AUTH_METHOD] == config_flow._AUTH_METHOD_SECRETS
