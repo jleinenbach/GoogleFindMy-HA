@@ -378,6 +378,33 @@ def _sync_get_last_gps_from_history(
         return None
 
 
+@dataclass(frozen=True)
+class StatusSnapshot:
+    """Lightweight status descriptor shared with diagnostic entities/tests."""
+
+    state: str
+    reason: Optional[str] = None
+    changed_at: Optional[float] = None
+
+
+class ApiStatus:
+    """String constants describing the coordinator's polling state."""
+
+    UNKNOWN = "unknown"
+    OK = "ok"
+    ERROR = "error"
+    REAUTH = "reauth_required"
+
+
+class FcmStatus:
+    """String constants representing push-transport health."""
+
+    UNKNOWN = "unknown"
+    CONNECTED = "connected"
+    DEGRADED = "degraded"
+    DISCONNECTED = "disconnected"
+
+
 class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
     """Coordinator that manages polling, cache, and push updates for Google Find My Device.
 
@@ -522,6 +549,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             "non_significant_dropped": 0,    # drops by significance gate
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
+
+        # Granular status tracking (API polling vs. push transport)
+        self._api_status_state: str = ApiStatus.UNKNOWN
+        self._api_status_reason: Optional[str] = None
+        self._api_status_changed_at: Optional[float] = None
+        self._fcm_status_state: str = FcmStatus.UNKNOWN
+        self._fcm_status_reason: Optional[str] = None
+        self._fcm_status_changed_at: Optional[float] = None
+        self._reauth_initiated: bool = False
 
         # Performance metrics (timestamps, durations) & recent errors (bounded)
         self.performance_metrics: Dict[str, float] = {}
@@ -974,10 +1010,126 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             except Exception:
                 pass
 
+        if not failed:
+            # Allow future reauth flows once auth recovers.
+            self._reauth_initiated = False
+
     @property
     def auth_error_active(self) -> bool:
         """Expose the current "auth failed" condition for diagnostic entities (binary_sensor)."""
         return self._auth_error_active
+
+    def _set_api_status(self, status: str, *, reason: Optional[str] = None) -> None:
+        """Update the API polling status and notify listeners if it changed."""
+
+        if status == self._api_status_state and reason == self._api_status_reason:
+            return
+
+        self._api_status_state = status
+        self._api_status_reason = reason
+        self._api_status_changed_at = time.time()
+
+        try:
+            self.async_set_updated_data(self.data)
+        except Exception:
+            # Fallback for very early startup when listeners are not ready yet.
+            pass
+
+    def _set_fcm_status(self, status: str, *, reason: Optional[str] = None) -> None:
+        """Update the push transport status while avoiding noisy churn."""
+
+        if status == self._fcm_status_state and reason == self._fcm_status_reason:
+            return
+
+        self._fcm_status_state = status
+        self._fcm_status_reason = reason
+        self._fcm_status_changed_at = time.time()
+
+        try:
+            self.async_set_updated_data(self.data)
+        except Exception:
+            pass
+
+    async def _async_start_reauth_flow(self) -> None:
+        """Trigger Home Assistant's re-auth flow once per failure episode."""
+
+        if self._reauth_initiated:
+            return
+
+        entry = getattr(self, "config_entry", None)
+        if entry is None:
+            return
+
+        self._reauth_initiated = True
+
+        # Prefer the ConfigEntry helper when available; fall back to the manager API.
+        try:
+            result = entry.async_start_reauth(self.hass)
+        except AttributeError:
+            result = None
+        else:
+            if asyncio.iscoroutine(result):
+                try:
+                    await result
+                except Exception as err:
+                    _LOGGER.debug("async_start_reauth(entry) failed: %s", err)
+                    self._reauth_initiated = False
+                return
+            if result is not None:
+                return
+
+        hass_config_entries = getattr(self.hass, "config_entries", None)
+        if hass_config_entries is None:
+            _LOGGER.debug("Home Assistant config_entries manager unavailable; cannot start reauth")
+            self._reauth_initiated = False
+            return
+
+        try:
+            result = hass_config_entries.async_start_reauth(entry)
+        except TypeError:
+            try:
+                result = hass_config_entries.async_start_reauth(entry.entry_id)
+            except Exception as err:
+                _LOGGER.debug("async_start_reauth(entry_id) failed: %s", err)
+                self._reauth_initiated = False
+                return
+        except Exception as err:
+            _LOGGER.debug("async_start_reauth fallback failed: %s", err)
+            self._reauth_initiated = False
+            return
+
+        if asyncio.iscoroutine(result):
+            try:
+                await result
+            except Exception as err:
+                _LOGGER.debug("async_start_reauth coroutine failed: %s", err)
+                self._reauth_initiated = False
+
+    @property
+    def api_status(self) -> StatusSnapshot:
+        """Return a snapshot describing the current API polling health."""
+
+        return StatusSnapshot(
+            state=self._api_status_state,
+            reason=self._api_status_reason,
+            changed_at=self._api_status_changed_at,
+        )
+
+    @property
+    def fcm_status(self) -> StatusSnapshot:
+        """Return a snapshot describing the current push transport health."""
+
+        return StatusSnapshot(
+            state=self._fcm_status_state,
+            reason=self._fcm_status_reason,
+            changed_at=self._fcm_status_changed_at,
+        )
+
+    @property
+    def is_fcm_connected(self) -> bool:
+        """Convenience boolean for entities relying on push transport availability."""
+
+        return self._fcm_status_state == FcmStatus.CONNECTED
 
     # --- END: Add/Replace inside Coordinator class --------------------------------
 
@@ -1371,6 +1523,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         if self._fcm_defer_started_mono == 0.0:
             self._fcm_defer_started_mono = now_mono
             self._fcm_last_stage = 0
+            self._set_fcm_status(
+                FcmStatus.DEGRADED,
+                reason="Push transport not ready; awaiting connection",
+            )
             return
         elapsed = now_mono - self._fcm_defer_started_mono
         if elapsed >= 60 and self._fcm_last_stage < 1:
@@ -1378,10 +1534,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.warning(
                 "Polling deferred: FCM/push not ready 60s after (re)start. Polls and actions remain gated."
             )
+            self._set_fcm_status(
+                FcmStatus.DEGRADED,
+                reason="Push transport waiting for connection (60s elapsed)",
+            )
         if elapsed >= 300 and self._fcm_last_stage < 2:
             self._fcm_last_stage = 2
             _LOGGER.error(
                 "Polling still deferred: FCM/push not ready after 5 minutes. Check credentials/network."
+            )
+            self._set_fcm_status(
+                FcmStatus.DISCONNECTED,
+                reason="Push transport not connected after prolonged wait",
             )
 
     def _clear_fcm_deferral(self) -> None:
@@ -1390,6 +1554,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             _LOGGER.info("FCM/push is ready; resuming scheduled polling.")
         self._fcm_defer_started_mono = 0.0
         self._fcm_last_stage = 0
+        self._set_fcm_status(FcmStatus.CONNECTED)
 
     async def _async_update_data(self) -> List[Dict[str, Any]]:
         """Provide cached device data; trigger background poll if due.
@@ -1421,11 +1586,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         _LOGGER.warning("FCM provider not ready after 15s; proceeding anyway.")
                 self._startup_complete = True
 
+            if self._is_fcm_ready_soft():
+                self._set_fcm_status(FcmStatus.CONNECTED)
+            elif self._fcm_last_stage < 2:
+                self._set_fcm_status(
+                    FcmStatus.DEGRADED,
+                    reason="Push transport not ready; continuing with cached data",
+                )
+
             # 1) Always fetch the lightweight FULL device list using native async API
             all_devices = await self.api.async_get_basic_device_list()
 
             # Success path: if we were in an auth error state, clear it now.
             self._set_auth_state(failed=False)
+            self._set_api_status(ApiStatus.OK)
 
             all_devices = all_devices or []
 
@@ -1560,15 +1734,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             raise
         except ConfigEntryAuthFailed as auth_exc:
             # Surface up to HA to trigger re-auth flow; create Repairs issue & flag before bubbling up.
-            self._set_auth_state(failed=True, reason=f"Auth failed while fetching device list: {auth_exc}")
+            reason = self._short_error_message(auth_exc)
+            self._set_api_status(ApiStatus.REAUTH, reason=reason)
+            self._set_auth_state(
+                failed=True,
+                reason=f"Auth failed while fetching device list: {reason}",
+            )
+            await self._async_start_reauth_flow()
             raise
-        except UpdateFailed:
-            # Let pre-wrapped UpdateFailed bubble as-is
+        except UpdateFailed as update_err:
+            # Let pre-wrapped UpdateFailed bubble as-is after updating status
+            self._set_api_status(
+                ApiStatus.ERROR,
+                reason=self._short_error_message(update_err),
+            )
             raise
         except Exception as exc:
             # Record and raise as UpdateFailed per coordinator contract
             self.note_error(exc, where="_async_update_data")
             message = self._short_error_message(exc)
+            self._set_api_status(ApiStatus.ERROR, reason=message)
             raise UpdateFailed(
                 f"Unexpected error during coordinator update: {message}"
             ) from exc
@@ -2370,6 +2555,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             return
 
         wall_now = time.time()
+        self._set_fcm_status(FcmStatus.CONNECTED)
         if reset_baseline:
             self._last_poll_mono = time.monotonic()  # optional: reset poll timer
 
@@ -2457,6 +2643,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._push_cooldown_until = time.monotonic() + cooldown_s
         self._push_ready_memo = False
         _LOGGER.debug("Entering push cooldown for %ss after transport failure", cooldown_s)
+        self._set_fcm_status(
+            FcmStatus.DEGRADED,
+            reason=f"Push transport recovering from error (cooldown {cooldown_s}s)",
+        )
 
     def can_play_sound(self, device_id: str) -> bool:
         """Return True if 'Play Sound' should be enabled for the device.
