@@ -390,6 +390,7 @@ async def async_get_adm_token(
         raise RuntimeError("ADM token generation failed without a captured exception.")
     finally:
         if fallback_active:
+            should_restore = True
             try:
                 current_method = await cache.get(DATA_AUTH_METHOD)
             except Exception as err:  # noqa: BLE001
@@ -399,13 +400,23 @@ async def async_get_adm_token(
                     _clip(err),
                 )
             else:
-                if current_method == _AUTH_METHOD_INDIVIDUAL_TOKENS:
-                    _LOGGER.debug(
-                        "Restoring auth_method to '%s' after OAuth fallback for %s.",
-                        (original_auth_method or "<unset>"),
-                        _mask_email(user),
-                    )
+                if current_method == original_auth_method:
+                    should_restore = False
+
+            if should_restore:
+                _LOGGER.debug(
+                    "Restoring auth_method to '%s' after OAuth fallback for %s.",
+                    (original_auth_method or "<unset>"),
+                    _mask_email(user),
+                )
+                try:
                     await cache.set(DATA_AUTH_METHOD, original_auth_method)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug(
+                        "Failed to restore auth_method after OAuth fallback for %s: %s",
+                        _mask_email(user),
+                        _clip(err),
+                    )
 
 
 # --- Functions required by config_flow.py (isolated, no global cache touch) ---
