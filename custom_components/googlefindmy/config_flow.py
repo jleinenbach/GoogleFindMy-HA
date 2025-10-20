@@ -632,11 +632,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                     errors["base"] = "cannot_connect"
                 else:
+                    auth_method = _AUTH_METHOD_INDIVIDUAL
                     self._auth_data = {
-                        DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
                         CONF_OAUTH_TOKEN: chosen,
                         CONF_GOOGLE_EMAIL: email,
                     }
+                    if isinstance(chosen, str) and chosen.startswith("aas_et/"):
+                        auth_method = _AUTH_METHOD_SECRETS
+                        self._auth_data[DATA_AAS_TOKEN] = chosen
+                    else:
+                        self._auth_data.pop(DATA_AAS_TOKEN, None)
+                    self._auth_data[DATA_AUTH_METHOD] = auth_method
                     self._auth_data.pop(DATA_SECRET_BUNDLE, None)
                     return await self.async_step_device_selection()
 
