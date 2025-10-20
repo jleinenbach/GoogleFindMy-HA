@@ -431,6 +431,61 @@ def test_async_get_adm_token_oauth_fallback_failure(monkeypatch: pytest.MonkeyPa
     asyncio.run(_exercise())
 
 
+def test_async_get_adm_token_oauth_fallback_not_reinvoked_after_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient failure after OAuth fallback must not trigger a second fallback."""
+
+    async def _exercise() -> None:
+        user = "user@example.com"
+        attempts: list[int] = []
+        sleep_durations: list[float] = []
+
+        async def fake_generate(username: str, *, cache: _DummyTokenCache) -> str:
+            attempts.append(1)
+            idx = len(attempts)
+            assert username == user
+            if idx == 1:
+                raise InvalidAasTokenError("stale AAS")
+            if idx == 2:
+                raise RuntimeError("temporary failure")
+            if idx == 3:
+                raise InvalidAasTokenError("still invalid")
+            raise AssertionError("Unexpected additional ADM token generation attempt")
+
+        async def fake_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+
+        monkeypatch.setattr(adm_token_retrieval, "_generate_adm_token", fake_generate)
+        monkeypatch.setattr(adm_token_retrieval.asyncio, "sleep", fake_sleep)
+
+        cache = _DummyTokenCache(
+            {
+                DATA_AUTH_METHOD: "secrets_json",
+                DATA_AAS_TOKEN: "aas_et/OLD",
+                CONF_OAUTH_TOKEN: "oauth-token",
+            }
+        )
+
+        with pytest.raises(InvalidAasTokenError):
+            await adm_token_retrieval.async_get_adm_token(
+                user,
+                retries=2,
+                cache=cache,
+            )
+
+        assert len(attempts) == 3
+        assert sleep_durations == [2.0]
+
+        auth_method_writes = cache.values_for(DATA_AUTH_METHOD)
+        assert auth_method_writes.count(adm_token_retrieval._AUTH_METHOD_INDIVIDUAL_TOKENS) == 1
+        assert auth_method_writes[-1] == "secrets_json"
+        assert cache._data.get(DATA_AUTH_METHOD) == "secrets_json"
+        assert cache._data.get(CONF_OAUTH_TOKEN) == "oauth-token"
+
+    asyncio.run(_exercise())
+
+
 def test_async_get_adm_token_oauth_path_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """OAuth-configured entries must not attempt a fallback on auth errors."""
 

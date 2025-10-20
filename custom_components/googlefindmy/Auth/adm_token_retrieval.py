@@ -428,7 +428,6 @@ async def async_get_adm_token(
                     )
                 fallback_auth_method_overridden = False
                 fallback_replaced_auth_method = None
-            tried_oauth_fallback = False
 
             sleep_s = backoff * (2 ** attempt)
             _LOGGER.info(
