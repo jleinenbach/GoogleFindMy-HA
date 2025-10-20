@@ -1160,20 +1160,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         if not callable(fn):
             return
 
-        try:
-            if asyncio.iscoroutinefunction(fn):
+        def _invoke() -> None:
+            try:
                 result = fn()
                 if inspect.isawaitable(result):
                     self.hass.async_create_task(result, name=task_name)
-                return
+            except Exception as err:
+                _LOGGER.debug(
+                    "async_request_refresh dispatch failed (%s): %s", log_context, err
+                )
 
-            result = fn()
-            if inspect.isawaitable(result):
-                self.hass.async_create_task(result, name=task_name)
-        except Exception as err:
-            _LOGGER.debug(
-                "async_request_refresh dispatch failed (%s): %s", log_context, err
-            )
+        if self._is_on_hass_loop():
+            _invoke()
+        else:
+            self._run_on_hass_loop(_invoke)
 
     def _schedule_short_retry(self, delay_s: float = 5.0) -> None:
         """Schedule a short, coalesced refresh instead of shifting the poll baseline.

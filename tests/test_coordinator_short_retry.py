@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Any, Callable
+import threading
+from typing import Any, Callable, Coroutine
 from unittest.mock import AsyncMock
 
 import pytest
@@ -139,3 +140,57 @@ def test_short_retry_dispatches_refresh_task(
     assert name == f"{DOMAIN}.short_retry_refresh"
     assert getattr(coro, "cr_code", None) is coordinator.async_request_refresh.__code__
     assert refresh_calls == ["called"]
+
+
+def test_dispatch_async_request_refresh_marshals_to_loop_thread(
+    coordinator: GoogleFindMyCoordinator,
+) -> None:
+    """Dispatch from a worker thread runs async_create_task on the loop thread."""
+
+    loop = coordinator.hass.loop
+    loop_thread_id = threading.get_ident()
+
+    event = asyncio.Event()
+    coroutine_threads: list[int] = []
+    call_threads: list[int] = []
+    call_count = 0
+
+    async def _refresh_body() -> None:
+        coroutine_threads.append(threading.get_ident())
+        event.set()
+
+    def _async_request_refresh() -> Coroutine[Any, Any, None]:
+        nonlocal call_count
+        call_count += 1
+        return _refresh_body()
+
+    coordinator.async_request_refresh = _async_request_refresh
+
+    original_async_create_task = coordinator.hass.async_create_task
+
+    def _wrapped_async_create_task(coro, *, name: str | None = None):
+        call_threads.append(threading.get_ident())
+        return original_async_create_task(coro, name=name)
+
+    coordinator.hass.async_create_task = _wrapped_async_create_task
+
+    def _worker() -> None:
+        coordinator._dispatch_async_request_refresh(
+            task_name=f"{DOMAIN}.thread_refresh",
+            log_context="thread-test",
+        )
+
+    thread = threading.Thread(target=_worker)
+    thread.start()
+    thread.join()
+
+    loop.run_until_complete(asyncio.wait_for(event.wait(), timeout=1))
+    loop.run_until_complete(asyncio.sleep(0))
+
+    assert call_count == 1
+    assert call_threads == [loop_thread_id]
+    assert coroutine_threads == [loop_thread_id]
+    assert coordinator.hass.created
+    coro, name = coordinator.hass.created[-1]
+    assert name == f"{DOMAIN}.thread_refresh"
+    assert getattr(coro, "cr_code", None) is _refresh_body.__code__
