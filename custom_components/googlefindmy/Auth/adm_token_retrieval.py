@@ -67,6 +67,7 @@ _LOGGER = logging.getLogger(__name__)
 _ANDROID_ID: int = 0x38918A453D071993
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 _APP_ID: str = "com.google.android.apps.adm"
+_AUTH_METHOD_INDIVIDUAL_TOKENS = "individual_tokens"
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +170,7 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
         raise ValueError("TokenCache instance is required for multi-account safety.")
 
     auth_method = await cache.get(DATA_AUTH_METHOD)
-    use_oauth_provider = auth_method == "individual_tokens"
+    use_oauth_provider = auth_method == _AUTH_METHOD_INDIVIDUAL_TOKENS
 
     aas_token_direct: Optional[str] = None
     aas_provider: Optional[Callable[[], Awaitable[str]]] = None
@@ -276,6 +277,8 @@ async def async_get_adm_token(
     last_exc: Optional[Exception] = None
     attempts = max(1, retries + 1)
     tried_oauth_fallback = False
+    fallback_auth_method_overridden = False
+    fallback_replaced_auth_method: str | None = None
     original_auth_method = await cache.get(DATA_AUTH_METHOD)
 
     for attempt in range(attempts):
@@ -292,7 +295,7 @@ async def async_get_adm_token(
             if not await cache.get(probe_key):
                 await cache.set(probe_key, 3)
 
-            if tried_oauth_fallback:
+            if fallback_auth_method_overridden:
                 try:
                     current_method = await cache.get(DATA_AUTH_METHOD)
                 except Exception as err:  # noqa: BLE001
@@ -302,13 +305,18 @@ async def async_get_adm_token(
                         _clip(err),
                     )
                     current_method = None
-                if current_method != original_auth_method:
+                if current_method == _AUTH_METHOD_INDIVIDUAL_TOKENS:
                     _LOGGER.debug(
                         "Resetting auth_method to '%s' after successful OAuth fallback for %s.",
-                        original_auth_method or "<unset>",
+                        (fallback_replaced_auth_method or original_auth_method or "<unset>"),
                         _mask_email(user),
                     )
-                    await cache.set(DATA_AUTH_METHOD, original_auth_method)
+                    await cache.set(
+                        DATA_AUTH_METHOD,
+                        fallback_replaced_auth_method or original_auth_method,
+                    )
+                fallback_auth_method_overridden = False
+                fallback_replaced_auth_method = None
 
             return token
 
@@ -331,7 +339,7 @@ async def async_get_adm_token(
             except Exception:  # noqa: BLE001
                 pass
 
-            is_originally_aas = original_auth_method != "individual_tokens"
+            is_originally_aas = original_auth_method != _AUTH_METHOD_INDIVIDUAL_TOKENS
             if is_originally_aas and not tried_oauth_fallback:
                 oauth_token = await cache.get(CONF_OAUTH_TOKEN)
                 if (
@@ -345,13 +353,26 @@ async def async_get_adm_token(
                     )
                     tried_oauth_fallback = True
                     try:
-                        await cache.set(DATA_AUTH_METHOD, "individual_tokens")
+                        fallback_replaced_auth_method = await cache.get(DATA_AUTH_METHOD)
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.debug(
+                            "Failed to read auth_method before OAuth fallback on %s: %s",
+                            _mask_email(user),
+                            _clip(err),
+                        )
+                        fallback_replaced_auth_method = None
+                    try:
+                        await cache.set(
+                            DATA_AUTH_METHOD, _AUTH_METHOD_INDIVIDUAL_TOKENS
+                        )
                     except Exception as err:  # noqa: BLE001
                         _LOGGER.debug(
                             "Failed to switch auth_method for OAuth fallback on %s: %s",
                             _mask_email(user),
                             _clip(err),
                         )
+                    else:
+                        fallback_auth_method_overridden = True
                     continue
 
                 _LOGGER.error(
@@ -385,7 +406,7 @@ async def async_get_adm_token(
             except Exception:
                 pass  # best-effort
 
-            if tried_oauth_fallback:
+            if fallback_auth_method_overridden:
                 try:
                     current_method = await cache.get(DATA_AUTH_METHOD)
                 except Exception as err:  # noqa: BLE001
@@ -395,14 +416,19 @@ async def async_get_adm_token(
                         _clip(err),
                     )
                     current_method = None
-                if current_method != original_auth_method:
+                if current_method == _AUTH_METHOD_INDIVIDUAL_TOKENS:
                     _LOGGER.debug(
                         "Resetting auth_method to '%s' after transient failure for %s.",
-                        original_auth_method or "<unset>",
+                        (fallback_replaced_auth_method or original_auth_method or "<unset>"),
                         _mask_email(user),
                     )
-                    await cache.set(DATA_AUTH_METHOD, original_auth_method)
-                tried_oauth_fallback = False
+                    await cache.set(
+                        DATA_AUTH_METHOD,
+                        fallback_replaced_auth_method or original_auth_method,
+                    )
+                fallback_auth_method_overridden = False
+                fallback_replaced_auth_method = None
+            tried_oauth_fallback = False
 
             sleep_s = backoff * (2 ** attempt)
             _LOGGER.info(
@@ -424,13 +450,18 @@ async def async_get_adm_token(
             _clip(err),
         )
         current_method = None
-    if current_method != original_auth_method:
+    if fallback_auth_method_overridden and current_method == _AUTH_METHOD_INDIVIDUAL_TOKENS:
         _LOGGER.debug(
             "Resetting auth_method to '%s' after failed ADM token retrieval for %s.",
-            original_auth_method or "<unset>",
+            (fallback_replaced_auth_method or original_auth_method or "<unset>"),
             _mask_email(user),
         )
-        await cache.set(DATA_AUTH_METHOD, original_auth_method)
+        await cache.set(
+            DATA_AUTH_METHOD,
+            fallback_replaced_auth_method or original_auth_method,
+        )
+        fallback_auth_method_overridden = False
+        fallback_replaced_auth_method = None
 
     if last_exc is not None:
         raise last_exc
