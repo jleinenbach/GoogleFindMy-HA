@@ -311,13 +311,18 @@ class FcmRegister:
             "Content-Type": "application/x-www-form-urlencoded",
         }
 
-        sender_candidates: list[str] = [GCM_SERVER_KEY_B64]
+        sender_candidates: list[str] = []
         if (
             isinstance(self.config.messaging_sender_id, str)
             and self.config.messaging_sender_id
-            and self.config.messaging_sender_id not in sender_candidates
         ):
             sender_candidates.append(self.config.messaging_sender_id)
+
+        if GCM_SERVER_KEY_B64 not in sender_candidates:
+            sender_candidates.append(GCM_SERVER_KEY_B64)
+
+        if not sender_candidates:
+            sender_candidates = [GCM_SERVER_KEY_B64]
 
         body = {
             "app": self.config.chrome_id,

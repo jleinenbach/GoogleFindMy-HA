@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+# tests/test_fcm_register.py
+
 import asyncio
 import logging
+
 import types
 from dataclasses import dataclass
 from typing import Any
@@ -52,8 +55,8 @@ class _FakeSession:
         return self._responses.pop(0)
 
 
-def test_gcm_register_uses_server_key_sender_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The initial request uses the legacy server key sender value."""
+def test_gcm_register_uses_numeric_sender_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The initial request uses the configured numeric sender value."""
 
     responses = [
         _FakeResponse(200, "token=abc123", {"Content-Type": "text/plain"}),
@@ -76,7 +79,7 @@ def test_gcm_register_uses_server_key_sender_by_default(monkeypatch: pytest.Monk
     result = asyncio.run(register.gcm_register({"androidId": 1, "securityToken": 2}))
 
     assert result["token"] == "abc123"
-    assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
+    assert session.calls[0]["data"]["sender"] == "1234567890123"
 
 
 def test_gcm_register_html_retry_uses_legacy_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,7 +114,7 @@ def test_gcm_register_html_retry_uses_legacy_once(monkeypatch: pytest.MonkeyPatc
         GCM_REGISTER3_URL,
         GCM_REGISTER_URL,
     ]
-    assert all(call["data"]["sender"] == GCM_SERVER_KEY_B64 for call in session.calls)
+    assert all(call["data"]["sender"] == "1234567890123" for call in session.calls)
 
 
 def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,8 +145,8 @@ def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(session.calls) == 2
 
 
-def test_gcm_register_falls_back_to_numeric_sender(monkeypatch: pytest.MonkeyPatch) -> None:
-    """PHONE_REGISTRATION_ERROR triggers a second attempt using the numeric sender."""
+def test_gcm_register_falls_back_to_server_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PHONE_REGISTRATION_ERROR triggers a second attempt using the legacy server key."""
 
     responses = [
         _FakeResponse(200, "Error=PHONE_REGISTRATION_ERROR", {"Content-Type": "text/plain"}),
@@ -168,8 +171,8 @@ def test_gcm_register_falls_back_to_numeric_sender(monkeypatch: pytest.MonkeyPat
 
     assert result["token"] == "xyz"
     assert len(session.calls) == 2
-    assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
-    assert session.calls[1]["data"]["sender"] == "1234567890123"
+    assert session.calls[0]["data"]["sender"] == "1234567890123"
+    assert session.calls[1]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
 def test_checkin_or_register_reuses_cached_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
