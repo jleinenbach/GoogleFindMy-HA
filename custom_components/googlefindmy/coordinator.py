@@ -2124,10 +2124,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
             # No cache -> Registry + State (cheap, non-blocking)
             dev_id = entry["device_id"]
-            # Support namespaced unique_ids (preferred) and legacy as fallback
+            # Support entry-scoped unique_ids (preferred) and legacy forms as fallback
             entry_id = self._entry_id()
-            uid_candidates = []
+            uid_candidates: List[str] = []
             if entry_id:
+                uid_candidates.append(f"{entry_id}:{dev_id}")
                 uid_candidates.append(f"{DOMAIN}_{entry_id}_{dev_id}")
             uid_candidates.append(f"{DOMAIN}_{dev_id}")  # legacy
 
@@ -2138,7 +2139,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     break
             if not entity_id:
                 _LOGGER.debug(
-                    "No entity registry entry for device '%s' (unique_id candidates=%s); skipping any fallback.",
+                    "No entity registry entry for device '%s'; checked unique_id formats %s. "
+                    "Skipping state/history fallback because tracker cache is unavailable.",
                     entry["name"],
                     uid_candidates,
                 )
