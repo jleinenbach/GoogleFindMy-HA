@@ -16,6 +16,7 @@ from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
+    DATA_AUTH_METHOD,
     DOMAIN,
 )
 
@@ -95,6 +96,7 @@ def test_manual_reauth_clears_cached_aas_and_mints_new_token(monkeypatch: pytest
         await cache.async_set_cached_value(username_string, "user@example.com")
         await cache.async_set_cached_value(CONF_OAUTH_TOKEN, "oauth-old")
         await cache.async_set_cached_value(DATA_AAS_TOKEN, "aas_et/STABLE")
+        await cache.async_set_cached_value(DATA_AUTH_METHOD, "individual_tokens")
 
         entry = _DummyEntry(
             entry_id="entry-1",
@@ -102,6 +104,7 @@ def test_manual_reauth_clears_cached_aas_and_mints_new_token(monkeypatch: pytest
                 CONF_GOOGLE_EMAIL: "user@example.com",
                 CONF_OAUTH_TOKEN: "oauth-old",
                 DATA_AAS_TOKEN: "aas_et/STABLE",
+                DATA_AUTH_METHOD: "individual_tokens",
             },
             cache=cache,
         )
@@ -120,12 +123,14 @@ def test_manual_reauth_clears_cached_aas_and_mints_new_token(monkeypatch: pytest
         entry.data = {
             CONF_GOOGLE_EMAIL: "user@example.com",
             CONF_OAUTH_TOKEN: new_oauth,
+            DATA_AUTH_METHOD: "individual_tokens",
         }
 
         # Simulate reload storing the new OAuth token and keeping AAS cleared.
         await cache.async_set_cached_value(CONF_OAUTH_TOKEN, new_oauth)
         await cache.async_set_cached_value(username_string, entry.data[CONF_GOOGLE_EMAIL])
         await cache.async_set_cached_value(DATA_AAS_TOKEN, None)
+        await cache.async_set_cached_value(DATA_AUTH_METHOD, "individual_tokens")
 
         assert await cache.get(DATA_AAS_TOKEN) is None
         assert await cache.get(CONF_OAUTH_TOKEN) == new_oauth
@@ -136,8 +141,16 @@ def test_manual_reauth_clears_cached_aas_and_mints_new_token(monkeypatch: pytest
             observed["oauth_token"] = oauth_token
             return {"Token": "aas-new", "Email": username}
 
-        async def _fake_request_token(username: str, service: str, *, cache, aas_provider):
+        async def _fake_request_token(
+            username: str,
+            service: str,
+            *,
+            cache,
+            aas_token=None,
+            aas_provider,
+        ):
             observed["service"] = service
+            assert aas_token is None
             observed["aas_token"] = await aas_provider()
             return "adm-new"
 

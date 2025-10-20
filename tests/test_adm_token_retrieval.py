@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import pytest
 
 from custom_components.googlefindmy.Auth import adm_token_retrieval, token_retrieval
+from custom_components.googlefindmy.const import DATA_AAS_TOKEN, DATA_AUTH_METHOD
 
 
 class _DummyTokenCache:
@@ -26,6 +27,131 @@ class _DummyTokenCache:
             self._data.pop(name, None)
         else:
             self._data[name] = value
+
+
+def test_generate_adm_token_reuses_cached_aas(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Secrets-based auth must reuse the cached AAS token without provider calls."""
+
+    async def _exercise() -> None:
+        cache = _DummyTokenCache(
+            {
+                DATA_AUTH_METHOD: "secrets_json",
+                DATA_AAS_TOKEN: "aas_et/MASTER",
+            }
+        )
+
+        provider_called = False
+
+        async def _fail_provider(*_: Any, **__: Any) -> str:
+            nonlocal provider_called
+            provider_called = True
+            return "aas_et/SHOULD_NOT_BE_USED"
+
+        async def _fake_request_token(
+            username: str,
+            service: str,
+            *,
+            cache: Any,
+            aas_token: str | None,
+            aas_provider: Callable[[], Awaitable[str]] | None,
+        ) -> str:
+            assert username == "user@example.com"
+            assert service.endswith("android_device_manager")
+            assert aas_token == "aas_et/MASTER"
+            assert aas_provider is None
+            return "adm-token"
+
+        monkeypatch.setattr(adm_token_retrieval, "async_get_aas_token", _fail_provider)
+        monkeypatch.setattr(adm_token_retrieval, "async_request_token", _fake_request_token)
+
+        token = await adm_token_retrieval._generate_adm_token("user@example.com", cache=cache)
+
+        assert token == "adm-token"
+        assert not provider_called
+
+    asyncio.run(_exercise())
+
+
+def test_generate_adm_token_falls_back_to_provider_when_aas_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Secrets-based auth should fall back to the OAuth provider if AAS cache is empty."""
+
+    async def _exercise() -> None:
+        cache = _DummyTokenCache({DATA_AUTH_METHOD: "secrets_json"})
+
+        provider_calls = 0
+
+        async def _fake_provider(*, cache: Any) -> str:
+            nonlocal provider_calls
+            provider_calls += 1
+            assert isinstance(cache, _DummyTokenCache)
+            return "aas_et/FALLBACK"
+
+        async def _fake_request_token(
+            username: str,
+            service: str,
+            *,
+            cache: Any,
+            aas_token: str | None,
+            aas_provider: Callable[[], Awaitable[str]] | None,
+        ) -> str:
+            assert username == "user@example.com"
+            assert service.endswith("android_device_manager")
+            assert aas_token is None
+            assert callable(aas_provider)
+            token = await aas_provider()
+            assert token == "aas_et/FALLBACK"
+            return "adm-token"
+
+        monkeypatch.setattr(adm_token_retrieval, "async_get_aas_token", _fake_provider)
+        monkeypatch.setattr(adm_token_retrieval, "async_request_token", _fake_request_token)
+
+        token = await adm_token_retrieval._generate_adm_token("user@example.com", cache=cache)
+
+        assert token == "adm-token"
+        assert provider_calls == 1
+
+    asyncio.run(_exercise())
+
+
+def test_generate_adm_token_uses_provider_for_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OAuth-based auth must route through the async AAS provider."""
+
+    async def _exercise() -> None:
+        cache = _DummyTokenCache({DATA_AUTH_METHOD: "individual_tokens"})
+
+        provider_calls = 0
+
+        async def _fake_provider(*, cache: Any) -> str:
+            nonlocal provider_calls
+            provider_calls += 1
+            assert isinstance(cache, _DummyTokenCache)
+            return "aas_et/NEW"
+
+        async def _fake_request_token(
+            username: str,
+            service: str,
+            *,
+            cache: Any,
+            aas_token: str | None,
+            aas_provider: Callable[[], Awaitable[str]] | None,
+        ) -> str:
+            assert aas_token is None
+            assert callable(aas_provider)
+            result = await aas_provider()
+            assert result == "aas_et/NEW"
+            return "adm-token"
+
+        monkeypatch.setattr(adm_token_retrieval, "async_get_aas_token", _fake_provider)
+        monkeypatch.setattr(adm_token_retrieval, "async_request_token", _fake_request_token)
+
+        token = await adm_token_retrieval._generate_adm_token("user@example.com", cache=cache)
+
+        assert token == "adm-token"
+        assert provider_calls == 1
+
+    asyncio.run(_exercise())
 
 
 def test_async_request_token_uses_cached_android_id(monkeypatch: pytest.MonkeyPatch) -> None:
