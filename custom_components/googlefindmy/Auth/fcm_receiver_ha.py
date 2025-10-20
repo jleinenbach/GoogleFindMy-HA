@@ -960,3 +960,144 @@ class FcmReceiverHA:
                     return tok
         return None
 
+    # -------------------- Manual locate registration --------------------
+
+    async def async_register_for_location_updates(
+        self, canonic_id: str, callback: Callable[[str, str], None]
+    ) -> Optional[str]:
+        """Register a manual locate callback and ensure an entry token is available."""
+
+        if not isinstance(canonic_id, str) or not canonic_id:
+            _LOGGER.warning("Manual locate registration skipped: missing canonical id")
+            return None
+        if not callable(callback):
+            _LOGGER.error(
+                "Manual locate registration for %s rejected: callback is not callable",
+                canonic_id[:8],
+            )
+            return None
+
+        entry_id: Optional[str] = None
+        cache = None
+        fallback_entry: Optional[str] = None
+        fallback_cache = None
+        display_entry: Optional[str] = None
+        display_cache: Any = None
+
+        for coordinator in self.coordinators.copy():
+            entry = getattr(coordinator, "config_entry", None)
+            candidate_entry = getattr(entry, "entry_id", None) if entry is not None else None
+            if not candidate_entry:
+                continue
+
+            candidate_cache = self._entry_caches.get(candidate_entry)
+            if candidate_cache is None:
+                candidate_cache = getattr(coordinator, "cache", None) or getattr(
+                    coordinator, "_cache", None
+                )
+                if candidate_cache is not None:
+                    self._entry_caches[candidate_entry] = candidate_cache
+
+            present = False
+            try:
+                present_fn = getattr(coordinator, "is_device_present", None)
+                if callable(present_fn):
+                    present = bool(present_fn(canonic_id))
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "[entry=%s] Manual locate presence check failed for %s: %s",
+                    candidate_entry,
+                    canonic_id[:8],
+                    err,
+                )
+
+            has_display = False
+            if not present:
+                try:
+                    name_fn = getattr(coordinator, "get_device_display_name", None)
+                    if callable(name_fn):
+                        has_display = bool(name_fn(canonic_id))
+                except Exception:
+                    has_display = False
+
+            if present:
+                entry_id = candidate_entry
+                cache = candidate_cache
+                break
+
+            if has_display:
+                display_entry = candidate_entry
+                display_cache = candidate_cache
+
+            if fallback_entry is None:
+                fallback_entry = candidate_entry
+                fallback_cache = candidate_cache
+
+        if entry_id is None and display_entry is not None:
+            entry_id = display_entry
+            cache = display_cache
+
+        if entry_id is None and fallback_entry is not None:
+            entry_id = fallback_entry
+            cache = fallback_cache
+
+        if entry_id is None:
+            _LOGGER.warning(
+                "Manual locate registration skipped for %s: no coordinator available",
+                canonic_id[:8],
+            )
+            return None
+
+        self.location_update_callbacks[canonic_id] = callback
+
+        token: Optional[str] = None
+        try:
+            client = await self._ensure_client_for_entry(entry_id, cache)
+            if client is None:
+                _LOGGER.warning(
+                    "[entry=%s] Manual locate registration failed: client unavailable",
+                    entry_id,
+                )
+                return None
+
+            await self._start_supervisor_for_entry(entry_id, cache)
+
+            token = self.get_fcm_token(entry_id)
+            if not token:
+                ok_reg = await self._register_for_fcm_entry(entry_id)
+                if not ok_reg:
+                    _LOGGER.warning(
+                        "[entry=%s] Manual locate registration failed: token request rejected",
+                        entry_id,
+                    )
+                    return None
+                token = self.get_fcm_token(entry_id)
+
+            if not token:
+                _LOGGER.warning(
+                    "[entry=%s] Manual locate registration failed: token unavailable",
+                    entry_id,
+                )
+                return None
+
+            self._update_token_routing(token, {entry_id})
+            await self._persist_routing_token(entry_id, token)
+            _LOGGER.info(
+                "[entry=%s] Manual locate registration ready for %s",
+                entry_id,
+                canonic_id[:8],
+            )
+            return token
+        finally:
+            if not token:
+                self.location_update_callbacks.pop(canonic_id, None)
+
+    async def async_unregister_for_location_updates(self, canonic_id: str) -> None:
+        """Remove a manual locate callback if registered."""
+
+        if self.location_update_callbacks.pop(canonic_id, None) is not None:
+            _LOGGER.debug(
+                "Manual locate callback removed for %s",
+                canonic_id[:8],
+            )
+
