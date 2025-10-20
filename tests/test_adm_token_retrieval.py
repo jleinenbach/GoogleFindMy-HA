@@ -385,6 +385,58 @@ def test_async_get_adm_token_oauth_fallback_success(monkeypatch: pytest.MonkeyPa
     asyncio.run(_exercise())
 
 
+def test_async_get_adm_token_oauth_fallback_success_after_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OAuth fallback must restore the auth method even after transient retries."""
+
+    async def _exercise() -> None:
+        user = "user@example.com"
+        attempts: list[int] = []
+        sleep_durations: list[float] = []
+
+        async def fake_generate(username: str, *, cache: _DummyTokenCache) -> str:
+            attempts.append(1)
+            assert username == user
+            if len(attempts) == 1:
+                raise InvalidAasTokenError("stale AAS")
+            if len(attempts) == 2:
+                raise RuntimeError("temporary failure")
+            assert cache._data.get(DATA_AUTH_METHOD) == "individual_tokens"
+            return "adm-success"
+
+        async def fake_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+
+        monkeypatch.setattr(adm_token_retrieval, "_generate_adm_token", fake_generate)
+        monkeypatch.setattr(adm_token_retrieval.asyncio, "sleep", fake_sleep)
+
+        cache = _DummyTokenCache(
+            {
+                DATA_AUTH_METHOD: "secrets_json",
+                DATA_AAS_TOKEN: "aas_et/OLD",
+                CONF_OAUTH_TOKEN: "oauth-token",
+            }
+        )
+
+        token = await adm_token_retrieval.async_get_adm_token(
+            user,
+            retries=2,
+            backoff=1.0,
+            cache=cache,
+        )
+
+        assert token == "adm-success"
+        assert len(attempts) == 3
+        assert sleep_durations == [2.0]
+        assert cache._data.get(DATA_AUTH_METHOD) == "secrets_json"
+        auth_method_writes = cache.values_for(DATA_AUTH_METHOD)
+        assert auth_method_writes.count("individual_tokens") == 1
+        assert auth_method_writes[-1] == "secrets_json"
+
+    asyncio.run(_exercise())
+
+
 def test_async_get_adm_token_oauth_fallback_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """If both AAS and OAuth paths fail, the last auth error must surface."""
 
