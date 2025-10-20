@@ -157,27 +157,17 @@ class FcmRegister:
 
     @staticmethod
     def _looks_like_html(text: str) -> bool:
-        """Heuristic check to decide if a response body is HTML (e.g., 404 page).
-
-        Notes:
-            We intentionally keep this robust because Google may return a branded
-            HTML error page with status 200. We check for:
-            - Leading '<!doctype' or '<html'
-            - Presence of both '<html' and '<title>'
-            - Known strings from Google error pages
-        """
+        """Heuristically detect whether a response body contains HTML."""
         if not text:
             return False
-        t = text.lstrip()
-        head = t[:64].lower()
+        stripped = text.lstrip()
+        head = stripped[:64].lower()
         if head.startswith("<!doctype") or head.startswith("<html"):
             return True
-        tl = t.lower()
-        if "<html" in tl and "<title" in tl:
+        lowered = stripped.lower()
+        if "<html" in lowered and "<title" in lowered:
             return True
-        if "error 404" in tl or "that’s an error" in tl or "that's an error" in tl:
-            return True
-        return False
+        return "error 404" in lowered or "that’s an error" in lowered or "that's an error" in lowered
 
     # ---------------------------------------------------------------------
     # GCM Check-in
@@ -301,36 +291,38 @@ class FcmRegister:
         options: dict[str, Any],
         retries: int = 8,
     ) -> dict[str, str] | None:
-        """
-        Obtain a GCM token with retries and exponential backoff.
+        """Obtain a GCM token with retries.
 
         Args:
-            options: A dict containing 'androidId' and 'securityToken'.
-            retries: The number of retry attempts.
+            options: Dict containing ``androidId`` and ``securityToken`` from the
+                check-in response.
+            retries: Number of attempts before giving up.
 
         Returns:
-            A minimal credential dict with token, app_id, etc., or None on failure.
-            returns {"token": "...", "gcm_app_id": 123123, "android_id":123123,
-                "security_token": 123123}
+            Dict with token/app_id/android_id/security_token on success, otherwise
+            ``None``.
         """
         gcm_app_id = f"wp:{self.config.bundle_id}#{uuid.uuid4()}"
         android_id = options["androidId"]
         security_token = options["securityToken"]
 
-        # NB: we purposefully do NOT send any 'Accept' header here.
         headers = {
             "Authorization": f"AidLogin {android_id}:{security_token}",
             "Content-Type": "application/x-www-form-urlencoded",
         }
 
-        # Sender fallback order: prefer the configured numeric project number when
-        # available (behaviour shipped in GoogleFindMy-HA), but gracefully fall back
-        # to the legacy server key when Google refuses to treat us as a "phone".
         sender_candidates: list[str] = []
-        if isinstance(self.config.messaging_sender_id, str) and self.config.messaging_sender_id:
+        if (
+            isinstance(self.config.messaging_sender_id, str)
+            and self.config.messaging_sender_id
+        ):
             sender_candidates.append(self.config.messaging_sender_id)
+
         if GCM_SERVER_KEY_B64 not in sender_candidates:
             sender_candidates.append(GCM_SERVER_KEY_B64)
+
+        if not sender_candidates:
+            sender_candidates = [GCM_SERVER_KEY_B64]
 
         body = {
             "app": self.config.chrome_id,
@@ -338,6 +330,7 @@ class FcmRegister:
             "device": android_id,
             "sender": sender_candidates[0],
         }
+
         if self._log_debug_verbose:
             _logger.debug(
                 "GCM Registration request (url=%s): app=%s, X-subtype=%s, device=%s, sender=%s",
@@ -348,131 +341,134 @@ class FcmRegister:
                 body["sender"],
             )
 
-        url = GCM_REGISTER_URL
         last_error: str | Exception | None = None
-        tried_variant = False
-
-        # Non-retryable error codes returned by GCM register body (Error=<CODE>)
-        NON_RETRYABLE = {
-            "AUTHENTICATION_FAILED",
-            "INVALID_PARAMETERS",
-            "INVALID_SENDER",
-            "MISSING_SENDER",
-        }
-
-        attempt = 1
         sender_index = 0
+        attempt = 1
+        use_legacy_next = False
+
         while attempt <= retries:
+            url = GCM_REGISTER3_URL if use_legacy_next else GCM_REGISTER_URL
+            use_legacy_next = False
+
             try:
                 async with self._session.post(
                     url=url,
                     headers=headers,
-                    data=body,  # x-www-form-urlencoded
+                    data=body,
                     timeout=self.CLIENT_TIMEOUT,
                 ) as resp:
-                    response_status = resp.status
-                    content_type = (resp.headers.get("Content-Type") or "").lower()
                     response_text = await resp.text()
-
-                # Detect HTML error pages even when status==200.
-                html_like = ("text/html" in content_type) or self._looks_like_html(response_text)
-
-                if (
-                    (response_status == 404 or html_like)
-                    and url == GCM_REGISTER_URL
-                    and not tried_variant
-                ):
-                    alt = GCM_REGISTER3_URL
-                    _logger.warning(
-                        "GCM register: 404/HTML received at %s (status=%s); toggling endpoint to %s and retrying immediately.",
-                        url,
-                        response_status,
-                        alt,
-                    )
-                    url = alt
-                    tried_variant = True
-                    await asyncio.sleep(0.5)
-                    continue
-
-                # Parse body lines for structured keys
-                token = None
-                error_code = None
-                for line in response_text.splitlines():
-                    k, _, v = line.partition("=")
-                    k = k.strip().lower()
-                    if k == "token":
-                        token = v.strip()
-                    elif k == "error":
-                        error_code = (v or "").strip().upper()
-
-                if token:
-                    success_url_indicator = (
-                        "/c2dm/register3" if tried_variant and url == GCM_REGISTER3_URL else "/c2dm/register"
-                    )
-                    _logger.info("GCM register succeeded via %s", success_url_indicator)
-                    return {
-                        "token": token,
-                        "app_id": gcm_app_id,
-                        "android_id": android_id,
-                        "security_token": security_token,
-                    }
-
-                if error_code:
-                    last_error = f"Error={error_code}"
-                    if (
-                        error_code == "PHONE_REGISTRATION_ERROR"
-                        and sender_index + 1 < len(sender_candidates)
-                    ):
-                        sender_index += 1
-                        body["sender"] = sender_candidates[sender_index]
-                        _logger.warning(
-                            "GCM register error %s encountered; switching sender fallback to %s",
-                            error_code,
-                            "legacy server key" if sender_index else "configured sender",
-                        )
-                        continue
-
-                    if error_code in NON_RETRYABLE or error_code == "PHONE_REGISTRATION_ERROR":
-                        _logger.error(
-                            "GCM register returned non-retryable error at %s: %s — giving up",
-                            url, last_error,
-                        )
-                        return None
-                    _logger.warning(
-                        "GCM register error at %s (attempt %d/%d): %s",
-                        url, attempt, retries, last_error,
-                    )
-                else:
-                    # Unexpected body without token/error
-                    last_error = (
-                        f"Unexpected register response (status={response_status}, "
-                        f"ctype={content_type}): {response_text[:200]}"
-                    )
-                    if html_like:
-                        last_error += " [html]"
-                    _logger.warning(
-                        "GCM register unexpected response at %s (attempt %d/%d): %s",
-                        url, attempt, retries, last_error,
-                    )
-
-            except Exception as e:
-                last_error = e
+                    content_type = resp.headers.get("Content-Type", "").lower()
+                    status = resp.status
+            except Exception as exc:  # network or aiohttp failure
+                last_error = exc
                 _logger.warning(
                     "GCM register request failed at %s (attempt %d/%d): %s",
-                    url, attempt, retries, e,
+                    url,
+                    attempt,
+                    retries,
+                    exc,
+                )
+                if attempt < retries:
+                    await asyncio.sleep(1)
+                attempt += 1
+                continue
+
+            html_like = "text/html" in content_type or self._looks_like_html(response_text)
+
+            if (
+                url == GCM_REGISTER_URL
+                and (status == 404 or html_like)
+                and attempt < retries
+            ):
+                snippet = response_text[:200]
+                last_error = (
+                    f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                )
+                _logger.warning(
+                    "GCM register: 404/HTML received at %s (status=%s); toggling endpoint to %s for next attempt.",
+                    url,
+                    status,
+                    GCM_REGISTER3_URL,
+                )
+                use_legacy_next = True
+                await asyncio.sleep(0.5)
+                attempt += 1
+                continue
+
+            token: str | None = None
+            error_code: str | None = None
+            for line in response_text.splitlines():
+                key, _, value = line.partition("=")
+                lower_key = key.strip().lower()
+                if lower_key == "token":
+                    token = value.strip()
+                    break
+                if lower_key == "error":
+                    error_code = value.strip().upper()
+
+            if token:
+                indicator = "/c2dm/register3" if url == GCM_REGISTER3_URL else "/c2dm/register"
+                _logger.info("GCM register succeeded via %s", indicator)
+                return {
+                    "token": token,
+                    "app_id": gcm_app_id,
+                    "android_id": android_id,
+                    "security_token": security_token,
+                }
+
+            if error_code:
+                last_error = f"Error={error_code}"
+                if (
+                    error_code == "PHONE_REGISTRATION_ERROR"
+                    and sender_index + 1 < len(sender_candidates)
+                ):
+                    sender_index += 1
+                    body["sender"] = sender_candidates[sender_index]
+                    label = (
+                        "legacy server key"
+                        if sender_candidates[sender_index] == GCM_SERVER_KEY_B64
+                        else "configured numeric sender"
+                    )
+                    _logger.warning(
+                        "GCM register error %s encountered; switching sender fallback to %s",
+                        error_code,
+                        label,
+                    )
+                    if attempt < retries:
+                        await asyncio.sleep(1)
+                    attempt += 1
+                    continue
+
+                _logger.warning(
+                    "GCM register error at %s (attempt %d/%d): %s",
+                    url,
+                    attempt,
+                    retries,
+                    last_error,
+                )
+            else:
+                snippet = response_text[:200]
+                if html_like:
+                    snippet += " [html]"
+                last_error = (
+                    f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                )
+                _logger.warning(
+                    "GCM register unexpected response at %s (attempt %d/%d): %s",
+                    url,
+                    attempt,
+                    retries,
+                    last_error,
                 )
 
             if attempt < retries:
-                # Exponential backoff with cap and small jitter (network/transient only)
-                delay = min(1.5 * (2 ** (attempt - 1)), 30.0)
-                delay *= (0.9 + 0.2 * secrets.randbits(4) / 15.0)
-                await asyncio.sleep(delay)
-
+                await asyncio.sleep(1)
             attempt += 1
 
-        msg = f"Unable to complete GCM register after {retries} attempts (last url={url})"
+        msg = f"Unable to complete GCM register after {retries} attempts"
         if isinstance(last_error, Exception):
-            _logger.error("%s", msg, exc_info=last_error)
+            _logger.error(msg, exc_info=last_error)
         else:
             _logger.error("%s, last error was: %s", msg, last_error)
         return None
