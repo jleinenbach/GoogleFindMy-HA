@@ -99,13 +99,23 @@ def _summarize_response(obj: Any) -> str:
     return f"{type(obj).__name__}"
 
 
+_OAUTH_SCOPE_PREFIX = "oauth2:https://www.googleapis.com/auth/"
+
+
 def _normalize_service(service: str) -> str:
-    """Map known aliases to the expected OAuth2 scope (defensive)."""
-    s = (service or "").strip().lower()
-    if s in {"android_device_manager", "adm"}:
-        return "oauth2:https://www.googleapis.com/auth/android_device_manager"
-    # Fallback: allow callers to pass a full scope already
-    return service
+    """Map known aliases to the expected OAuth2 scope suffix (defensive)."""
+
+    cleaned = (service or "").strip()
+    lowered = cleaned.lower()
+
+    if lowered in {"android_device_manager", "adm"}:
+        return "android_device_manager"
+
+    if lowered.startswith(_OAUTH_SCOPE_PREFIX):
+        return cleaned[len(_OAUTH_SCOPE_PREFIX) :]
+
+    # Fallback: allow callers to pass a custom scope suffix unchanged.
+    return cleaned
 
 
 def _is_non_retryable_auth(err: Exception) -> bool:
