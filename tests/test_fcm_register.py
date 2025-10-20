@@ -13,6 +13,7 @@ import pytest
 from custom_components.googlefindmy.Auth.firebase_messaging.const import (
     GCM_REGISTER3_URL,
     GCM_REGISTER_URL,
+    GCM_SERVER_KEY_B64,
 )
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegister,
@@ -113,3 +114,33 @@ def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert result is None
     assert len(session.calls) == 1
+
+
+def test_gcm_register_falls_back_to_server_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PHONE_REGISTRATION_ERROR triggers a second attempt using the server key sender."""
+
+    responses = [
+        _FakeResponse(200, "Error=PHONE_REGISTRATION_ERROR", {"Content-Type": "text/plain"}),
+        _FakeResponse(200, "token=xyz", {"Content-Type": "text/plain"}),
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    result = asyncio.run(register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3))
+
+    assert result["token"] == "xyz"
+    assert len(session.calls) == 2
+    assert session.calls[0]["data"]["sender"] == "1234567890123"
+    assert session.calls[1]["data"]["sender"] == GCM_SERVER_KEY_B64
