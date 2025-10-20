@@ -137,16 +137,29 @@ def test_request_token_uses_supplied_cache(monkeypatch: pytest.MonkeyPatch) -> N
         recorded["cache"] = cache
         return "aas-token"
 
-    def fake_perform_oauth(username: str, aas_token: str, scope: str, play_services: bool) -> str:
-        recorded["oauth_params"] = (username, aas_token, scope, play_services)
+    def fake_perform_oauth(
+        username: str,
+        aas_token: str,
+        scope: str,
+        play_services: bool,
+        *,
+        android_id: int,
+    ) -> str:
+        recorded["oauth_params"] = (username, aas_token, scope, play_services, android_id)
         return "spot-token"
 
     monkeypatch.setattr(token_retrieval, "async_get_aas_token", fake_async_get_aas_token)
     monkeypatch.setattr(token_retrieval, "_perform_oauth_sync", fake_perform_oauth)
 
-    sentinel_cache = object()
+    sentinel_cache = _DummyCache()
     token = token_retrieval.request_token("user@example.com", "spot", cache=sentinel_cache)
 
     assert token == "spot-token"
     assert recorded["cache"] is sentinel_cache
-    assert recorded["oauth_params"] == ("user@example.com", "aas-token", "spot", False)
+    assert recorded["oauth_params"] == (
+        "user@example.com",
+        "aas-token",
+        "spot",
+        False,
+        token_retrieval._ANDROID_ID,
+    )

@@ -51,7 +51,11 @@ from typing import Any, Awaitable, Callable, Optional
 import gpsoauth
 
 # Prefer relative imports inside the package for robustness
-from .token_retrieval import async_request_token, InvalidAasTokenError
+from .token_retrieval import (
+    InvalidAasTokenError,
+    async_request_token,
+    _extract_android_id_from_credentials,
+)
 from .token_cache import TokenCache
 from .username_provider import async_get_username, username_string
 from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
@@ -175,6 +179,36 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
 # Public APIs
 # ---------------------------------------------------------------------------
 
+
+async def _resolve_android_id_for_isolated_flow(
+    *,
+    secrets_bundle: Optional[dict[str, Any]],
+    cache_get: Optional[Callable[[str], Awaitable[Any]]],
+) -> int:
+    """Resolve android_id for isolated exchanges using secrets or flow cache."""
+
+    android_id: int | None = None
+
+    if isinstance(secrets_bundle, dict):
+        android_id = _extract_android_id_from_credentials(secrets_bundle.get("fcm_credentials"))
+
+    if android_id is None and cache_get is not None:
+        try:
+            cached_fcm = await cache_get("fcm_credentials")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Isolated exchange: failed to read cached FCM credentials: %s", _clip(err))
+        else:
+            android_id = _extract_android_id_from_credentials(cached_fcm)
+
+    if android_id is None:
+        _LOGGER.warning(
+            "FCM credentials missing android_id; falling back to static identifier. "
+            "Generate fresh secrets.json if authentication fails."
+        )
+        android_id = _ANDROID_ID
+
+    return android_id
+
 async def async_get_adm_token(
     username: Optional[str] = None,
     *,
@@ -270,13 +304,19 @@ async def async_get_adm_token(
 
 # --- Functions required by config_flow.py (isolated, no global cache touch) ---
 
-async def _perform_oauth_with_provided_aas(username: str, aas_token: str) -> str:
+async def _perform_oauth_with_provided_aas(
+    username: str,
+    aas_token: str,
+    *,
+    android_id: int = _ANDROID_ID,
+) -> str:
     """
     Perform the OAuth exchange with a provided AAS token (used for isolated validation).
 
     Args:
         username: The Google account e-mail.
         aas_token: The AAS token to exchange.
+        android_id: The device-specific Android ID used for the OAuth exchange.
 
     Returns:
         The resulting ADM token.
@@ -288,7 +328,7 @@ async def _perform_oauth_with_provided_aas(username: str, aas_token: str) -> str
         resp = gpsoauth.perform_oauth(
             username,
             aas_token,
-            _ANDROID_ID,
+            android_id,
             service="oauth2:https://www.googleapis.com/auth/android_device_manager",
             app=_APP_ID,
             client_sig=_CLIENT_SIG,
@@ -360,9 +400,14 @@ async def async_get_adm_token_isolated(
     last_exc: Optional[Exception] = None
     attempts = max(1, retries + 1)
 
+    android_id = await _resolve_android_id_for_isolated_flow(
+        secrets_bundle=secrets_bundle,
+        cache_get=cache_get,
+    )
+
     for attempt in range(attempts):
         try:
-            tok = await _perform_oauth_with_provided_aas(user, src_aas)
+            tok = await _perform_oauth_with_provided_aas(user, src_aas, android_id=android_id)
 
             # Best-effort: persist TTL metadata via provided flow-local cache.
             if cache_set is not None:

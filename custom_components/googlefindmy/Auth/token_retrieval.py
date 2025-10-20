@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import gpsoauth
 
@@ -46,7 +46,61 @@ _ANDROID_ID: int = 0x38918A453D071993
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 
 
-def _perform_oauth_sync(username: str, aas_token: str, scope: str, play_services: bool) -> str:
+def _extract_android_id_from_credentials(fcm_creds: Any) -> int | None:
+    """Parse the android_id from an FCM credential bundle."""
+
+    if not isinstance(fcm_creds, dict):
+        return None
+
+    gcm_block = fcm_creds.get("gcm")
+    candidate: Any = None
+    if isinstance(gcm_block, dict):
+        candidate = gcm_block.get("android_id")
+
+    if isinstance(candidate, int):
+        return candidate
+    if isinstance(candidate, str):
+        try:
+            return int(candidate, 0)
+        except (TypeError, ValueError):
+            _LOGGER.debug("android_id value from FCM credentials is not numeric")
+            return None
+    if candidate is not None:
+        _LOGGER.debug("Unsupported android_id type in FCM credentials: %s", type(candidate))
+    return None
+
+
+async def _resolve_android_id(*, cache: TokenCache | None) -> int:
+    """Resolve the android_id tied to the provided cache, with fallback."""
+
+    if cache is None:
+        return _ANDROID_ID
+
+    try:
+        fcm_creds = await cache.get("fcm_credentials")
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Failed to read FCM credentials from cache: %s", err)
+        return _ANDROID_ID
+
+    android_id = _extract_android_id_from_credentials(fcm_creds)
+    if android_id is None:
+        _LOGGER.warning(
+            "FCM credentials missing android_id; falling back to static identifier. "
+            "Generate fresh secrets.json if authentication fails."
+        )
+        return _ANDROID_ID
+
+    return android_id
+
+
+def _perform_oauth_sync(
+    username: str,
+    aas_token: str,
+    scope: str,
+    play_services: bool,
+    *,
+    android_id: int = _ANDROID_ID,
+) -> str:
     """Blocking gpsoauth.perform_oauth call, factored for reuse.
 
     Args:
@@ -54,6 +108,7 @@ def _perform_oauth_sync(username: str, aas_token: str, scope: str, play_services
         aas_token: AAS token to authorize the OAuth scope exchange.
         scope: OAuth scope suffix (e.g., "android_device_manager").
         play_services: If True, use the Play Services app id; else ADM app id.
+        android_id: Device-specific Android ID used for the OAuth exchange.
 
     Returns:
         The OAuth access token (string) for the requested scope.
@@ -67,7 +122,7 @@ def _perform_oauth_sync(username: str, aas_token: str, scope: str, play_services
         auth_response = gpsoauth.perform_oauth(
             username,
             aas_token,
-            _ANDROID_ID,
+            android_id,
             service="oauth2:https://www.googleapis.com/auth/" + scope,
             app=request_app,
             client_sig=_CLIENT_SIG,
@@ -148,8 +203,16 @@ def request_token(
     if aas_token is None:
         aas_token = asyncio.run(async_get_aas_token(cache=cache))
 
+    android_id = asyncio.run(_resolve_android_id(cache=cache))
+
     # Perform the blocking OAuth exchange.
-    return _perform_oauth_sync(username, aas_token, scope, play_services)
+    return _perform_oauth_sync(
+        username,
+        aas_token,
+        scope,
+        play_services,
+        android_id=android_id,
+    )
 
 
 async def async_request_token(
@@ -201,9 +264,18 @@ async def async_request_token(
 
     # Offload the blocking OAuth exchange to a worker thread.
     loop = asyncio.get_running_loop()
+    android_id = await _resolve_android_id(cache=cache)
+
     try:
         return await loop.run_in_executor(
-            None, lambda: _perform_oauth_sync(username, aas_token, scope, play_services)
+            None,
+            lambda: _perform_oauth_sync(
+                username,
+                aas_token,
+                scope,
+                play_services,
+                android_id=android_id,
+            ),
         )
     except InvalidAasTokenError:
         _LOGGER.warning(
