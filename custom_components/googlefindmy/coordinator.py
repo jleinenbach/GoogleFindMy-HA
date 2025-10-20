@@ -2261,6 +2261,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 self.stats[stat_name],
             )
             self._schedule_stats_persist()
+            try:
+                self.async_update_listeners()
+            except Exception as err:
+                _LOGGER.debug("Stats listener notification failed: %s", err)
         else:
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
