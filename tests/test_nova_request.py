@@ -267,6 +267,64 @@ def test_async_nova_request_skips_seeding_without_username(monkeypatch: pytest.M
     assert headers.get("Authorization") == "Bearer adm-fallback"
 
 
+def test_async_nova_request_preserves_existing_aas_when_username_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-seeded AAS token must survive flow token usage without username kwarg."""
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(200, b"\xfa\xce")])
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        calls.append(
+            {
+                "username": username,
+                "cache": cache,
+                "retries": retries,
+                "backoff": backoff,
+            }
+        )
+        return "adm-preseed"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _exercise() -> tuple[str, Any]:
+        await cache.set(username_string, "user@example.com")
+        await cache.set(DATA_AAS_TOKEN, "cached-aas-token")
+        result = await async_nova_request(
+            "testScope",
+            "face",
+            token="fcm-registration-token",
+            cache=cache,
+            session=session,
+        )
+        final_aas = await cache.get(DATA_AAS_TOKEN)
+        return result, final_aas
+
+    result, final_aas = asyncio.run(_exercise())
+
+    assert result == "face"
+    assert calls and calls[0]["username"] == "user@example.com"
+    assert calls[0]["cache"] is cache
+    assert calls[0]["retries"] == 2
+    assert calls[0]["backoff"] == 1.0
+    assert final_aas == "cached-aas-token"
+    assert session.calls
+    headers = session.calls[0]["kwargs"].get("headers", {})
+    assert headers.get("Authorization") == "Bearer adm-preseed"
+
+
 def test_async_nova_request_converts_flow_token_with_ephemeral_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
