@@ -277,188 +277,135 @@ async def async_get_adm_token(
     last_exc: Optional[Exception] = None
     attempts = max(1, retries + 1)
     tried_oauth_fallback = False
-    fallback_auth_method_overridden = False
-    fallback_replaced_auth_method: str | None = None
+    fallback_active = False
     original_auth_method = await cache.get(DATA_AUTH_METHOD)
 
-    for attempt in range(attempts):
-        try:
-            # Only generates if not cached; avoids multiple token exchanges under load
-            token = await cache.get_or_set(cache_key, _generator)
+    try:
+        for attempt in range(attempts):
+            try:
+                # Only generates if not cached; avoids multiple token exchanges under load
+                token = await cache.get_or_set(cache_key, _generator)
 
-            # Persist TTL metadata (best-effort; entry-scoped if possible)
-            issued_key = f"adm_token_issued_at_{user}"
-            probe_key = f"adm_probe_startup_left_{user}"
+                # Persist TTL metadata (best-effort; entry-scoped if possible)
+                issued_key = f"adm_token_issued_at_{user}"
+                probe_key = f"adm_probe_startup_left_{user}"
 
-            if not await cache.get(issued_key):
-                await cache.set(issued_key, time.time())
-            if not await cache.get(probe_key):
-                await cache.set(probe_key, 3)
+                if not await cache.get(issued_key):
+                    await cache.set(issued_key, time.time())
+                if not await cache.get(probe_key):
+                    await cache.set(probe_key, 3)
 
-            if fallback_auth_method_overridden:
+                return token
+
+            except InvalidAasTokenError as auth_err:
+                last_exc = auth_err
+                _LOGGER.warning(
+                    "ADM token authentication failed (attempt %d/%d) for %s: %s",
+                    attempt + 1,
+                    attempts,
+                    _mask_email(user),
+                    _clip(auth_err),
+                )
+
                 try:
-                    current_method = await cache.get(DATA_AUTH_METHOD)
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.debug(
-                        "Failed to read auth_method during fallback reset for %s: %s",
-                        _mask_email(user),
-                        _clip(err),
-                    )
-                    current_method = None
-                if current_method == _AUTH_METHOD_INDIVIDUAL_TOKENS:
-                    _LOGGER.debug(
-                        "Resetting auth_method to '%s' after successful OAuth fallback for %s.",
-                        (fallback_replaced_auth_method or original_auth_method or "<unset>"),
-                        _mask_email(user),
-                    )
-                    await cache.set(
-                        DATA_AUTH_METHOD,
-                        fallback_replaced_auth_method or original_auth_method,
-                    )
-                fallback_auth_method_overridden = False
-                fallback_replaced_auth_method = None
+                    await cache.set(cache_key, None)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    await cache.set(DATA_AAS_TOKEN, None)
+                except Exception:  # noqa: BLE001
+                    pass
 
-            return token
-
-        except InvalidAasTokenError as auth_err:
-            last_exc = auth_err
-            _LOGGER.warning(
-                "ADM token authentication failed (attempt %d/%d) for %s: %s",
-                attempt + 1,
-                attempts,
-                _mask_email(user),
-                _clip(auth_err),
-            )
-
-            try:
-                await cache.set(cache_key, None)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await cache.set(DATA_AAS_TOKEN, None)
-            except Exception:  # noqa: BLE001
-                pass
-
-            is_originally_aas = original_auth_method != _AUTH_METHOD_INDIVIDUAL_TOKENS
-            if is_originally_aas and not tried_oauth_fallback:
-                oauth_token = await cache.get(CONF_OAUTH_TOKEN)
-                if (
-                    isinstance(oauth_token, str)
-                    and oauth_token
-                    and not oauth_token.startswith("aas_et/")
-                ):
-                    _LOGGER.info(
-                        "ADM token AAS path failed for %s; attempting one-time OAuth fallback.",
-                        _mask_email(user),
-                    )
-                    tried_oauth_fallback = True
-                    try:
-                        fallback_replaced_auth_method = await cache.get(DATA_AUTH_METHOD)
-                    except Exception as err:  # noqa: BLE001
-                        _LOGGER.debug(
-                            "Failed to read auth_method before OAuth fallback on %s: %s",
+                is_originally_aas = original_auth_method != _AUTH_METHOD_INDIVIDUAL_TOKENS
+                if is_originally_aas and not tried_oauth_fallback:
+                    oauth_token = await cache.get(CONF_OAUTH_TOKEN)
+                    if (
+                        isinstance(oauth_token, str)
+                        and oauth_token
+                        and not oauth_token.startswith("aas_et/")
+                    ):
+                        _LOGGER.info(
+                            "ADM token AAS path failed for %s; attempting one-time OAuth fallback.",
                             _mask_email(user),
-                            _clip(err),
                         )
-                        fallback_replaced_auth_method = None
-                    try:
-                        await cache.set(
-                            DATA_AUTH_METHOD, _AUTH_METHOD_INDIVIDUAL_TOKENS
-                        )
-                    except Exception as err:  # noqa: BLE001
-                        _LOGGER.debug(
-                            "Failed to switch auth_method for OAuth fallback on %s: %s",
-                            _mask_email(user),
-                            _clip(err),
-                        )
-                    else:
-                        fallback_auth_method_overridden = True
-                    continue
+                        tried_oauth_fallback = True
+                        try:
+                            await cache.set(
+                                DATA_AUTH_METHOD, _AUTH_METHOD_INDIVIDUAL_TOKENS
+                            )
+                        except Exception as err:  # noqa: BLE001
+                            _LOGGER.debug(
+                                "Failed to switch auth_method for OAuth fallback on %s: %s",
+                                _mask_email(user),
+                                _clip(err),
+                            )
+                        else:
+                            fallback_active = True
+                        continue
+
+                    _LOGGER.error(
+                        "ADM token authentication failed for %s and no OAuth fallback token is available.",
+                        _mask_email(user),
+                    )
+                    break
 
                 _LOGGER.error(
-                    "ADM token authentication failed for %s and no OAuth fallback token is available.",
+                    "ADM token authentication failed definitively for %s: %s",
                     _mask_email(user),
+                    _clip(auth_err),
                 )
                 break
 
-            _LOGGER.error(
-                "ADM token authentication failed definitively for %s: %s",
-                _mask_email(user),
-                _clip(auth_err),
-            )
-            break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                # Non-retryable? Log once and stop immediately.
+                if _is_non_retryable_auth(exc) or attempt >= attempts - 1:
+                    _LOGGER.error(
+                        "ADM token generation failed%s for %s: %s",
+                        "" if attempt >= attempts - 1 else " (non-retryable)",
+                        _mask_email(user),
+                        _clip(exc),
+                    )
+                    break
 
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            # Non-retryable? Log once and stop immediately.
-            if _is_non_retryable_auth(exc) or attempt >= attempts - 1:
-                _LOGGER.error(
-                    "ADM token generation failed%s for %s: %s",
-                    "" if attempt >= attempts - 1 else " (non-retryable)",
+                # Retryable path: clear any stale cache value and back off
+                try:
+                    await cache.set(cache_key, None)
+                except Exception:
+                    pass  # best-effort
+
+                sleep_s = backoff * (2 ** attempt)
+                _LOGGER.info(
+                    "ADM token generation failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
+                    attempt + 1,
+                    attempts,
                     _mask_email(user),
                     _clip(exc),
+                    sleep_s,
                 )
-                break
+                await asyncio.sleep(sleep_s)
 
-            # Retryable path: clear any stale cache value and back off
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("ADM token generation failed without a captured exception.")
+    finally:
+        if fallback_active:
             try:
-                await cache.set(cache_key, None)
-            except Exception:
-                pass  # best-effort
-
-            if fallback_auth_method_overridden:
-                try:
-                    current_method = await cache.get(DATA_AUTH_METHOD)
-                except Exception as err:  # noqa: BLE001
+                current_method = await cache.get(DATA_AUTH_METHOD)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Failed to read auth_method during OAuth fallback reset for %s: %s",
+                    _mask_email(user),
+                    _clip(err),
+                )
+            else:
+                if current_method == _AUTH_METHOD_INDIVIDUAL_TOKENS:
                     _LOGGER.debug(
-                        "Failed to read auth_method during retry reset for %s: %s",
-                        _mask_email(user),
-                        _clip(err),
-                    )
-                    current_method = None
-                if current_method != _AUTH_METHOD_INDIVIDUAL_TOKENS:
-                    _LOGGER.debug(
-                        "Ensuring OAuth fallback remains active after transient failure for %s.",
+                        "Restoring auth_method to '%s' after OAuth fallback for %s.",
+                        (original_auth_method or "<unset>"),
                         _mask_email(user),
                     )
-                    await cache.set(DATA_AUTH_METHOD, _AUTH_METHOD_INDIVIDUAL_TOKENS)
-
-            sleep_s = backoff * (2 ** attempt)
-            _LOGGER.info(
-                "ADM token generation failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
-                attempt + 1,
-                attempts,
-                _mask_email(user),
-                _clip(exc),
-                sleep_s,
-            )
-            await asyncio.sleep(sleep_s)
-
-    try:
-        current_method = await cache.get(DATA_AUTH_METHOD)
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.debug(
-            "Failed to read auth_method during final reset for %s: %s",
-            _mask_email(user),
-            _clip(err),
-        )
-        current_method = None
-    if fallback_auth_method_overridden and current_method == _AUTH_METHOD_INDIVIDUAL_TOKENS:
-        _LOGGER.debug(
-            "Resetting auth_method to '%s' after failed ADM token retrieval for %s.",
-            (fallback_replaced_auth_method or original_auth_method or "<unset>"),
-            _mask_email(user),
-        )
-        await cache.set(
-            DATA_AUTH_METHOD,
-            fallback_replaced_auth_method or original_auth_method,
-        )
-        fallback_auth_method_overridden = False
-        fallback_replaced_auth_method = None
-
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("ADM token generation failed without a captured exception.")
+                    await cache.set(DATA_AUTH_METHOD, original_auth_method)
 
 
 # --- Functions required by config_flow.py (isolated, no global cache touch) ---
