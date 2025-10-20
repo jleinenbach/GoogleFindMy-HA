@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import pytest
 
@@ -11,6 +11,9 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     async_nova_request,
 )
+from custom_components.googlefindmy.api import _EphemeralCache
+from custom_components.googlefindmy.const import DATA_AAS_TOKEN
+from custom_components.googlefindmy.Auth.username_provider import username_string
 
 
 class _DummyResponse:
@@ -60,8 +63,21 @@ class _StubCache:
             return
         self._data[key] = value
 
+    async def get_or_set(
+        self, key: str, generator: Callable[[], Awaitable[Any] | Any]
+    ) -> Any:
+        if key in self._data:
+            return self._data[key]
+        result = generator()
+        if asyncio.iscoroutine(result):
+            result = await result
+        await self.set(key, result)
+        return result
 
-def test_async_nova_request_returns_auth_error_on_repeated_401() -> None:
+
+def test_async_nova_request_returns_auth_error_on_repeated_401(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure NovaAuthError is raised instead of NameError on 401 responses."""
 
     cache = _StubCache()
@@ -79,6 +95,20 @@ def test_async_nova_request_returns_auth_error_on_repeated_401() -> None:
 
         async def _refresh() -> str:
             return await refresh_results.get()
+
+        async def _seed_initial(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return "initial-adm"
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _seed_initial,
+        )
 
         await async_nova_request(
             "testScope",
@@ -137,3 +167,145 @@ def test_async_nova_request_fetches_token_when_not_supplied(monkeypatch: pytest.
     assert session.calls
     headers = session.calls[0]["kwargs"].get("headers", {})
     assert headers.get("Authorization") == "Bearer resolved-token"
+
+
+def test_async_nova_request_invokes_adm_exchange_even_with_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Providing a token kwarg must still route through async_get_adm_token_api."""
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(200, b"\xaa\xbb")])
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        stored = await cache.get(DATA_AAS_TOKEN)
+        calls.append({
+            "username": username,
+            "cache": cache,
+            "retries": retries,
+            "backoff": backoff,
+            "stored_aas": stored,
+        })
+        return "adm-from-override"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "beef",
+            username="User@Example.COM",
+            token="aas_et/FLOW",
+            cache=cache,
+            session=session,
+        )
+
+    result = asyncio.run(_exercise())
+
+    assert result == "aabb"
+    assert calls and calls[0]["username"] == "user@example.com"
+    assert calls[0]["stored_aas"] == "aas_et/FLOW"
+    assert session.calls
+    headers = session.calls[0]["kwargs"].get("headers", {})
+    assert headers.get("Authorization") == "Bearer adm-from-override"
+
+
+def test_async_nova_request_skips_seeding_without_username(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not seed non-AAS override tokens when username kwarg is omitted."""
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(200, b"\x01\x02")])
+
+    calls: list[Any] = []
+    final_state: dict[str, Any] = {}
+
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        calls.append(await cache.get(DATA_AAS_TOKEN))
+        return "adm-fallback"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _exercise() -> str:
+        await cache.set(username_string, "user@example.com")
+        result = await async_nova_request(
+            "testScope",
+            "c0de",
+            token="fcm-registration-token",
+            cache=cache,
+            session=session,
+        )
+        final_state["seeded"] = await cache.get(DATA_AAS_TOKEN)
+        return result
+
+    result = asyncio.run(_exercise())
+
+    assert result == "0102"
+    assert calls == [None]
+    assert final_state["seeded"] is None
+    assert session.calls
+    headers = session.calls[0]["kwargs"].get("headers", {})
+    assert headers.get("Authorization") == "Bearer adm-fallback"
+
+
+def test_async_nova_request_converts_flow_token_with_ephemeral_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config-flow style caches must convert AAS tokens before Nova POST."""
+
+    cache = _EphemeralCache(oauth_token=None, email="User@Example.COM")
+    session = _DummySession([_DummyResponse(200, b"\x99\x33")])
+
+    calls: list[str] = []
+
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        calls.append(await cache.get(DATA_AAS_TOKEN))
+        return "adm-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "cafe",
+            username="user@example.com",
+            token="aas_et/CONFIG_FLOW",
+            cache=cache,
+            session=session,
+        )
+
+    result = asyncio.run(_exercise())
+
+    assert result == "9933"
+    assert calls == ["aas_et/CONFIG_FLOW"]
+    assert session.calls
+    headers = session.calls[0]["kwargs"].get("headers", {})
+    assert headers.get("Authorization") == "Bearer adm-token"
