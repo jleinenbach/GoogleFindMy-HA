@@ -80,7 +80,7 @@ def test_generate_adm_token_reuses_cached_aas(monkeypatch: pytest.MonkeyPatch) -
             **kwargs: Any,
         ) -> dict[str, str]:
             perform_calls.append((username, aas_token))
-            return {"Auth": "adm-token"}
+            return {"Token": "adm-token"}
 
         def fail_exchange(*args: Any, **kwargs: Any) -> dict[str, str]:
             raise AssertionError("OAuth exchange must not be invoked for cached AAS path")
@@ -164,7 +164,7 @@ def test_generate_adm_token_uses_provider_for_oauth(monkeypatch: pytest.MonkeyPa
             **kwargs: Any,
         ) -> dict[str, str]:
             perform_calls.append(aas_token)
-            return {"Auth": "adm-token"}
+            return {"Token": "adm-token"}
 
         monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange_token)
         monkeypatch.setattr(token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
@@ -195,7 +195,7 @@ def test_async_request_token_uses_cached_android_id(monkeypatch: pytest.MonkeyPa
             recorded["username"] = username
             recorded["aas_token"] = aas_token
             recorded["kwargs"] = kwargs
-            return {"Auth": "adm-token"}
+            return {"Token": "adm-token"}
 
         monkeypatch.setattr(token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
 
@@ -230,7 +230,7 @@ def test_async_request_token_uses_constant_android_id_when_missing(
             **kwargs: Any,
         ) -> dict[str, str]:
             recorded["android_id"] = android_id
-            return {"Auth": "adm-token"}
+            return {"Token": "adm-token"}
 
         monkeypatch.setattr(token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
 
@@ -248,6 +248,27 @@ def test_async_request_token_uses_constant_android_id_when_missing(
 
     asyncio.run(_exercise())
 
+
+def test_perform_oauth_sync_missing_keys_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gpsoauth responses without Token/Auth must raise a clear runtime error."""
+
+    def fake_perform_oauth(
+        username: str,
+        aas_token: str,
+        android_id: int,
+        **kwargs: Any,
+    ) -> dict[str, str]:
+        return {"Error": "SomeOtherFailure"}
+
+    monkeypatch.setattr(token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
+
+    with pytest.raises(RuntimeError, match="Neither 'Token' nor 'Auth'"):
+        token_retrieval._perform_oauth_sync(
+            "user@example.com",
+            "aas-token",
+            "android_device_manager",
+            play_services=False,
+        )
 
 def test_async_get_adm_token_retries_transient_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Transient failures should retry without clearing unrelated cache entries."""
@@ -625,7 +646,7 @@ def test_async_get_adm_token_isolated_uses_bundle_android_id(
         **kwargs: Any,
     ) -> dict[str, str]:
         recorded["android_id"] = android_id
-        return {"Auth": "adm-token"}
+        return {"Token": "adm-token"}
 
     monkeypatch.setattr(adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
 
@@ -660,7 +681,7 @@ def test_async_get_adm_token_isolated_prefers_cache_android_id(
         **kwargs: Any,
     ) -> dict[str, str]:
         recorded["android_id"] = android_id
-        return {"Auth": "adm-token"}
+        return {"Token": "adm-token"}
 
     monkeypatch.setattr(adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
 
@@ -700,7 +721,7 @@ def test_async_get_adm_token_isolated_falls_back_without_android_id(
         **kwargs: Any,
     ) -> dict[str, str]:
         recorded["android_id"] = android_id
-        return {"Auth": "adm-token"}
+        return {"Token": "adm-token"}
 
     monkeypatch.setattr(adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
 
