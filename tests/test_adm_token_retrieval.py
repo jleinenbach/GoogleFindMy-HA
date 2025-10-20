@@ -100,6 +100,16 @@ def test_generate_adm_token_reuses_cached_aas(monkeypatch: pytest.MonkeyPatch) -
     asyncio.run(_exercise())
 
 
+def test_normalize_service_accepts_full_scope() -> None:
+    """Full OAuth scope strings must normalize back to the scope suffix."""
+
+    normalized = adm_token_retrieval._normalize_service(
+        "oauth2:https://www.googleapis.com/auth/android_device_manager"
+    )
+
+    assert normalized == "android_device_manager"
+
+
 def test_generate_adm_token_falls_back_to_provider_when_aas_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -125,6 +135,7 @@ def test_generate_adm_token_falls_back_to_provider_when_aas_missing(
         ) -> str:
             assert aas_token is None
             assert callable(aas_provider)
+            assert service == "android_device_manager"
             return await aas_provider()
 
         monkeypatch.setattr(adm_token_retrieval, "async_get_aas_token", fake_provider)
@@ -210,7 +221,10 @@ def test_async_request_token_uses_cached_android_id(monkeypatch: pytest.MonkeyPa
 
         assert token == "adm-token"
         assert recorded["android_id"] == int("0x1A2B3C", 16)
-        assert recorded["kwargs"]["service"].endswith("android_device_manager")
+        assert (
+            recorded["kwargs"]["service"]
+            == "oauth2:https://www.googleapis.com/auth/android_device_manager"
+        )
 
     asyncio.run(_exercise())
 
