@@ -221,10 +221,11 @@ def test_async_request_token_uses_cached_android_id(monkeypatch: pytest.MonkeyPa
 
         assert token == "adm-token"
         assert recorded["android_id"] == int("0x1A2B3C", 16)
-        assert (
-            recorded["kwargs"]["service"]
-            == "oauth2:https://www.googleapis.com/auth/android_device_manager"
-        )
+        assert recorded["kwargs"] == {
+            "service": "oauth2:https://www.googleapis.com/auth/android_device_manager",
+            "app": "com.google.android.apps.adm",
+            "client_sig": "38918a453d07199354f8b19af05ec6562ced5788",
+        }
 
     asyncio.run(_exercise())
 
