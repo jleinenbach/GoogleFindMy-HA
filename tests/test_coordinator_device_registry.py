@@ -1,0 +1,106 @@
+# tests/test_coordinator_device_registry.py
+"""Regression tests for coordinator device registry linkage."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any, Iterable, Optional, Set, Tuple
+
+import pytest
+
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.const import DOMAIN
+from homeassistant.helpers import device_registry as dr
+
+
+class _FakeDeviceEntry:
+    """Minimal stand-in for Home Assistant's DeviceEntry."""
+
+    def __init__(
+        self,
+        *,
+        identifiers: Iterable[Tuple[str, str]],
+        config_entry_id: str,
+        name: Optional[str],
+        via_device: Optional[str],
+    ) -> None:
+        self.identifiers: Set[Tuple[str, str]] = set(identifiers)
+        self.config_entries = {config_entry_id}
+        self.id = f"device-{config_entry_id}-{len(self.identifiers)}"
+        self.name = name
+        self.name_by_user = None
+        self.disabled_by = None
+        self.via_device = via_device
+
+
+class _FakeDeviceRegistry:
+    """Fake device registry capturing `async_get_or_create` calls."""
+
+    def __init__(self) -> None:
+        self.created: list[dict[str, Any]] = []
+        self.devices: list[_FakeDeviceEntry] = []
+
+    def async_get_device(self, *, identifiers: Set[Tuple[str, str]]) -> Optional[_FakeDeviceEntry]:
+        for device in self.devices:
+            if identifiers & device.identifiers:
+                return device
+        return None
+
+    def async_get_or_create(
+        self,
+        *,
+        config_entry_id: str,
+        identifiers: Set[Tuple[str, str]],
+        manufacturer: str,
+        model: str,
+        name: Optional[str],
+        via_device: Optional[str],
+    ) -> _FakeDeviceEntry:
+        entry = _FakeDeviceEntry(
+            identifiers=identifiers,
+            config_entry_id=config_entry_id,
+            name=name,
+            via_device=via_device,
+        )
+        self.devices.append(entry)
+        self.created.append(
+            {
+                "config_entry_id": config_entry_id,
+                "identifiers": identifiers,
+                "manufacturer": manufacturer,
+                "model": model,
+                "name": name,
+                "via_device": via_device,
+            }
+        )
+        return entry
+
+    def async_update_device(self, *args, **kwargs) -> None:  # pragma: no cover - not needed
+        raise AssertionError("Unexpected update call in this test")
+
+
+@pytest.fixture
+def fake_registry(monkeypatch: pytest.MonkeyPatch) -> _FakeDeviceRegistry:
+    """Patch Home Assistant's device registry helper with a lightweight stub."""
+
+    registry = _FakeDeviceRegistry()
+    monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
+    return registry
+
+
+def test_devices_link_to_service_device(fake_registry: _FakeDeviceRegistry) -> None:
+    """Newly created devices must reference the service device via `via_device`."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
+    coordinator.hass = object()
+    coordinator._service_device_id = "svc-device-1"
+
+    created = coordinator._ensure_registry_for_devices(
+        devices=[{"id": "abc123", "name": "Pixel"}],
+        ignored=set(),
+    )
+
+    assert created == 1
+    assert fake_registry.created[0]["identifiers"] == {(DOMAIN, "entry-42:abc123")}
+    assert fake_registry.created[0]["via_device"] == "svc-device-1"

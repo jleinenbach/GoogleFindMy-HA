@@ -898,7 +898,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     manufacturer="Google",
                     model="Find My Device",
                     name=use_name,
-                    via_device_id=getattr(self, "_service_device_id", None),
+                    via_device=getattr(self, "_service_device_id", None),
                 )
                 created_or_updated += 1
             else:

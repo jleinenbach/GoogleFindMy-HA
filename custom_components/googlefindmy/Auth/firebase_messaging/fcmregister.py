@@ -89,6 +89,8 @@ class FcmRegisterConfig:
         - `vapid_key` should generally remain the default (server key b64). When equal
           to GCM_SERVER_KEY_B64 we do **not** include it in the registration payload
           to avoid server errors.
+        - If Google rejects the numeric sender with `PHONE_REGISTRATION_ERROR`, we
+          automatically fall back to the legacy server key used by upstream tools.
     """
     project_id: str
     app_id: str
@@ -320,12 +322,21 @@ class FcmRegister:
             "Authorization": f"AidLogin {android_id}:{security_token}",
             "Content-Type": "application/x-www-form-urlencoded",
         }
+
+        # Sender fallback order: prefer the configured numeric project number when
+        # available (behaviour shipped in GoogleFindMy-HA), but gracefully fall back
+        # to the legacy server key when Google refuses to treat us as a "phone".
+        sender_candidates: list[str] = []
+        if isinstance(self.config.messaging_sender_id, str) and self.config.messaging_sender_id:
+            sender_candidates.append(self.config.messaging_sender_id)
+        if GCM_SERVER_KEY_B64 not in sender_candidates:
+            sender_candidates.append(GCM_SERVER_KEY_B64)
+
         body = {
             "app": self.config.chrome_id,
             "X-subtype": gcm_app_id,
             "device": android_id,
-            # IMPORTANT: GCM register expects the numeric sender ID (project number).
-            "sender": self.config.messaging_sender_id,
+            "sender": sender_candidates[0],
         }
         if self._log_debug_verbose:
             _logger.debug(
@@ -347,10 +358,11 @@ class FcmRegister:
             "INVALID_PARAMETERS",
             "INVALID_SENDER",
             "MISSING_SENDER",
-            "PHONE_REGISTRATION_ERROR",  # treat as deterministic for desktop-style clients
         }
 
-        for attempt in range(1, retries + 1):
+        attempt = 1
+        sender_index = 0
+        while attempt <= retries:
             try:
                 async with self._session.post(
                     url=url,
@@ -407,7 +419,20 @@ class FcmRegister:
 
                 if error_code:
                     last_error = f"Error={error_code}"
-                    if error_code in NON_RETRYABLE:
+                    if (
+                        error_code == "PHONE_REGISTRATION_ERROR"
+                        and sender_index + 1 < len(sender_candidates)
+                    ):
+                        sender_index += 1
+                        body["sender"] = sender_candidates[sender_index]
+                        _logger.warning(
+                            "GCM register error %s encountered; switching sender fallback to %s",
+                            error_code,
+                            "legacy server key" if sender_index else "configured sender",
+                        )
+                        continue
+
+                    if error_code in NON_RETRYABLE or error_code == "PHONE_REGISTRATION_ERROR":
                         _logger.error(
                             "GCM register returned non-retryable error at %s: %s — giving up",
                             url, last_error,
@@ -442,6 +467,8 @@ class FcmRegister:
                 delay = min(1.5 * (2 ** (attempt - 1)), 30.0)
                 delay *= (0.9 + 0.2 * secrets.randbits(4) / 15.0)
                 await asyncio.sleep(delay)
+
+            attempt += 1
 
         msg = f"Unable to complete GCM register after {retries} attempts (last url={url})"
         if isinstance(last_error, Exception):
