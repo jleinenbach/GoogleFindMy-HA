@@ -582,7 +582,12 @@ async def async_nova_request(
     if not user:
         raise ValueError("Username is not available for async_nova_request.")
 
-    if isinstance(token, str) and token:
+    if (
+        isinstance(token, str)
+        and token
+        and isinstance(username, str)
+        and username.strip()
+    ):
         try:
             await cache.set(DATA_AAS_TOKEN, token)
             if ns_prefix:

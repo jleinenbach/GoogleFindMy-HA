@@ -13,6 +13,7 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 )
 from custom_components.googlefindmy.api import _EphemeralCache
 from custom_components.googlefindmy.const import DATA_AAS_TOKEN
+from custom_components.googlefindmy.Auth.username_provider import username_string
 
 
 class _DummyResponse:
@@ -218,6 +219,52 @@ def test_async_nova_request_invokes_adm_exchange_even_with_token(
     assert session.calls
     headers = session.calls[0]["kwargs"].get("headers", {})
     assert headers.get("Authorization") == "Bearer adm-from-override"
+
+
+def test_async_nova_request_skips_seeding_without_username(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Do not seed non-AAS override tokens when username kwarg is omitted."""
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(200, b"\x01\x02")])
+
+    calls: list[Any] = []
+    final_state: dict[str, Any] = {}
+
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        calls.append(await cache.get(DATA_AAS_TOKEN))
+        return "adm-fallback"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _exercise() -> str:
+        await cache.set(username_string, "user@example.com")
+        result = await async_nova_request(
+            "testScope",
+            "c0de",
+            token="fcm-registration-token",
+            cache=cache,
+            session=session,
+        )
+        final_state["seeded"] = await cache.get(DATA_AAS_TOKEN)
+        return result
+
+    result = asyncio.run(_exercise())
+
+    assert result == "0102"
+    assert calls == [None]
+    assert final_state["seeded"] is None
+    assert session.calls
+    headers = session.calls[0]["kwargs"].get("headers", {})
+    assert headers.get("Authorization") == "Bearer adm-fallback"
 
 
 def test_async_nova_request_converts_flow_token_with_ephemeral_cache(
