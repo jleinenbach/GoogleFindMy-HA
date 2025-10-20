@@ -558,21 +558,39 @@ async def async_nova_request(
     """
     url = f"https://android.googleapis.com/nova/{api_scope}"
 
-    # Use provided credentials if available (for config flow), otherwise fetch from cache.
-    if token and username:
+    ns_raw = (namespace or "").strip()
+    ns_prefix = f"{ns_raw}:" if ns_raw and not ns_raw.endswith(":") else ns_raw
+
+    async def _cache_get(key: str) -> Any:
+        if cache_get is not None:
+            return await cache_get(key)
+        return await cache.get(key)
+
+    async def _cache_set(key: str, value: Any) -> None:
+        if cache_set is not None:
+            await cache_set(key, value)
+            return
+        await cache.set(key, value)
+
+    if username:
         user = username
-        initial_token = token
     else:
-        if username:
-            user = username
-        else:
-            val = await cache.get(username_string)
-            user = str(val) if isinstance(val, str) and val else None
-            if not user:
-                user = await async_get_username(cache=cache)  # type: ignore[arg-type]
+        val = await cache.get(username_string)
+        user = str(val) if isinstance(val, str) and val else None
         if not user:
-            raise ValueError("Username is not available for async_nova_request.")
-        initial_token = await _get_initial_token_async(user, _LOGGER, ns_prefix=(namespace or ""), cache=cache)
+            user = await async_get_username(cache=cache)  # type: ignore[arg-type]
+    if not user:
+        raise ValueError("Username is not available for async_nova_request.")
+
+    if isinstance(token, str) and token:
+        try:
+            await cache.set(DATA_AAS_TOKEN, token)
+            if ns_prefix:
+                await cache.set(f"{ns_prefix}{DATA_AAS_TOKEN}", token)
+        except Exception as err:  # noqa: BLE001 - defensive caching
+            _LOGGER.debug("Failed to seed provided flow token into cache: %s", err)
+
+    initial_token = await _get_initial_token_async(user, _LOGGER, ns_prefix=(namespace or ""), cache=cache)
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
@@ -588,21 +606,6 @@ async def async_nova_request(
         raise ValueError("Invalid hex payload for Nova request") from e
 
     # Select cache/refresh providers (entry-scoped TokenCache)
-    ns_prefix = (namespace or "").strip()
-    if ns_prefix and not ns_prefix.endswith(":"):
-        ns_prefix += ":"
-
-    async def _cache_get(key: str) -> Any:
-        if cache_get is not None:
-            return await cache_get(key)
-        return await cache.get(key)
-
-    async def _cache_set(key: str, value: Any) -> None:
-        if cache_set is not None:
-            await cache_set(key, value)
-            return
-        await cache.set(key, value)
-
     if refresh_override is not None:
         rf_fn: Callable[[], Awaitable[Optional[str]]] = refresh_override
     else:
