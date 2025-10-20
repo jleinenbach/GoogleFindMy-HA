@@ -1740,8 +1740,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 failed=True,
                 reason=f"Auth failed while fetching device list: {reason}",
             )
-            await self._async_start_reauth_flow()
-            raise
+            try:
+                await self._async_start_reauth_flow()
+            except Exception as reauth_err:  # pragma: no cover - defensive guard
+                self._reauth_initiated = False
+                _LOGGER.exception(
+                    "Failed to initiate re-auth flow after auth failure: %s",
+                    self._short_error_message(reauth_err),
+                )
+            raise auth_exc
         except UpdateFailed as update_err:
             # Let pre-wrapped UpdateFailed bubble as-is after updating status
             self._set_api_status(
