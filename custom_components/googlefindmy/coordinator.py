@@ -55,6 +55,7 @@ This module must not log secrets and must keep user-facing strings out of code; 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
 import time
@@ -1152,6 +1153,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """
         self.hass.loop.call_soon_threadsafe(func, *args)
 
+    def _dispatch_async_request_refresh(self, *, task_name: str, log_context: str) -> None:
+        """Invoke ``async_request_refresh`` safely regardless of its implementation."""
+
+        fn = getattr(self, "async_request_refresh", None)
+        if not callable(fn):
+            return
+
+        try:
+            if asyncio.iscoroutinefunction(fn):
+                result = fn()
+                if inspect.isawaitable(result):
+                    self.hass.async_create_task(result, name=task_name)
+                return
+
+            result = fn()
+            if inspect.isawaitable(result):
+                self.hass.async_create_task(result, name=task_name)
+        except Exception as err:
+            _LOGGER.debug(
+                "async_request_refresh dispatch failed (%s): %s", log_context, err
+            )
+
     def _schedule_short_retry(self, delay_s: float = 5.0) -> None:
         """Schedule a short, coalesced refresh instead of shifting the poll baseline.
 
@@ -1181,7 +1204,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             def _cb(_now) -> None:
                 # Clear handle and request a refresh (non-blocking)
                 self._short_retry_cancel = None
-                self.async_request_refresh()
+                self._dispatch_async_request_refresh(
+                    task_name=f"{DOMAIN}.short_retry_refresh",
+                    log_context="short retry",
+                )
 
             self._short_retry_cancel = async_call_later(
                 self.hass, max(0.0, float(delay_s)), _cb
@@ -1197,22 +1223,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         """Handle Device Registry changes by rebuilding poll targets (rare)."""
         self._reindex_poll_targets_from_device_registry()
         # After changes, request a refresh so the next tick uses the new target sets.
-        # Compatibility: async_request_refresh is a plain def on most cores, but an
-        # async coroutine on some versions. Handle both safely.
-        fn = getattr(self, "async_request_refresh", None)
-        if callable(fn):
-            try:
-                if asyncio.iscoroutinefunction(fn):
-                    await fn()  # type: ignore[misc]
-                else:
-                    res = fn()
-                    # If a coroutine slips through (rare), schedule it to avoid warnings.
-                    if asyncio.iscoroutine(res):
-                        self.hass.async_create_task(
-                            res, name=f"{DOMAIN}.dr_event_refresh"
-                        )
-            except Exception as err:
-                _LOGGER.debug("async_request_refresh dispatch failed (DR event): %s", err)
+        self._dispatch_async_request_refresh(
+            task_name=f"{DOMAIN}.dr_event_refresh",
+            log_context="device registry event",
+        )
 
     # ---------------------------- Cooldown helpers (server-aware) -----------
     def _compute_type_cooldown_seconds(self, report_hint: Optional[str]) -> int:
