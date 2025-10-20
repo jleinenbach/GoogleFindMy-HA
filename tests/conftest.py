@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
+from datetime import datetime, timezone
 
 # Ensure the package root is importable without installing the package.
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,11 +134,16 @@ def _stub_homeassistant() -> None:
     class CoreState:  # minimal CoreState stub
         running = "running"
 
+    class ServiceCall:  # pragma: no cover - stub for service handlers
+        def __init__(self, data=None):
+            self.data = data or {}
+
     class HomeAssistant:  # minimal HomeAssistant placeholder
         state = CoreState.running
 
     core_module.CoreState = CoreState
     core_module.HomeAssistant = HomeAssistant
+    core_module.ServiceCall = ServiceCall
     core_module.callback = lambda func: func
     sys.modules["homeassistant.core"] = core_module
 
@@ -149,8 +155,12 @@ def _stub_homeassistant() -> None:
     class ConfigEntryNotReady(HomeAssistantError):
         pass
 
+    class ServiceValidationError(HomeAssistantError):
+        pass
+
     exceptions_module.HomeAssistantError = HomeAssistantError
     exceptions_module.ConfigEntryNotReady = ConfigEntryNotReady
+    exceptions_module.ServiceValidationError = ServiceValidationError
     exceptions_module.ConfigEntryAuthFailed = ConfigEntryAuthFailed
     sys.modules["homeassistant.exceptions"] = exceptions_module
 
@@ -164,6 +174,10 @@ def _stub_homeassistant() -> None:
         module = ModuleType(module_name)
         sys.modules[module_name] = module
         setattr(helpers_pkg, sub, module)
+
+    device_registry_module = sys.modules["homeassistant.helpers.device_registry"]
+    device_registry_module.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
+    device_registry_module.async_get = lambda _hass=None: SimpleNamespace(async_get=lambda _id: None)
 
     cv_module = ModuleType("homeassistant.helpers.config_validation")
 
@@ -198,12 +212,85 @@ def _stub_homeassistant() -> None:
     class UpdateFailed(Exception):
         pass
 
-    sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed = UpdateFailed
+    update_coordinator_module = sys.modules["homeassistant.helpers.update_coordinator"]
+    update_coordinator_module.UpdateFailed = UpdateFailed
+
+    from typing import Generic, TypeVar
+
+    _T = TypeVar("_T")
+
+    class DataUpdateCoordinator(Generic[_T]):
+        """Minimal stub for DataUpdateCoordinator supporting subclassing."""
+
+        def __init__(self, hass=None, logger=None, name: str | None = None, update_interval=None):
+            self.hass = hass
+            self.logger = logger
+            self.name = name or "coordinator"
+            self.update_interval = update_interval
+
+        async def async_request_refresh(self) -> None:  # pragma: no cover - stubbed behaviour
+            return None
+
+        async def async_config_entry_first_refresh(self) -> None:  # pragma: no cover - stubbed behaviour
+            return None
+
+    update_coordinator_module.DataUpdateCoordinator = DataUpdateCoordinator
+
+    event_module = ModuleType("homeassistant.helpers.event")
+
+    async def _async_call_later(*_args, **_kwargs):  # pragma: no cover - stubbed behaviour
+        return None
+
+    event_module.async_call_later = _async_call_later
+    sys.modules["homeassistant.helpers.event"] = event_module
+    setattr(helpers_pkg, "event", event_module)
+
+    network_module = ModuleType("homeassistant.helpers.network")
+    network_module.get_url = lambda *args, **kwargs: "https://example.local"
+    sys.modules["homeassistant.helpers.network"] = network_module
+    setattr(helpers_pkg, "network", network_module)
+
+    entity_registry_module = sys.modules["homeassistant.helpers.entity_registry"]
+
+    def _async_get_entity_registry(_hass=None):  # pragma: no cover - stub behaviour
+        return SimpleNamespace(async_get=lambda _entity_id: None)
+
+    entity_registry_module.async_get = _async_get_entity_registry
+
+    util_pkg = sys.modules.setdefault("homeassistant.util", ModuleType("homeassistant.util"))
+    dt_module = ModuleType("homeassistant.util.dt")
+    dt_module.UTC = timezone.utc
+    dt_module.utcnow = lambda: datetime.utcnow().replace(tzinfo=timezone.utc)
+    dt_module.now = dt_module.utcnow
+    dt_module.as_local = lambda dt: dt
+    sys.modules["homeassistant.util.dt"] = dt_module
+    setattr(util_pkg, "dt", dt_module)
 
     components_pkg = sys.modules.setdefault(
         "homeassistant.components", ModuleType("homeassistant.components")
     )
     components_pkg.__path__ = getattr(components_pkg, "__path__", [])
+
+    http_module = ModuleType("homeassistant.components.http")
+
+    class HomeAssistantView:  # pragma: no cover - stub for imports
+        requires_auth = False
+
+        async def get(self, *_args, **_kwargs):
+            return None
+
+    http_module.HomeAssistantView = HomeAssistantView
+    sys.modules["homeassistant.components.http"] = http_module
+    setattr(components_pkg, "http", http_module)
+
+    diagnostics_module = ModuleType("homeassistant.components.diagnostics")
+
+    def _async_redact_data(data, _keys):  # pragma: no cover - stub behaviour
+        return data
+
+    diagnostics_module.async_redact_data = _async_redact_data
+    sys.modules["homeassistant.components.diagnostics"] = diagnostics_module
+    setattr(components_pkg, "diagnostics", diagnostics_module)
 
     recorder_module = ModuleType("homeassistant.components.recorder")
     recorder_module.get_instance = lambda *args, **kwargs: None
