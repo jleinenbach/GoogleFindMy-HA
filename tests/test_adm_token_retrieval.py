@@ -72,19 +72,45 @@ def test_generate_adm_token_reuses_cached_aas(monkeypatch: pytest.MonkeyPatch) -
     asyncio.run(_exercise())
 
 
-def test_generate_adm_token_requires_cached_aas(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Missing cached AAS tokens for secrets-based auth must raise."""
+def test_generate_adm_token_falls_back_to_provider_when_aas_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Secrets-based auth should fall back to the OAuth provider if AAS cache is empty."""
 
     async def _exercise() -> None:
         cache = _DummyTokenCache({DATA_AUTH_METHOD: "secrets_json"})
 
-        async def _fake_request_token(*_: Any, **__: Any) -> str:
-            raise AssertionError("async_request_token must not be called when AAS token is missing")
+        provider_calls = 0
 
+        async def _fake_provider(*, cache: Any) -> str:
+            nonlocal provider_calls
+            provider_calls += 1
+            assert isinstance(cache, _DummyTokenCache)
+            return "aas_et/FALLBACK"
+
+        async def _fake_request_token(
+            username: str,
+            service: str,
+            *,
+            cache: Any,
+            aas_token: str | None,
+            aas_provider: Callable[[], Awaitable[str]] | None,
+        ) -> str:
+            assert username == "user@example.com"
+            assert service.endswith("android_device_manager")
+            assert aas_token is None
+            assert callable(aas_provider)
+            token = await aas_provider()
+            assert token == "aas_et/FALLBACK"
+            return "adm-token"
+
+        monkeypatch.setattr(adm_token_retrieval, "async_get_aas_token", _fake_provider)
         monkeypatch.setattr(adm_token_retrieval, "async_request_token", _fake_request_token)
 
-        with pytest.raises(RuntimeError, match=r"Required AAS token \(aas_token\) not found"):
-            await adm_token_retrieval._generate_adm_token("user@example.com", cache=cache)
+        token = await adm_token_retrieval._generate_adm_token("user@example.com", cache=cache)
+
+        assert token == "adm-token"
+        assert provider_calls == 1
 
     asyncio.run(_exercise())
 

@@ -182,13 +182,12 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
         aas_token_direct = await cache.get(DATA_AAS_TOKEN)
         if not isinstance(aas_token_direct, str) or not aas_token_direct:
             _LOGGER.warning(
-                "Cached AAS token missing for %s during ADM refresh (method=%s).",
+                "Cached AAS token missing for %s during ADM refresh (method=%s); falling back to OAuth provider.",
                 _mask_email(username),
                 auth_method or "<unknown>",
             )
-            raise RuntimeError(
-                f"Required AAS token ({DATA_AAS_TOKEN}) not found in cache for {_mask_email(username)}."
-            )
+            aas_token_direct = None
+            aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
 
     return await async_request_token(
         username,
