@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 import pytest
 
 from custom_components.googlefindmy.NovaApi.nova_request import (
+    AsyncTTLPolicy,
     NovaAuthError,
     async_nova_request,
 )
@@ -126,6 +127,79 @@ def test_async_nova_request_returns_auth_error_on_repeated_401(
     assert err.value.status == 401
     assert isinstance(err.value.detail, str)
     assert "Unauthorized" in err.value.detail
+
+
+def test_async_nova_request_refreshes_token_after_initial_401(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 triggers an ADM refresh and retries with the rotated token."""
+
+    cache = _StubCache()
+    session = _DummySession(
+        [
+            _DummyResponse(401, b"unauthorized"),
+            _DummyResponse(200, b"\xba\xad\xf0\r"),
+        ]
+    )
+
+    adm_calls: list[str | None] = []
+    refresh_calls: list[None] = []
+    on_401_calls: list[bool] = []
+
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        adm_calls.append(username)
+        return "adm-old"
+
+    async def _refresh_override() -> str:
+        refresh_calls.append(None)
+        return "adm-new"
+
+    original_on_401 = AsyncTTLPolicy.on_401
+
+    async def _spy_on_401(
+        self: AsyncTTLPolicy, adaptive_downshift: bool = True
+    ) -> Any:
+        on_401_calls.append(adaptive_downshift)
+        return await original_on_401(self, adaptive_downshift=adaptive_downshift)
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.AsyncTTLPolicy.on_401",
+        _spy_on_401,
+    )
+
+    async def _exercise() -> tuple[str, Any]:
+        await cache.set(DATA_AAS_TOKEN, "aas-original")
+        result = await async_nova_request(
+            "testScope",
+            "deadbeef",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+            refresh_override=_refresh_override,
+        )
+        final_aas = await cache.get(DATA_AAS_TOKEN)
+        return result, final_aas
+
+    result, final_aas = asyncio.run(_exercise())
+
+    assert result == "baadf00d"
+    assert final_aas == "aas-original"
+    assert adm_calls == ["user@example.com"]
+    assert len(refresh_calls) == 1
+    assert len(on_401_calls) == 1
+    assert len(session.calls) == 2
+    second_headers = session.calls[1]["kwargs"].get("headers", {})
+    assert second_headers.get("Authorization") == "Bearer adm-new"
 
 
 def test_async_nova_request_fetches_token_when_not_supplied(monkeypatch: pytest.MonkeyPatch) -> None:
