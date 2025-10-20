@@ -264,6 +264,12 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         return stats.get(self._stat_key, 0)
 
     @property
+    def available(self) -> bool:
+        """Stats sensors stay available even when polling fails."""
+
+        return True
+
+    @property
     def device_info(self) -> DeviceInfo:
         """Expose a single integration service device for diagnostic sensors.
 
@@ -334,6 +340,9 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         """
         dev_id = self._device_id
         if not dev_id:
+            return False
+        is_fcm_connected = getattr(self.coordinator, "is_fcm_connected", None)
+        if is_fcm_connected is False:
             return False
         try:
             if hasattr(self.coordinator, "is_device_present"):

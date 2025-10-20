@@ -136,6 +136,12 @@ class GoogleFindMyPollingSensor(
         return "mdi:sync" if self.is_on else "mdi:sync-off"
 
     @property
+    def available(self) -> bool:
+        """Polling diagnostic sensor stays online to expose status information."""
+
+        return True
+
+    @property
     def device_info(self) -> DeviceInfo:
         """Attach the sensor to the per-entry service device."""
         # Single service device per config entry:
@@ -252,6 +258,24 @@ class GoogleFindMyAuthStatusSensor(
         """Return a dynamic icon to communicate the current auth state."""
         # Keep explicit icons for clarity, even with device_class=problem.
         return "mdi:key-alert" if self.is_on else "mdi:key-check"
+
+    @property
+    def available(self) -> bool:
+        """Auth status diagnostics remain available even if polling fails."""
+
+        return True
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Optional[str]] | None:
+        """Expose API polling status as part of the diagnostic context."""
+
+        status = getattr(self.coordinator, "api_status", None)
+        if status is None:
+            return None
+        attributes: dict[str, Optional[str]] = {"api_status": status.state}
+        if status.reason:
+            attributes["api_status_reason"] = status.reason
+        return attributes
 
     @property
     def device_info(self) -> DeviceInfo:
