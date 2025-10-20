@@ -278,7 +278,8 @@ async def async_get_adm_token(
     attempts = max(1, retries + 1)
     tried_oauth_fallback = False
     fallback_active = False
-    original_auth_method = await cache.get(DATA_AUTH_METHOD)
+    initial_auth_method = await cache.get(DATA_AUTH_METHOD)
+    auth_method_for_reset = initial_auth_method
 
     try:
         for attempt in range(attempts):
@@ -316,7 +317,9 @@ async def async_get_adm_token(
                 except Exception:  # noqa: BLE001
                     pass
 
-                is_originally_aas = original_auth_method != _AUTH_METHOD_INDIVIDUAL_TOKENS
+                is_originally_aas = (
+                    initial_auth_method != _AUTH_METHOD_INDIVIDUAL_TOKENS
+                )
                 if is_originally_aas and not tried_oauth_fallback:
                     oauth_token = await cache.get(CONF_OAUTH_TOKEN)
                     if (
@@ -330,6 +333,14 @@ async def async_get_adm_token(
                         )
                         tried_oauth_fallback = True
                         try:
+                            try:
+                                auth_method_for_reset = await cache.get(DATA_AUTH_METHOD)
+                            except Exception as err:  # noqa: BLE001
+                                _LOGGER.debug(
+                                    "Failed to read auth_method before OAuth fallback for %s: %s",
+                                    _mask_email(user),
+                                    _clip(err),
+                                )
                             await cache.set(
                                 DATA_AUTH_METHOD, _AUTH_METHOD_INDIVIDUAL_TOKENS
                             )
@@ -400,17 +411,17 @@ async def async_get_adm_token(
                     _clip(err),
                 )
             else:
-                if current_method == original_auth_method:
+                if current_method == auth_method_for_reset:
                     should_restore = False
 
             if should_restore:
                 _LOGGER.debug(
                     "Restoring auth_method to '%s' after OAuth fallback for %s.",
-                    (original_auth_method or "<unset>"),
+                    (auth_method_for_reset or "<unset>"),
                     _mask_email(user),
                 )
                 try:
-                    await cache.set(DATA_AUTH_METHOD, original_auth_method)
+                    await cache.set(DATA_AUTH_METHOD, auth_method_for_reset)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug(
                         "Failed to restore auth_method after OAuth fallback for %s: %s",
