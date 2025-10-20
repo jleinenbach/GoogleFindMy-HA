@@ -77,6 +77,7 @@ from .const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
+    DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_LOCATION_POLL_INTERVAL,
@@ -736,6 +737,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Early, idempotent seeding of TokenCache from entry.data (authoritative SSOT)
     try:
+        if DATA_AUTH_METHOD in entry.data:
+            await cache.async_set_cached_value(DATA_AUTH_METHOD, entry.data[DATA_AUTH_METHOD])
+            _LOGGER.debug("Seeded auth_method into TokenCache from entry.data")
         if CONF_OAUTH_TOKEN in entry.data:
             await cache.async_set_cached_value(CONF_OAUTH_TOKEN, entry.data[CONF_OAUTH_TOKEN])
             _LOGGER.debug("Seeded oauth_token into TokenCache from entry.data")

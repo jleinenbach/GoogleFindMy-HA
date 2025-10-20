@@ -59,6 +59,7 @@ from .token_retrieval import (
 from .token_cache import TokenCache
 from .username_provider import async_get_username, username_string
 from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
+from ..const import DATA_AAS_TOKEN, DATA_AUTH_METHOD
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -150,11 +151,13 @@ async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
 
 async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
     """
-    Generate a new ADM token by delegating to the central token retriever,
-    injecting an **entry-scoped AAS provider** when `cache` is supplied.
+    Generate a new ADM token, honoring the original authentication method.
 
-    This keeps the logic simple and closes the end-to-end entry scoping:
-    ADM <-OAuth(AAS from same cache)-> AAS.
+    When the integration was configured with individual OAuth tokens, an
+    entry-scoped AAS provider is injected so that the cached OAuth credential
+    can be exchanged for a fresh AAS token. Otherwise (secrets.json / AAS
+    master token), the cached AAS token is reused directly to perform the
+    AAS → ADM exchange.
     """
     _LOGGER.debug(
         "Generating new ADM token for account %s (entry scoped)",
@@ -165,12 +168,33 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
     if cache is None:
         raise ValueError("TokenCache instance is required for multi-account safety.")
 
-    aas_provider: Callable[[], Awaitable[str]] = lambda: async_get_aas_token(cache=cache)
+    auth_method = await cache.get(DATA_AUTH_METHOD)
+    use_oauth_provider = auth_method == "individual_tokens"
+
+    aas_token_direct: Optional[str] = None
+    aas_provider: Optional[Callable[[], Awaitable[str]]] = None
+
+    if use_oauth_provider:
+        _LOGGER.debug("ADM token refresh path: using OAuth→AAS provider (individual tokens).")
+        aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
+    else:
+        _LOGGER.debug("ADM token refresh path: reusing cached AAS token (secrets.json / master).")
+        aas_token_direct = await cache.get(DATA_AAS_TOKEN)
+        if not isinstance(aas_token_direct, str) or not aas_token_direct:
+            _LOGGER.warning(
+                "Cached AAS token missing for %s during ADM refresh (method=%s).",
+                _mask_email(username),
+                auth_method or "<unknown>",
+            )
+            raise RuntimeError(
+                f"Required AAS token ({DATA_AAS_TOKEN}) not found in cache for {_mask_email(username)}."
+            )
 
     return await async_request_token(
         username,
         service,
         cache=cache,
+        aas_token=aas_token_direct,
         aas_provider=aas_provider,
     )
 
