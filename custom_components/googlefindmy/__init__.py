@@ -115,6 +115,7 @@ from . import diagnostics  # noqa: F401
 
 # Service registration has been moved to a dedicated module (clean separation of concerns)
 from .services import async_register_services
+from . import system_health as system_health_module
 
 # Optional feature: GoogleHomeFilter (guard import to avoid hard dependency)
 try:
@@ -697,6 +698,14 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     bucket = hass.data.setdefault(DOMAIN, {})
     bucket.setdefault("entries", {})  # entry_id -> RuntimeData
     bucket.setdefault("device_owner_index", {})  # canonical_id -> entry_id (E2.5 scaffold)
+
+    if not bucket.get("system_health_registered"):
+        try:
+            await system_health_module.async_register(hass)
+        except Exception as err:  # pragma: no cover - diagnostics only
+            _LOGGER.debug("System health registration failed: %s", err)
+        else:
+            bucket["system_health_registered"] = True
 
     # Use a lock + idempotent flag to avoid double registration on racey startups.
     services_lock = bucket.setdefault("services_lock", asyncio.Lock())
