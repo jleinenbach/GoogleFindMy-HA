@@ -7,7 +7,7 @@ import asyncio
 import importlib
 import sys
 from types import ModuleType, SimpleNamespace
-from typing import Callable
+from typing import Callable, Optional
 
 import pytest
 
@@ -73,3 +73,90 @@ def test_async_acquire_discards_invalid_cached_receiver(monkeypatch: pytest.Monk
     assert recorded_getters["loc"]() is new_receiver
     assert recorded_getters["api"]() is new_receiver
     assert hass.data[DOMAIN]["fcm_refcount"] == 1
+
+
+def test_multi_entry_buffers_prevent_global_cache_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure two entries never fall back to global cache helpers."""
+
+    async def _boom(*_args, **_kwargs) -> None:
+        raise AssertionError("Global cache helper must not be used")
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.Auth.token_cache.async_get_cached_value",
+        _boom,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.Auth.token_cache.async_set_cached_value",
+        _boom,
+    )
+
+    receiver = FcmReceiverHA()
+
+    class DummyCache:
+        """Simple async cache stub bound to a single entry."""
+
+        def __init__(self, entry_id: str) -> None:
+            self.entry_id = entry_id
+            self.data: dict[str, object] = {}
+
+        async def get(self, key: str) -> object | None:
+            return self.data.get(key)
+
+        async def set(self, key: str, value: object | None) -> None:
+            self.data[key] = value
+
+    class DummyEntry:
+        def __init__(self, entry_id: str) -> None:
+            self.entry_id = entry_id
+            self.options: dict[str, object] = {}
+
+    class DummyCoordinator:
+        def __init__(self, entry_id: str) -> None:
+            self.config_entry = DummyEntry(entry_id)
+            self.cache = DummyCache(entry_id)
+
+    start_calls: list[str] = []
+
+    async def fake_start(self, entry_id: str, _cache: Optional[DummyCache]) -> None:
+        start_calls.append(entry_id)
+
+    monkeypatch.setattr(FcmReceiverHA, "_start_supervisor_for_entry", fake_start)
+
+    coord_one = DummyCoordinator("entry-1")
+    coord_two = DummyCoordinator("entry-2")
+
+    creds_one = {"fcm": {"registration": {"token": "token-entry-1"}}}
+    creds_two = {"fcm": {"registration": {"token": "token-entry-2"}}}
+
+    async def _exercise() -> None:
+        await receiver.async_initialize()
+
+        receiver._on_credentials_updated_for_entry("entry-1", creds_one)
+        receiver._on_credentials_updated_for_entry("entry-2", creds_two)
+        await asyncio.sleep(0)
+
+        receiver.register_coordinator(coord_one)
+        receiver.register_coordinator(coord_two)
+
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_exercise())
+
+    cache_one = coord_one.cache.data
+    cache_two = coord_two.cache.data
+
+    assert cache_one["fcm_credentials"] == creds_one
+    assert cache_two["fcm_credentials"] == creds_two
+    assert cache_one["fcm_routing_tokens"] == ["token-entry-1"]
+    assert cache_two["fcm_routing_tokens"] == ["token-entry-2"]
+
+    assert receiver._pending_creds == {}
+    assert receiver._pending_routing_tokens == {}
+    assert receiver.get_fcm_token("entry-1") == "token-entry-1"
+    assert receiver.get_fcm_token("entry-2") == "token-entry-2"
+
+    assert start_calls.count("entry-1") == 1
+    assert start_calls.count("entry-2") == 1
