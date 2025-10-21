@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+
 import logging
 import time
 from datetime import datetime, timedelta
@@ -14,6 +15,8 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 from homeassistant.util import dt as dt_util
+
+from .coordinator import GoogleFindMyCoordinator
 
 from .const import (
     DOMAIN,
@@ -128,9 +131,16 @@ class GoogleFindMyMapView(HomeAssistantView):
             return _html_response("Unauthorized", "Invalid authentication token.", status=401)
 
         # ---- 2) Coordinator + device membership check (404 if unknown in this entry) ----
-        try:
-            coordinator = self.hass.data[DOMAIN][entry.entry_id]
-        except KeyError:
+        runtime = getattr(entry, "runtime_data", None)
+        coordinator: GoogleFindMyCoordinator | None = None
+        if isinstance(runtime, GoogleFindMyCoordinator):
+            coordinator = runtime
+        else:
+            runtime_bucket = self.hass.data.get(DOMAIN, {}).get("entries", {})
+            runtime_entry = runtime_bucket.get(entry.entry_id)
+            coordinator = getattr(runtime_entry, "coordinator", None)
+
+        if not isinstance(coordinator, GoogleFindMyCoordinator):
             _LOGGER.debug("Coordinator not found for entry_id=%s", entry.entry_id)
             return _html_response("Server Error", "Integration not ready.", status=503)
 

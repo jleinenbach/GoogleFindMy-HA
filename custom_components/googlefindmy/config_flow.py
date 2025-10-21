@@ -938,17 +938,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     except Exception:  # pragma: no cover
                         pass
 
-        data = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
-        if data is not None:
+        runtime_bucket = self.hass.data.get(DOMAIN, {}).get("entries", {})
+        runtime_entry = runtime_bucket.get(entry.entry_id)
+        if runtime_entry is not None:
             for attr in ("_cache", "cache"):
-                if hasattr(data, attr):
+                if hasattr(runtime_entry, attr):
                     try:
-                        return getattr(data, attr)
+                        return getattr(runtime_entry, attr)
                     except Exception:  # pragma: no cover
                         pass
-
-        if isinstance(data, dict):
-            return data.get("cache") or data.get("_cache")
+            if isinstance(runtime_entry, dict):
+                cache = runtime_entry.get("cache") or runtime_entry.get("_cache")
+                if cache is not None:
+                    return cache
         return None
 
 

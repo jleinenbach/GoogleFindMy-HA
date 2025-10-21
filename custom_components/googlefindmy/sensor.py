@@ -155,7 +155,17 @@ async def async_setup_entry(
     - Optionally create diagnostic stat sensors when enabled via options.
     - Dynamically add per-device sensors when new devices appear.
     """
-    coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][entry.entry_id]
+    runtime = getattr(entry, "runtime_data", None)
+    coordinator: GoogleFindMyCoordinator | None = None
+    if isinstance(runtime, GoogleFindMyCoordinator):
+        coordinator = runtime
+    else:
+        runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
+        runtime_entry = runtime_bucket.get(entry.entry_id)
+        coordinator = getattr(runtime_entry, "coordinator", None)
+
+    if not isinstance(coordinator, GoogleFindMyCoordinator):
+        raise HomeAssistantError("googlefindmy coordinator not ready")
 
     entities: list[SensorEntity] = []
     known_ids: set[str] = set()

@@ -105,7 +105,17 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Google Find My Device button entities."""
-    coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][config_entry.entry_id]
+    runtime = getattr(config_entry, "runtime_data", None)
+    coordinator: GoogleFindMyCoordinator | None = None
+    if isinstance(runtime, GoogleFindMyCoordinator):
+        coordinator = runtime
+    else:
+        runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
+        runtime_entry = runtime_bucket.get(config_entry.entry_id)
+        coordinator = getattr(runtime_entry, "coordinator", None)
+
+    if not isinstance(coordinator, GoogleFindMyCoordinator):
+        raise HomeAssistantError("googlefindmy coordinator not ready")
 
     known_ids: set[str] = set()
     entities: list[ButtonEntity] = []

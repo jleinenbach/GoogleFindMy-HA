@@ -27,6 +27,8 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
+from homeassistant.exceptions import HomeAssistantError
+
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
@@ -87,7 +89,17 @@ async def async_setup_entry(
 
     Registers both diagnostic sensors under the per-entry service device.
     """
-    coordinator: GoogleFindMyCoordinator = hass.data[DOMAIN][entry.entry_id]
+    runtime = getattr(entry, "runtime_data", None)
+    coordinator: GoogleFindMyCoordinator | None = None
+    if isinstance(runtime, GoogleFindMyCoordinator):
+        coordinator = runtime
+    else:
+        runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
+        runtime_entry = runtime_bucket.get(entry.entry_id)
+        coordinator = getattr(runtime_entry, "coordinator", None)
+
+    if not isinstance(coordinator, GoogleFindMyCoordinator):
+        raise HomeAssistantError("googlefindmy coordinator not ready")
     entities: list[BinarySensorEntity] = [
         GoogleFindMyPollingSensor(coordinator, entry),
         GoogleFindMyAuthStatusSensor(coordinator, entry),
