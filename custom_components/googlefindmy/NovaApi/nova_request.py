@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import asyncio
 import binascii
+import logging
+import random
 import re
 import time
-import random
-import logging
-from typing import Awaitable, Callable, Optional, Any
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
 
@@ -50,12 +51,9 @@ from custom_components.googlefindmy.Auth.username_provider import (
 )
 from custom_components.googlefindmy.Auth.adm_token_retrieval import (
     async_get_adm_token as async_get_adm_token_api,
-    # Isolated refresh (for config flow validation without global cache)
-    async_get_adm_token_isolated,
 )
 from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
 from custom_components.googlefindmy.Auth.token_cache import (
-    async_set_cached_value,
     TokenCache,  # NEW: for entry-scoped cache access in async path
 )
 from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
@@ -71,9 +69,38 @@ NOVA_MAX_RETRIES = 3
 NOVA_INITIAL_BACKOFF_S = 1.0
 NOVA_BACKOFF_FACTOR = 2.0
 NOVA_MAX_RETRY_AFTER_S = 60.0
+
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KiB
 
+# --- Retry helpers ---
+
+def _compute_delay(attempt: int, retry_after: Optional[str]) -> float:
+    """Return a retry delay honoring Retry-After headers with jittered exponential backoff fallback."""
+
+    delay: float | None = None
+    if retry_after:
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                retry_dt = parsedate_to_datetime(retry_after)
+            except (TypeError, ValueError):
+                retry_dt = None
+            if retry_dt is not None:
+                if retry_dt.tzinfo is None:
+                    retry_dt = retry_dt.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                delay = max(0.0, (retry_dt - now).total_seconds())
+
+    if delay is None:
+        exponent = max(0, attempt - 1)
+        backoff = (NOVA_BACKOFF_FACTOR**exponent) * NOVA_INITIAL_BACKOFF_S
+        delay = random.uniform(0.0, backoff)
+
+    return min(delay, NOVA_MAX_RETRY_AFTER_S)
+
 # --- PII Redaction ---
+
 _RE_BEARER = re.compile(r"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*", re.I)
 _RE_EMAIL = re.compile(r"([A-Za-z0-9._%+-])([A-Za-z0-9._%+-]*)(@[^,\s]+)")
 _RE_HEX16 = re.compile(r"\b[0-9a-fA-F]{16,}\b")

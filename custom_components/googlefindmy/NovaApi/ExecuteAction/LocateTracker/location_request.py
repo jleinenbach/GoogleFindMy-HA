@@ -208,7 +208,7 @@ def _make_location_callback(
                 """Asynchronous part of the callback to decrypt and store data."""
                 try:
                     location_data = await async_decrypt_location_response_locations(
-                        device_update, cache=cache_ref
+                        device_update, cache=cache
                     )
                 except (StaleOwnerKeyError, DecryptionError, SpotApiEmptyResponseError) as err:
                     _LOGGER.error("Failed to process location data for %s: %s", name, err)

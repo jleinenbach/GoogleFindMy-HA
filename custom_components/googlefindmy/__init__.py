@@ -134,8 +134,15 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
 ]
 
-# This integration can only be configured via config entries
-CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+# This integration can only be configured via config entries; gracefully handle older HA cores lacking helper
+if hasattr(cv, "config_entry_only_config_schema"):
+    CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+elif hasattr(cv, "empty_config_schema"):
+    CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
+else:  # pragma: no cover - legacy fallback for very old test environments
+    import voluptuous as vol
+
+    CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
 
 # Latest config entry schema version handled by this integration
 CONFIG_ENTRY_VERSION: int = 2
