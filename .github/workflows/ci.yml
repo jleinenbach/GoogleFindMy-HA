@@ -43,7 +43,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
-      - name: Run pre-commit
+      - name: Run pre-commit (still required locally; pre-commit.ci auto-fixes PRs)
         run: pre-commit run --all-files
 
       - name: Run pytest
