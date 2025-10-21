@@ -63,6 +63,18 @@ def test_shim_prefers_explicit_entry_cache(multi_cache_registry: dict[str, _Stub
     assert refreshed.get_fcm_token() == "token-two-updated"
 
 
+def test_shim_rejects_unknown_entry_id(multi_cache_registry: dict[str, _StubCache]) -> None:
+    """Explicit entry lookups must not mutate arbitrary caches."""
+
+    with pytest.raises(ValueError) as err:
+        fcm_receiver.FcmReceiver(entry_id="missing-entry")
+
+    assert "unknown entry_id" in str(err.value)
+    # Caches should remain untouched when resolution fails.
+    assert multi_cache_registry["entry-one"]._data["fcm_credentials"]["fcm"]["registration"]["token"] == "token-one"
+    assert multi_cache_registry["entry-two"]._data["fcm_credentials"]["fcm"]["registration"]["token"] == "token-two"
+
+
 def test_shim_warns_and_uses_first_cache_when_ambiguous(caplog: pytest.LogCaptureFixture, multi_cache_registry: dict[str, _StubCache]) -> None:
     """When no entry is provided, the shim should not crash even with two caches."""
 

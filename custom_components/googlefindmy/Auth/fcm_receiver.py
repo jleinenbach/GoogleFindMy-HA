@@ -173,9 +173,9 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
             resolved = _token_cache._INSTANCES.get(entry_id)
             if resolved is not None:
                 return resolved
-            _LOGGER.debug(
-                "Legacy FcmReceiver: entry_id '%s' not registered; falling back to first cache.",
-                entry_id,
+            raise ValueError(
+                "Legacy FcmReceiver shim received unknown entry_id; "
+                "provide a registered entry_id or cache=..."
             )
 
         if not _token_cache._INSTANCES:
