@@ -33,13 +33,16 @@ import re
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 import aiohttp
 
 try:
     from bs4 import BeautifulSoup
-except ImportError:  # pragma: no cover - optional dependency, covered via fallback branch
+except (
+    ImportError
+):  # pragma: no cover - optional dependency, covered via fallback branch
     BeautifulSoup = None  # type: ignore[assignment]
     _BS4_AVAILABLE = False
 else:
@@ -62,7 +65,9 @@ from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 _LOGGER = logging.getLogger(__name__)
 
 if not _BS4_AVAILABLE:
-    _LOGGER.debug("BeautifulSoup4 not installed, error response beautification disabled.")
+    _LOGGER.debug(
+        "BeautifulSoup4 not installed, error response beautification disabled."
+    )
 
 # --- Retry constants ---
 NOVA_MAX_RETRIES = 3
@@ -74,7 +79,8 @@ MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KiB
 
 # --- Retry helpers ---
 
-def _compute_delay(attempt: int, retry_after: Optional[str]) -> float:
+
+def _compute_delay(attempt: int, retry_after: str | None) -> float:
     """Return a retry delay honoring Retry-After headers with jittered exponential backoff fallback."""
 
     delay: float | None = None
@@ -98,6 +104,7 @@ def _compute_delay(attempt: int, retry_after: Optional[str]) -> float:
         delay = random.uniform(0.0, backoff)
 
     return min(delay, NOVA_MAX_RETRY_AFTER_S)
+
 
 # --- PII Redaction ---
 
@@ -125,9 +132,13 @@ def _beautify_text(resp_text: str) -> str:
 
     if _BS4_AVAILABLE and BeautifulSoup is not None:
         try:
-            text = BeautifulSoup(resp_text, "html.parser").get_text(separator=" ", strip=True)
+            text = BeautifulSoup(resp_text, "html.parser").get_text(
+                separator=" ", strip=True
+            )
         except Exception as err:  # pragma: no cover - defensive logging path
-            _LOGGER.debug("Failed to parse error response body via BeautifulSoup: %s", err)
+            _LOGGER.debug(
+                "Failed to parse error response body via BeautifulSoup: %s", err
+            )
         else:
             if text:
                 return text[:_ERROR_SNIPPET_MAX]
@@ -143,7 +154,7 @@ class NovaError(Exception):
 class NovaAuthError(NovaError):
     """Raised on 4xx client errors after retries."""
 
-    def __init__(self, status: int, detail: Optional[str] = None):
+    def __init__(self, status: int, detail: str | None = None):
         super().__init__(f"HTTP Client Error {status}: {detail or ''}".strip())
         self.status = status
         self.detail = detail
@@ -152,7 +163,7 @@ class NovaAuthError(NovaError):
 class NovaRateLimitError(NovaError):
     """Raised on 429 rate-limiting errors after retries."""
 
-    def __init__(self, detail: Optional[str] = None):
+    def __init__(self, detail: str | None = None):
         super().__init__(f"Rate limited by upstream API: {detail or ''}".strip())
         self.detail = detail
 
@@ -160,7 +171,7 @@ class NovaRateLimitError(NovaError):
 class NovaHTTPError(NovaError):
     """Raised for 5xx server errors after retries."""
 
-    def __init__(self, status: int, detail: Optional[str] = None):
+    def __init__(self, status: int, detail: str | None = None):
         super().__init__(f"HTTP Server Error {status}: {detail or ''}".strip())
         self.status = status
         self.detail = detail
@@ -228,7 +239,11 @@ async def _get_initial_token_async(
             try:
                 await cache.set(cache_key, fallback)
             except Exception as err:  # pragma: no cover - defensive logging
-                logger.debug("Failed to mirror ADM token to namespaced key '%s': %s", cache_key, err)
+                logger.debug(
+                    "Failed to mirror ADM token to namespaced key '%s': %s",
+                    cache_key,
+                    err,
+                )
             return fallback
 
     token = await async_get_adm_token_api(normalized_user, cache=cache)
@@ -237,7 +252,9 @@ async def _get_initial_token_async(
         try:
             await cache.set(cache_key, token)
         except Exception as err:  # pragma: no cover - defensive logging
-            logger.debug("Failed to persist ADM token to namespaced key '%s': %s", cache_key, err)
+            logger.debug(
+                "Failed to persist ADM token to namespaced key '%s': %s", cache_key, err
+            )
 
     return token
 
@@ -257,9 +274,9 @@ class TTLPolicy:
         self,
         username: str,
         logger,
-        get_value: Callable[[str], Optional[float | int | str]],
+        get_value: Callable[[str], float | int | str | None],
         set_value: Callable[[str, object | None], None],
-        refresh_fn: Callable[[], Optional[str]],
+        refresh_fn: Callable[[], str | None],
         set_auth_header_fn: Callable[[str], None],
         ns_prefix: str = "",
     ) -> None:
@@ -274,7 +291,12 @@ class TTLPolicy:
         """
         self.username = username
         self.log = logger
-        self._get, self._set, self._refresh, self._set_auth = get_value, set_value, refresh_fn, set_auth_header_fn
+        self._get, self._set, self._refresh, self._set_auth = (
+            get_value,
+            set_value,
+            refresh_fn,
+            set_auth_header_fn,
+        )
         self._ns = (ns_prefix or "").strip()
         if self._ns and not self._ns.endswith(":"):
             self._ns += ":"
@@ -333,13 +355,19 @@ class TTLPolicy:
             if probenext is None:
                 self._set(
                     self.k_probenext,
-                    now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct),
+                    now
+                    + self._jitter_pct(
+                        self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct
+                    ),
                 )
             elif now >= float(probenext):
                 do_arm = True
                 self._set(
                     self.k_probenext,
-                    now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct),
+                    now
+                    + self._jitter_pct(
+                        self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct
+                    ),
                 )
 
         if do_arm:
@@ -347,7 +375,7 @@ class TTLPolicy:
             return True
         return bool(self._get(self.k_armed))
 
-    def _do_refresh(self, now: float) -> Optional[str]:
+    def _do_refresh(self, now: float) -> str | None:
         """Refresh token, update header and issuance timestamp, bootstrap startup probes if missing."""
         try:
             self._set(f"{self._ns}adm_token_{self.username}", None)  # best-effort clear
@@ -377,17 +405,21 @@ class TTLPolicy:
                 threshold = max(0.0, float(best_ttl) - self.TTL_MARGIN_SEC)
                 threshold = self._jitter_sec(threshold, self.JITTER_SEC)
                 if age >= threshold:
-                    self.log.info("ADM token reached measured threshold – proactively refreshing...")
+                    self.log.info(
+                        "ADM token reached measured threshold – proactively refreshing..."
+                    )
                     self._do_refresh(now)
             except (ValueError, TypeError) as e:
                 self.log.debug("Threshold check failed: %s", e)
 
-    def on_401(self, adaptive_downshift: bool = True) -> Optional[str]:
+    def on_401(self, adaptive_downshift: bool = True) -> str | None:
         """Handle 401: measure TTL, adapt quickly on unexpected short TTLs, then refresh."""
         now = time.time()
         issued = self._get(self.k_issued)
         if issued is None:
-            self.log.warning("Got 401 – issued timestamp missing; attempting token refresh.")
+            self.log.warning(
+                "Got 401 – issued timestamp missing; attempting token refresh."
+            )
             return self._do_refresh(now)
 
         age_sec = now - float(issued)
@@ -397,7 +429,7 @@ class TTLPolicy:
         if planned_probe:
             self.log.info("Got 401 (forced probe) – measured TTL: %.1f min.", age_min)
             self._set(self.k_bestttl, age_sec)  # always accept probe (up or down)
-            self._set(self.k_armed, 0)          # coalesce multiple 401 in same probe window
+            self._set(self.k_armed, 0)  # coalesce multiple 401 in same probe window
             left = self._get(self.k_startleft)
             if left and int(left) > 0:
                 try:
@@ -405,13 +437,17 @@ class TTLPolicy:
                 except (ValueError, TypeError):
                     self._set(self.k_startleft, 0)
         else:
-            self.log.warning("Got 401 – token expired after %.1f min (unplanned).", age_min)
+            self.log.warning(
+                "Got 401 – token expired after %.1f min (unplanned).", age_min
+            )
             if adaptive_downshift:
                 best = self._get(self.k_bestttl)
                 try:
                     # If clearly shorter than our current model (>10% shorter), recalibrate immediately.
                     if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
-                        self.log.warning("Unexpected short TTL – recalibrating best known TTL.")
+                        self.log.warning(
+                            "Unexpected short TTL – recalibrating best known TTL."
+                        )
                         self._set(self.k_bestttl, age_sec)
                 except (ValueError, TypeError) as e:
                     self.log.debug("Recalibration check failed: %s", e)
@@ -429,18 +465,32 @@ class AsyncTTLPolicy(TTLPolicy):
         do_arm = bool(startup_left and int(startup_left) > 0)
         if not do_arm:
             if probenext is None:
-                await self._set(self.k_probenext, now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.PROBE_INTERVAL_JITTER_PCT))
+                await self._set(
+                    self.k_probenext,
+                    now
+                    + self._jitter_pct(
+                        self.PROBE_INTERVAL_SEC, self.PROBE_INTERVAL_JITTER_PCT
+                    ),
+                )
             elif now >= float(probenext):
                 do_arm = True
-                await self._set(self.k_probenext, now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.PROBE_INTERVAL_JITTER_PCT))
+                await self._set(
+                    self.k_probenext,
+                    now
+                    + self._jitter_pct(
+                        self.PROBE_INTERVAL_SEC, self.PROBE_INTERVAL_JITTER_PCT
+                    ),
+                )
         if do_arm:
             await self._set(self.k_armed, 1)
             return True
         return bool(await self._get(self.k_armed))
 
-    async def _do_refresh_async(self, now: float) -> Optional[str]:
+    async def _do_refresh_async(self, now: float) -> str | None:
         try:
-            await self._set(f"{self._ns}adm_token_{self.username}", None)  # best-effort clear
+            await self._set(
+                f"{self._ns}adm_token_{self.username}", None
+            )  # best-effort clear
         except Exception:
             pass
         try:
@@ -472,25 +522,31 @@ class AsyncTTLPolicy(TTLPolicy):
                 threshold = max(0.0, float(best_ttl) - self.TTL_MARGIN_SEC)
                 threshold = self._jitter_sec(threshold, self.JITTER_SEC)
                 if age >= threshold:
-                    self.log.info("ADM token reached measured threshold – proactively refreshing (async)…")
+                    self.log.info(
+                        "ADM token reached measured threshold – proactively refreshing (async)…"
+                    )
                     await self._do_refresh_async(now)
             except (ValueError, TypeError) as e:
                 self.log.debug("Threshold check failed (async): %s", e)
 
-    async def on_401(self, adaptive_downshift: bool = True) -> Optional[str]:
+    async def on_401(self, adaptive_downshift: bool = True) -> str | None:
         """Async 401 handling with stampede guard and async cache I/O."""
         lock = _get_async_refresh_lock()
         async with lock:
             # Skip duplicate refresh if someone just refreshed recently.
             current_issued = await self._get(self.k_issued)
             if current_issued and time.time() - float(current_issued) < 2:
-                self.log.debug("Another task already refreshed the token; skipping duplicate refresh.")
+                self.log.debug(
+                    "Another task already refreshed the token; skipping duplicate refresh."
+                )
                 return None
 
             now = time.time()
             issued = await self._get(self.k_issued)
             if issued is None:
-                self.log.info("Got 401 – issued timestamp missing; attempting token refresh (async).")
+                self.log.info(
+                    "Got 401 – issued timestamp missing; attempting token refresh (async)."
+                )
                 return await self._do_refresh_async(now)
 
             age_sec = now - float(issued)
@@ -498,7 +554,9 @@ class AsyncTTLPolicy(TTLPolicy):
             planned_probe = bool(await self._get(self.k_armed))
 
             if planned_probe:
-                self.log.info("Got 401 (forced probe) – measured TTL: %.1f min.", age_min)
+                self.log.info(
+                    "Got 401 (forced probe) – measured TTL: %.1f min.", age_min
+                )
                 await self._set(self.k_bestttl, age_sec)
                 await self._set(self.k_armed, 0)
                 left = await self._get(self.k_startleft)
@@ -508,12 +566,16 @@ class AsyncTTLPolicy(TTLPolicy):
                     except (ValueError, TypeError):
                         await self._set(self.k_startleft, 0)
             else:
-                self.log.info("Got 401 – token expired after %.1f min (unplanned).", age_min)
+                self.log.info(
+                    "Got 401 – token expired after %.1f min (unplanned).", age_min
+                )
                 if adaptive_downshift:
                     best = await self._get(self.k_bestttl)
                     try:
                         if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
-                            self.log.warning("Unexpected short TTL – recalibrating best known TTL (async).")
+                            self.log.warning(
+                                "Unexpected short TTL – recalibrating best known TTL (async)."
+                            )
                             await self._set(self.k_bestttl, age_sec)
                     except (ValueError, TypeError) as e:
                         self.log.debug("Recalibration check failed (async): %s", e)
@@ -532,16 +594,16 @@ async def async_nova_request(
     api_scope: str,
     hex_payload: str,
     *,
-    username: Optional[str] = None,
-    session: Optional[aiohttp.ClientSession] = None,
+    username: str | None = None,
+    session: aiohttp.ClientSession | None = None,
     # Optional: initial token for config-flow isolation (bypass cache lookups)
-    token: Optional[str] = None,
+    token: str | None = None,
     # Optional overrides for flow-local validation (avoid global cache conflicts)
-    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
-    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
-    refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+    cache_get: Callable[[str], Awaitable[Any]] | None = None,
+    cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+    refresh_override: Callable[[], Awaitable[str | None]] | None = None,
     # Optional: entry-specific namespace for cache keys (e.g., entry_id)
-    namespace: Optional[str] = None,
+    namespace: str | None = None,
     # Entry-scoped TokenCache for strict multi-account separation
     cache: TokenCache,
 ) -> str:
@@ -622,7 +684,9 @@ async def async_nova_request(
         except Exception as err:  # noqa: BLE001 - defensive caching
             _LOGGER.debug("Failed to seed provided flow token into cache: %s", err)
 
-    initial_token = await _get_initial_token_async(user, _LOGGER, ns_prefix=(namespace or ""), cache=cache)
+    initial_token = await _get_initial_token_async(
+        user, _LOGGER, ns_prefix=(namespace or ""), cache=cache
+    )
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
@@ -639,7 +703,7 @@ async def async_nova_request(
 
     # Select cache/refresh providers (entry-scoped TokenCache)
     if refresh_override is not None:
-        rf_fn: Callable[[], Awaitable[Optional[str]]] = refresh_override
+        rf_fn: Callable[[], Awaitable[str | None]] = refresh_override
     else:
         rf_fn = lambda: async_get_adm_token_api(user, cache=cache)  # noqa: E731
 
@@ -684,16 +748,24 @@ async def async_nova_request(
                 ) as response:
                     content = await response.read()
                     status = response.status
-                    _LOGGER.debug("Nova API async request to %s: status=%d", api_scope, status)
+                    _LOGGER.debug(
+                        "Nova API async request to %s: status=%d", api_scope, status
+                    )
 
                     if status == 200:
                         return content.hex()
 
-                    text_snippet = _redact(_beautify_text(content.decode(errors="ignore")))
+                    text_snippet = _redact(
+                        _beautify_text(content.decode(errors="ignore"))
+                    )
 
                     if status == 401:
                         lvl = logging.INFO if not refreshed_once else logging.WARNING
-                        _LOGGER.log(lvl, "Nova API async request to %s: 401 Unauthorized. Refreshing token.", api_scope)
+                        _LOGGER.log(
+                            lvl,
+                            "Nova API async request to %s: 401 Unauthorized. Refreshing token.",
+                            api_scope,
+                        )
                         await policy.on_401()
                         if not refreshed_once:
                             refreshed_once = True
@@ -703,7 +775,9 @@ async def async_nova_request(
 
                     if status in (408, 429) or 500 <= status < 600:
                         if retries_used < NOVA_MAX_RETRIES:
-                            delay = _compute_delay(attempt, response.headers.get("Retry-After"))
+                            delay = _compute_delay(
+                                attempt, response.headers.get("Retry-After")
+                            )
                             _LOGGER.info(
                                 "Nova API async request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
                                 api_scope,
@@ -723,14 +797,19 @@ async def async_nova_request(
                                 status,
                             )
                             if status == 429:
-                                raise NovaRateLimitError(f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts.")
-                            raise NovaHTTPError(status, f"Nova API failed after {NOVA_MAX_RETRIES} attempts.")
+                                raise NovaRateLimitError(
+                                    f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts."
+                                )
+                            raise NovaHTTPError(
+                                status,
+                                f"Nova API failed after {NOVA_MAX_RETRIES} attempts.",
+                            )
 
                     raise NovaAuthError(status, text_snippet)
 
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            except (TimeoutError, aiohttp.ClientError) as e:
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, None)
                     _LOGGER.info(
@@ -751,7 +830,9 @@ async def async_nova_request(
                         retries_used + 1,
                         type(e).__name__,
                     )
-                    raise NovaError(f"Nova API request failed after retries: {e}") from e
+                    raise NovaError(
+                        f"Nova API request failed after retries: {e}"
+                    ) from e
 
     finally:
         if ephemeral_session and session:

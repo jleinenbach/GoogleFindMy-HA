@@ -7,16 +7,17 @@
 from selenium.webdriver.support.ui import WebDriverWait
 from custom_components.googlefindmy.chrome_driver import create_driver
 
-def request_oauth_account_token_flow(headless=False):
 
+def request_oauth_account_token_flow(headless=False):
     # In Home Assistant context, skip the interactive prompts
     import sys
-    is_home_assistant = 'homeassistant' in sys.modules
-    
+
+    is_home_assistant = "homeassistant" in sys.modules
+
     if not headless and not is_home_assistant:
         print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
 > Please make sure that Chrome is installed on your system.
-> For macOS users only: Make that you allow Python (or PyCharm) to control Chrome if prompted. 
+> For macOS users only: Make that you allow Python (or PyCharm) to control Chrome if prompted.
         """)
 
         # Press enter to continue
@@ -41,7 +42,7 @@ def request_oauth_account_token_flow(headless=False):
 
         # Get the value of the "oauth_token" cookie
         oauth_token_cookie = driver.get_cookie("oauth_token")
-        oauth_token_value = oauth_token_cookie['value']
+        oauth_token_value = oauth_token_cookie["value"]
 
         # Print the value of the "oauth_token" cookie
         if not is_home_assistant:
@@ -53,5 +54,6 @@ def request_oauth_account_token_flow(headless=False):
         # Close the browser
         driver.quit()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     request_oauth_account_token_flow()

@@ -25,7 +25,7 @@ Provided sensors:
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from homeassistant.exceptions import HomeAssistantError
 
@@ -188,9 +188,9 @@ class GoogleFindMyAuthStatusSensor(
     entity_description = AUTH_STATUS_DESC
 
     # Internal event-driven state (None -> unknown, True -> problem, False -> ok)
-    _event_state: Optional[bool]
-    _unsub_err: Optional[Callable[[], None]]
-    _unsub_ok: Optional[Callable[[], None]]
+    _event_state: bool | None
+    _unsub_err: Callable[[], None] | None
+    _unsub_ok: Callable[[], None] | None
 
     def __init__(
         self, coordinator: GoogleFindMyCoordinator, entry: ConfigEntry
@@ -278,13 +278,13 @@ class GoogleFindMyAuthStatusSensor(
         return True
 
     @property
-    def extra_state_attributes(self) -> dict[str, Optional[str]] | None:
+    def extra_state_attributes(self) -> dict[str, str | None] | None:
         """Expose API polling status as part of the diagnostic context."""
 
         status = getattr(self.coordinator, "api_status", None)
         if status is None:
             return None
-        attributes: dict[str, Optional[str]] = {"api_status": status.state}
+        attributes: dict[str, str | None] = {"api_status": status.state}
         if status.reason:
             attributes["api_status_reason"] = status.reason
         return attributes

@@ -30,7 +30,7 @@ class _FakeResponse:
     text_value: str
     headers: dict[str, str]
 
-    async def __aenter__(self) -> "_FakeResponse":  # noqa: D401 - context manager contract
+    async def __aenter__(self) -> _FakeResponse:  # noqa: D401 - context manager contract
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
@@ -47,14 +47,18 @@ class _FakeSession:
         self._responses = responses
         self.calls: list[dict[str, Any]] = []
 
-    def post(self, *, url: str, headers: dict[str, str], data: dict[str, Any], timeout: Any) -> _FakeResponse:
+    def post(
+        self, *, url: str, headers: dict[str, str], data: dict[str, Any], timeout: Any
+    ) -> _FakeResponse:
         self.calls.append({"url": url, "data": dict(data), "headers": dict(headers)})
         if not self._responses:
             raise AssertionError("No more responses configured for FakeSession")
         return self._responses.pop(0)
 
 
-def test_gcm_register_uses_numeric_sender_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gcm_register_uses_numeric_sender_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The initial request uses the configured numeric sender value."""
 
     responses = [
@@ -81,12 +85,16 @@ def test_gcm_register_uses_numeric_sender_by_default(monkeypatch: pytest.MonkeyP
     assert session.calls[0]["data"]["sender"] == "1234567890123"
 
 
-def test_gcm_register_html_retry_uses_legacy_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gcm_register_html_retry_uses_legacy_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """HTML/404 response triggers a single legacy retry before returning to the primary URL."""
 
     responses = [
         _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
-        _FakeResponse(404, "<!doctype html>legacy not found", {"Content-Type": "text/html"}),
+        _FakeResponse(
+            404, "<!doctype html>legacy not found", {"Content-Type": "text/html"}
+        ),
         _FakeResponse(200, "token=abc123", {"Content-Type": "text/plain"}),
     ]
     session = _FakeSession(responses)
@@ -138,7 +146,9 @@ def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(register.gcm_register({"androidId": 1, "securityToken": 2}, retries=2))
+    result = asyncio.run(
+        register.gcm_register({"androidId": 1, "securityToken": 2}, retries=2)
+    )
 
     assert result is None
     assert len(session.calls) == 2
@@ -148,7 +158,9 @@ def test_gcm_register_falls_back_to_server_key(monkeypatch: pytest.MonkeyPatch) 
     """PHONE_REGISTRATION_ERROR triggers a second attempt using the legacy server key."""
 
     responses = [
-        _FakeResponse(200, "Error=PHONE_REGISTRATION_ERROR", {"Content-Type": "text/plain"}),
+        _FakeResponse(
+            200, "Error=PHONE_REGISTRATION_ERROR", {"Content-Type": "text/plain"}
+        ),
         _FakeResponse(200, "token=xyz", {"Content-Type": "text/plain"}),
     ]
     session = _FakeSession(responses)
@@ -166,7 +178,9 @@ def test_gcm_register_falls_back_to_server_key(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3))
+    result = asyncio.run(
+        register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3)
+    )
 
     assert result["token"] == "xyz"
     assert len(session.calls) == 2
@@ -174,7 +188,9 @@ def test_gcm_register_falls_back_to_server_key(monkeypatch: pytest.MonkeyPatch) 
     assert session.calls[1]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
-def test_checkin_or_register_reuses_cached_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_checkin_or_register_reuses_cached_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Existing credentials trigger a check-in using cached android/security tokens."""
 
     config = FcmRegisterConfig(
@@ -198,7 +214,9 @@ def test_checkin_or_register_reuses_cached_credentials(monkeypatch: pytest.Monke
         return {"androidId": android_id, "securityToken": security_token}
 
     async def fail_register(self):  # pragma: no cover - should not be invoked
-        raise AssertionError("Unexpected register() invocation when cached credentials exist")
+        raise AssertionError(
+            "Unexpected register() invocation when cached credentials exist"
+        )
 
     register.gcm_check_in = types.MethodType(fake_gcm_check_in, register)
     register.register = types.MethodType(fail_register, register)

@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Collection
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -19,14 +19,14 @@ except ImportError:  # pragma: no cover - fallback for stripped test environment
 from .const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN, INTEGRATION_VERSION
 
 
-def _normalize_email(value: Optional[str]) -> str:
+def _normalize_email(value: str | None) -> str:
     """Return a normalized email address (lowercase, trimmed)."""
     if not isinstance(value, str):
         return ""
     return value.strip().lower()
 
 
-def _email_hash(entry: ConfigEntry) -> Optional[str]:
+def _email_hash(entry: ConfigEntry) -> str | None:
     """Return a truncated SHA-256 hash for the account email (or None if absent)."""
     email = entry.data.get(CONF_GOOGLE_EMAIL)
     if isinstance(email, str) and email:
@@ -43,7 +43,7 @@ def _email_hash(entry: ConfigEntry) -> Optional[str]:
     return f"sha256:{digest[:12]}"
 
 
-def _safe_len(value: Any) -> Optional[int]:
+def _safe_len(value: Any) -> int | None:
     """Return len(value) if it behaves like a collection, otherwise None."""
     if isinstance(value, Collection):
         try:
@@ -53,7 +53,7 @@ def _safe_len(value: Any) -> Optional[int]:
     return None
 
 
-def _safe_datetime(value: Any) -> Optional[str]:
+def _safe_datetime(value: Any) -> str | None:
     """Return an ISO8601 timestamp for datetime values."""
     if isinstance(value, datetime):
         try:
@@ -142,7 +142,7 @@ async def async_register(hass: HomeAssistant) -> None:
     component.async_register_info(hass, DOMAIN, async_get_system_health_info)
 
 
-def _entry_state(entry: ConfigEntry) -> Optional[str]:
+def _entry_state(entry: ConfigEntry) -> str | None:
     """Return the config entry state as a plain string."""
     state = getattr(entry, "state", None)
     if state is None:
@@ -170,7 +170,9 @@ def _build_entry_payload(
     if devices_loaded is not None:
         payload["devices_loaded"] = devices_loaded
 
-    last_success = _safe_datetime(getattr(coordinator, "last_update_success_time", None))
+    last_success = _safe_datetime(
+        getattr(coordinator, "last_update_success_time", None)
+    )
     if last_success is None:
         alt_last = getattr(coordinator, "last_successful_update", None)
         payload_value = _safe_datetime(alt_last)
@@ -211,7 +213,9 @@ async def async_get_system_health_info(hass: HomeAssistant) -> dict[str, Any]:
             config_entries = list(manager.async_entries(DOMAIN))
         except TypeError:
             config_entries = [
-                entry for entry in manager.async_entries() if entry.domain == DOMAIN  # type: ignore[attr-defined]
+                entry
+                for entry in manager.async_entries()
+                if entry.domain == DOMAIN  # type: ignore[attr-defined]
             ]
         except Exception:  # pragma: no cover - defensive guard
             config_entries = []

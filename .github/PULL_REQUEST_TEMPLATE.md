@@ -67,7 +67,7 @@ Notes for AI/automation:
 - ☐ For **bugfixes**: a **minimal regression test** is included that fails without the fix and passes with it
 - Coverage targets:
   - ☐ `config_flow.py` remains **100%**
-  - ☐ Total ≥ **95%**  
+  - ☐ Total ≥ **95%**
     ☐ Temporary dip due to necessary code removal — **follow-up issue** opened: #___
 
 ### Expected areas (check all that apply)

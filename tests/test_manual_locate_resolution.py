@@ -59,7 +59,9 @@ def hass() -> HomeAssistant:
 
 
 @pytest.fixture
-def registries(monkeypatch: pytest.MonkeyPatch) -> tuple[_StubDeviceRegistry, _StubEntityRegistry]:
+def registries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[_StubDeviceRegistry, _StubEntityRegistry]:
     """Patch integration registries with mutable stubs for each test."""
 
     device_registry = _StubDeviceRegistry()
@@ -162,7 +164,9 @@ class _StubCoordinator:
 
 
 def test_async_handle_manual_locate_success(
-    hass: HomeAssistant, registries: tuple[_StubDeviceRegistry, _StubEntityRegistry], caplog: pytest.LogCaptureFixture
+    hass: HomeAssistant,
+    registries: tuple[_StubDeviceRegistry, _StubEntityRegistry],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Manual locate dispatches to the coordinator and logs success."""
 
@@ -194,9 +198,7 @@ def test_async_handle_manual_locate_namespaced_identifier(
         config_entries={"entry-1"},
     )
     coordinator = _StubCoordinator()
-    asyncio.run(
-        gfm.async_handle_manual_locate(hass, coordinator, "device-namespace")
-    )
+    asyncio.run(gfm.async_handle_manual_locate(hass, coordinator, "device-namespace"))
     assert coordinator.calls == ["canonical-ns"]
 
 
@@ -222,7 +224,9 @@ class _FailingCoordinator(_StubCoordinator):
 
 
 def test_async_handle_manual_locate_failure_adds_diagnostic(
-    hass: HomeAssistant, registries: tuple[_StubDeviceRegistry, _StubEntityRegistry], caplog: pytest.LogCaptureFixture
+    hass: HomeAssistant,
+    registries: tuple[_StubDeviceRegistry, _StubEntityRegistry],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Resolution failures propagate errors and add diagnostics."""
 

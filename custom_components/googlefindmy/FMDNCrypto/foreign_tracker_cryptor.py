@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import secrets
 from binascii import unhexlify
-from typing import Tuple
 
 from Cryptodome.Cipher import AES
 from ecdsa import SECP160r1
@@ -54,6 +53,7 @@ _NONCE_LEN: int = 16
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def rx_to_ry(Rx: int, curve) -> int:
     """Recover the even Y coordinate for a given X on a short Weierstrass curve.
 
@@ -72,7 +72,7 @@ def rx_to_ry(Rx: int, curve) -> int:
         ValueError: If the provided X does not yield a valid point on the curve.
     """
     # Compute y^2 = x^3 + a·x + b (mod p)
-    Ryy = (Rx ** 3 + curve.a() * Rx + curve.b()) % curve.p()
+    Ryy = (Rx**3 + curve.a() * Rx + curve.b()) % curve.p()
 
     # For p ≡ 3 (mod 4): y = (y^2)^((p+1)//4) mod p is a square root
     Ry = pow(Ryy, (curve.p() + 1) // 4, curve.p())
@@ -98,7 +98,8 @@ def _require_len(name: str, b: bytes, expected: int) -> None:
 # AES-EAX wrappers (authenticated encryption)
 # ---------------------------------------------------------------------------
 
-def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> Tuple[bytes, bytes]:
+
+def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> tuple[bytes, bytes]:
     """Encrypt and authenticate with AES-EAX-256.
 
     Args:
@@ -152,7 +153,8 @@ def decrypt_aes_eax(data: bytes, tag: bytes, nonce: bytes, key: bytes) -> bytes:
 # ECIES-like envelope (domain-specific construction)
 # ---------------------------------------------------------------------------
 
-def encrypt(message: bytes, random: bytes, eid: bytes) -> Tuple[bytes, bytes]:
+
+def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
     """Encrypt a payload to an ephemeral EID on SECP160r1 using AES-EAX-256.
 
     Construction (as implemented in the original code and preserved):
@@ -210,7 +212,9 @@ def encrypt(message: bytes, random: bytes, eid: bytes) -> Tuple[bytes, bytes]:
     return m_dash + tag, S.x().to_bytes(_COORD_LEN, "big")
 
 
-def decrypt(identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_counter: int) -> bytes:
+def decrypt(
+    identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_counter: int
+) -> bytes:
     """Decrypt a payload sent to a tracker identity on SECP160r1 with AES-EAX-256.
 
     Construction (mirrors `encrypt` above):
@@ -271,7 +275,10 @@ def decrypt(identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_
 # Optional async wrapper (non-breaking): offload CPU work to a worker thread
 # ---------------------------------------------------------------------------
 
-async def async_decrypt(identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_counter: int) -> bytes:
+
+async def async_decrypt(
+    identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_counter: int
+) -> bytes:
     """Async convenience wrapper for `decrypt(...)` using `asyncio.to_thread`.
 
     This preserves the original sync API while allowing async call sites

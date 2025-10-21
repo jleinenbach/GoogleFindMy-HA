@@ -4,6 +4,7 @@
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
 """Handles fetching the list of Find My devices from the Nova API."""
+
 from __future__ import annotations
 
 import argparse
@@ -11,7 +12,8 @@ import asyncio
 import binascii
 import logging
 import os
-from typing import Optional, Callable, Awaitable, Any
+from typing import Any
+from collections.abc import Callable, Awaitable
 
 from aiohttp import ClientSession
 
@@ -60,17 +62,17 @@ def create_device_list_request() -> str:
 
 
 async def async_request_device_list(
-    username: Optional[str] = None,
+    username: str | None = None,
     *,
-    session: Optional[ClientSession] = None,
+    session: ClientSession | None = None,
     # Entry-scoped TokenCache (recommended in HA coordinators)
-    cache: Optional[TokenCache] = None,
+    cache: TokenCache | None = None,
     # Flow-local / entry-scoped overrides (all optional):
-    token: Optional[str] = None,
-    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
-    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
-    refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
-    namespace: Optional[str] = None,
+    token: str | None = None,
+    cache_get: Callable[[str], Awaitable[Any]] | None = None,
+    cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+    refresh_override: Callable[[], Awaitable[str | None]] | None = None,
+    namespace: str | None = None,
 ) -> str:
     """Asynchronously request the device list via Nova.
 
@@ -150,9 +152,9 @@ async def async_request_device_list(
         username=username,
         session=session,
         token=token,
-        cache=cache,              # ← ensure entry-local reads/writes where available
-        cache_get=ns_get,         # ← only used if provided; otherwise TokenCache is used
-        cache_set=ns_set,         # ← only used if provided; otherwise TokenCache is used
+        cache=cache,  # ← ensure entry-local reads/writes where available
+        cache_get=ns_get,  # ← only used if provided; otherwise TokenCache is used
+        cache_set=ns_set,  # ← only used if provided; otherwise TokenCache is used
         refresh_override=refresh_override,
         namespace=namespace,
     )
@@ -189,7 +191,7 @@ def request_device_list() -> str:
 
 
 # ------------------------------ CLI helper ---------------------------------
-def _resolve_cli_cache(entry_id_hint: Optional[str]) -> tuple[TokenCache, str]:
+def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
     """Return the entry-scoped cache/namespace for CLI usage or raise informative error."""
 
     entry_ids = get_registered_entry_ids()
@@ -209,21 +211,24 @@ def _resolve_cli_cache(entry_id_hint: Optional[str]) -> tuple[TokenCache, str]:
         available = ", ".join(sorted(entry_ids)) or "<none>"
         raise RuntimeError(
             "Unknown entry_id '{entry}'. Available entry IDs: {avail}. "
-            "Unbekannte Entry-ID '{entry}'. Verfügbare IDs: {avail}."
-            .format(entry=normalized, avail=available)
+            "Unbekannte Entry-ID '{entry}'. Verfügbare IDs: {avail}.".format(
+                entry=normalized, avail=available
+            )
         ) from err
 
     return cache, normalized
 
 
-async def _async_cli_main(entry_id: Optional[str] = None) -> None:
+async def _async_cli_main(entry_id: str | None = None) -> None:
     """Asynchronous main function for the CLI experience (single event loop).
 
     This function provides an interactive command-line interface for fetching
     device locations or registering new microcontroller-based trackers.
     It is intended for development and testing purposes.
     """
-    cache, namespace = _resolve_cli_cache(entry_id or os.environ.get("GOOGLEFINDMY_ENTRY_ID"))
+    cache, namespace = _resolve_cli_cache(
+        entry_id or os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+    )
 
     print("Loading...")
     result_hex = await async_request_device_list(cache=cache, namespace=namespace)
@@ -263,6 +268,7 @@ async def _async_cli_main(entry_id: Optional[str] = None) -> None:
             from custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device import (
                 register_esp32,
             )
+
             register_esp32()
 
         # Run potential blocking/IO work in a worker thread to avoid blocking the loop.
@@ -287,15 +293,13 @@ async def _async_cli_main(entry_id: Optional[str] = None) -> None:
         )
 
 
-def _parse_cli_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments for entry selection."""
 
     parser = argparse.ArgumentParser(description="Google Find My Device CLI helper")
     parser.add_argument(
         "--entry",
-        help=(
-            "Config entry ID to target. Alternatively set GOOGLEFINDMY_ENTRY_ID."
-        ),
+        help=("Config entry ID to target. Alternatively set GOOGLEFINDMY_ENTRY_ID."),
     )
     return parser.parse_args(argv)
 

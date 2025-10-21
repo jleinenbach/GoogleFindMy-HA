@@ -18,12 +18,13 @@ Quality & design notes (HA Platinum guidelines)
 * End devices are linked to the single per-entry *service device* via `via_device`
   using the identifier `(DOMAIN, f"integration_{entry_id}")` for clean grouping.
 """
+
 from __future__ import annotations
 
 import hashlib
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -38,7 +39,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
-    OPT_MAP_VIEW_TOKEN_EXPIRATION,   # <-- use the constant (C2)
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,  # <-- use the constant (C2)
     SERVICE_LOCATE_DEVICE,
     service_device_identifier,
 )
@@ -148,9 +149,7 @@ async def async_setup_entry(
                 known_ids.add(dev_id)
 
         if new_entities:
-            _LOGGER.debug(
-                "Dynamically adding %d button entity(ies)", len(new_entities)
-            )
+            _LOGGER.debug("Dynamically adding %d button entity(ies)", len(new_entities))
             async_add_entities(new_entities, True)
 
     unsub = coordinator.async_add_listener(_add_new_devices)
@@ -212,12 +211,12 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
 
     # ---------------- Device Info + Map Link (shared) ----------------
     @property
-    def _entry_id(self) -> Optional[str]:
+    def _entry_id(self) -> str | None:
         """Return entry_id if the entity is bound to a config entry."""
         entry = getattr(self.coordinator, "config_entry", None)
         return getattr(entry, "entry_id", None)
 
-    def _service_device_identifier(self) -> Optional[tuple[str, str]]:
+    def _service_device_identifier(self) -> tuple[str, str] | None:
         """Return the `(DOMAIN, f"integration_{entry_id}")` identifier for via_device."""
         eid = self._entry_id
         if not eid:
@@ -249,7 +248,9 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         path = self._build_map_path(self._device["id"], auth_token, redirect=False)
 
         raw_name = (self._device.get("name") or "").strip()
-        use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
+        use_name = (
+            raw_name if raw_name and raw_name != "Google Find My Device" else None
+        )
 
         info_kwargs: dict[str, Any] = {}
         if use_name:
@@ -288,6 +289,7 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         # Prefer central options helper if available; fall back to direct reads.
         try:
             from . import _opt  # type: ignore
+
             token_expiration_enabled = _opt(
                 config_entry,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -343,7 +345,9 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
         dev_id = self._device["id"]
         try:
             # Presence gate
-            if hasattr(self.coordinator, "is_device_present") and not self.coordinator.is_device_present(dev_id):
+            if hasattr(
+                self.coordinator, "is_device_present"
+            ) and not self.coordinator.is_device_present(dev_id):
                 return False
             # Capability / push readiness gate
             return self.coordinator.can_play_sound(dev_id)
@@ -422,7 +426,9 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
         """
         dev_id = self._device["id"]
         try:
-            if hasattr(self.coordinator, "is_device_present") and not self.coordinator.is_device_present(dev_id):
+            if hasattr(
+                self.coordinator, "is_device_present"
+            ) and not self.coordinator.is_device_present(dev_id):
                 return False
             can_stop = getattr(self.coordinator, "can_stop_sound", None)
             if callable(can_stop):
@@ -499,7 +505,9 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
         dev_id = self._device["id"]
         try:
             # Presence gate
-            if hasattr(self.coordinator, "is_device_present") and not self.coordinator.is_device_present(dev_id):
+            if hasattr(
+                self.coordinator, "is_device_present"
+            ) and not self.coordinator.is_device_present(dev_id):
                 return False
             # Locate gating
             return self.coordinator.can_request_location(dev_id)

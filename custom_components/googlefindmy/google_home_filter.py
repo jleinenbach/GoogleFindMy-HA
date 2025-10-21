@@ -38,7 +38,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Mapping, Callable
+from typing import Any
+from collections.abc import Mapping, Callable
 
 from homeassistant.components.zone import DOMAIN as ZONE_DOMAIN
 from homeassistant.config_entries import ConfigEntry
@@ -91,7 +92,9 @@ class GoogleHomeFilter:
         "_unsub_zone_listener",
     )
 
-    def __init__(self, hass: HomeAssistant, config_like: Mapping[str, Any] | ConfigEntry) -> None:
+    def __init__(
+        self, hass: HomeAssistant, config_like: Mapping[str, Any] | ConfigEntry
+    ) -> None:
         """Initialize the Google Home filter.
 
         Args:
@@ -123,7 +126,9 @@ class GoogleHomeFilter:
     # Configuration helpers
     # ---------------------------------------------------------------------
 
-    def _apply_from_mapping_or_entry(self, source: Mapping[str, Any] | ConfigEntry) -> None:
+    def _apply_from_mapping_or_entry(
+        self, source: Mapping[str, Any] | ConfigEntry
+    ) -> None:
         """Load settings from ConfigEntry (options-first) or from a plain mapping.
 
         Accepted keyword formats:
@@ -143,16 +148,24 @@ class GoogleHomeFilter:
             )
             keywords_raw = source.options.get(
                 OPT_GOOGLE_HOME_FILTER_KEYWORDS,
-                source.data.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS),
+                source.data.get(
+                    OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
+                ),
             )
         else:
             enabled = bool(source.get(OPT_GOOGLE_HOME_FILTER_ENABLED, True))
-            keywords_raw = source.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)
+            keywords_raw = source.get(
+                OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
+            )
 
         self._enabled = bool(enabled)
         self._keywords = self._normalize_keywords(keywords_raw)
 
-        _LOGGER.debug("GoogleHomeFilter loaded (enabled=%s, keywords=%s)", self._enabled, self._keywords)
+        _LOGGER.debug(
+            "GoogleHomeFilter loaded (enabled=%s, keywords=%s)",
+            self._enabled,
+            self._keywords,
+        )
 
     def apply_from_entry(self, entry: ConfigEntry) -> None:
         """(Re)load settings from a ConfigEntry."""
@@ -161,7 +174,11 @@ class GoogleHomeFilter:
     def update_config(self, config_or_entry: Mapping[str, Any] | ConfigEntry) -> None:
         """Update filter configuration (accepts dict or ConfigEntry)."""
         self._apply_from_mapping_or_entry(config_or_entry)
-        _LOGGER.info("Updated Google Home filter config: enabled=%s, keywords=%s", self._enabled, self._keywords)
+        _LOGGER.info(
+            "Updated Google Home filter config: enabled=%s, keywords=%s",
+            self._enabled,
+            self._keywords,
+        )
 
     # ---------------------------------------------------------------------
     # Normalization / parsing
@@ -355,7 +372,9 @@ class GoogleHomeFilter:
     # Filter decision
     # ---------------------------------------------------------------------
 
-    def should_filter_detection(self, device_id: str, location_name: str | None) -> tuple[bool, dict | None]:
+    def should_filter_detection(
+        self, device_id: str, location_name: str | None
+    ) -> tuple[bool, dict | None]:
         """Return (should_filter, replacement_attributes).
 
         Semantics:
@@ -380,7 +399,11 @@ class GoogleHomeFilter:
             home_name_cf = str(self.get_home_zone_name() or "Home").strip().casefold()
             if loc_cf in {"home", home_name_cf}:
                 if self._should_prevent_spam(device_id):
-                    _LOGGER.debug("Filtering 'home' spam for %s (location_name=%r)", device_id, location_name)
+                    _LOGGER.debug(
+                        "Filtering 'home' spam for %s (location_name=%r)",
+                        device_id,
+                        location_name,
+                    )
                     return True, None
                 self._update_spam_tracking(device_id)
                 return False, None
@@ -392,7 +415,9 @@ class GoogleHomeFilter:
         # Already home → debounce-only
         if self.is_device_at_home(device_id):
             if self._should_prevent_spam(device_id):
-                _LOGGER.debug("Filtering Google Home spam for %s at %s", device_id, location_name)
+                _LOGGER.debug(
+                    "Filtering Google Home spam for %s at %s", device_id, location_name
+                )
                 return True, None
             self._update_spam_tracking(device_id)
             return False, None

@@ -18,7 +18,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from typing import Any, Iterable, Tuple
+from typing import Any
+from collections.abc import Iterable
 
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError, HomeAssistantError
@@ -76,7 +77,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         )
         return entries.values()
 
-    async def _resolve_runtime_for_device_id(device_id: str) -> Tuple[Any, str]:
+    async def _resolve_runtime_for_device_id(device_id: str) -> tuple[Any, str]:
         """Return the runtime and canonical_id for a device_id or raise translated error.
 
         Robustness:
@@ -102,10 +103,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 total_count = len(configured_entries)
                 is_active = ctx.get("is_active_entry")
                 if callable(is_active):
-                    active_count = sum(1 for entry in configured_entries if is_active(entry))
+                    active_count = sum(
+                        1 for entry in configured_entries if is_active(entry)
+                    )
                 entry_titles = [
-                    entry.title or entry.entry_id
-                    for entry in configured_entries
+                    entry.title or entry.entry_id for entry in configured_entries
                 ]
                 entries_placeholder = ", ".join(entry_titles) or "—"
             else:
@@ -264,7 +266,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             The token is a short-lived (weekly) or static gate derived from the HA UUID.
             All tokens are redacted in logs; the view must validate tokens server-side.
         """
-        from homeassistant.exceptions import HomeAssistantError  # local import to avoid top-level dependency
+        from homeassistant.exceptions import (
+            HomeAssistantError,
+        )  # local import to avoid top-level dependency
 
         try:
             base_url = get_url(
@@ -288,7 +292,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             )
         )
         opt_reader = ctx.get("opt")
-        opt_key = ctx.get("opt_map_view_token_expiration_key", OPT_MAP_VIEW_TOKEN_EXPIRATION)
+        opt_key = ctx.get(
+            "opt_map_view_token_expiration_key", OPT_MAP_VIEW_TOKEN_EXPIRATION
+        )
 
         expiration_cache: dict[str, bool] = {}
         token_cache: dict[str, str] = {}
@@ -405,7 +411,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 continue
 
             auth_token = _token_for_entry(owner_entry_id)
-            new_config_url = f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
+            new_config_url = (
+                f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
+            )
             dev_reg.async_update_device(
                 device_id=device.id,
                 configuration_url=new_config_url,
@@ -446,12 +454,17 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             try:
                 target_device_ids = {str(x) for x in raw_ids}
             except Exception:
-                _LOGGER.error("Invalid 'device_ids' payload; expected list/tuple/set of device IDs (strings).")
+                _LOGGER.error(
+                    "Invalid 'device_ids' payload; expected list/tuple/set of device IDs (strings)."
+                )
                 return
         elif raw_ids is None:
             target_device_ids = set()
         else:
-            _LOGGER.error("Invalid 'device_ids' type: %s; expected string, list/tuple/set, or omitted.", type(raw_ids).__name__)
+            _LOGGER.error(
+                "Invalid 'device_ids' type: %s; expected string, list/tuple/set, or omitted.",
+                type(raw_ids).__name__,
+            )
             return
 
         dev_reg = dr.async_get(hass)
@@ -463,7 +476,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             mode,
             "none"
             if not raw_ids
-            else (raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"),
+            else (
+                raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"
+            ),
         )
 
         if mode == MODE_MIGRATE:
@@ -474,16 +489,22 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     try:
                         await soft_migrate(hass, entry_)
                     except Exception as err:
-                        _LOGGER.error("Soft-migrate failed for entry %s: %s", entry_.entry_id, err)
+                        _LOGGER.error(
+                            "Soft-migrate failed for entry %s: %s", entry_.entry_id, err
+                        )
             else:
-                _LOGGER.warning("soft_migrate_entry not provided in context; MIGRATE path is a no-op.")
+                _LOGGER.warning(
+                    "soft_migrate_entry not provided in context; MIGRATE path is a no-op."
+                )
 
             # Reload all entries to apply migrations
             for entry_ in entries:
                 try:
                     await hass.config_entries.async_reload(entry_.entry_id)
                 except Exception as err:
-                    _LOGGER.error("Reload failed for entry %s: %s", entry_.entry_id, err)
+                    _LOGGER.error(
+                        "Reload failed for entry %s: %s", entry_.entry_id, err
+                    )
 
             _LOGGER.info(
                 "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
@@ -513,7 +534,10 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
         def _is_service_device(dev: dr.DeviceEntry) -> bool:
             # service device can be 'integration' or entry-scoped name
-            if any(domain == DOMAIN and ident == "integration" for domain, ident in dev.identifiers):
+            if any(
+                domain == DOMAIN and ident == "integration"
+                for domain, ident in dev.identifiers
+            ):
                 return True
             return any(
                 domain == DOMAIN and str(ident).startswith("integration_")
@@ -562,7 +586,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 removed_entities += 1
                 orphan_only_cleanup = True
             except Exception as err:
-                _LOGGER.error("Failed to remove orphan entity %s: %s", ent.entity_id, err)
+                _LOGGER.error(
+                    "Failed to remove orphan entity %s: %s", ent.entity_id, err
+                )
 
         # 4) Remove devices (ours only) that now have no entities left and are not service devices.
         for dev_id in list(candidate_devices):
@@ -582,7 +608,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         if orphan_only_cleanup and not affected_entry_ids:
             to_reload = list(entries)
         else:
-            to_reload = [e for e in entries if e.entry_id in affected_entry_ids] or list(entries)
+            to_reload = [
+                e for e in entries if e.entry_id in affected_entry_ids
+            ] or list(entries)
 
         for entry_ in to_reload:
             try:
@@ -599,9 +627,17 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
     # ---- Actual service registrations (global; visible even without entries) ----
     # NOTE: We intentionally do NOT pass voluptuous schemas here; services.yaml is our SSoT.
-    hass.services.async_register(DOMAIN, SERVICE_LOCATE_DEVICE, async_locate_device_service)
-    hass.services.async_register(DOMAIN, SERVICE_LOCATE_EXTERNAL, async_locate_external_service)
+    hass.services.async_register(
+        DOMAIN, SERVICE_LOCATE_DEVICE, async_locate_device_service
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_LOCATE_EXTERNAL, async_locate_external_service
+    )
     hass.services.async_register(DOMAIN, SERVICE_PLAY_SOUND, async_play_sound_service)
     hass.services.async_register(DOMAIN, SERVICE_STOP_SOUND, async_stop_sound_service)
-    hass.services.async_register(DOMAIN, SERVICE_REFRESH_DEVICE_URLS, async_refresh_device_urls_service)
-    hass.services.async_register(DOMAIN, SERVICE_REBUILD_REGISTRY, async_rebuild_registry_service)
+    hass.services.async_register(
+        DOMAIN, SERVICE_REFRESH_DEVICE_URLS, async_refresh_device_urls_service
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_REBUILD_REGISTRY, async_rebuild_registry_service
+    )

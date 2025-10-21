@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional, Callable, Awaitable, Any, cast
+from typing import Any, cast
+from collections.abc import Callable, Awaitable
 
 import aiohttp
 from aiohttp import ClientSession
@@ -43,24 +44,26 @@ def start_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str
         Hex-encoded protobuf payload for Nova transport.
     """
     request_uuid = generate_random_uuid()
-    return create_sound_request(True, canonic_device_id, gcm_registration_id, request_uuid)
+    return create_sound_request(
+        True, canonic_device_id, gcm_registration_id, request_uuid
+    )
 
 
 async def async_submit_start_sound_request(
     canonic_device_id: str,
     gcm_registration_id: str,
     *,
-    session: Optional[ClientSession] = None,
-    namespace: Optional[str] = None,
+    session: ClientSession | None = None,
+    namespace: str | None = None,
     # NEW: entry-scoped content/metadata cache for multi-account setups
-    cache: Optional[TokenCache] = None,
+    cache: TokenCache | None = None,
     # Optional parity with nova_request (flow-local & overrides)
-    username: Optional[str] = None,
-    token: Optional[str] = None,
-    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
-    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
-    refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
-) -> Optional[str]:
+    username: str | None = None,
+    token: str | None = None,
+    cache_get: Callable[[str], Awaitable[Any]] | None = None,
+    cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+    refresh_override: Callable[[], Awaitable[str | None]] | None = None,
+) -> str | None:
     """Submit a 'Play Sound' action using the shared async Nova client.
 
     This function handles the network request and robustly catches common API

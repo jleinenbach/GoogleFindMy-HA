@@ -1,5 +1,6 @@
 # tests/test_fcm_receiver_shim.py
 """Regression tests for the legacy FcmReceiver shim token-cache resolution."""
+
 from __future__ import annotations
 
 import copy
@@ -39,12 +40,17 @@ def multi_cache_registry(monkeypatch: pytest.MonkeyPatch) -> dict[str, _StubCach
             }
         },
     )
-    registry: dict[str, _StubCache] = {cache_one.entry_id: cache_one, cache_two.entry_id: cache_two}
+    registry: dict[str, _StubCache] = {
+        cache_one.entry_id: cache_one,
+        cache_two.entry_id: cache_two,
+    }
     monkeypatch.setattr(token_cache, "_INSTANCES", registry, raising=False)
     return registry
 
 
-def test_shim_prefers_explicit_entry_cache(multi_cache_registry: dict[str, _StubCache]) -> None:
+def test_shim_prefers_explicit_entry_cache(
+    multi_cache_registry: dict[str, _StubCache],
+) -> None:
     """Entry-specific resolution avoids `_get_default_cache` ambiguity."""
 
     receiver = fcm_receiver.FcmReceiver(entry_id="entry-two")
@@ -63,7 +69,9 @@ def test_shim_prefers_explicit_entry_cache(multi_cache_registry: dict[str, _Stub
     assert refreshed.get_fcm_token() == "token-two-updated"
 
 
-def test_shim_rejects_unknown_entry_id(multi_cache_registry: dict[str, _StubCache]) -> None:
+def test_shim_rejects_unknown_entry_id(
+    multi_cache_registry: dict[str, _StubCache],
+) -> None:
     """Explicit entry lookups must not mutate arbitrary caches."""
 
     with pytest.raises(ValueError) as err:
@@ -71,11 +79,23 @@ def test_shim_rejects_unknown_entry_id(multi_cache_registry: dict[str, _StubCach
 
     assert "unknown entry_id" in str(err.value)
     # Caches should remain untouched when resolution fails.
-    assert multi_cache_registry["entry-one"]._data["fcm_credentials"]["fcm"]["registration"]["token"] == "token-one"
-    assert multi_cache_registry["entry-two"]._data["fcm_credentials"]["fcm"]["registration"]["token"] == "token-two"
+    assert (
+        multi_cache_registry["entry-one"]._data["fcm_credentials"]["fcm"][
+            "registration"
+        ]["token"]
+        == "token-one"
+    )
+    assert (
+        multi_cache_registry["entry-two"]._data["fcm_credentials"]["fcm"][
+            "registration"
+        ]["token"]
+        == "token-two"
+    )
 
 
-def test_shim_warns_and_uses_first_cache_when_ambiguous(caplog: pytest.LogCaptureFixture, multi_cache_registry: dict[str, _StubCache]) -> None:
+def test_shim_warns_and_uses_first_cache_when_ambiguous(
+    caplog: pytest.LogCaptureFixture, multi_cache_registry: dict[str, _StubCache]
+) -> None:
     """When no entry is provided, the shim should not crash even with two caches."""
 
     caplog.set_level("WARNING")

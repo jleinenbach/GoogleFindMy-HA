@@ -7,6 +7,7 @@
 import hashlib
 import hmac
 
+
 def calculate_truncated_sha256(identity_key: bytes, operation: int) -> bytes:
     identity_key_bytes = identity_key
     data = identity_key_bytes + bytes([operation])

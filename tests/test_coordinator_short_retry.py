@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
-from typing import Any, Callable, Coroutine
+from typing import Any
+from collections.abc import Callable, Coroutine
 from unittest.mock import AsyncMock
 
 import pytest
@@ -18,17 +19,23 @@ from custom_components.googlefindmy.const import DOMAIN
 class _DummyCache:
     """Minimal cache stub satisfying the coordinator constructor."""
 
-    async def async_get_cached_value(self, _key: str) -> None:  # pragma: no cover - stub
+    async def async_get_cached_value(
+        self, _key: str
+    ) -> None:  # pragma: no cover - stub
         return None
 
-    async def async_set_cached_value(self, _key: str, _value: Any) -> None:  # pragma: no cover - stub
+    async def async_set_cached_value(
+        self, _key: str, _value: Any
+    ) -> None:  # pragma: no cover - stub
         return None
 
 
 class _DummyBus:
     """Provide an async_listen placeholder used by the coordinator."""
 
-    def async_listen(self, *_args, **_kwargs) -> Callable[[], None]:  # pragma: no cover - stub
+    def async_listen(
+        self, *_args, **_kwargs
+    ) -> Callable[[], None]:  # pragma: no cover - stub
         return lambda: None
 
 
@@ -75,7 +82,9 @@ def fresh_loop() -> asyncio.AbstractEventLoop:
 
 
 @pytest.fixture
-def coordinator(monkeypatch: pytest.MonkeyPatch, fresh_loop: asyncio.AbstractEventLoop) -> GoogleFindMyCoordinator:
+def coordinator(
+    monkeypatch: pytest.MonkeyPatch, fresh_loop: asyncio.AbstractEventLoop
+) -> GoogleFindMyCoordinator:
     """Instantiate a coordinator with patched dependencies for retry tests."""
 
     hass = _DummyHass(fresh_loop)
@@ -116,7 +125,8 @@ def test_short_retry_dispatches_refresh_task(
         return _cancel
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.async_call_later", _fake_async_call_later
+        "custom_components.googlefindmy.coordinator.async_call_later",
+        _fake_async_call_later,
     )
 
     refresh_calls: list[str] = []

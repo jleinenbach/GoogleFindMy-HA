@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
@@ -19,10 +19,12 @@ class _FakeHass:
         return func(*args, **kwargs)
 
 
-def test_token_cache_create_exposes_entry_id_for_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_token_cache_create_exposes_entry_id_for_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """TokenCache.create should provide an entry_id namespace to API helpers."""
 
-    captured: Dict[str, Any] = {}
+    captured: dict[str, Any] = {}
 
     async def _run() -> None:
         hass = _FakeHass()
@@ -34,12 +36,22 @@ def test_token_cache_create_exposes_entry_id_for_namespace(monkeypatch: pytest.M
             captured["kwargs"] = kwargs
             return "00"
 
-        def fake_process(self: googlefindmy_api.GoogleFindMyAPI, result_hex: str) -> list[dict[str, Any]]:
+        def fake_process(
+            self: googlefindmy_api.GoogleFindMyAPI, result_hex: str
+        ) -> list[dict[str, Any]]:
             captured["processed_hex"] = result_hex
             return []
 
-        monkeypatch.setattr(googlefindmy_api, "async_request_device_list", fake_async_request_device_list)
-        monkeypatch.setattr(googlefindmy_api.GoogleFindMyAPI, "_process_device_list_response", fake_process)
+        monkeypatch.setattr(
+            googlefindmy_api,
+            "async_request_device_list",
+            fake_async_request_device_list,
+        )
+        monkeypatch.setattr(
+            googlefindmy_api.GoogleFindMyAPI,
+            "_process_device_list_response",
+            fake_process,
+        )
 
         api_instance = googlefindmy_api.GoogleFindMyAPI(cache=cache)
         result = await api_instance.async_get_basic_device_list("user@example.com")

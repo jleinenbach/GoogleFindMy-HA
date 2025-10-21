@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Iterable, Optional, Set, Tuple
+from typing import Any
+from collections.abc import Iterable
 
 import pytest
 
@@ -19,12 +20,12 @@ class _FakeDeviceEntry:
     def __init__(
         self,
         *,
-        identifiers: Iterable[Tuple[str, str]],
+        identifiers: Iterable[tuple[str, str]],
         config_entry_id: str,
-        name: Optional[str],
-        via_device: Optional[str],
+        name: str | None,
+        via_device: str | None,
     ) -> None:
-        self.identifiers: Set[Tuple[str, str]] = set(identifiers)
+        self.identifiers: set[tuple[str, str]] = set(identifiers)
         self.config_entries = {config_entry_id}
         self.id = f"device-{config_entry_id}-{len(self.identifiers)}"
         self.name = name
@@ -40,7 +41,9 @@ class _FakeDeviceRegistry:
         self.created: list[dict[str, Any]] = []
         self.devices: list[_FakeDeviceEntry] = []
 
-    def async_get_device(self, *, identifiers: Set[Tuple[str, str]]) -> Optional[_FakeDeviceEntry]:
+    def async_get_device(
+        self, *, identifiers: set[tuple[str, str]]
+    ) -> _FakeDeviceEntry | None:
         for device in self.devices:
             if identifiers & device.identifiers:
                 return device
@@ -50,11 +53,11 @@ class _FakeDeviceRegistry:
         self,
         *,
         config_entry_id: str,
-        identifiers: Set[Tuple[str, str]],
+        identifiers: set[tuple[str, str]],
         manufacturer: str,
         model: str,
-        name: Optional[str],
-        via_device: Optional[str],
+        name: str | None,
+        via_device: str | None,
     ) -> _FakeDeviceEntry:
         entry = _FakeDeviceEntry(
             identifiers=identifiers,
@@ -75,7 +78,9 @@ class _FakeDeviceRegistry:
         )
         return entry
 
-    def async_update_device(self, *args, **kwargs) -> None:  # pragma: no cover - not needed
+    def async_update_device(
+        self, *args, **kwargs
+    ) -> None:  # pragma: no cover - not needed
         raise AssertionError("Unexpected update call in this test")
 
 

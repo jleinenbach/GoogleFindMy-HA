@@ -10,7 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from custom_components.googlefindmy import system_health
-from custom_components.googlefindmy.const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+    DOMAIN,
+)
 
 
 def _run(coro):
@@ -62,7 +66,9 @@ class _FakeCoordinator:
         self.data = [{"id": "device-1"}, {"id": "device-2"}]
         self.last_update_success_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
         self.stats = {"background_updates": 3, "polled_updates": 2}
-        self.fcm_status = SimpleNamespace(state="connected", reason=None, changed_at=123.0)
+        self.fcm_status = SimpleNamespace(
+            state="connected", reason=None, changed_at=123.0
+        )
         self.is_auth_error_active = False
 
 
@@ -126,7 +132,10 @@ def test_async_get_system_health_info_redacts_email() -> None:
     payload = info["entries"][0]
     assert payload["entry_id"] == "entry-test"
     assert payload["devices_loaded"] == 2
-    assert payload["last_successful_update"] == coordinator.last_update_success_time.isoformat()
+    assert (
+        payload["last_successful_update"]
+        == coordinator.last_update_success_time.isoformat()
+    )
 
     account_hash = payload.get("account_hash")
     assert isinstance(account_hash, str)

@@ -1,9 +1,11 @@
 # tests/test_nova_request.py
 """Tests for Nova API async request helpers."""
+
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -28,7 +30,7 @@ class _DummyResponse:
     async def read(self) -> bytes:
         return self._body
 
-    async def __aenter__(self) -> "_DummyResponse":
+    async def __aenter__(self) -> _DummyResponse:
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
@@ -162,9 +164,7 @@ def test_async_nova_request_refreshes_token_after_initial_401(
 
     original_on_401 = AsyncTTLPolicy.on_401
 
-    async def _spy_on_401(
-        self: AsyncTTLPolicy, adaptive_downshift: bool = True
-    ) -> Any:
+    async def _spy_on_401(self: AsyncTTLPolicy, adaptive_downshift: bool = True) -> Any:
         on_401_calls.append(adaptive_downshift)
         return await original_on_401(self, adaptive_downshift=adaptive_downshift)
 
@@ -202,7 +202,9 @@ def test_async_nova_request_refreshes_token_after_initial_401(
     assert second_headers.get("Authorization") == "Bearer adm-new"
 
 
-def test_async_nova_request_fetches_token_when_not_supplied(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_nova_request_fetches_token_when_not_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Nova should resolve an ADM token when `token` kwarg is omitted."""
 
     cache = _StubCache()
@@ -217,7 +219,14 @@ def test_async_nova_request_fetches_token_when_not_supplied(monkeypatch: pytest.
         backoff: float = 1.0,
         cache: Any,
     ) -> str:
-        calls.append({"username": username, "cache": cache, "retries": retries, "backoff": backoff})
+        calls.append(
+            {
+                "username": username,
+                "cache": cache,
+                "retries": retries,
+                "backoff": backoff,
+            }
+        )
         return "resolved-token"
 
     monkeypatch.setattr(
@@ -261,13 +270,15 @@ def test_async_nova_request_invokes_adm_exchange_even_with_token(
         cache: Any,
     ) -> str:
         stored = await cache.get(DATA_AAS_TOKEN)
-        calls.append({
-            "username": username,
-            "cache": cache,
-            "retries": retries,
-            "backoff": backoff,
-            "stored_aas": stored,
-        })
+        calls.append(
+            {
+                "username": username,
+                "cache": cache,
+                "retries": retries,
+                "backoff": backoff,
+                "stored_aas": stored,
+            }
+        )
         return "adm-from-override"
 
     monkeypatch.setattr(
@@ -295,7 +306,9 @@ def test_async_nova_request_invokes_adm_exchange_even_with_token(
     assert headers.get("Authorization") == "Bearer adm-from-override"
 
 
-def test_async_nova_request_skips_seeding_without_username(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_nova_request_skips_seeding_without_username(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Do not seed non-AAS override tokens when username kwarg is omitted."""
 
     cache = _StubCache()

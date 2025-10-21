@@ -39,7 +39,8 @@ import random
 from base64 import urlsafe_b64decode
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
 
 from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
@@ -147,9 +148,9 @@ class FcmPushClientConfig:  # pylint:disable=too-many-instance-attributes
 
 class FcmPushClient:  # pylint:disable=too-many-instance-attributes
     """Worker-only FCM client.
-       - Establishes a single connection with initial retry.
-       - Listens for messages until an error occurs or stop() is called.
-       - No internal reset/monitor loops; outer supervisor restarts the client.
+    - Establishes a single connection with initial retry.
+    - Listens for messages until an error occurs or stop() is called.
+    - No internal reset/monitor loops; outer supervisor restarts the client.
     """
 
     def __init__(
@@ -239,7 +240,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                 await asyncio.wait_for(
                     writer.wait_closed(), timeout=self.config.writer_close_timeout
                 )
-            except (asyncio.TimeoutError, TimeoutError):
+            except TimeoutError:
                 # TLS shutdown timed out: hard-close
                 self.logger.debug("SSL shutdown timed out; aborting transport")
                 transport = writer.transport if hasattr(writer, "transport") else None
@@ -370,7 +371,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             android_id = gcm_data.get("android_id")
             security_token = gcm_data.get("security_token")
             if not android_id or not security_token:
-                raise ValueError("android_id or security_token is missing from credentials")
+                raise ValueError(
+                    "android_id or security_token is missing from credentials"
+                )
 
             req = LoginRequest()
             req.adaptive_heartbeat = False
@@ -500,7 +503,11 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             ret_val = {"_raw_json": decrypted_json}
         else:
             # Not JSON → provide a stable mapping for consumers
-            ret_val = {"_raw_text": text} if text is not None else {"_raw_bytes": decrypted.hex()}
+            ret_val = (
+                {"_raw_text": text}
+                if text is not None
+                else {"_raw_bytes": decrypted.hex()}
+            )
 
         self._log_verbose(
             "Decrypted data for message %s is: %s", msg.persistent_id, ret_val
@@ -509,7 +516,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self.callback(ret_val, msg.persistent_id, self.callback_context)
             self._reset_error_count(ErrorType.NOTIFY)
         except Exception:
-            self.logger.exception("Unexpected exception calling notification callback\n")
+            self.logger.exception(
+                "Unexpected exception calling notification callback\n"
+            )
             self._try_increment_error_count(ErrorType.NOTIFY)
 
     def _new_input_stream_id_available(self) -> bool:
@@ -572,7 +581,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         if error_type not in self.sequential_error_counters:
             self.sequential_error_counters[error_type] = 0
 
-    # NOTE: returns True to keep going, False when we've decided to stop
+        # NOTE: returns True to keep going, False when we've decided to stop
         self.sequential_error_counters[error_type] += 1
 
         if (
@@ -757,9 +766,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                 raise RuntimeError("FCM registration did not return credentials.")
 
             registration = (
-                self.credentials.get("fcm", {})
-                .get("registration", {})
-                .get("token")
+                self.credentials.get("fcm", {}).get("registration", {}).get("token")
             )
             if not registration:
                 raise RuntimeError("FCM registration token missing from credentials.")
@@ -807,7 +814,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self.last_message_time = time.time()
             self.tasks = [
                 asyncio.create_task(self._listen(), name="googlefindmy.fcm_listen"),
-                asyncio.create_task(self._start_heartbeat_sender(), name="googlefindmy.fcm_heartbeat"),
+                asyncio.create_task(
+                    self._start_heartbeat_sender(), name="googlefindmy.fcm_heartbeat"
+                ),
             ]
         except Exception as ex:
             self.logger.error("Unexpected error running FcmPushClient: %s", ex)

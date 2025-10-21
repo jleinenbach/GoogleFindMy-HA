@@ -37,7 +37,8 @@ import logging
 import os
 import socket
 import time
-from typing import Any, Collection, Optional, Tuple
+from typing import Any
+from collections.abc import Collection
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -52,7 +53,11 @@ from homeassistant.exceptions import (
     HomeAssistantError,
 )
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
+from homeassistant.helpers import (
+    device_registry as dr,
+    entity_registry as er,
+    issue_registry as ir,
+)
 
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
 from .Auth.token_cache import (
@@ -60,8 +65,10 @@ from .Auth.token_cache import (
     _register_instance,
     _unregister_instance,
 )
+
 # Username key normalization
 from .Auth.username_provider import username_string
+
 # Shared FCM provider (HA-managed singleton)
 from .Auth.fcm_receiver_ha import FcmReceiverHA
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -169,7 +176,7 @@ def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> st
 
 
 # --- BEGIN: Helpers for resolution and manual locate ---------------------------
-def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> Tuple[str, str]:
+def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> tuple[str, str]:
     """Resolve HA device_id/entity_id/canonical_id -> (canonical_id, friendly_name).
 
     Resolution order:
@@ -247,7 +254,11 @@ async def async_handle_manual_locate(
         if getattr(coordinator, "_diag", None):
             coordinator._diag.add_error(  # type: ignore[attr-defined]
                 code="manual_locate_resolution_failed",
-                context={"device_id": "", "arg": str(arg)[:64], "reason": str(err)[:160]},
+                context={
+                    "device_id": "",
+                    "arg": str(arg)[:64],
+                    "reason": str(err)[:160],
+                },
             )
         _LOGGER.error("Locate failed for '%s': %s", arg, err)
         raise
@@ -269,7 +280,13 @@ def _redact_url_token(url: str) -> str:
             else:
                 redacted.append((k, v))
         return urlunsplit(
-            (parts.scheme, parts.netloc, parts.path, urlencode(redacted, doseq=True), parts.fragment)
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(redacted, doseq=True),
+                parts.fragment,
+            )
         )
     except Exception:  # pragma: no cover
         return url
@@ -292,7 +309,7 @@ def _is_active_entry(entry: ConfigEntry) -> bool:
     }
 
 
-def _primary_active_entry(entries: list[ConfigEntry]) -> Optional[ConfigEntry]:
+def _primary_active_entry(entries: list[ConfigEntry]) -> ConfigEntry | None:
     """Pick a deterministic 'primary' active entry to avoid mutual aborts.
 
     Tie-break rule (stable, minimalistic):
@@ -322,7 +339,9 @@ def _effective_config(entry: ConfigEntry) -> dict[str, Any]:
     return {k: _opt(entry, k, None) for k in OPTION_KEYS}
 
 
-async def _async_soft_migrate_data_to_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_soft_migrate_data_to_options(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
     """Idempotently copy known settings from data -> options (never move secrets)."""
     new_options = dict(entry.options)
     changed = False
@@ -464,7 +483,9 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
             total_candidates += 1
             new_uid = namespaced_prefix + uid[len(prefix) :]
 
-            existing_eid = ent_reg.async_get_entity_id(ent.domain, ent.platform, new_uid)
+            existing_eid = ent_reg.async_get_entity_id(
+                ent.domain, ent.platform, new_uid
+            )
             if existing_eid:
                 _LOGGER.warning(
                     "Unique-ID migration skipped (collision): %s -> %s (existing=%s)",
@@ -489,7 +510,9 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
                 new_identifiers = set(device.identifiers)
                 new_identifiers.remove((DOMAIN, "integration"))
                 new_identifiers.add((DOMAIN, f"integration_{entry.entry_id}"))
-                dev_reg.async_update_device(device_id=device.id, new_identifiers=new_identifiers)
+                dev_reg.async_update_device(
+                    device_id=device.id, new_identifiers=new_identifiers
+                )
                 _LOGGER.info(
                     "Migrated integration service device identifier for entry '%s'",
                     entry.entry_id,
@@ -547,7 +570,8 @@ async def _async_migrate_device_identifiers_to_entry_scope(
 
         # Keep service/integration device untouched
         if (DOMAIN, "integration") in device.identifiers or any(
-            domain == DOMAIN and str(ident).startswith("integration_") for domain, ident in device.identifiers
+            domain == DOMAIN and str(ident).startswith("integration_")
+            for domain, ident in device.identifiers
         ):
             continue
 
@@ -559,7 +583,7 @@ async def _async_migrate_device_identifiers_to_entry_scope(
         new_identifiers = set(device.identifiers)
         dirty = False
 
-        for (_domain, ident) in our_ids:
+        for _domain, ident in our_ids:
             ident_str = str(ident)
             if ":" in ident_str and ident_str.startswith(entry.entry_id + ":"):
                 skipped += 1
@@ -590,7 +614,9 @@ async def _async_migrate_device_identifiers_to_entry_scope(
             dirty = True
 
         if dirty and new_identifiers != device.identifiers:
-            dev_reg.async_update_device(device_id=device.id, new_identifiers=new_identifiers)
+            dev_reg.async_update_device(
+                device_id=device.id, new_identifiers=new_identifiers
+            )
             updated += 1
 
     _LOGGER.info(
@@ -616,7 +642,9 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
     bucket = hass.data.setdefault(DOMAIN, {})
     fcm_lock = bucket.setdefault("fcm_lock", asyncio.Lock())
     if fcm_lock.locked():
-        bucket["fcm_lock_contention_count"] = int(bucket.get("fcm_lock_contention_count", 0)) + 1
+        bucket["fcm_lock_contention_count"] = (
+            int(bucket.get("fcm_lock_contention_count", 0)) + 1
+        )
     async with fcm_lock:
         refcount = int(bucket.get("fcm_refcount", 0))
         fcm: FcmReceiverHA | None = bucket.get("fcm_receiver")
@@ -629,7 +657,9 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
                 return False
             candidate = getattr(attr, "__func__", attr)
             try:
-                candidate = inspect.unwrap(candidate)  # unwrap functools.partial / wraps
+                candidate = inspect.unwrap(
+                    candidate
+                )  # unwrap functools.partial / wraps
             except Exception:  # pragma: no cover - defensive
                 pass
             if inspect.iscoroutinefunction(candidate):
@@ -670,7 +700,9 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
                 attach = getattr(fcm, "attach_hass", None)
                 if callable(attach):
                     attach(hass)
-                    _LOGGER.debug("Attached HA context to FCM receiver (owner-index routing enabled).")
+                    _LOGGER.debug(
+                        "Attached HA context to FCM receiver (owner-index routing enabled)."
+                    )
             except Exception as err:
                 _LOGGER.debug("FCM attach_hass skipped: %s", err)
 
@@ -766,7 +798,9 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """
     bucket = hass.data.setdefault(DOMAIN, {})
     bucket.setdefault("entries", {})  # entry_id -> RuntimeData
-    bucket.setdefault("device_owner_index", {})  # canonical_id -> entry_id (E2.5 scaffold)
+    bucket.setdefault(
+        "device_owner_index", {}
+    )  # canonical_id -> entry_id (E2.5 scaffold)
 
     if not bucket.get("system_health_registered"):
         try:
@@ -825,7 +859,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         dupes = [
             e
             for e in active_entries
-            if e.entry_id != entry.entry_id and _extract_email_from_entry(e) == current_email
+            if e.entry_id != entry.entry_id
+            and _extract_email_from_entry(e) == current_email
         ]
         if dupes:
             # Create a repair issue and abort only this entry; the existing one remains active.
@@ -858,7 +893,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     domain_bucket.setdefault("device_owner_index", {})  # ensure present (E2.5)
 
     # 1) Token cache: create/register early (ENTRY-SCOPED ONLY)
-    legacy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json")
+    legacy_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json"
+    )
     cache = await TokenCache.create(hass, entry.entry_id, legacy_path=legacy_path)
     _register_instance(entry.entry_id, cache)
 
@@ -870,21 +907,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         except Exception as err:
             _LOGGER.debug("Cache flush on stop raised: %s", err)
 
-    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop))
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop)
+    )
 
     # Early, idempotent seeding of TokenCache from entry.data (authoritative SSOT)
     try:
         if DATA_AUTH_METHOD in entry.data:
-            await cache.async_set_cached_value(DATA_AUTH_METHOD, entry.data[DATA_AUTH_METHOD])
+            await cache.async_set_cached_value(
+                DATA_AUTH_METHOD, entry.data[DATA_AUTH_METHOD]
+            )
             _LOGGER.debug("Seeded auth_method into TokenCache from entry.data")
         if CONF_OAUTH_TOKEN in entry.data:
-            await cache.async_set_cached_value(CONF_OAUTH_TOKEN, entry.data[CONF_OAUTH_TOKEN])
+            await cache.async_set_cached_value(
+                CONF_OAUTH_TOKEN, entry.data[CONF_OAUTH_TOKEN]
+            )
             _LOGGER.debug("Seeded oauth_token into TokenCache from entry.data")
         if DATA_AAS_TOKEN in entry.data:
-            await cache.async_set_cached_value(DATA_AAS_TOKEN, entry.data[DATA_AAS_TOKEN])
+            await cache.async_set_cached_value(
+                DATA_AAS_TOKEN, entry.data[DATA_AAS_TOKEN]
+            )
             _LOGGER.debug("Seeded aas_token into TokenCache from entry.data")
         if CONF_GOOGLE_EMAIL in entry.data:
-            await cache.async_set_cached_value(username_string, entry.data[CONF_GOOGLE_EMAIL])
+            await cache.async_set_cached_value(
+                username_string, entry.data[CONF_GOOGLE_EMAIL]
+            )
             _LOGGER.debug("Seeded google_email into TokenCache from entry.data")
     except Exception as err:
         _LOGGER.debug("Early TokenCache seeding from entry.data failed: %s", err)
@@ -900,7 +947,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             if callable(unreg):
                 entry.async_on_unload(unreg)
         else:
-            _LOGGER.debug("Nova API register_hass() not available; continuing with module defaults.")
+            _LOGGER.debug(
+                "Nova API register_hass() not available; continuing with module defaults."
+            )
     except Exception as err:
         _LOGGER.debug("Nova API session provider registration skipped: %s", err)
 
@@ -952,12 +1001,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     coordinator = GoogleFindMyCoordinator(
         hass,
         cache=cache,
-        location_poll_interval=_opt(entry, OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL),
+        location_poll_interval=_opt(
+            entry, OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
+        ),
         device_poll_delay=_opt(entry, OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
         min_poll_interval=_opt(entry, OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
-        min_accuracy_threshold=_opt(entry, OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD),
+        min_accuracy_threshold=_opt(
+            entry, OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
+        ),
         allow_history_fallback=_opt(
-            entry, OPT_ALLOW_HISTORY_FALLBACK, DEFAULT_OPTIONS.get(OPT_ALLOW_HISTORY_FALLBACK, False)
+            entry,
+            OPT_ALLOW_HISTORY_FALLBACK,
+            DEFAULT_OPTIONS.get(OPT_ALLOW_HISTORY_FALLBACK, False),
         ),
     )
     coordinator.config_entry = entry  # convenience for platforms
@@ -990,7 +1045,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Expose runtime object and keep classic pointer for legacy modules
     entry.runtime_data = coordinator
-    hass.data[DOMAIN].setdefault("entries", {})[entry.entry_id] = RuntimeData(coordinator=coordinator)
+    hass.data[DOMAIN].setdefault("entries", {})[entry.entry_id] = RuntimeData(
+        coordinator=coordinator
+    )
 
     # Owner-index scaffold (E2.5): coordinator will eventually claim canonical_ids
     hass.data[DOMAIN].setdefault("device_owner_index", {})
@@ -998,7 +1055,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # Optional: attach Google Home filter (options-first configuration)
     if GoogleHomeFilter:
         try:
-            coordinator.google_home_filter = GoogleHomeFilter(hass, _effective_config(entry))  # type: ignore[call-arg]
+            coordinator.google_home_filter = GoogleHomeFilter(
+                hass, _effective_config(entry)
+            )  # type: ignore[call-arg]
             _LOGGER.debug("Initialized Google Home filter (options-first)")
         except Exception as err:
             _LOGGER.debug("GoogleHomeFilter attach skipped due to: %s", err)
@@ -1011,7 +1070,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     try:
         await coordinator.async_setup()
     except Exception as err:
-        _LOGGER.warning("Coordinator setup failed early; will recover on next refresh: %s", err)
+        _LOGGER.warning(
+            "Coordinator setup failed early; will recover on next refresh: %s", err
+        )
 
     # Register map views (idempotent across multi-entry)
     if not bucket.get("views_registered"):
@@ -1032,20 +1093,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         listener_active = False
         try:
             if is_reload:
-                _LOGGER.info("Integration reloaded: forcing an immediate device scan window.")
+                _LOGGER.info(
+                    "Integration reloaded: forcing an immediate device scan window."
+                )
                 coordinator.force_poll_due()
 
             await coordinator.async_refresh()
             if not coordinator.last_update_success:
-                _LOGGER.warning("Initial refresh failed; entities will recover on subsequent polls.")
+                _LOGGER.warning(
+                    "Initial refresh failed; entities will recover on subsequent polls."
+                )
             await _async_normalize_device_names(hass)
         except Exception as err:
-            _LOGGER.error("Initial refresh raised an unexpected error: %s", err, exc_info=True)
+            _LOGGER.error(
+                "Initial refresh raised an unexpected error: %s", err, exc_info=True
+            )
 
     if hass.state == CoreState.running:
-        hass.async_create_task(_do_first_refresh(None), name="googlefindmy.initial_refresh")
+        hass.async_create_task(
+            _do_first_refresh(None), name="googlefindmy.initial_refresh"
+        )
     else:
-        unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _do_first_refresh)
+        unsub = hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STARTED, _do_first_refresh
+        )
         listener_active = True
 
         def _safe_unsub() -> None:
@@ -1115,7 +1186,9 @@ async def _async_seed_manual_credentials(
         )
 
 
-async def _async_save_individual_credentials(cache: TokenCache, oauth_token: str, google_email: str) -> None:
+async def _async_save_individual_credentials(
+    cache: TokenCache, oauth_token: str, google_email: str
+) -> None:
     """Persist individual credentials (oauth_token + email) to the *entry-scoped* token cache."""
     try:
         await cache.async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
@@ -1145,7 +1218,10 @@ async def async_remove_config_entry_device(
     if entry.entry_id not in device_entry.config_entries:
         return False
 
-    dev_id = next((ident for (domain, ident) in device_entry.identifiers if domain == DOMAIN), None)
+    dev_id = next(
+        (ident for (domain, ident) in device_entry.identifiers if domain == DOMAIN),
+        None,
+    )
     if not dev_id:
         return False
 
@@ -1155,7 +1231,9 @@ async def async_remove_config_entry_device(
     try:
         runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
         runtime_entry = runtime_bucket.get(entry.entry_id)
-        coordinator: GoogleFindMyCoordinator | None = getattr(runtime_entry, "coordinator", None)
+        coordinator: GoogleFindMyCoordinator | None = getattr(
+            runtime_entry, "coordinator", None
+        )
         if not isinstance(coordinator, GoogleFindMyCoordinator):
             coordinator = getattr(entry, "runtime_data", None)
             if not isinstance(coordinator, GoogleFindMyCoordinator):
@@ -1167,7 +1245,9 @@ async def async_remove_config_entry_device(
 
     try:
         opts = dict(entry.options)
-        current_raw = opts.get(OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES))
+        current_raw = opts.get(
+            OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES)
+        )
         ignored_map, _migrated = coerce_ignored_mapping(current_raw)
 
         name_to_store = device_entry.name_by_user or device_entry.name or dev_id
@@ -1189,7 +1269,12 @@ async def async_remove_config_entry_device(
 
         if opts != entry.options:
             hass.config_entries.async_update_entry(entry, options=opts)
-            _LOGGER.info("Marked device '%s' (%s) as ignored for entry '%s'", name_to_store, dev_id, entry.title)
+            _LOGGER.info(
+                "Marked device '%s' (%s) as ignored for entry '%s'",
+                name_to_store,
+                dev_id,
+                entry.title,
+            )
     except Exception as err:
         _LOGGER.debug("Persisting delete decision failed for %s: %s", dev_id, err)
 
@@ -1216,7 +1301,10 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
                     dev_reg.async_update_device(device_id=device.id, name=new_name)
                     updated += 1
         if updated:
-            _LOGGER.info('Normalized %d device name(s) by removing legacy "Find My - " prefix', updated)
+            _LOGGER.info(
+                'Normalized %d device name(s) by removing legacy "Find My - " prefix',
+                updated,
+            )
     except Exception as err:
         _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
@@ -1232,9 +1320,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         - Device owner index cleanup: remove all canonical_id claims for this entry (E2.5).
     """
     try:
-        entries_bucket: dict[str, RuntimeData] | None = hass.data.get(DOMAIN, {}).get("entries")  # type: ignore[assignment]
-        runtime_data = None if entries_bucket is None else entries_bucket.get(entry.entry_id)
-        coordinator: GoogleFindMyCoordinator | None = getattr(entry, "runtime_data", None)
+        entries_bucket: dict[str, RuntimeData] | None = hass.data.get(DOMAIN, {}).get(
+            "entries"
+        )  # type: ignore[assignment]
+        runtime_data = (
+            None if entries_bucket is None else entries_bucket.get(entry.entry_id)
+        )
+        coordinator: GoogleFindMyCoordinator | None = getattr(
+            entry, "runtime_data", None
+        )
         if runtime_data and hasattr(runtime_data, "coordinator"):
             coordinator = runtime_data.coordinator
         if coordinator:
@@ -1244,15 +1338,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if ok:
-        hass.data.setdefault(DOMAIN, {}).setdefault("entries", {}).pop(entry.entry_id, None)
+        hass.data.setdefault(DOMAIN, {}).setdefault("entries", {}).pop(
+            entry.entry_id, None
+        )
 
         cache = _unregister_instance(entry.entry_id)
         if cache:
             try:
                 await cache.close()
-                _LOGGER.debug("TokenCache for entry '%s' has been flushed and closed.", entry.entry_id)
+                _LOGGER.debug(
+                    "TokenCache for entry '%s' has been flushed and closed.",
+                    entry.entry_id,
+                )
             except Exception as err:
-                _LOGGER.warning("Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err)
+                _LOGGER.warning(
+                    "Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err
+                )
 
     try:
         await _async_release_shared_fcm(hass)
@@ -1267,7 +1368,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         for cid in stale:
             owner_index.pop(cid, None)
         if stale:
-            _LOGGER.debug("Cleared %d owner-index claim(s) for entry '%s'", len(stale), entry.entry_id)
+            _LOGGER.debug(
+                "Cleared %d owner-index claim(s) for entry '%s'",
+                len(stale),
+                entry.entry_id,
+            )
     except Exception as err:
         _LOGGER.debug("Owner-index cleanup failed: %s", err)
 

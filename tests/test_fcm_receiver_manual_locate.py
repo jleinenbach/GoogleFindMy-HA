@@ -82,7 +82,9 @@ def test_manual_locate_registration_and_cleanup(
         await asyncio.sleep(0)
         start_calls.clear()
 
-        token = await receiver.async_register_for_location_updates(device_id, manual_callback)
+        token = await receiver.async_register_for_location_updates(
+            device_id, manual_callback
+        )
 
         assert token == "token-123"
         assert receiver.location_update_callbacks[device_id] is manual_callback

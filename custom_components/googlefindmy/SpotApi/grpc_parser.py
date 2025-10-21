@@ -7,6 +7,7 @@ import struct
 import gzip
 import io
 
+
 class GrpcParser:
     @staticmethod
     def extract_grpc_payload(grpc: bytes) -> bytes:
@@ -20,10 +21,12 @@ class GrpcParser:
 
         length = struct.unpack(">I", grpc[1:5])[0]
         if len(grpc) < 5 + length:
-            raise ValueError(f"Invalid GRPC payload length (expected {length}, got {len(grpc) - 5})")
+            raise ValueError(
+                f"Invalid GRPC payload length (expected {length}, got {len(grpc) - 5})"
+            )
 
         # Extract exactly one message frame (unary RPC)
-        msg = grpc[5:5 + length]
+        msg = grpc[5 : 5 + length]
 
         if flag == 1:
             # Compressed frame (gzip) → decompress

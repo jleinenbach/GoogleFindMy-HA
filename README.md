@@ -1,4 +1,4 @@
-# Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> 
+# Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
 A comprehensive Home Assistant custom integration for Google's FindMy Device network, enabling real-time(ish) tracking and control of FindMy devices directly within Home Assistant!
 
@@ -15,7 +15,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
 ---
-## Features 
+## Features
 
 - 🗺️ **Real-time Device Tracking**: Track Google FindMy devices with location data, sourced from the FindMy network
 - ⏱️ **Configurable Polling**: Flexible polling intervals with rate limit protection
@@ -24,7 +24,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 - 📍 **Historical Map-View**: Each tracker has a filterable Map-View that shows tracker movement with location data
 - 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
 - ❣️ **More to come!**
-  
+
 >[!NOTE]
 >**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**
 >
@@ -56,7 +56,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 3. Copy the entire contents of the secrets.json file.
     - Specifically, open the file in a text editor, select all, and copy.
 
-### <ins>Authentication Part 2 (Home Assistant Steps)</ins> 
+### <ins>Authentication Part 2 (Home Assistant Steps)</ins>
 4. Add the integration to your Home Assistant install.
 5. In Home Assistant, paste the copied text from secrets.json when prompted.
 6. After completing authentication and adding devices, RESTART Home Assistant!

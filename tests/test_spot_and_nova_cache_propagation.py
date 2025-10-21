@@ -29,7 +29,9 @@ class _DummyCache:
         self._data[key] = value
 
 
-def test_pick_auth_token_prefers_spot_threads_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pick_auth_token_prefers_spot_threads_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """_pick_auth_token_async should reuse the provided cache for username/SPOT lookups."""
 
     cache = _DummyCache()
@@ -59,7 +61,9 @@ def test_pick_auth_token_prefers_spot_threads_cache(monkeypatch: pytest.MonkeyPa
     assert recorded["spot_username"] == "user@example.com"
 
 
-def test_pick_auth_token_falls_back_to_adm_with_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pick_auth_token_falls_back_to_adm_with_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Fallback to ADM token must pass the entry cache to all helpers."""
 
     cache = _DummyCache()
@@ -80,7 +84,9 @@ def test_pick_auth_token_falls_back_to_adm_with_cache(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(spot_module, "async_get_username", fake_async_get_username)
     monkeypatch.setattr(spot_module, "async_get_spot_token", fake_async_get_spot_token)
-    monkeypatch.setattr(spot_module, "async_get_adm_token_api", fake_async_get_adm_token_api)
+    monkeypatch.setattr(
+        spot_module, "async_get_adm_token_api", fake_async_get_adm_token_api
+    )
 
     token, kind, username = asyncio.run(spot_module._pick_auth_token_async(cache=cache))
 
@@ -92,7 +98,9 @@ def test_pick_auth_token_falls_back_to_adm_with_cache(monkeypatch: pytest.Monkey
     assert recorded["adm_user"] == "user@example.com"
 
 
-def test_async_spot_request_forwards_cache_to_picker(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_spot_request_forwards_cache_to_picker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """async_spot_request must pass the entry cache to the token picker and HTTP layer."""
 
     cache = _DummyCache()
@@ -113,19 +121,23 @@ def test_async_spot_request_forwards_cache_to_picker(monkeypatch: pytest.MonkeyP
         def __init__(self, *args, **kwargs) -> None:
             recorded["client_kwargs"] = kwargs
 
-        async def __aenter__(self) -> "DummyClient":
+        async def __aenter__(self) -> DummyClient:
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
             return None
 
-        async def post(self, url: str, *, headers=None, content=None, **_kwargs: Any) -> DummyResponse:
+        async def post(
+            self, url: str, *, headers=None, content=None, **_kwargs: Any
+        ) -> DummyResponse:
             recorded["post_url"] = url
             recorded["post_headers"] = headers
             recorded["post_content"] = content
             return DummyResponse()
 
-    monkeypatch.setattr(spot_module, "_pick_auth_token_async", fake_pick_auth_token_async)
+    monkeypatch.setattr(
+        spot_module, "_pick_auth_token_async", fake_pick_auth_token_async
+    )
     monkeypatch.setattr(spot_module.httpx, "AsyncClient", DummyClient)
     monkeypatch.setattr(
         spot_module.GrpcParser,
@@ -138,7 +150,9 @@ def test_async_spot_request_forwards_cache_to_picker(monkeypatch: pytest.MonkeyP
         staticmethod(lambda data: b"decoded"),
     )
 
-    result = asyncio.run(spot_module.async_spot_request("Scope", b"payload", cache=cache))
+    result = asyncio.run(
+        spot_module.async_spot_request("Scope", b"payload", cache=cache)
+    )
 
     assert result == b"decoded"
     assert recorded["pick_cache"] is cache
@@ -159,7 +173,9 @@ def test_get_initial_token_async_uses_cache(monkeypatch: pytest.MonkeyPatch) -> 
         recorded["adm_cache"] = cache
         return "adm-token"
 
-    monkeypatch.setattr(nova_module, "async_get_adm_token_api", fake_async_get_adm_token_api)
+    monkeypatch.setattr(
+        nova_module, "async_get_adm_token_api", fake_async_get_adm_token_api
+    )
 
     token = asyncio.run(
         nova_module._get_initial_token_async(

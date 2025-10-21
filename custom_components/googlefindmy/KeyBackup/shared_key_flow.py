@@ -8,8 +8,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as ec
 
 from custom_components.googlefindmy.KeyBackup.response_parser import get_fmdn_shared_key
-from custom_components.googlefindmy.KeyBackup.shared_key_request import get_security_domain_request_url
+from custom_components.googlefindmy.KeyBackup.shared_key_request import (
+    get_security_domain_request_url,
+)
 from custom_components.googlefindmy.chrome_driver import create_driver
+
 
 def request_shared_key_flow():
     driver = create_driver()
@@ -52,14 +55,15 @@ def request_shared_key_flow():
 
                 # Parse the alert message
                 import json
+
                 data = json.loads(message)
 
-                if data['method'] == 'setVaultSharedKeys':
-                    shared_key = get_fmdn_shared_key(data['vaultKeys'])
+                if data["method"] == "setVaultSharedKeys":
+                    shared_key = get_fmdn_shared_key(data["vaultKeys"])
                     print("[SharedKeyFlow] Received Shared Key.")
                     driver.quit()
                     return shared_key.hex()
-                elif data['method'] == 'closeView':
+                elif data["method"] == "closeView":
                     print("[SharedKeyFlow] closeView() called. Closing browser.")
                     driver.quit()
                     break
@@ -74,4 +78,4 @@ def request_shared_key_flow():
 
 
 if __name__ == "__main__":
-   request_shared_key_flow()
+    request_shared_key_flow()

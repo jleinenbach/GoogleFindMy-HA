@@ -3,11 +3,14 @@
 # tests/test_location_request_cache_isolation.py
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 import pytest
 
-from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import location_request
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
+    location_request,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
     start_sound_request,
     stop_sound_request,
@@ -54,7 +57,9 @@ class DummyFcmReceiver:
         self.registered.pop(device_id, None)
 
 
-def test_locate_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_locate_request_prefers_entry_scoped_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Locate flow must not fall back to the global cache when entry cache is provided."""
 
     primary_cache = FakeTokenCache("entry-one")
@@ -88,9 +93,13 @@ def test_locate_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPat
         return "00"
 
     monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda: receiver)
-    monkeypatch.setattr(location_request, "_make_location_callback", fake_make_location_callback)
+    monkeypatch.setattr(
+        location_request, "_make_location_callback", fake_make_location_callback
+    )
     monkeypatch.setattr(location_request, "async_nova_request", fake_async_nova_request)
-    monkeypatch.setattr(location_request, "create_location_request", lambda *args, **kwargs: "payload")
+    monkeypatch.setattr(
+        location_request, "create_location_request", lambda *args, **kwargs: "payload"
+    )
 
     async def _run() -> None:
         result = await location_request.get_location_data_for_device(
@@ -141,7 +150,9 @@ def test_stop_sound_request_requires_cache() -> None:
     asyncio.run(_run())
 
 
-def test_start_sound_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_sound_request_prefers_entry_scoped_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Start sound flow must only touch the provided entry-local cache."""
 
     cache = FakeTokenCache("entry-one")
@@ -166,8 +177,12 @@ def test_start_sound_request_prefers_entry_scoped_cache(monkeypatch: pytest.Monk
 
     cache_ref = cache
 
-    monkeypatch.setattr(start_sound_request, "async_nova_request", fake_async_nova_request)
-    monkeypatch.setattr(start_sound_request, "start_sound_request", lambda *_, **__: "payload")
+    monkeypatch.setattr(
+        start_sound_request, "async_nova_request", fake_async_nova_request
+    )
+    monkeypatch.setattr(
+        start_sound_request, "start_sound_request", lambda *_, **__: "payload"
+    )
 
     async def _run() -> None:
         result = await start_sound_request.async_submit_start_sound_request(
@@ -185,7 +200,9 @@ def test_start_sound_request_prefers_entry_scoped_cache(monkeypatch: pytest.Monk
     asyncio.run(_run())
 
 
-def test_stop_sound_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stop_sound_request_prefers_entry_scoped_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Stop sound flow must only touch the provided entry-local cache."""
 
     cache = FakeTokenCache("entry-two")
@@ -210,8 +227,12 @@ def test_stop_sound_request_prefers_entry_scoped_cache(monkeypatch: pytest.Monke
 
     cache_ref = cache
 
-    monkeypatch.setattr(stop_sound_request, "async_nova_request", fake_async_nova_request)
-    monkeypatch.setattr(stop_sound_request, "stop_sound_request", lambda *_, **__: "payload")
+    monkeypatch.setattr(
+        stop_sound_request, "async_nova_request", fake_async_nova_request
+    )
+    monkeypatch.setattr(
+        stop_sound_request, "stop_sound_request", lambda *_, **__: "payload"
+    )
 
     async def _run() -> None:
         result = await stop_sound_request.async_submit_stop_sound_request(

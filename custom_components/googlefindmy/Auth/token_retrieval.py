@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 import gpsoauth
 
@@ -67,7 +68,9 @@ def _extract_android_id_from_credentials(fcm_creds: Any) -> int | None:
             _LOGGER.debug("android_id value from FCM credentials is not numeric")
             return None
     if candidate is not None:
-        _LOGGER.debug("Unsupported android_id type in FCM credentials: %s", type(candidate))
+        _LOGGER.debug(
+            "Unsupported android_id type in FCM credentials: %s", type(candidate)
+        )
     return None
 
 
@@ -115,7 +118,9 @@ def _perform_oauth_sync(
         InvalidAasTokenError: If gpsoauth explicitly rejects the supplied AAS token.
         RuntimeError: If the gpsoauth exchange fails or returns an invalid response.
     """
-    request_app = "com.google.android.gms" if play_services else "com.google.android.apps.adm"
+    request_app = (
+        "com.google.android.gms" if play_services else "com.google.android.apps.adm"
+    )
     try:
         auth_response = gpsoauth.perform_oauth(
             username,
@@ -159,7 +164,7 @@ def request_token(
     scope: str,
     play_services: bool = False,
     *,
-    aas_token: Optional[str] = None,
+    aas_token: str | None = None,
     cache: TokenCache | None = None,
 ) -> str:
     """Synchronous token request via gpsoauth (CLI/tests only).
@@ -222,8 +227,8 @@ async def async_request_token(
     play_services: bool = False,
     *,
     cache: TokenCache,
-    aas_provider: Optional[Callable[[], Awaitable[str]]] = None,
-    aas_token: Optional[str] = None,
+    aas_provider: Callable[[], Awaitable[str]] | None = None,
+    aas_token: str | None = None,
 ) -> str:
     """Async wrapper for the OAuth token request (HA-safe).
 
@@ -257,6 +262,7 @@ async def async_request_token(
         if aas_provider is not None:
             aas_token = await aas_provider()
         else:
+
             async def _default_aas_provider() -> str:
                 return await async_get_aas_token(cache=cache)
 

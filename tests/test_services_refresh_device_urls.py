@@ -53,7 +53,9 @@ class _StubDeviceRegistry:
         self.devices[device_id].configuration_url = configuration_url
 
 
-def test_refresh_device_urls_uses_entry_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_refresh_device_urls_uses_entry_scoped_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Each device URL uses the owning entry's token policy and canonical identifier."""
 
     fake_now = 1_209_600  # Aligns with a deterministic week bucket.
@@ -107,7 +109,9 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(monkeypatch: pytest.Monkey
         ),
         "ha-service": SimpleNamespace(
             id="ha-service",
-            identifiers={(const.DOMAIN, f"{const.SERVICE_DEVICE_IDENTIFIER_PREFIX}entry-1")},
+            identifiers={
+                (const.DOMAIN, f"{const.SERVICE_DEVICE_IDENTIFIER_PREFIX}entry-1")
+            },
             config_entries={"entry-1"},
             serial_number=None,
             name="Service",
@@ -122,13 +126,15 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(monkeypatch: pytest.Monkey
 
     async def _run_refresh() -> None:
         await services.async_register_services(hass, ctx)
-        handler = hass.services.registered[(const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)]
+        handler = hass.services.registered[
+            (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+        ]
         await handler(ServiceCall({}))
 
     asyncio.run(_run_refresh())
 
     week_bucket = str(fake_now // 604800)
-    expected_entry_one_token = hashlib.md5("ha-uuid:entry-1:static".encode()).hexdigest()[:16]
+    expected_entry_one_token = hashlib.md5(b"ha-uuid:entry-1:static").hexdigest()[:16]
     expected_entry_two_token = hashlib.md5(
         f"ha-uuid:entry-2:{week_bucket}".encode()
     ).hexdigest()[:16]

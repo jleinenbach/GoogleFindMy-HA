@@ -49,13 +49,13 @@ def custom_message_formatter(message, indent, _as_one_line):
     # Resolve optional display timezone from env; default to UTC.
     display_tz_name = os.environ.get("GOOGLEFINDMY_DEV_TZ", "UTC")
     if display_tz_name == "UTC" or ZoneInfo is None:
-        display_tz = datetime.timezone.utc
+        display_tz = datetime.UTC
         display_tz_name = "UTC"
     else:
         try:
             display_tz = ZoneInfo(display_tz_name)
         except Exception:
-            display_tz = datetime.timezone.utc
+            display_tz = datetime.UTC
             display_tz_name = "UTC"
 
     for field, value in message.ListFields():
@@ -72,7 +72,7 @@ def custom_message_formatter(message, indent, _as_one_line):
                         unix_time = float(secs) + float(nanos) / 1e9
 
                         dt_utc = datetime.datetime.fromtimestamp(
-                            unix_time, tz=datetime.timezone.utc
+                            unix_time, tz=datetime.UTC
                         )
                         utc_str = dt_utc.isoformat().replace("+00:00", "Z")
                         if display_tz_name == "UTC":
@@ -100,7 +100,7 @@ def custom_message_formatter(message, indent, _as_one_line):
                     unix_time = float(secs) + float(nanos) / 1e9
 
                     dt_utc = datetime.datetime.fromtimestamp(
-                        unix_time, tz=datetime.timezone.utc
+                        unix_time, tz=datetime.UTC
                     )
                     utc_str = dt_utc.isoformat().replace("+00:00", "Z")
                     if display_tz_name == "UTC":
@@ -156,14 +156,14 @@ def parse_device_list_protobuf(hex_string: str):
 # --------------------------------------------------------------------------------------
 
 
-def get_canonic_ids(device_list) -> List[Tuple[str, str]]:
+def get_canonic_ids(device_list) -> list[tuple[str, str]]:
     """Return (device_name, canonic_id) for all devices in the list.
 
     Defensive policy:
         * Handle Android and non-Android identifier shapes.
         * Skip non-string/empty IDs to avoid downstream surprises.
     """
-    result: List[Tuple[str, str]] = []
+    result: list[tuple[str, str]] = []
     for device in getattr(device_list, "deviceMetadata", []):
         try:
             if device.identifierInformation.type == DeviceUpdate_pb2.IDENTIFIER_ANDROID:
@@ -192,7 +192,7 @@ def get_canonic_ids(device_list) -> List[Tuple[str, str]]:
 # Tunables to keep behavior explicit and easily auditable
 _NEAR_TS_TOLERANCE_S: float = 5.0  # semantic merge tolerance (seconds)
 
-_DEVICE_STUB_KEYS: Tuple[str, ...] = (
+_DEVICE_STUB_KEYS: tuple[str, ...] = (
     "name",
     "id",
     "device_id",
@@ -210,7 +210,7 @@ _DEVICE_STUB_KEYS: Tuple[str, ...] = (
 )
 
 
-def _build_device_stub(device_name: str, canonic_id: str) -> Dict[str, Any]:
+def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
     """Return a normalized, predictable stub for a device row.
 
     The stub ensures consistent keys across call sites and prevents
@@ -234,7 +234,7 @@ def _build_device_stub(device_name: str, canonic_id: str) -> Dict[str, Any]:
     }
 
 
-def _normalize_location_dict(loc: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
     """Coerce numeric fields to floats (when present) and drop NaN/Inf.
 
     Only mutates a shallow copy. Unknown keys are preserved (e.g., `_report_hint`).
@@ -255,7 +255,7 @@ def _normalize_location_dict(loc: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _get_rank_tuple(n: Dict[str, Any]) -> Tuple[int, int, float, float, str]:
+def _get_rank_tuple(n: dict[str, Any]) -> tuple[int, int, float, float, str]:
     """Create a sort key tuple with status-based prioritization.
     Priority (high to low):
       1. Source/Status: Owner > Crowdsourced > Aggregated > Unknown
@@ -346,8 +346,8 @@ def _get_rank_tuple(n: Dict[str, Any]) -> Tuple[int, int, float, float, str]:
 
 
 def _select_best_location(
-    cands: List[Dict[str, Any]]
-) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    cands: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Choose the most useful location from a list of candidates.
 
     This function normalizes all candidates once, then sorts them based on a
@@ -370,7 +370,7 @@ def _select_best_location(
         return None, []
 
     # Normalize once up front
-    normed_cands: List[Dict[str, Any]] = [_normalize_location_dict(c or {}) for c in cands]
+    normed_cands: list[dict[str, Any]] = [_normalize_location_dict(c or {}) for c in cands]
 
     # Sort using the new rank tuple which prioritizes status
     normed_cands.sort(key=_get_rank_tuple, reverse=True)
@@ -381,11 +381,11 @@ def _select_best_location(
 
 
 def _merge_semantics_if_near_ts(
-    best: Dict[str, Any],
-    normed_cands: List[Dict[str, Any]],
+    best: dict[str, Any],
+    normed_cands: list[dict[str, Any]],
     *,
     tolerance_s: float = _NEAR_TS_TOLERANCE_S,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Attach a semantic label from a candidate with the closest timestamp.
 
     Behavior:
@@ -418,7 +418,7 @@ def _merge_semantics_if_near_ts(
     except (TypeError, ValueError):
         t_best = 0.0
 
-    best_label: Optional[str] = None
+    best_label: str | None = None
     min_delta = float("inf")
 
     if t_best > 0:
@@ -442,7 +442,7 @@ def _merge_semantics_if_near_ts(
     return out
 
 
-def get_devices_with_location(device_list) -> List[Dict[str, Any]]:
+def get_devices_with_location(device_list) -> list[dict[str, Any]]:
     """Extract one consolidated row per canonic device ID from a device list.
 
     This function serves as a robust barrier against data contamination by
@@ -472,7 +472,7 @@ def get_devices_with_location(device_list) -> List[Dict[str, Any]]:
         # If the decrypt layer is unavailable, return stubs only.
         decrypt_location_response_locations = None  # type: ignore[assignment]
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     for device in getattr(device_list, "deviceMetadata", []):
         # Resolve canonic IDs for this device (Android vs. generic path)
@@ -489,7 +489,7 @@ def get_devices_with_location(device_list) -> List[Dict[str, Any]]:
         device_name = getattr(device, "userDefinedDeviceName", None) or ""
 
         # Try decryption ONCE per device; share across all its canonic IDs
-        location_candidates: List[Dict[str, Any]] = []
+        location_candidates: list[dict[str, Any]] = []
         if decrypt_location_response_locations is not None:
             try:
                 if device.HasField("information") and device.information.HasField(

@@ -9,7 +9,8 @@ import sys
 from contextlib import suppress
 from dataclasses import dataclass, field
 from types import ModuleType, SimpleNamespace
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 import pytest
 
@@ -76,10 +77,14 @@ class _StubCoordinator:
     def can_play_sound(self, _device_id: str) -> bool:
         return True
 
-    def async_set_updated_data(self, _data: Any) -> None:  # pragma: no cover - no state change
+    def async_set_updated_data(
+        self, _data: Any
+    ) -> None:  # pragma: no cover - no state change
         return None
 
-    def push_updated(self, _ids: list[str]) -> None:  # pragma: no cover - no state change
+    def push_updated(
+        self, _ids: list[str]
+    ) -> None:  # pragma: no cover - no state change
         return None
 
     async def async_locate_device(self, canonical_id: str) -> dict[str, Any]:
@@ -124,7 +129,9 @@ class _StubFcm:
 
 
 class _StubBus:
-    def async_listen_once(self, _event: str, _callback: Callable[..., Any]) -> Callable[[], None]:
+    def async_listen_once(
+        self, _event: str, _callback: Callable[..., Any]
+    ) -> Callable[[], None]:
         return lambda: None
 
 
@@ -140,7 +147,9 @@ class _StubServices:
     def __init__(self) -> None:
         self.registered: dict[tuple[str, str], Callable[..., Any]] = {}
 
-    def async_register(self, domain: str, service: str, handler: Callable[..., Any]) -> None:
+    def async_register(
+        self, domain: str, service: str, handler: Callable[..., Any]
+    ) -> None:
         self.registered[(domain, service)] = handler
 
 
@@ -174,21 +183,31 @@ class _StubConfigEntries:
             return []
         return list(self._entries)
 
-    async def async_forward_entry_setups(self, entry: _StubConfigEntry, platforms: list[str]) -> None:
+    async def async_forward_entry_setups(
+        self, entry: _StubConfigEntry, platforms: list[str]
+    ) -> None:
         self.forward_calls.append((entry.entry_id, tuple(platforms)))
 
-    async def async_unload_platforms(self, _entry: _StubConfigEntry, _platforms: list[str]) -> bool:
+    async def async_unload_platforms(
+        self, _entry: _StubConfigEntry, _platforms: list[str]
+    ) -> bool:
         return True
 
-    def async_update_entry(self, entry: _StubConfigEntry, *, options: dict[str, Any]) -> None:
+    def async_update_entry(
+        self, entry: _StubConfigEntry, *, options: dict[str, Any]
+    ) -> None:
         entry.options = dict(options)
 
-    async def async_reload(self, _entry_id: str) -> None:  # pragma: no cover - not triggered
+    async def async_reload(
+        self, _entry_id: str
+    ) -> None:  # pragma: no cover - not triggered
         return None
 
 
 class _StubHass:
-    def __init__(self, entries: list[_StubConfigEntry], loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self, entries: list[_StubConfigEntry], loop: asyncio.AbstractEventLoop
+    ) -> None:
         from homeassistant.core import CoreState
 
         self.loop = loop
@@ -200,7 +219,9 @@ class _StubHass:
         self.config_entries = _StubConfigEntries(entries)
         self._tasks: list[asyncio.Task[Any]] = []
 
-    def async_create_task(self, coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+    def async_create_task(
+        self, coro: Any, *, name: str | None = None
+    ) -> asyncio.Task[Any]:
         task = self.loop.create_task(coro, name=name)
         self._tasks.append(task)
         return task
@@ -226,8 +247,12 @@ def test_multi_account_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
             sys.modules["homeassistant.loader"] = loader_module
 
         integration = importlib.import_module("custom_components.googlefindmy.__init__")
-        coordinator_module = importlib.import_module("custom_components.googlefindmy.coordinator")
-        map_view_module = importlib.import_module("custom_components.googlefindmy.map_view")
+        coordinator_module = importlib.import_module(
+            "custom_components.googlefindmy.coordinator"
+        )
+        map_view_module = importlib.import_module(
+            "custom_components.googlefindmy.map_view"
+        )
 
         config_entries_module = importlib.import_module("homeassistant.config_entries")
         state_cls = config_entries_module.ConfigEntryState
@@ -238,7 +263,9 @@ def test_multi_account_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
 
         caches: dict[str, _StubTokenCache] = {}
 
-        async def _fake_cache_create(cls: Any, hass: Any, entry_id: str, legacy_path: str | None = None) -> _StubTokenCache:  # type: ignore[override]
+        async def _fake_cache_create(
+            cls: Any, hass: Any, entry_id: str, legacy_path: str | None = None
+        ) -> _StubTokenCache:  # type: ignore[override]
             cache = _StubTokenCache(entry_id)
             caches[entry_id] = cache
             return cache
@@ -248,31 +275,47 @@ def test_multi_account_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
             "create",
             classmethod(_fake_cache_create),
         )
+
         async def _noop_async(*_args: Any, **_kwargs: Any) -> None:
             return None
 
-        monkeypatch.setattr(integration, "_register_instance", lambda *args, **kwargs: None)
-        monkeypatch.setattr(integration, "_unregister_instance", lambda *args, **kwargs: None)
-        monkeypatch.setattr(integration, "_async_soft_migrate_data_to_options", _noop_async)
+        monkeypatch.setattr(
+            integration, "_register_instance", lambda *args, **kwargs: None
+        )
+        monkeypatch.setattr(
+            integration, "_unregister_instance", lambda *args, **kwargs: None
+        )
+        monkeypatch.setattr(
+            integration, "_async_soft_migrate_data_to_options", _noop_async
+        )
         monkeypatch.setattr(integration, "_async_migrate_unique_ids", _noop_async)
         monkeypatch.setattr(integration, "_async_normalize_device_names", _noop_async)
 
         stub_fcm = _StubFcm()
+
         async def _acquire_shared_fcm(_hass: Any) -> _StubFcm:
             return stub_fcm
 
-        monkeypatch.setattr(integration, "_async_acquire_shared_fcm", _acquire_shared_fcm)
+        monkeypatch.setattr(
+            integration, "_async_acquire_shared_fcm", _acquire_shared_fcm
+        )
 
         issue_calls: list[tuple[str, str]] = []
         monkeypatch.setattr(
             integration.ir,
             "async_create_issue",
-            lambda hass, domain, issue_id, **kwargs: issue_calls.append((domain, issue_id)),
+            lambda hass, domain, issue_id, **kwargs: issue_calls.append(
+                (domain, issue_id)
+            ),
         )
 
-        monkeypatch.setattr(coordinator_module, "GoogleFindMyCoordinator", _StubCoordinator)
+        monkeypatch.setattr(
+            coordinator_module, "GoogleFindMyCoordinator", _StubCoordinator
+        )
         monkeypatch.setattr(integration, "GoogleFindMyCoordinator", _StubCoordinator)
-        monkeypatch.setattr(map_view_module, "GoogleFindMyCoordinator", _StubCoordinator, raising=False)
+        monkeypatch.setattr(
+            map_view_module, "GoogleFindMyCoordinator", _StubCoordinator, raising=False
+        )
 
         class _DummyView:
             def __init__(self, hass: Any) -> None:
@@ -281,8 +324,12 @@ def test_multi_account_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
             async def get(self, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
                 return SimpleNamespace(status=200)
 
-        monkeypatch.setattr(map_view_module, "GoogleFindMyMapView", _DummyView, raising=False)
-        monkeypatch.setattr(map_view_module, "GoogleFindMyMapRedirectView", _DummyView, raising=False)
+        monkeypatch.setattr(
+            map_view_module, "GoogleFindMyMapView", _DummyView, raising=False
+        )
+        monkeypatch.setattr(
+            map_view_module, "GoogleFindMyMapRedirectView", _DummyView, raising=False
+        )
         monkeypatch.setattr(integration, "GoogleFindMyMapView", _DummyView)
         monkeypatch.setattr(integration, "GoogleFindMyMapRedirectView", _DummyView)
 

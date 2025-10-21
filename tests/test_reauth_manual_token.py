@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
@@ -25,7 +25,7 @@ class _MemoryCache:
     """In-memory async cache emulating the TokenCache contract for tests."""
 
     def __init__(self) -> None:
-        self._data: Dict[str, Any] = {}
+        self._data: dict[str, Any] = {}
 
     async def get(self, name: str) -> Any:
         return self._data.get(name)
@@ -48,7 +48,7 @@ class _MemoryCache:
         await self.set(name, result)
         return result
 
-    async def all(self) -> Dict[str, Any]:  # pragma: no cover - helper for completeness
+    async def all(self) -> dict[str, Any]:  # pragma: no cover - helper for completeness
         return dict(self._data)
 
 
@@ -62,10 +62,12 @@ class _RuntimeData:
 class _DummyEntry:
     """Lightweight ConfigEntry substitute for flow testing."""
 
-    def __init__(self, *, entry_id: str, data: Dict[str, Any], cache: _MemoryCache) -> None:
+    def __init__(
+        self, *, entry_id: str, data: dict[str, Any], cache: _MemoryCache
+    ) -> None:
         self.entry_id = entry_id
         self.data = data
-        self.options: Dict[str, Any] = {}
+        self.options: dict[str, Any] = {}
         self.title = "Test Entry"
         self.runtime_data = _RuntimeData(cache)
 
@@ -85,10 +87,12 @@ class _DummyHass:
 
     def __init__(self, entry: _DummyEntry, cache: _MemoryCache) -> None:
         self.config_entries = _DummyConfigEntries(entry)
-        self.data: Dict[str, Any] = {DOMAIN: {entry.entry_id: _RuntimeData(cache)}}
+        self.data: dict[str, Any] = {DOMAIN: {entry.entry_id: _RuntimeData(cache)}}
 
 
-def test_manual_reauth_clears_cached_aas_and_mints_new_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_manual_reauth_clears_cached_aas_and_mints_new_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """After manual reauth, cached AAS tokens must be cleared and a new ADM flow must use fresh OAuth."""
 
     async def _exercise() -> None:
@@ -128,14 +132,16 @@ def test_manual_reauth_clears_cached_aas_and_mints_new_token(monkeypatch: pytest
 
         # Simulate reload storing the new OAuth token and keeping AAS cleared.
         await cache.async_set_cached_value(CONF_OAUTH_TOKEN, new_oauth)
-        await cache.async_set_cached_value(username_string, entry.data[CONF_GOOGLE_EMAIL])
+        await cache.async_set_cached_value(
+            username_string, entry.data[CONF_GOOGLE_EMAIL]
+        )
         await cache.async_set_cached_value(DATA_AAS_TOKEN, None)
         await cache.async_set_cached_value(DATA_AUTH_METHOD, "individual_tokens")
 
         assert await cache.get(DATA_AAS_TOKEN) is None
         assert await cache.get(CONF_OAUTH_TOKEN) == new_oauth
 
-        observed: Dict[str, Any] = {}
+        observed: dict[str, Any] = {}
 
         async def _fake_exchange(username: str, oauth_token: str, android_id: int):
             observed["oauth_token"] = oauth_token
@@ -154,8 +160,12 @@ def test_manual_reauth_clears_cached_aas_and_mints_new_token(monkeypatch: pytest
             observed["aas_token"] = await aas_provider()
             return "adm-new"
 
-        monkeypatch.setattr(aas_token_retrieval, "_exchange_oauth_for_aas", _fake_exchange)
-        monkeypatch.setattr(adm_token_retrieval, "async_request_token", _fake_request_token)
+        monkeypatch.setattr(
+            aas_token_retrieval, "_exchange_oauth_for_aas", _fake_exchange
+        )
+        monkeypatch.setattr(
+            adm_token_retrieval, "async_request_token", _fake_request_token
+        )
 
         token = await adm_token_retrieval.async_get_adm_token(cache=cache)
 

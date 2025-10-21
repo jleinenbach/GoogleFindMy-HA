@@ -11,16 +11,12 @@ import logging
 import traceback
 from typing import (
     TYPE_CHECKING,
-    Optional,
-    Callable,
     Protocol,
     runtime_checkable,
-    Awaitable,
     Any,
-    Dict,
-    List,
     cast,
 )
+from collections.abc import Callable, Awaitable
 
 import aiohttp
 
@@ -52,13 +48,14 @@ _LOGGER = logging.getLogger(__name__)
 @runtime_checkable
 class FcmReceiverProtocol(Protocol):
     """Defines the interface for the FCM receiver."""
+
     async def async_register_for_location_updates(
         self, device_id: str, callback: Callable[[str, str], None]
     ) -> str | None: ...
     async def async_unregister_for_location_updates(self, device_id: str) -> None: ...
 
 
-_FCM_ReceiverGetter: Optional[Callable[[], FcmReceiverProtocol]] = None
+_FCM_ReceiverGetter: Callable[[], FcmReceiverProtocol] | None = None
 
 
 def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
@@ -81,7 +78,9 @@ def unregister_fcm_receiver_provider() -> None:
     _FCM_ReceiverGetter = None
 
 
-def create_location_request(canonic_device_id: str, fcm_registration_id: str, request_uuid: str) -> str:
+def create_location_request(
+    canonic_device_id: str, fcm_registration_id: str, request_uuid: str
+) -> str:
     """Build and serialize a LocateTracker action request.
 
     DeviceUpdate_pb2 is imported lazily here to avoid protobuf side effects
@@ -95,14 +94,18 @@ def create_location_request(canonic_device_id: str, fcm_registration_id: str, re
     Returns:
         A hex-encoded string representing the serialized protobuf message.
     """
-    from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2  # lazy import
+    from custom_components.googlefindmy.ProtoDecoders import (
+        DeviceUpdate_pb2,
+    )  # lazy import
 
     action_request = create_action_request(
         canonic_device_id, fcm_registration_id, request_uuid=request_uuid
     )
 
     # Use a current timestamp; server treats this as an arbitrary marker.
-    action_request.action.locateTracker.lastHighTrafficEnablingTime.seconds = int(time.time())
+    action_request.action.locateTracker.lastHighTrafficEnablingTime.seconds = int(
+        time.time()
+    )
     action_request.action.locateTracker.contributorType = (
         DeviceUpdate_pb2.SpotContributorType.FMDN_ALL_LOCATIONS
     )
@@ -126,6 +129,7 @@ class _CallbackContext:
         event: An asyncio.Event to signal that data has been received.
         data: The data payload received from the callback.
     """
+
     __slots__ = ("event", "data")
 
     def __init__(self) -> None:
@@ -140,7 +144,7 @@ def _make_location_callback(
     canonic_device_id: str,
     ctx: _CallbackContext,
     loop: asyncio.AbstractEventLoop,
-    cache: "TokenCache",
+    cache: TokenCache,
 ) -> Callable[[str, str], None]:
     """Factory that creates an FCM callback bound to a context object.
 
@@ -171,7 +175,9 @@ def _make_location_callback(
 
             # Lazy imports inside callback (avoid protobuf import side effects during HA startup)
             try:
-                from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
+                from custom_components.googlefindmy.ProtoDecoders.decoder import (
+                    parse_device_update_protobuf,
+                )
                 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
                     async_decrypt_location_response_locations,
                     DecryptionError,
@@ -181,7 +187,11 @@ def _make_location_callback(
                     SpotApiEmptyResponseError,
                 )
             except ImportError as import_error:
-                _LOGGER.error("Failed to import decoder/decrypt functions in callback for %s: %s", name, import_error)
+                _LOGGER.error(
+                    "Failed to import decoder/decrypt functions in callback for %s: %s",
+                    name,
+                    import_error,
+                )
                 ctx.data = []
                 ctx.event.set()
                 return
@@ -190,7 +200,9 @@ def _make_location_callback(
             try:
                 device_update = parse_device_update_protobuf(hex_response)
             except Exception as parse_exc:
-                _LOGGER.error("Failed to parse device update for %s: %s", name, parse_exc)
+                _LOGGER.error(
+                    "Failed to parse device update for %s: %s", name, parse_exc
+                )
                 ctx.data = []
                 ctx.event.set()
                 return
@@ -210,25 +222,39 @@ def _make_location_callback(
                     location_data = await async_decrypt_location_response_locations(
                         device_update, cache=cache
                     )
-                except (StaleOwnerKeyError, DecryptionError, SpotApiEmptyResponseError) as err:
-                    _LOGGER.error("Failed to process location data for %s: %s", name, err)
+                except (
+                    StaleOwnerKeyError,
+                    DecryptionError,
+                    SpotApiEmptyResponseError,
+                ) as err:
+                    _LOGGER.error(
+                        "Failed to process location data for %s: %s", name, err
+                    )
                     ctx.data = []
                     ctx.event.set()
                     return
                 except Exception as err:
-                    _LOGGER.error("Unexpected error during async decryption for %s: %s", name, err)
+                    _LOGGER.error(
+                        "Unexpected error during async decryption for %s: %s", name, err
+                    )
                     _LOGGER.debug("Traceback: %s", traceback.format_exc())
                     ctx.data = []
                     ctx.event.set()
                     return
 
                 if location_data:
-                    _LOGGER.info("Successfully decrypted %d location record(s) for %s", len(location_data), name)
+                    _LOGGER.info(
+                        "Successfully decrypted %d location record(s) for %s",
+                        len(location_data),
+                        name,
+                    )
                     # Attach canonic_id for validation after wait
                     location_data[0]["canonic_id"] = response_canonic_id
                     ctx.data = location_data
                 else:
-                    _LOGGER.warning("No location data found after decryption for %s", name)
+                    _LOGGER.warning(
+                        "No location data found after decryption for %s", name
+                    )
                     ctx.data = []
                 ctx.event.set()
 
@@ -236,7 +262,9 @@ def _make_location_callback(
             asyncio.run_coroutine_threadsafe(_decrypt_and_store(), loop)
 
         except Exception as callback_error:
-            _LOGGER.error("Error processing FCM callback for %s: %s", name, callback_error)
+            _LOGGER.error(
+                "Error processing FCM callback for %s: %s", name, callback_error
+            )
             _LOGGER.debug("FCM callback traceback: %s", traceback.format_exc())
             ctx.data = []
             ctx.event.set()
@@ -250,17 +278,17 @@ def _make_location_callback(
 async def get_location_data_for_device(
     canonic_device_id: str,
     name: str,
-    session: Optional[aiohttp.ClientSession] = None,
+    session: aiohttp.ClientSession | None = None,
     *,
-    username: Optional[str] = None,
+    username: str | None = None,
     # Entry-scope extensions (all optional / backward compatible):
-    token: Optional[str] = None,
-    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
-    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
-    refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
-    namespace: Optional[str] = None,
-    cache: Optional["TokenCache"] = None,  # type: ignore[name-defined]
-) -> List[Dict[str, Any]]:
+    token: str | None = None,
+    cache_get: Callable[[str], Awaitable[Any]] | None = None,
+    cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+    refresh_override: Callable[[], Awaitable[str | None]] | None = None,
+    namespace: str | None = None,
+    cache: TokenCache | None = None,  # type: ignore[name-defined]
+) -> list[dict[str, Any]]:
     """Get location data for a device (async, HA-compatible).
 
     Orchestrates:
@@ -313,8 +341,8 @@ async def get_location_data_for_device(
         raise MissingNamespaceError()
 
     # Build cache accessors, preferring entry-local namespacing when provided.
-    ns_get: Optional[Callable[[str], Awaitable[Any]]] = cache_get
-    ns_set: Optional[Callable[[str, Any], Awaitable[None]]] = cache_set
+    ns_get: Callable[[str], Awaitable[Any]] | None = cache_get
+    ns_set: Callable[[str, Any], Awaitable[None]] | None = cache_set
 
     if resolved_namespace and (cache_get is None or cache_set is None):
         ns_prefix = f"{resolved_namespace}:"
@@ -366,7 +394,9 @@ async def get_location_data_for_device(
             return []
 
         # Create location request payload
-        hex_payload = create_location_request(canonic_device_id, fcm_token, request_uuid)
+        hex_payload = create_location_request(
+            canonic_device_id, fcm_token, request_uuid
+        )
 
         # Send location request to Google API (async; HA session preferred if provided)
         _LOGGER.info("Sending location request to Google API for %s...", name)
@@ -386,16 +416,27 @@ async def get_location_data_for_device(
         except asyncio.CancelledError:
             raise
         except NovaRateLimitError as e:
-            _LOGGER.warning("Rate limited while requesting location for %s: %s", name, e)
+            _LOGGER.warning(
+                "Rate limited while requesting location for %s: %s", name, e
+            )
             return []
         except NovaHTTPError as e:
-            _LOGGER.warning("Server error (%s) while requesting location for %s: %s", e.status, name, e)
+            _LOGGER.warning(
+                "Server error (%s) while requesting location for %s: %s",
+                e.status,
+                name,
+                e,
+            )
             return []
         except NovaAuthError as e:
-            _LOGGER.error("Authentication error while requesting location for %s: %s", name, e)
+            _LOGGER.error(
+                "Authentication error while requesting location for %s: %s", name, e
+            )
             return []
         except aiohttp.ClientError as e:
-            _LOGGER.warning("Network/client error while requesting location for %s: %s", name, e)
+            _LOGGER.warning(
+                "Network/client error while requesting location for %s: %s", name, e
+            )
             return []
         except Exception as e:
             _LOGGER.error("Nova API request failed for %s: %s", name, e)
@@ -409,8 +450,10 @@ async def get_location_data_for_device(
         _LOGGER.info("Waiting for location response for %s...", name)
         try:
             await asyncio.wait_for(ctx.event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            _LOGGER.warning("No location response received for %s (timeout: %ss)", name, timeout)
+        except TimeoutError:
+            _LOGGER.warning(
+                "No location response received for %s (timeout: %ss)", name, timeout
+            )
             return []
 
         data = ctx.data or []
@@ -420,7 +463,10 @@ async def get_location_data_for_device(
         if not data:
             _LOGGER.warning("No location data found for %s after decryption", name)
         else:
-            _LOGGER.warning("Received location data for unexpected device in %s flow; ignoring.", name)
+            _LOGGER.warning(
+                "Received location data for unexpected device in %s flow; ignoring.",
+                name,
+            )
         return []
 
     except asyncio.CancelledError:
@@ -434,12 +480,16 @@ async def get_location_data_for_device(
         # Clean up - unregister callback only (receiver lifecycle is owned by integration)
         try:
             if registered:
-                await fcm_receiver.async_unregister_for_location_updates(canonic_device_id)
+                await fcm_receiver.async_unregister_for_location_updates(
+                    canonic_device_id
+                )
         except Exception as cleanup_error:
-            _LOGGER.warning("Error during FCM unregister for %s: %s", name, cleanup_error)
+            _LOGGER.warning(
+                "Error during FCM unregister for %s: %s", name, cleanup_error
+            )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # CLI invocation will fail unless an external provider is registered; kept for parity.
 
     class _CliTokenCache:
@@ -464,4 +514,3 @@ if __name__ == '__main__':
     )
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
-
