@@ -7,7 +7,12 @@ repos:
           - --fix
           - --exit-non-zero-on-fix
           - --target-version=py312
+          - --extend-exclude=custom_components/googlefindmy/ProtoDecoders/
+          - --extend-exclude=custom_components/googlefindmy/Auth/firebase_messaging/proto/
       - id: ruff-format
+        args:
+          - --extend-exclude=custom_components/googlefindmy/ProtoDecoders/
+          - --extend-exclude=custom_components/googlefindmy/Auth/firebase_messaging/proto/
   - repo: https://github.com/asottile/pyupgrade
     rev: v3.17.0
     hooks:
