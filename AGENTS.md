@@ -15,6 +15,7 @@
 * **PR template alignment.** Complete [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) and keep the responses synchronized with the items listed below.
 * **AGENTS upkeep.** Before opening a PR, review all applicable `AGENTS.md` files and update them when improvements or corrections are evident.
 * **Contributor guidance hygiene.** Verify that root and scoped `AGENTS.md` files remain accurate. When code or tests touch related automation or guidance, review and update the impacted `.github` workflows/templates, shared test utilities, and documentation so they stay current.
+* **pre-commit.ci automation.** The GitHub App is enabled with permission to push formatting fixes to PR branches whenever the configured hooks (e.g., `ruff`, `ruff-format`) report autofixable issues; keep `.pre-commit-config.yaml` aligned with the enforced checks.
 * **Purpose & scope.** PR title/description state *what* changes and *why*, and which user scenarios are affected.
 * **Tests — creation & update (MUST).** Any code change ships unit/integration tests that cover the change; every bug fix includes a **regression test** (§3.2). Never reduce existing coverage without a follow-up to restore it.
 
@@ -29,7 +30,7 @@
 
 > **Local run (VERIFY)**
 > **bash commands:**
-> – pre-commit run --all-files
+> – pre-commit run --all-files *(required even though pre-commit.ci auto-applies hook fixes on PR branches)*
 > – python3 -m script.hassfest
 > – pytest -q
 
