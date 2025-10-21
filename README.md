@@ -125,8 +125,8 @@ To contribute, please:
 2. Create a feature branch
 3. Install the development dependencies with `python -m pip install -r requirements-dev.txt`
 4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes
-5. **Run `ruff format` (or `ruff format --check`) before opening a PR.** The `pre-commit` hooks will refuse the commit when formatting is skipped, so always format first and restage any modified files.
-6. Run `pytest -q`, fix any failures, and address every `DeprecationWarning` you encounter (consider rerunning with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings).
+5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments).
+6. When running pytest (either through the helper script or directly) fix any failures and address every `DeprecationWarning` you encounter—rerun with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings.
 7. Test thoroughly with your Find My devices
 8. Submit a pull request with detailed description
 

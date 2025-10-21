@@ -156,66 +156,56 @@ async def async_submit_stop_sound_request(
         return None
 
 
+async def _async_cli_main(entry_id_hint: str | None = None) -> None:
+    """Execute the CLI helper for Stop Sound, enforcing explicit entry selection."""
+
+    from custom_components.googlefindmy.Auth.fcm_receiver import FcmReceiver
+    from custom_components.googlefindmy.NovaApi.ListDevices import nbe_list_devices
+
+    explicit_hint = entry_id_hint
+    if explicit_hint is None:
+        env_hint = os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+        if env_hint is not None:
+            explicit_hint = env_hint.strip() or None
+
+    cache, namespace = nbe_list_devices._resolve_cli_cache(explicit_hint)
+
+    receiver = FcmReceiver(entry_id=namespace, cache=cache)
+
+    sample_canonic_device_id = get_example_data("sample_canonic_device_id")
+    fcm_token = receiver.register_for_location_updates(lambda x: None)
+    if not isinstance(fcm_token, str) or not fcm_token:
+        raise RuntimeError(
+            "Unable to retrieve an FCM token for the selected entry. Ensure the "
+            "account has valid credentials and try again."
+        )
+
+    await async_submit_stop_sound_request(
+        sample_canonic_device_id,
+        fcm_token,
+        cache=cache,
+        namespace=namespace,
+    )
+
+
 if __name__ == "__main__":
     # This block serves as a CLI helper for standalone testing and development.
     # It obtains an FCM token synchronously and then runs the async submission
     # function in a new event loop.
-    async def _main():
-        """Run a test execution of the stop sound request for development."""
-        from custom_components.googlefindmy.Auth.fcm_receiver import (
-            FcmReceiver,
-        )  # sync-only CLI variant
+    cli_entry = sys.argv[1] if len(sys.argv) > 1 else None
 
-        entry_hint = os.environ.get("GOOGLEFINDMY_ENTRY_ID")
-        if entry_hint is not None:
-            entry_hint = entry_hint.strip() or None
-
-        try:
-            receiver = FcmReceiver(entry_id=entry_hint)
-        except ValueError as err:
-            available_hint: str | None = None
-            try:
-                from custom_components.googlefindmy.Auth import (
-                    token_cache as _legacy_cache,
-                )
-
-                entries = sorted(_legacy_cache._INSTANCES)
-                if entries:
-                    available_hint = ", ".join(entries)
-            except Exception:  # noqa: BLE001 - best-effort hint only
-                available_hint = None
-
-            extra = f" Available entry IDs: {available_hint}." if available_hint else ""
-            print(
-                "Unable to resolve an FCM token cache for the CLI helper.\n"
-                f"{err}\n"
-                "Set GOOGLEFINDMY_ENTRY_ID to the desired ConfigEntry ID or "
-                "instantiate the shim with cache=... to pick a specific account."
-                + extra,
-                file=sys.stderr,
-            )
-            return
-
-        sample_canonic_device_id = get_example_data("sample_canonic_device_id")
-        fcm_token = receiver.register_for_location_updates(lambda x: None)
-
-        class _CliTokenCache:
-            """Minimal in-memory TokenCache shim for CLI experiments."""
-
-            def __init__(self) -> None:
-                self.entry_id = "cli"
-                self._values: dict[str, Any] = {}
-
-            async def async_get_cached_value(self, key: str) -> Any:
-                return self._values.get(key)
-
-            async def async_set_cached_value(self, key: str, value: Any) -> None:
-                self._values[key] = value
-
-        await async_submit_stop_sound_request(
-            sample_canonic_device_id,
-            fcm_token,
-            cache=_CliTokenCache(),
+    try:
+        asyncio.run(_async_cli_main(cli_entry))
+    except MissingTokenCacheError:
+        print(
+            "No token cache is available for the CLI helper. Provide the ConfigEntry "
+            "ID via the first CLI argument or set GOOGLEFINDMY_ENTRY_ID.",
+            file=sys.stderr,
         )
-
-    asyncio.run(_main())
+        sys.exit(1)
+    except RuntimeError as err:
+        print(err, file=sys.stderr)
+        sys.exit(1)
+    except ValueError as err:
+        print(err, file=sys.stderr)
+        sys.exit(1)
