@@ -300,7 +300,7 @@ def _stub_homeassistant() -> None:
     )
     dt_module = ModuleType("homeassistant.util.dt")
     dt_module.UTC = timezone.utc
-    dt_module.utcnow = lambda: datetime.utcnow().replace(tzinfo=timezone.utc)
+    dt_module.utcnow = lambda: datetime.now(timezone.utc)
     dt_module.now = dt_module.utcnow
     dt_module.as_local = lambda dt: dt
     sys.modules["homeassistant.util.dt"] = dt_module
