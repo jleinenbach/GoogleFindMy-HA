@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 import pytest
 
@@ -237,3 +237,60 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
     assert data[CONF_OAUTH_TOKEN] == "aas_et/MANUAL_MASTER"
     assert data[DATA_AAS_TOKEN] == "aas_et/MANUAL_MASTER"
     assert data[DATA_AUTH_METHOD] == config_flow._AUTH_METHOD_SECRETS
+
+
+def test_ephemeral_probe_cache_allows_missing_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Config-flow probes must tolerate ephemeral caches without entry IDs."""
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_async_request_device_list(
+        username: str,
+        *,
+        session: Any = None,
+        cache: Any,
+        token: str | None = None,
+        cache_get: Callable[[str], Awaitable[Any]] | None = None,
+        cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+        refresh_override: Callable[[], Awaitable[Optional[str]]] | None = None,
+        namespace: str | None = None,
+    ) -> str:
+        captured["username"] = username
+        captured["cache"] = cache
+        captured["token"] = token
+        captured["namespace"] = namespace
+        assert cache_get is not None
+        assert cache_set is not None
+        return "00"
+
+    def _fake_process(self: GoogleFindMyAPI, result_hex: str) -> list[dict[str, Any]]:
+        captured["processed_hex"] = result_hex
+        return [{"id": "device"}]
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices.async_request_device_list",
+        _fake_async_request_device_list,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.api.async_request_device_list",
+        _fake_async_request_device_list,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.api.GoogleFindMyAPI._process_device_list_response",
+        _fake_process,
+    )
+
+    async def _exercise() -> list[dict[str, Any]]:
+        api = GoogleFindMyAPI(oauth_token="aas_et/PROBE", google_email="Probe@Example.com")
+        return await api.async_get_basic_device_list(token="aas_et/PROBE")
+
+    result = asyncio.run(_exercise())
+
+    assert result == [{"id": "device"}]
+    assert captured["username"] == "Probe@Example.com"
+    assert captured["token"] == "aas_et/PROBE"
+    assert captured["namespace"] is None
+    cache = captured["cache"]
+    assert not hasattr(cache, "entry_id")
+    assert hasattr(cache, "async_get_cached_value")
+    assert hasattr(cache, "async_set_cached_value")

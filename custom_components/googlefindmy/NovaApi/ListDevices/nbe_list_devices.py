@@ -113,9 +113,15 @@ async def async_request_device_list(
         raise MissingTokenCacheError()
 
     if namespace is None:
-        namespace = getattr(cache, "entry_id", None)
-        if not namespace:
+        inferred_namespace = getattr(cache, "entry_id", None) or getattr(
+            cache, "namespace", None
+        )
+        if isinstance(inferred_namespace, str) and inferred_namespace.strip():
+            namespace = inferred_namespace.strip()
+        elif isinstance(cache, TokenCache):
             raise MissingNamespaceError()
+        else:
+            namespace = None
 
     hex_payload = create_device_list_request()
 
