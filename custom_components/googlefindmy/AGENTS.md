@@ -342,4 +342,8 @@ Add to the PR description:
 * Relative links in Markdown (GitHub blog): [https://github.blog/news-insights/product-news/relative-links-in-markup-files/](https://github.blog/news-insights/product-news/relative-links-in-markup-files/)
 * CommonMark spec (current) — link reference definitions: [https://spec.commonmark.org/current/](https://spec.commonmark.org/current/)
 
+### 6) In-repo Find My Device Network protocol reference
+
+* [`custom_components/googlefindmy/FMDN.md`](./FMDN.md) — canonical reference detailing cryptography, provisioning flows, BLE behavior, and failure modes underpinning modules such as [`custom_components/googlefindmy/api.py`](./api.py), [`custom_components/googlefindmy/coordinator.py`](./coordinator.py), and the BLE parsers in [`custom_components/googlefindmy/ProtoDecoders/`](./ProtoDecoders/).
+
 See also: [BOOKMARKS.md](./BOOKMARKS.md) for additional, curated reference URLs.
