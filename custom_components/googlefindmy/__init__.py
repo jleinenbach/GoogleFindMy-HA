@@ -133,6 +133,9 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
 ]
 
+# Latest config entry schema version handled by this integration
+CONFIG_ENTRY_VERSION: int = 2
+
 
 # ---- Runtime typing helpers -------------------------------------------------
 class RuntimeData:
@@ -335,6 +338,73 @@ async def _async_soft_migrate_data_to_options(hass: HomeAssistant, entry: Config
             entry.title,
         )
         hass.config_entries.async_update_entry(entry, options=new_options)
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Handle config entry migrations for legacy Google Find My entries."""
+
+    target_version = CONFIG_ENTRY_VERSION
+    raw_email: str | None = None
+    normalized_email = ""
+    data_changed = False
+
+    existing_email = entry.data.get(CONF_GOOGLE_EMAIL)
+    if isinstance(existing_email, str) and existing_email.strip():
+        raw_email = existing_email.strip()
+    else:
+        secrets_bundle = entry.data.get(DATA_SECRET_BUNDLE)
+        if isinstance(secrets_bundle, dict):
+            for key in ("google_email", "username", "Email", "email"):
+                candidate = secrets_bundle.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    raw_email = candidate.strip()
+                    break
+
+    if isinstance(raw_email, str) and raw_email:
+        normalized_email = _normalize_email(raw_email)
+        if entry.data.get(CONF_GOOGLE_EMAIL) != raw_email:
+            new_data = dict(entry.data)
+            new_data[CONF_GOOGLE_EMAIL] = raw_email
+            data_changed = True
+        else:
+            new_data = dict(entry.data)
+    else:
+        new_data = dict(entry.data)
+
+    update_kwargs: dict[str, Any] = {}
+    if data_changed:
+        update_kwargs["data"] = new_data
+
+    if raw_email and entry.title != raw_email:
+        update_kwargs["title"] = raw_email
+
+    if normalized_email and entry.unique_id != normalized_email:
+        update_kwargs["unique_id"] = normalized_email
+
+    if update_kwargs:
+        try:
+            hass.config_entries.async_update_entry(entry, **update_kwargs)
+        except TypeError:
+            unique_id_value = update_kwargs.pop("unique_id", None)
+            if update_kwargs:
+                hass.config_entries.async_update_entry(entry, **update_kwargs)
+            if unique_id_value and entry.unique_id != unique_id_value:
+                if hasattr(entry, "_unique_id"):
+                    try:
+                        entry._unique_id = unique_id_value  # type: ignore[attr-defined]
+                    except Exception as err:  # pragma: no cover - defensive fallback
+                        _LOGGER.debug(
+                            "Unable to set unique_id on entry '%s': %s",
+                            entry.entry_id,
+                            err,
+                        )
+
+    if entry.version < target_version:
+        entry.version = target_version
+
+    await _async_soft_migrate_data_to_options(hass, entry)
+
+    return True
 
 
 # ------------------------- Entity/Device migrations --------------------------
