@@ -224,7 +224,9 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
             _hex: str,
             target_entries: set[str] | None,
         ) -> None:
-            seen_routes.append((entry_id, set(target_entries) if target_entries else None))
+            seen_routes.append(
+                (entry_id, set(target_entries) if target_entries else None)
+            )
 
         monkeypatch.setattr(receiver, "_process_background_update", capture_process)
 

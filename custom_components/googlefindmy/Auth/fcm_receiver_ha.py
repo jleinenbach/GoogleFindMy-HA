@@ -495,7 +495,6 @@ class FcmReceiverHA:
             pending_tokens = self._pending_routing_tokens.pop(entry.entry_id, set())
 
             if pending_tokens:
-
                 self._entry_to_tokens.setdefault(entry.entry_id, set()).update(
                     pending_tokens
                 )
