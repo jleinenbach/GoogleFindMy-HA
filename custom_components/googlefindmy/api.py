@@ -84,16 +84,16 @@ def _maybe_log_guard_once(context: str, *, email: Optional[str] = None, entry_id
         extra.append(f"email={email}")
     if entry_id:
         extra.append(f"entry_id={entry_id}")
-    suffix = f" ({', '.join(extra)}) if extra else ''"
+    suffix = f" ({', '.join(extra)})" if extra else ""
 
     if not _GUARD_LOGGED_ONCE:
         _LOGGER.info(
             "Auth guard: multiple config entries detected; deferring validation to setup%s",
-            suffix if isinstance(suffix, str) else "",
+            suffix,
         )
         _GUARD_LOGGED_ONCE = True
     else:
-        _LOGGER.debug("Auth guard (suppressed duplicate): %s%s", context, suffix if isinstance(suffix, str) else "")
+        _LOGGER.debug("Auth guard (suppressed duplicate): %s%s", context, suffix)
 
 
 # ----------------------------- Minimal protocols -----------------------------
