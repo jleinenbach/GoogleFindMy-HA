@@ -1,11 +1,11 @@
 # tests/test_fcm_receiver_guard.py
-"""Regression tests for the shared FCM receiver guard."""
-
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import sys
+from contextlib import suppress
 from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
 
@@ -162,3 +162,115 @@ def test_multi_entry_buffers_prevent_global_cache_access(
 
     assert start_calls.count("entry-1") == 1
     assert start_calls.count("entry-2") == 1
+
+
+def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removing a coordinator clears its tokens and blocks future fan-out."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        receiver = FcmReceiverHA()
+
+        async def fake_start(_self, _entry_id: str, _cache: object | None) -> None:
+            return None
+
+        monkeypatch.setattr(FcmReceiverHA, "_start_supervisor_for_entry", fake_start)
+
+        def create_task(coro, *, name: str | None = None):
+            return loop.create_task(coro, name=name)
+
+        monkeypatch.setattr(asyncio, "create_task", create_task)
+
+        class DummyCache:
+            def __init__(self, entry_id: str) -> None:
+                self.entry_id = entry_id
+                self.data: dict[str, object] = {}
+
+            async def get(self, key: str) -> object | None:
+                return self.data.get(key)
+
+            async def set(self, key: str, value: object | None) -> None:
+                self.data[key] = value
+
+        class DummyEntry:
+            def __init__(self, entry_id: str) -> None:
+                self.entry_id = entry_id
+                self.options: dict[str, object] = {}
+
+        class DummyCoordinator:
+            def __init__(self, entry_id: str) -> None:
+                self.config_entry = DummyEntry(entry_id)
+                self.cache = DummyCache(entry_id)
+                self.google_home_filter = None
+
+            def is_ignored(self, _device_id: str) -> bool:
+                return False
+
+        loop.run_until_complete(receiver.async_initialize())
+
+        monkeypatch.setattr(
+            receiver,
+            "_extract_canonic_id_from_response",
+            lambda _hex: "device-xyz",
+        )
+
+        seen_routes: list[tuple[str, set[str] | None]] = []
+
+        async def capture_process(
+            entry_id: str,
+            canonic_id: str,
+            _hex: str,
+            target_entries: set[str] | None,
+        ) -> None:
+            seen_routes.append(
+                (entry_id, set(target_entries) if target_entries else None)
+            )
+
+        monkeypatch.setattr(receiver, "_process_background_update", capture_process)
+
+        coord_one = DummyCoordinator("entry-one")
+        coord_two = DummyCoordinator("entry-two")
+
+        creds_one = {"fcm": {"registration": {"token": "token-one"}}}
+        creds_two = {"fcm": {"registration": {"token": "token-two"}}}
+
+        receiver._on_credentials_updated_for_entry("entry-one", creds_one)
+        receiver._on_credentials_updated_for_entry("entry-two", creds_two)
+
+        loop.run_until_complete(asyncio.sleep(0))
+
+        receiver.register_coordinator(coord_one)
+        receiver.register_coordinator(coord_two)
+
+        loop.run_until_complete(asyncio.sleep(0))
+
+        payload = base64.b64encode(b"payload").decode()
+        envelope = {"data": {"com.google.android.apps.adm.FCM_PAYLOAD": payload}}
+
+        receiver._on_notification("entry-one", envelope, None, None)
+        loop.run_until_complete(asyncio.sleep(0))
+
+        assert seen_routes
+
+        seen_routes.clear()
+
+        receiver.unregister_coordinator(coord_one)
+
+        receiver._on_notification("entry-one", envelope, None, None)
+        loop.run_until_complete(asyncio.sleep(0))
+
+        assert seen_routes == []
+        assert "token-one" not in receiver._token_to_entries
+        assert "entry-one" not in receiver._entry_to_tokens
+    finally:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+            with suppress(Exception):
+                loop.run_until_complete(task)
+
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        asyncio.set_event_loop(None)
