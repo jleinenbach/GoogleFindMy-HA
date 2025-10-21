@@ -253,6 +253,43 @@ def test_multi_account_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
         map_view_module = importlib.import_module(
             "custom_components.googlefindmy.map_view"
         )
+        nova_module = importlib.import_module(
+            "custom_components.googlefindmy.NovaApi.nova_request"
+        )
+
+        register_calls: list[Any] = []
+        unregister_calls: list[Any] = []
+        session_unreg_calls: list[Any] = []
+
+        original_register = getattr(nova_module, "register_hass", None)
+        original_unregister = getattr(nova_module, "unregister_hass", None)
+        original_unreg_provider = getattr(
+            nova_module, "unregister_session_provider", None
+        )
+
+        def _spy_register(hass: Any) -> None:
+            register_calls.append(hass)
+            if callable(original_register):
+                original_register(hass)
+
+        def _spy_unregister() -> None:
+            unregister_calls.append(True)
+            if callable(original_unregister):
+                original_unregister()
+
+        def _spy_unreg_provider() -> None:
+            session_unreg_calls.append(True)
+            if callable(original_unreg_provider):
+                original_unreg_provider()
+
+        monkeypatch.setattr(nova_module, "register_hass", _spy_register)
+        monkeypatch.setattr(nova_module, "unregister_hass", _spy_unregister)
+        monkeypatch.setattr(
+            nova_module,
+            "unregister_session_provider",
+            _spy_unreg_provider,
+            raising=False,
+        )
 
         config_entries_module = importlib.import_module("homeassistant.config_entries")
         state_cls = config_entries_module.ConfigEntryState
@@ -379,6 +416,26 @@ def test_multi_account_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
             "entry-two": "fcm-token-entry-two",
         }
         assert issue_calls == []
+
+        assert len(register_calls) == 2
+        bucket = hass.data[DOMAIN]
+        assert bucket["nova_refcount"] == 2
+
+        def _drain_unload_callbacks(entry: _StubConfigEntry) -> None:
+            callbacks = list(entry._unload_callbacks)
+            entry._unload_callbacks.clear()
+            for callback in callbacks:
+                callback()
+
+        _drain_unload_callbacks(entry_one)
+        assert bucket["nova_refcount"] == 1
+        assert not unregister_calls
+        assert not session_unreg_calls
+
+        _drain_unload_callbacks(entry_two)
+        assert bucket["nova_refcount"] == 0
+        assert len(unregister_calls) == 1
+        assert len(session_unreg_calls) == 1
     finally:
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
         for task in pending:

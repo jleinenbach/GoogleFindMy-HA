@@ -891,6 +891,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     domain_bucket = hass.data.setdefault(DOMAIN, {})
     is_reload = bool(domain_bucket.get("initial_setup_complete", False))
     domain_bucket.setdefault("device_owner_index", {})  # ensure present (E2.5)
+    domain_bucket.setdefault("nova_refcount", 0)
 
     # 1) Token cache: create/register early (ENTRY-SCOPED ONLY)
     legacy_path = os.path.join(
@@ -942,10 +943,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
         reg = getattr(nova, "register_hass", None)
         unreg = getattr(nova, "unregister_session_provider", None)
+        unreg_hass = getattr(nova, "unregister_hass", None)
         if callable(reg):
-            reg(hass)
-            if callable(unreg):
-                entry.async_on_unload(unreg)
+            try:
+                reg(hass)
+            except Exception as err:
+                _LOGGER.debug("Nova API register_hass() raised: %s", err)
+            else:
+                bucket = hass.data.setdefault(DOMAIN, {})
+                refcount = int(bucket.get("nova_refcount", 0)) + 1
+                bucket["nova_refcount"] = refcount
+                _LOGGER.debug("Nova session provider refcount -> %s", refcount)
+
+                def _release_nova_session_provider() -> None:
+                    inner_bucket = hass.data.setdefault(DOMAIN, {})
+                    inner_refcount = max(
+                        int(inner_bucket.get("nova_refcount", 0)) - 1, 0
+                    )
+                    inner_bucket["nova_refcount"] = inner_refcount
+                    _LOGGER.debug(
+                        "Nova session provider refcount -> %s", inner_refcount
+                    )
+                    if inner_refcount != 0:
+                        return
+                    if callable(unreg_hass):
+                        try:
+                            unreg_hass()
+                        except Exception as err:  # pragma: no cover - defensive
+                            _LOGGER.debug(
+                                "Nova unregister_hass raised during unload: %s", err
+                            )
+                    if callable(unreg):
+                        try:
+                            unreg()
+                        except Exception as err:  # pragma: no cover - defensive
+                            _LOGGER.debug(
+                                "Nova unregister_session_provider raised: %s", err
+                            )
+
+                entry.async_on_unload(_release_nova_session_provider)
         else:
             _LOGGER.debug(
                 "Nova API register_hass() not available; continuing with module defaults."
