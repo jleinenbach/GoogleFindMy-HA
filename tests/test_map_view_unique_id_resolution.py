@@ -113,7 +113,9 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
         ]
     )
 
-    monkeypatch.setattr(map_view, "GoogleFindMyCoordinator", _StubCoordinator)
+    monkeypatch.setattr(
+        map_view, "GoogleFindMyCoordinator", _StubCoordinator, raising=False
+    )
     monkeypatch.setattr(
         map_view,
         "_resolve_entry_by_token",
