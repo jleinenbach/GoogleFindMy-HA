@@ -167,7 +167,11 @@ Add to the PR description:
 
 ## 9) Docs & i18n (minimal but strict)
 
-* No hard-coded UI strings in Python. Keep `strings.json` / `translations/*.json` in sync.
+* No hard-coded UI strings in Python.
+* Translation hygiene (MUST) — keep `strings.json` and `translations/*.json` in sync:
+  * [ ] Update **every** locale file in `translations/*.json` **and** `strings.json` whenever translation keys or formatted placeholders change.
+  * [ ] Cross-check locale files for missing keys, placeholder mismatches, or obsolete entries before submitting the PR.
+  * [ ] Run the documented helper command (if available) to compare locales; otherwise perform a manual diff review to confirm parity and note the method in the PR.
 * Translate service and exception texts (`translation_key`).
 * Update README only when user-visible behavior/options change.
 * **Rule §9.DOC (canonical):** Keep documentation and docstrings accurate for existing features by correcting errors and augmenting missing details without shortening or deleting content. When functionality is intentionally removed or deprecated, remove or reduce the corresponding documentation to reflect that change while preserving historical clarity.
