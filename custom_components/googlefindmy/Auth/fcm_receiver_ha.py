@@ -143,6 +143,7 @@ class FcmReceiverHA:
 
         # Routing tables
         self._token_to_entries: dict[str, set[str]] = {}  # token -> set(entry_id)
+        self._entry_to_tokens: dict[str, set[str]] = {}  # entry_id -> set(token)
 
         # Entry-scoped TokenCache instances (for background decrypt path)
         self._entry_caches: dict[str, TokenCache] = {}
@@ -481,6 +482,8 @@ class FcmReceiverHA:
         if entry is None:
             return
 
+        self._entry_to_tokens.setdefault(entry.entry_id, set())
+
         if cache is not None:
             self._ensure_cache_entry_id(cache, entry.entry_id)
             self._entry_caches[entry.entry_id] = cache
@@ -492,6 +495,10 @@ class FcmReceiverHA:
             pending_tokens = self._pending_routing_tokens.pop(entry.entry_id, set())
 
             if pending_tokens:
+
+                self._entry_to_tokens.setdefault(entry.entry_id, set()).update(
+                    pending_tokens
+                )
 
                 async def _flush_tokens() -> None:
                     try:
@@ -574,6 +581,7 @@ class FcmReceiverHA:
                 self._entry_caches[entry_id] = replacement
             else:
                 self._entry_caches.pop(entry_id, None)
+                self._purge_entry_tokens(entry_id)
 
     # -------------------- Incoming notifications --------------------
 
@@ -712,8 +720,10 @@ class FcmReceiverHA:
 
     def _coordinators_for_entries(self, entries: set[str] | None) -> list[Any]:
         """Return coordinators for the given entry set (or all if None)."""
-        if not entries:
+        if entries is None:
             return self.coordinators.copy()
+        if not entries:
+            return []
         res: list[Any] = []
         for c in self.coordinators:
             try:
@@ -722,26 +732,48 @@ class FcmReceiverHA:
                     res.append(c)
             except Exception:
                 pass
-        return res or self.coordinators.copy()
+        return res
 
     def _update_token_routing(self, token: str, entry_ids: set[str]) -> None:
         """Update the token→entry mapping."""
         try:
             if not isinstance(token, str) or not token:
                 return
-            prev = self._token_to_entries.get(token)
-            self._token_to_entries[token] = set(entry_ids)
-            if prev != self._token_to_entries[token]:
+            prev = set(self._token_to_entries.get(token, set()))
+            new_entries = {eid for eid in entry_ids if isinstance(eid, str) and eid}
+
+            if new_entries:
+                self._token_to_entries[token] = new_entries
+            else:
+                self._token_to_entries.pop(token, None)
+
+            removed_entries = prev - new_entries
+            for entry_id in removed_entries:
+                tokens = self._entry_to_tokens.get(entry_id)
+                if tokens is not None:
+                    tokens.discard(token)
+                    if not tokens:
+                        self._entry_to_tokens.pop(entry_id, None)
+
+            for entry_id in new_entries:
+                self._entry_to_tokens.setdefault(entry_id, set()).add(token)
+
+            if prev != new_entries:
                 _LOGGER.debug(
                     "Updated FCM token routing: token=%s… -> %s",
                     token[:8],
-                    ",".join(sorted(entry_ids)),
+                    ",".join(sorted(new_entries)) or "<none>",
                 )
         except Exception as err:
             _LOGGER.debug("Token routing update skipped: %s", err)
 
     async def _persist_routing_token(self, entry_id: str, token: str) -> None:
         """Persist routing tokens per entry (best-effort, entry-scoped if cache available)."""
+        if not isinstance(token, str) or not token:
+            return
+
+        self._entry_to_tokens.setdefault(entry_id, set()).add(token)
+
         cache = self._entry_caches.get(entry_id)
         if cache is not None:
             try:
@@ -1125,9 +1157,27 @@ class FcmReceiverHA:
                 )
             finally:
                 self.pcs.pop(eid, None)
+                self._purge_entry_tokens(eid)
 
         self.last_stop_monotonic = time.monotonic()
         _LOGGER.info("FCM receiver stopped")
+
+    def _purge_entry_tokens(self, entry_id: str) -> None:
+        """Remove all routing references for a given entry."""
+        tokens = self._entry_to_tokens.pop(entry_id, set())
+        self._pending_routing_tokens.pop(entry_id, None)
+        if not tokens:
+            return
+        for token in tokens:
+            entries = self._token_to_entries.get(token)
+            if entries is None:
+                continue
+            entries = set(entries)
+            entries.discard(entry_id)
+            if entries:
+                self._token_to_entries[token] = entries
+            else:
+                self._token_to_entries.pop(token, None)
 
     # -------------------- Public token accessor --------------------
 
