@@ -31,6 +31,7 @@ This module aims to be self-documenting. All public functions include precise do
 from __future__ import annotations
 
 import asyncio
+import inspect
 import hashlib
 import json
 import logging
@@ -531,6 +532,43 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         refcount = int(bucket.get("fcm_refcount", 0))
         fcm: FcmReceiverHA | None = bucket.get("fcm_receiver")
 
+        def _method_is_coroutine(receiver: object, name: str) -> bool:
+            """Return True if receiver.name is an async callable."""
+
+            attr = getattr(receiver, name, None)
+            if attr is None:
+                return False
+            candidate = getattr(attr, "__func__", attr)
+            try:
+                candidate = inspect.unwrap(candidate)  # unwrap functools.partial / wraps
+            except Exception:  # pragma: no cover - defensive
+                pass
+            if inspect.iscoroutinefunction(candidate):
+                return True
+            cls_attr = getattr(type(receiver), name, None)
+            if cls_attr is not None:
+                cls_candidate = getattr(cls_attr, "__func__", cls_attr)
+                return inspect.iscoroutinefunction(cls_candidate)
+            return False
+
+        if fcm is not None and (
+            not _method_is_coroutine(fcm, "async_register_for_location_updates")
+            or not _method_is_coroutine(fcm, "async_unregister_for_location_updates")
+        ):
+            _LOGGER.warning(
+                "Discarding cached FCM receiver lacking async registration methods"
+            )
+            stale = bucket.pop("fcm_receiver", None)
+            fcm = None
+            stop_callable = getattr(stale, "async_stop", None)
+            if stop_callable is not None:
+                try:
+                    result = stop_callable()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as err:  # pragma: no cover - defensive
+                    _LOGGER.debug("Failed to stop stale FCM receiver: %s", err)
+
         if fcm is None:
             fcm = FcmReceiverHA()
             _LOGGER.debug("Initializing shared FCM receiver...")
@@ -551,6 +589,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
             _LOGGER.info("Shared FCM receiver initialized")
 
             # Register provider for both consumer modules (exactly once on first acquire)
+            # Re-registering ensures downstream modules resolve the refreshed instance.
             loc_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
             api_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
 
