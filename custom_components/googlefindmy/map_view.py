@@ -178,16 +178,24 @@ class GoogleFindMyMapView(HomeAssistantView):
             # ---- 4) Find the device_tracker entity (entity registry, scoped to this entry) ----
             entity_registry = async_get_entity_registry(self.hass)
             entity_id: str | None = None
+            entry_unique_id_candidates: list[str] = []
 
-            for entity in entity_registry.entities.values():
-                if (
-                    entity.config_entry_id == entry.entry_id
-                    and entity.platform == DOMAIN
-                    and entity.entity_id.startswith("device_tracker.")
-                    and entity.unique_id
-                    and device_id in entity.unique_id
-                ):
-                    entity_id = entity.entity_id
+            entry_id = entry.entry_id
+            if entry_id:
+                entry_unique_id_candidates.append(f"{entry_id}:{device_id}")
+                entry_unique_id_candidates.append(f"{DOMAIN}_{entry_id}_{device_id}")
+            entry_unique_id_candidates.append(f"{DOMAIN}_{device_id}")
+
+            for unique_id in entry_unique_id_candidates:
+                candidate_entity_id = entity_registry.async_get_entity_id(
+                    "device_tracker", DOMAIN, unique_id
+                )
+                if not candidate_entity_id:
+                    continue
+
+                registry_entry = entity_registry.async_get(candidate_entity_id)
+                if registry_entry and registry_entry.config_entry_id == entry.entry_id:
+                    entity_id = candidate_entity_id
                     break
 
             if not entity_id:
@@ -442,24 +450,24 @@ class GoogleFindMyMapView(HomeAssistantView):
                 semantic_info = f"<b>Location Name:</b> {semantic_location}<br>"
 
             popup_text = f"""
-            <b>Location {i+1}</b><br>
-            <b>Coordinates:</b> {loc['lat']:.6f}, {loc['lon']:.6f}<br>
+            <b>Location {i + 1}</b><br>
+            <b>Coordinates:</b> {loc["lat"]:.6f}, {loc["lon"]:.6f}<br>
             <b>GPS Accuracy:</b> {accuracy:.1f} meters<br>
-            <b>Timestamp:</b> {timestamp_local.strftime('%Y-%m-%d %H:%M:%S %Z')}<br>
+            <b>Timestamp:</b> {timestamp_local.strftime("%Y-%m-%d %H:%M:%S %Z")}<br>
             <b style="color: {report_color}">Report Source:</b> <span style="color: {report_color}">{report_source}</span><br>
-            {semantic_info}<b>Entity ID:</b> {loc.get('entity_id', 'Unknown')}<br>
-            <b>Entity State:</b> {loc.get('state', 'Unknown')}<br>
+            {semantic_info}<b>Entity ID:</b> {loc.get("entity_id", "Unknown")}<br>
+            <b>Entity State:</b> {loc.get("state", "Unknown")}<br>
             """
 
             markers_js.append(
                 f"""
-                var marker_{i} = L.marker([{loc['lat']}, {loc['lon']}]);
+                var marker_{i} = L.marker([{loc["lat"]}, {loc["lon"]}]);
                 marker_{i}.accuracy = {accuracy};
                 marker_{i}.bindPopup(`{popup_text}`);
                 marker_{i}.bindTooltip('Accuracy: {accuracy:.1f}m');
                 marker_{i}.addTo(map);
 
-                var circle_{i} = L.circle([{loc['lat']}, {loc['lon']}], {{
+                var circle_{i} = L.circle([{loc["lat"]}, {loc["lon"]}], {{
                     radius: {accuracy},
                     color: '{color}',
                     fillColor: '{color}',

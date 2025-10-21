@@ -462,10 +462,20 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
                 "_resolve_entry_by_token",
                 lambda _hass, _token: (entry, {"token"}),
             )
+
+            class _StubEntityRegistry:
+                def async_get_entity_id(
+                    self, _domain: str, _platform: str, _unique_id: str
+                ) -> str | None:
+                    return None
+
+                def async_get(self, _entity_id: str) -> Any | None:
+                    return None
+
             monkeypatch.setattr(
                 map_view_module,
                 "async_get_entity_registry",
-                lambda _hass: SimpleNamespace(entities={}),
+                lambda _hass: _StubEntityRegistry(),
             )
 
             view = map_view_module.GoogleFindMyMapView(hass)

@@ -32,6 +32,7 @@
 > **Local run (VERIFY)**
 > **bash commands:**
 > – pre-commit run --all-files *(required even though pre-commit.ci auto-applies hook fixes on PR branches)*
+> – ruff format --check *(or run `ruff format` and restage) so formatting violations never reach commits/PRs*
 > – python3 -m script.hassfest
 > – pytest -q *(inspect the output for any `DeprecationWarning`s and resolve each one before proceeding)*
 >
