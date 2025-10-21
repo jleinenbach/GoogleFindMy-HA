@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional, Callable, Awaitable, Any
+from typing import Optional, Callable, Awaitable, Any, cast
 
 import aiohttp
 from aiohttp import ClientSession
@@ -24,12 +24,9 @@ from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
-# Optional entry-scoped cache and fallbacks (used for TTL metadata when namespaced)
-from custom_components.googlefindmy.Auth.token_cache import (
-    TokenCache,
-    async_get_cached_value as _cache_get_default,
-    async_set_cached_value as _cache_set_default,
-)
+from custom_components.googlefindmy.exceptions import MissingTokenCacheError
+
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 
 def start_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
@@ -94,19 +91,37 @@ async def async_submit_start_sound_request(
     hex_payload = start_sound_request(canonic_device_id, gcm_registration_id)
 
     # Prepare optional namespaced TTL cache wrappers if requested and not overridden
+    if cache is None:
+        raise MissingTokenCacheError()
+
+    cache_ref = cast(TokenCache, cache)
+
+    resolved_namespace = namespace or getattr(cache_ref, "entry_id", None)
+
     ns_get = cache_get
     ns_set = cache_set
 
-    if cache is not None:
+    if resolved_namespace and (ns_get is None or ns_set is None):
+        ns_prefix = f"{resolved_namespace}:"
+
         if ns_get is None:
-            ns_get = cache.async_get_cached_value
+
+            async def _ns_get(key: str) -> Any:
+                return await cache_ref.async_get_cached_value(f"{ns_prefix}{key}")
+
+            ns_get = _ns_get
+
         if ns_set is None:
-            ns_set = cache.async_set_cached_value
+
+            async def _ns_set(key: str, value: Any) -> None:
+                await cache_ref.async_set_cached_value(f"{ns_prefix}{key}", value)
+
+            ns_set = _ns_set
     else:
         if ns_get is None:
-            ns_get = _cache_get_default
+            ns_get = cache_ref.async_get_cached_value
         if ns_set is None:
-            ns_set = _cache_set_default
+            ns_set = cache_ref.async_set_cached_value
 
     try:
         # Submit via Nova (now entry-scoped when `cache`/`namespace` provided)
@@ -119,8 +134,8 @@ async def async_submit_start_sound_request(
             cache_get=ns_get,
             cache_set=ns_set,
             refresh_override=refresh_override,
-            namespace=namespace,
-            cache=cache,
+            namespace=resolved_namespace,
+            cache=cache_ref,
         )
     except asyncio.CancelledError:
         raise
@@ -145,6 +160,23 @@ if __name__ == "__main__":
         sample_canonic_device_id = get_example_data("sample_canonic_device_id")
         fcm_token = FcmReceiver().register_for_location_updates(lambda x: None)
 
-        await async_submit_start_sound_request(sample_canonic_device_id, fcm_token)
+        class _CliTokenCache:
+            """Minimal in-memory TokenCache shim for CLI experiments."""
+
+            def __init__(self) -> None:
+                self.entry_id = "cli"
+                self._values: dict[str, Any] = {}
+
+            async def async_get_cached_value(self, key: str) -> Any:
+                return self._values.get(key)
+
+            async def async_set_cached_value(self, key: str, value: Any) -> None:
+                self._values[key] = value
+
+        await async_submit_start_sound_request(
+            sample_canonic_device_id,
+            fcm_token,
+            cache=_CliTokenCache(),
+        )
 
     asyncio.run(_main())

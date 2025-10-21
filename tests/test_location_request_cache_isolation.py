@@ -3,11 +3,15 @@
 # tests/test_location_request_cache_isolation.py
 
 import asyncio
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 import pytest
 
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import location_request
+from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
+    start_sound_request,
+    stop_sound_request,
+)
 from custom_components.googlefindmy.exceptions import (
     MissingNamespaceError,
     MissingTokenCacheError,
@@ -69,8 +73,8 @@ def test_locate_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPat
         api_scope: str,
         hex_payload: str,
         *,
-        cache_get: Callable[[str], Any],
-        cache_set: Callable[[str, Any], Any],
+        cache_get: Callable[[str], Awaitable[Any]],
+        cache_set: Callable[[str, Any], Awaitable[None]],
         cache: FakeTokenCache,
         namespace: str | None,
         **kwargs: Any,
@@ -106,6 +110,120 @@ def test_locate_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPat
         assert primary_cache.calls == [
             ("set", "entry-one:ttl", "value"),
             ("get", "entry-one:ttl", None),
+        ]
+
+    asyncio.run(_run())
+
+
+def test_start_sound_request_requires_cache() -> None:
+    """Start sound submitter must raise when cache is missing."""
+
+    async def _run() -> None:
+        with pytest.raises(MissingTokenCacheError):
+            await start_sound_request.async_submit_start_sound_request(
+                "device-123",
+                "token",
+            )
+
+    asyncio.run(_run())
+
+
+def test_stop_sound_request_requires_cache() -> None:
+    """Stop sound submitter must raise when cache is missing."""
+
+    async def _run() -> None:
+        with pytest.raises(MissingTokenCacheError):
+            await stop_sound_request.async_submit_stop_sound_request(
+                "device-123",
+                "token",
+            )
+
+    asyncio.run(_run())
+
+
+def test_start_sound_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start sound flow must only touch the provided entry-local cache."""
+
+    cache = FakeTokenCache("entry-one")
+
+    async def fake_async_nova_request(
+        api_scope: str,
+        payload: str,
+        *,
+        cache_get: Callable[[str], Awaitable[Any]],
+        cache_set: Callable[[str, Any], Awaitable[None]],
+        cache: FakeTokenCache,
+        namespace: str | None,
+        **_: Any,
+    ) -> str:
+        assert api_scope == start_sound_request.NOVA_ACTION_API_SCOPE
+        assert payload == "payload"
+        assert cache is cache_ref
+        assert namespace == "entry-one"
+        await cache_set("ttl", "value")
+        await cache_get("ttl")
+        return "00"
+
+    cache_ref = cache
+
+    monkeypatch.setattr(start_sound_request, "async_nova_request", fake_async_nova_request)
+    monkeypatch.setattr(start_sound_request, "start_sound_request", lambda *_, **__: "payload")
+
+    async def _run() -> None:
+        result = await start_sound_request.async_submit_start_sound_request(
+            "device-123",
+            "token",
+            cache=cache_ref,
+        )
+
+        assert result == "00"
+        assert cache_ref.calls == [
+            ("set", "entry-one:ttl", "value"),
+            ("get", "entry-one:ttl", None),
+        ]
+
+    asyncio.run(_run())
+
+
+def test_stop_sound_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop sound flow must only touch the provided entry-local cache."""
+
+    cache = FakeTokenCache("entry-two")
+
+    async def fake_async_nova_request(
+        api_scope: str,
+        payload: str,
+        *,
+        cache_get: Callable[[str], Awaitable[Any]],
+        cache_set: Callable[[str, Any], Awaitable[None]],
+        cache: FakeTokenCache,
+        namespace: str | None,
+        **_: Any,
+    ) -> str:
+        assert api_scope == stop_sound_request.NOVA_ACTION_API_SCOPE
+        assert payload == "payload"
+        assert cache is cache_ref
+        assert namespace == "entry-two"
+        await cache_set("ttl", "value")
+        await cache_get("ttl")
+        return "00"
+
+    cache_ref = cache
+
+    monkeypatch.setattr(stop_sound_request, "async_nova_request", fake_async_nova_request)
+    monkeypatch.setattr(stop_sound_request, "stop_sound_request", lambda *_, **__: "payload")
+
+    async def _run() -> None:
+        result = await stop_sound_request.async_submit_stop_sound_request(
+            "device-456",
+            "token",
+            cache=cache_ref,
+        )
+
+        assert result == "00"
+        assert cache_ref.calls == [
+            ("set", "entry-two:ttl", "value"),
+            ("get", "entry-two:ttl", None),
         ]
 
     asyncio.run(_run())

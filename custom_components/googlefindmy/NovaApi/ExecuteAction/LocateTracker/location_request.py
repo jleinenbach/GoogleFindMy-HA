@@ -441,8 +441,26 @@ async def get_location_data_for_device(
 
 if __name__ == '__main__':
     # CLI invocation will fail unless an external provider is registered; kept for parity.
+
+    class _CliTokenCache:
+        """Minimal in-memory TokenCache shim for CLI experiments."""
+
+        def __init__(self) -> None:
+            self.entry_id = "cli"
+            self._values: dict[str, Any] = {}
+
+        async def async_get_cached_value(self, key: str) -> Any:
+            return self._values.get(key)
+
+        async def async_set_cached_value(self, key: str, value: Any) -> None:
+            self._values[key] = value
+
     asyncio.run(
-        get_location_data_for_device(get_example_data("sample_canonic_device_id"), "Test")
+        get_location_data_for_device(
+            get_example_data("sample_canonic_device_id"),
+            "Test",
+            cache=_CliTokenCache(),
+        )
     )
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
