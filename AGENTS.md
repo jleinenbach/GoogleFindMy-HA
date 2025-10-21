@@ -2,17 +2,18 @@
 
 > **Scope & authority**
 >
-> **Directory scope:** applies to `custom_components/googlefindmy/**` and tests under `tests/**`.
+> **Directory scope:** applies to the entire repository (with continued emphasis on `custom_components/googlefindmy/**` and tests under `tests/**`).
 > **File headers:** Every Python file within scope must begin with a comment containing its repository-relative path (e.g., `# tests/test_example.py`).
 > **Precedence:** (1) Official **Home Assistant Developer Docs** → (2) this AGENTS.md → (3) repository conventions. This file never overrides security/legal policies.
 > **Non-blocking:** Missing optional artifacts (README sections, `quality_scale.yaml`, CODEOWNERS, CI files) **must not block** urgent fixes. The agent proposes a minimal stub or follow-up task instead.
-> **References:** This contract relies on the sources listed below; for a curated, extended list of links, see [BOOKMARKS.md](./BOOKMARKS.md).
+> **References:** This contract relies on the sources listed below; for a curated, extended list of links, see [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md).
 
 ---
 
 ## 1) What must be in **every** PR (lean checklist)
 
-* **PR template alignment.** Complete [.github/PULL_REQUEST_TEMPLATE.md](../../.github/PULL_REQUEST_TEMPLATE.md) and keep the responses synchronized with the items listed below.
+* **PR template alignment.** Complete [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) and keep the responses synchronized with the items listed below.
+* **AGENTS upkeep.** Before opening a PR, review all applicable `AGENTS.md` files and update them when improvements or corrections are evident.
 * **Purpose & scope.** PR title/description state *what* changes and *why*, and which user scenarios are affected.
 * **Tests — creation & update (MUST).** Any code change ships unit/integration tests that cover the change; every bug fix includes a **regression test** (§3.2). Never reduce existing coverage without a follow-up to restore it.
 
@@ -348,6 +349,6 @@ Add to the PR description:
 
 ### 6) In-repo Find My Device Network protocol reference
 
-* [`custom_components/googlefindmy/FMDN.md`](./FMDN.md) — canonical reference detailing cryptography, provisioning flows, BLE behavior, and failure modes underpinning modules such as [`custom_components/googlefindmy/api.py`](./api.py), [`custom_components/googlefindmy/coordinator.py`](./coordinator.py), and the BLE parsers in [`custom_components/googlefindmy/ProtoDecoders/`](./ProtoDecoders/).
+* [`custom_components/googlefindmy/FMDN.md`](custom_components/googlefindmy/FMDN.md) — canonical reference detailing cryptography, provisioning flows, BLE behavior, and failure modes underpinning modules such as [`custom_components/googlefindmy/api.py`](custom_components/googlefindmy/api.py), [`custom_components/googlefindmy/coordinator.py`](custom_components/googlefindmy/coordinator.py), and the BLE parsers in [`custom_components/googlefindmy/ProtoDecoders/`](custom_components/googlefindmy/ProtoDecoders/).
 
-See also: [BOOKMARKS.md](./BOOKMARKS.md) for additional, curated reference URLs.
+See also: [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md) for additional, curated reference URLs.
