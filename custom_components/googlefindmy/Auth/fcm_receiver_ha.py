@@ -63,11 +63,6 @@ import random
 import time
 from typing import TYPE_CHECKING, Any, Callable, Optional, Set, Tuple
 
-from custom_components.googlefindmy.Auth.token_cache import (
-    async_get_cached_value,  # fallback for cold start with no coordinators
-    async_set_cached_value,  # fallback persistence if no entry cache available yet
-)
-
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
@@ -150,6 +145,8 @@ class FcmReceiverHA:
 
         # Entry-scoped TokenCache instances (for background decrypt path)
         self._entry_caches: dict[str, "TokenCache"] = {}
+        self._pending_creds: dict[str, dict | None] = {}
+        self._pending_routing_tokens: dict[str, Set[str]] = {}
 
         # Debounce state (push path): keyed by (entry_id, device_id)
         self._pending: dict[Tuple[str, str], dict] = {}
@@ -200,12 +197,7 @@ class FcmReceiverHA:
     # -------------------- Lifecycle --------------------
 
     async def async_initialize(self) -> bool:
-        """Initialize receiver (idempotent). Defers client creation to coordinator registration.
-
-        On cold start with zero coordinators, we attempt to keep backward compatibility by
-        loading previously persisted shared credentials into a transient slot; as soon as a
-        coordinator registers, credentials are mirrored into the entry's cache.
-        """
+        """Initialize receiver (idempotent). Defers client creation to coordinator registration."""
         # Prepare shared client config once
         if self._client_cfg is None and FcmPushClientConfig is not object:
             self._client_cfg = FcmPushClientConfig(
@@ -217,16 +209,6 @@ class FcmReceiverHA:
                 abort_on_sequential_error_count=int(FCM_ABORT_ON_SEQ_ERROR_COUNT),
             )
 
-        # Back-compat: cache legacy creds temporarily in case a caller asks for a token
-        try:
-            legacy = await async_get_cached_value("fcm_credentials")
-            if isinstance(legacy, str):
-                legacy = json.loads(legacy)
-            if isinstance(legacy, dict):
-                self.creds.setdefault("__legacy__", legacy)
-        except Exception:
-            pass
-
         _LOGGER.info("FCM receiver initialized (multi-client ready)")
         return True
 
@@ -237,7 +219,11 @@ class FcmReceiverHA:
                 return self.pcs[entry_id]
 
             # Load entry-scoped credentials if present
-            creds = None
+            creds = self.creds.get(entry_id)
+            if creds is None:
+                pending = self._pending_creds.get(entry_id)
+                if isinstance(pending, dict):
+                    creds = pending
             try:
                 if cache is not None:
                     val = await cache.get("fcm_credentials")
@@ -245,11 +231,10 @@ class FcmReceiverHA:
                         val = json.loads(val)
                     if isinstance(val, dict):
                         creds = val
+                        self.creds[entry_id] = creds
+                        self._pending_creds.pop(entry_id, None)
             except Exception as err:
                 _LOGGER.debug("Failed to load entry-scoped FCM creds for %s: %s", entry_id, err)
-            # Fallback to legacy cache for a one-time bootstrap
-            if creds is None:
-                creds = self.creds.get("__legacy__")
 
             # Build register config (shared across entries)
             if FcmRegisterConfig is object:
@@ -423,9 +408,32 @@ class FcmReceiverHA:
         if cache is not None:
             self._entry_caches[entry.entry_id] = cache
 
+            pending_creds = self._pending_creds.pop(entry.entry_id, None)
+            if pending_creds is not None:
+                asyncio.create_task(cache.set("fcm_credentials", pending_creds))
+
+            pending_tokens = self._pending_routing_tokens.pop(entry.entry_id, set())
+
+            if pending_tokens:
+
+                async def _flush_tokens() -> None:
+                    try:
+                        existing = await cache.get("fcm_routing_tokens")
+                        tokens = set(existing or [])
+                        tokens.update(pending_tokens)
+                        await cache.set("fcm_routing_tokens", sorted(tokens))
+                    except Exception as err:
+                        _LOGGER.debug(
+                            "[entry=%s] Failed to flush pending routing tokens: %s",
+                            entry.entry_id,
+                            err,
+                        )
+
+                asyncio.create_task(_flush_tokens())
+
         # Mirror any known credentials to this entry cache
         try:
-            creds = self.creds.get(entry.entry_id) or self.creds.get("__legacy__")
+            creds = self.creds.get(entry.entry_id)
             if creds and cache is not None:
                 asyncio.create_task(cache.set("fcm_credentials", creds))
         except Exception as err:
@@ -628,12 +636,8 @@ class FcmReceiverHA:
 
     async def _persist_routing_token(self, entry_id: str, token: str) -> None:
         """Persist routing tokens per entry (best-effort, entry-scoped if cache available)."""
-        # Find a coordinator for this entry to access its cache
-        for c in self.coordinators.copy():
-            entry = getattr(c, "config_entry", None)
-            cache = getattr(c, "cache", None)
-            if entry is None or entry.entry_id != entry_id or cache is None:
-                continue
+        cache = self._entry_caches.get(entry_id)
+        if cache is not None:
             try:
                 existing = await cache.get("fcm_routing_tokens")
                 tokens = set(existing or [])
@@ -642,14 +646,25 @@ class FcmReceiverHA:
             except Exception as err:
                 _LOGGER.debug("Persisting routing token failed for %s: %s", entry_id, err)
             return
-        # Fallback: persist globally if no entry cache is available yet
-        try:
-            existing = await async_get_cached_value("fcm_routing_tokens") or []
-            tokens = set(existing or [])
-            tokens.add(token)
-            await async_set_cached_value("fcm_routing_tokens", sorted(tokens))
-        except Exception:
-            pass
+
+        # Resolve cache lazily via registered coordinators
+        for coordinator in self.coordinators.copy():
+            entry = getattr(coordinator, "config_entry", None)
+            cache = getattr(coordinator, "cache", None)
+            if entry is None or entry.entry_id != entry_id or cache is None:
+                continue
+            self._entry_caches[entry_id] = cache
+            try:
+                existing = await cache.get("fcm_routing_tokens")
+                tokens = set(existing or [])
+                tokens.add(token)
+                await cache.set("fcm_routing_tokens", sorted(tokens))
+            except Exception as err:
+                _LOGGER.debug("Persisting routing token failed for %s: %s", entry_id, err)
+            return
+
+        pending = self._pending_routing_tokens.setdefault(entry_id, set())
+        pending.add(token)
 
     # -------------------- Ignore / target helpers --------------------
 
@@ -871,22 +886,41 @@ class FcmReceiverHA:
     async def _async_save_credentials_for_entry(self, entry_id: str) -> None:
         """Persist current credentials to the entry's TokenCache (best-effort)."""
         creds = self.creds.get(entry_id)
+        cache = self._entry_caches.get(entry_id)
+        if cache is not None:
+            try:
+                await cache.set("fcm_credentials", creds)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "[entry=%s] Failed to save FCM credentials to entry cache: %s",
+                    entry_id,
+                    err,
+                )
+            else:
+                self._pending_creds.pop(entry_id, None)
+            return
+
         for coordinator in self.coordinators.copy():
             entry = getattr(coordinator, "config_entry", None)
             cache = getattr(coordinator, "cache", None)
             if entry is None or entry.entry_id != entry_id or cache is None:
                 continue
+            self._entry_caches[entry_id] = cache
             try:
                 await cache.set("fcm_credentials", creds)
             except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("[entry=%s] Failed to save FCM credentials to entry cache: %s", entry_id, err)
+                _LOGGER.debug(
+                    "[entry=%s] Failed to save FCM credentials to entry cache: %s",
+                    entry_id,
+                    err,
+                )
+            else:
+                self._pending_creds.pop(entry_id, None)
             return
 
-        # Back-compat fallback if no entry cache was available yet
-        try:
-            await async_set_cached_value("fcm_credentials", creds)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("[entry=%s] Failed to save FCM credentials (fallback): %s", entry_id, err)
+        # Defer until cache available
+        if entry_id not in self._pending_creds or creds is not self._pending_creds[entry_id]:
+            self._pending_creds[entry_id] = creds if isinstance(creds, dict) else None
 
     def request_stop(self) -> None:
         """Signal a cooperative stop for all supervisors without awaiting."""
