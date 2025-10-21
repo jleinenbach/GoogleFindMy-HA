@@ -136,6 +136,17 @@ This repository provides a thin wrapper around the official `hassfest` validator
 1. Install the development dependencies: `python -m pip install -r requirements-dev.txt`
 2. Run the validator: `python3 -m script.hassfest`
 
+## Legacy CLI helpers & token cache selection
+
+Several modules still expose lightweight CLI entry points (for example the device
+listing helper and the standalone "Play/Stop Sound" examples). These scripts now
+require you to target a specific Home Assistant config entry whenever more than
+one token cache is available. Set the environment variable
+`GOOGLEFINDMY_ENTRY_ID` to the desired config entry ID before running the CLI, or
+pass a `cache=` override when instantiating the legacy `FcmReceiver` shim. If you
+omit the entry ID while multiple caches are active the CLI will abort with a
+message listing the available IDs so you can pick the right account.
+
 ## Credits
 
 - Böttger, L. (2024). GoogleFindMyTools [Computer software]. https://github.com/leonboe1/GoogleFindMyTools

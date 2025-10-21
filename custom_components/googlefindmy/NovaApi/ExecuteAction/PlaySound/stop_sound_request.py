@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from typing import Any, cast
 from collections.abc import Callable, Awaitable
 
@@ -164,8 +166,39 @@ if __name__ == "__main__":
             FcmReceiver,
         )  # sync-only CLI variant
 
+        entry_hint = os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+        if entry_hint is not None:
+            entry_hint = entry_hint.strip() or None
+
+        try:
+            receiver = FcmReceiver(entry_id=entry_hint)
+        except ValueError as err:
+            available_hint: str | None = None
+            try:
+                from custom_components.googlefindmy.Auth import token_cache as _legacy_cache
+
+                entries = sorted(_legacy_cache._INSTANCES)
+                if entries:
+                    available_hint = ", ".join(entries)
+            except Exception:  # noqa: BLE001 - best-effort hint only
+                available_hint = None
+
+            extra = (
+                f" Available entry IDs: {available_hint}."
+                if available_hint
+                else ""
+            )
+            print(
+                "Unable to resolve an FCM token cache for the CLI helper.\n"
+                f"{err}\n"
+                "Set GOOGLEFINDMY_ENTRY_ID to the desired ConfigEntry ID or "
+                "instantiate the shim with cache=... to pick a specific account." + extra,
+                file=sys.stderr,
+            )
+            return
+
         sample_canonic_device_id = get_example_data("sample_canonic_device_id")
-        fcm_token = FcmReceiver().register_for_location_updates(lambda x: None)
+        fcm_token = receiver.register_for_location_updates(lambda x: None)
 
         class _CliTokenCache:
             """Minimal in-memory TokenCache shim for CLI experiments."""

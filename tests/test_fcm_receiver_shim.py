@@ -93,12 +93,12 @@ def test_shim_rejects_unknown_entry_id(
     )
 
 
-def test_shim_warns_and_uses_first_cache_when_ambiguous(
-    caplog: pytest.LogCaptureFixture, multi_cache_registry: dict[str, _StubCache]
+def test_shim_requires_explicit_entry_when_multiple_caches(
+    multi_cache_registry: dict[str, _StubCache]
 ) -> None:
-    """When no entry is provided, the shim should not crash even with two caches."""
+    """Multiple caches require explicit entry selection to avoid ambiguity."""
 
-    caplog.set_level("WARNING")
-    receiver = fcm_receiver.FcmReceiver()
-    assert receiver.get_fcm_token() == "token-one"
-    assert "Legacy FcmReceiver shim found multiple TokenCache instances" in caplog.text
+    with pytest.raises(ValueError) as err:
+        fcm_receiver.FcmReceiver()
+
+    assert "cannot auto-select" in str(err.value)
