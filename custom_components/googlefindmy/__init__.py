@@ -52,6 +52,7 @@ from homeassistant.exceptions import (
     ConfigEntryNotReady,
     HomeAssistantError,
 )
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
@@ -132,6 +133,9 @@ PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
 ]
+
+# This integration can only be configured via config entries
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 # Latest config entry schema version handled by this integration
 CONFIG_ENTRY_VERSION: int = 2

@@ -3,7 +3,6 @@
   "name": "Google Find My Device",
   "version": "1.6",
   "config_flow": true,
-  "diagnostics": true,
   "integration_type": "device",
   "iot_class": "cloud_polling",
 
@@ -11,8 +10,6 @@
   "issue_tracker": "https://github.com/BSkando/GoogleFindMy-HA/issues",
   "codeowners": ["@BSkando"],
   "loggers": ["custom_components.googlefindmy"],
-
-  "icon": "mdi:google",
 
   "dependencies": ["http"],
   "after_dependencies": ["recorder"],
