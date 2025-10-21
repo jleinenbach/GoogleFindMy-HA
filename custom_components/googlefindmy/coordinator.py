@@ -180,12 +180,12 @@ class DiagnosticsBuffer:
 
     def add_warning(self, code: str, context: dict[str, Any]) -> None:
         """Record a warning with a semantic code and redacted context."""
-        key = f"{code}:{context.get('device_id','?')}"
+        key = f"{code}:{context.get('device_id', '?')}"
         self._add(self.warnings, key, context)
 
     def add_error(self, code: str, context: dict[str, Any]) -> None:
         """Record an error with a semantic code and redacted context."""
-        key = f"{code}:{context.get('device_id','?')}:{context.get('arg','')}"
+        key = f"{code}:{context.get('device_id', '?')}:{context.get('arg', '')}"
         self._add(self.errors, key, context)
 
     def to_dict(self) -> dict[str, Any]:
@@ -802,6 +802,58 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     # Optional back-compat alias (some callers may use the public-style name)
     ensure_service_device_exists = _ensure_service_device_exists
+
+    def _sync_owner_index(self, devices: list[dict[str, Any]] | None) -> None:
+        """Sync hass.data owner index for this entry (FCM fallback support)."""
+
+        hass = getattr(self, "hass", None)
+        entry_id = self._entry_id()
+        if hass is None or not entry_id:
+            return
+
+        try:
+            bucket = hass.data.setdefault(DOMAIN, {})
+            owner_index: dict[str, str] = bucket.setdefault("device_owner_index", {})
+        except Exception as err:  # noqa: BLE001 - defensive guard
+            _LOGGER.debug(
+                "[entry=%s] Owner-index sync skipped: %s",
+                entry_id,
+                err,
+            )
+            return
+
+        seen: set[str] = set()
+        for device in devices or []:
+            canonical = (
+                device.get("canonicalId")
+                or device.get("canonical_id")
+                or device.get("id")
+                or device.get("device_id")
+            )
+            if canonical is None:
+                continue
+            if not isinstance(canonical, str):
+                canonical = str(canonical)
+            canonical = canonical.strip()
+            if not canonical:
+                continue
+            owner_index[canonical] = entry_id
+            seen.add(canonical)
+
+        if owner_index:
+            stale = [
+                cid
+                for cid, eid in list(owner_index.items())
+                if eid == entry_id and cid not in seen
+            ]
+            for cid in stale:
+                owner_index.pop(cid, None)
+            if stale:
+                _LOGGER.debug(
+                    "[entry=%s] Pruned %d stale owner-index entries",
+                    entry_id,
+                    len(stale),
+                )
 
     @callback
     def _reindex_poll_targets_from_device_registry(self) -> None:
@@ -1705,6 +1757,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 raise UpdateFailed(
                     "Cold start: empty device list; treating as transient."
                 )
+
+            # Maintain owner index for FCM fallback routing (entry-scoped).
+            self._sync_owner_index(all_devices)
 
             ignored = self._get_ignored_set()
 
