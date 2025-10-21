@@ -293,6 +293,12 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
 
         return True
 
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Propagate coordinator updates to Home Assistant state."""
+
+        self.async_write_ha_state()
+
     @property
     def device_info(self) -> DeviceInfo:
         """Expose a single integration service device for diagnostic sensors.
