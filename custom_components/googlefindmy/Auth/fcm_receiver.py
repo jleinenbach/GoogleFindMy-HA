@@ -22,19 +22,22 @@ If you still call into this file directly, please migrate to the shared receiver
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 try:
     # Primary, explicit import path within the integration
-    from custom_components.googlefindmy.Auth.token_cache import (
-        get_cached_value,
-        set_cached_value,
-    )
+    from custom_components.googlefindmy.Auth import token_cache as _token_cache
 except Exception as err:  # noqa: BLE001 - defensive import for rare packaging layouts
     raise ImportError(
         "googlefindmy.Auth.fcm_receiver shim could not import token_cache; "
         "please ensure the integration is installed correctly."
     ) from err
+
+get_cached_value = _token_cache.get_cached_value
+set_cached_value = _token_cache.set_cached_value
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,9 +49,16 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
     interfering with the shared, HA-managed FCM lifecycle.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        entry_id: str | None = None,
+        cache: "TokenCache" | None = None,
+    ) -> None:
+        # Resolve the cache used for reads/writes in legacy contexts.
+        self._cache: "TokenCache" | None = self._resolve_cache(entry_id=entry_id, cache=cache)
         # Cache a snapshot of persisted credentials to keep legacy callers functional.
-        creds = get_cached_value("fcm_credentials")
+        creds = self._read_cached_credentials()
         # Normalize common storage shapes (dict or JSON-serialized dict)
         if isinstance(creds, str):
             try:
@@ -82,7 +92,7 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
 
     def get_fcm_token(self) -> Optional[str]:
         """Return the current FCM token from the persisted credentials, if available."""
-        creds = self._creds or get_cached_value("fcm_credentials")
+        creds = self._creds or self._read_cached_credentials()
         if isinstance(creds, str):
             # Late normalization if we were constructed before credentials were JSON.
             try:
@@ -111,7 +121,7 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
 
     def get_android_id(self) -> Optional[str]:
         """Return the Android ID from persisted credentials, if available."""
-        creds = self._creds or get_cached_value("fcm_credentials")
+        creds = self._creds or self._read_cached_credentials()
         if isinstance(creds, str):
             try:
                 import json
@@ -135,8 +145,57 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         Stores to the shared token cache; does not touch any FCM client here.
         """
         try:
-            set_cached_value("fcm_credentials", creds)
+            if self._cache is not None:
+                if creds is None:
+                    self._cache._data.pop("fcm_credentials", None)
+                else:
+                    self._cache._data["fcm_credentials"] = creds
+            else:
+                set_cached_value("fcm_credentials", creds)
             self._creds = creds
             _LOGGER.debug("Legacy FcmReceiver: credentials snapshot updated via shim.")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Legacy FcmReceiver: failed to persist credentials: %s", err)
+
+    # ----------------------------
+    # Internal helpers
+    # ----------------------------
+    @staticmethod
+    def _resolve_cache(
+        *, entry_id: str | None, cache: "TokenCache" | None
+    ) -> "TokenCache" | None:
+        """Return the TokenCache instance to use for legacy access."""
+
+        if cache is not None:
+            return cache
+
+        if entry_id is not None:
+            resolved = _token_cache._INSTANCES.get(entry_id)
+            if resolved is not None:
+                return resolved
+            raise ValueError(
+                "Legacy FcmReceiver shim received unknown entry_id; "
+                "provide a registered entry_id or cache=..."
+            )
+
+        if not _token_cache._INSTANCES:
+            return None
+
+        entry_items = list(_token_cache._INSTANCES.items())
+        if len(entry_items) > 1 and entry_id is None:
+            chosen_entry, chosen_cache = entry_items[0]
+            _LOGGER.warning(
+                "Legacy FcmReceiver shim found multiple TokenCache instances; defaulting to entry '%s'. "
+                "Provide entry_id=... or cache=... for deterministic behavior.",
+                chosen_entry,
+            )
+            return chosen_cache
+
+        return entry_items[0][1]
+
+    def _read_cached_credentials(self) -> Any:
+        """Return credentials from the selected cache without raising."""
+
+        if self._cache is not None:
+            return self._cache._data.get("fcm_credentials")
+        return get_cached_value("fcm_credentials")
