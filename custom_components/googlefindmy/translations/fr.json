@@ -263,16 +263,16 @@
   },
   "exceptions": {
     "device_not_found": {
-      "message": "L’appareil '{device_id}' est introuvable ou ne fait pas partie de cette intégration."
+      "message": "L’appareil {device_id} est introuvable ou ne fait pas partie de cette intégration."
     },
     "locate_failed": {
-      "message": "Échec de la localisation de l’appareil '{device_id}' : {error}"
+      "message": "Échec de la localisation de l’appareil {device_id} : {error}"
     },
     "play_sound_failed": {
-      "message": "Échec de la lecture du son sur '{device_id}' : {error}"
+      "message": "Échec de la lecture du son sur {device_id} : {error}"
     },
     "stop_sound_failed": {
-      "message": "Échec de l’arrêt du son sur '{device_id}' : {error}"
+      "message": "Échec de l’arrêt du son sur {device_id} : {error}"
     },
     "no_active_entry": {
       "message": "Aucune entrée Google Find My Device active n'est disponible. Entrées actives : {active_count}/{total_count}. Activez l'une des entrées configurées ({entries}) ou ajoutez un nouveau compte, puis réessayez."
