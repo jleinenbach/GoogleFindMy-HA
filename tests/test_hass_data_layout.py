@@ -9,14 +9,17 @@ import sys
 from contextlib import suppress
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
 from custom_components.googlefindmy.const import (
+    ATTR_MODE,
     CONF_GOOGLE_EMAIL,
     DATA_SECRET_BUNDLE,
     DOMAIN,
+    MODE_MIGRATE,
+    SERVICE_REBUILD_REGISTRY,
 )
 
 
@@ -82,6 +85,7 @@ class _StubConfigEntries:
     def __init__(self, entry: _StubConfigEntry) -> None:
         self._entries = [entry]
         self.forward_calls: list[tuple[_StubConfigEntry, tuple[str, ...]]] = []
+        self.reload_calls: list[str] = []
 
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
         return list(self._entries)
@@ -94,6 +98,19 @@ class _StubConfigEntries:
 
     def async_update_entry(self, entry: _StubConfigEntry, *, options: dict[str, Any]) -> None:
         entry.options = options
+
+    async def async_reload(self, entry_id: str) -> None:
+        self.reload_calls.append(entry_id)
+
+
+class _StubServices:
+    """Capture service registrations and expose them to tests."""
+
+    def __init__(self) -> None:
+        self.registered: dict[tuple[str, str], Callable[..., Any]] = {}
+
+    def async_register(self, domain: str, service: str, handler: Callable[..., Any]) -> None:
+        self.registered[(domain, service)] = handler
 
 
 class _StubHass:
@@ -109,6 +126,7 @@ class _StubHass:
         self.http = _StubHttp()
         self.config_entries = _StubConfigEntries(entry)
         self._tasks: list[asyncio.Task[Any]] = []
+        self.services = _StubServices()
 
     def async_create_task(self, coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
         task = self.loop.create_task(coro, name=name)
@@ -159,6 +177,27 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 
     try:
         if "homeassistant.components.button" not in sys.modules:
+            homeassistant_root = sys.modules.get("homeassistant")
+            if homeassistant_root is None:
+                homeassistant_root = ModuleType("homeassistant")
+                homeassistant_root.__path__ = []  # type: ignore[attr-defined]
+                sys.modules["homeassistant"] = homeassistant_root
+
+            components_pkg = sys.modules.get("homeassistant.components")
+            if components_pkg is None:
+                components_pkg = ModuleType("homeassistant.components")
+                components_pkg.__path__ = []  # type: ignore[attr-defined]
+                sys.modules["homeassistant.components"] = components_pkg
+
+            helpers_pkg = sys.modules.get("homeassistant.helpers")
+            if helpers_pkg is None:
+                helpers_pkg = ModuleType("homeassistant.helpers")
+                helpers_pkg.__path__ = []  # type: ignore[attr-defined]
+                sys.modules["homeassistant.helpers"] = helpers_pkg
+
+            setattr(homeassistant_root, "components", components_pkg)
+            setattr(homeassistant_root, "helpers", helpers_pkg)
+
             button_component = ModuleType("homeassistant.components.button")
 
             class _ButtonEntity:  # pragma: no cover - structural stub
@@ -172,6 +211,7 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             button_component.ButtonEntity = _ButtonEntity
             button_component.ButtonEntityDescription = _ButtonEntityDescription
             sys.modules["homeassistant.components.button"] = button_component
+            setattr(components_pkg, "button", button_component)
 
         if "homeassistant.components.http" not in sys.modules:
             http_component = ModuleType("homeassistant.components.http")
@@ -186,6 +226,83 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 
             http_component.HomeAssistantView = _HomeAssistantView
             sys.modules["homeassistant.components.http"] = http_component
+            components_pkg = sys.modules.get("homeassistant.components")
+            if components_pkg is not None:
+                setattr(components_pkg, "http", http_component)
+
+        if "homeassistant.loader" not in sys.modules:
+            homeassistant_root = sys.modules.setdefault("homeassistant", ModuleType("homeassistant"))
+            if not hasattr(homeassistant_root, "__path__"):
+                homeassistant_root.__path__ = []  # type: ignore[attr-defined]
+            loader_module = ModuleType("homeassistant.loader")
+
+            async def _async_get_integration(_hass: Any, _domain: str) -> SimpleNamespace:
+                return SimpleNamespace(name="googlefindmy", version="0.0.0")
+
+            loader_module.async_get_integration = _async_get_integration
+            sys.modules["homeassistant.loader"] = loader_module
+            setattr(homeassistant_root, "loader", loader_module)
+
+        helpers_pkg = sys.modules.setdefault("homeassistant.helpers", ModuleType("homeassistant.helpers"))
+        if not hasattr(helpers_pkg, "__path__"):
+            helpers_pkg.__path__ = []  # type: ignore[attr-defined]
+        entity_module = sys.modules.get("homeassistant.helpers.entity")
+        if entity_module is None:
+            entity_module = ModuleType("homeassistant.helpers.entity")
+            sys.modules["homeassistant.helpers.entity"] = entity_module
+            setattr(helpers_pkg, "entity", entity_module)
+
+        if not hasattr(entity_module, "DeviceInfo"):
+            class _DeviceInfo:
+                def __init__(self, **kwargs: Any) -> None:
+                    for key, value in kwargs.items():
+                        setattr(self, key, value)
+
+            entity_module.DeviceInfo = _DeviceInfo
+
+        entity_platform_module = sys.modules.get("homeassistant.helpers.entity_platform")
+        if entity_platform_module is None:
+            entity_platform_module = ModuleType("homeassistant.helpers.entity_platform")
+            sys.modules["homeassistant.helpers.entity_platform"] = entity_platform_module
+            setattr(helpers_pkg, "entity_platform", entity_platform_module)
+
+        if not hasattr(entity_platform_module, "AddEntitiesCallback"):
+            entity_platform_module.AddEntitiesCallback = Callable[[list[Any]], None]
+
+        helpers_pkg = sys.modules.setdefault("homeassistant.helpers", ModuleType("homeassistant.helpers"))
+        if not hasattr(helpers_pkg, "__path__"):
+            helpers_pkg.__path__ = []  # type: ignore[attr-defined]
+        update_coordinator_module = sys.modules.get("homeassistant.helpers.update_coordinator")
+        if update_coordinator_module is None:
+            update_coordinator_module = ModuleType("homeassistant.helpers.update_coordinator")
+            sys.modules["homeassistant.helpers.update_coordinator"] = update_coordinator_module
+            setattr(helpers_pkg, "update_coordinator", update_coordinator_module)
+
+        if not hasattr(update_coordinator_module, "CoordinatorEntity"):
+            class _CoordinatorEntity:
+                def __init__(self, coordinator: Any | None = None) -> None:
+                    self.coordinator = coordinator
+
+            update_coordinator_module.CoordinatorEntity = _CoordinatorEntity
+
+        if not hasattr(update_coordinator_module, "DataUpdateCoordinator"):
+            class _DataUpdateCoordinator:
+                def __init__(self, hass: Any, logger: Any | None = None, *, name: str | None = None, update_interval: Any | None = None) -> None:  # noqa: D401 - stub signature
+                    self.hass = hass
+                    self.logger = logger
+                    self.name = name
+                    self.update_interval = update_interval
+
+                async def async_config_entry_first_refresh(self) -> None:
+                    return None
+
+            update_coordinator_module.DataUpdateCoordinator = _DataUpdateCoordinator
+
+        if not hasattr(update_coordinator_module, "UpdateFailed"):
+            class _UpdateFailed(Exception):
+                pass
+
+            update_coordinator_module.UpdateFailed = _UpdateFailed
 
         integration = importlib.import_module("custom_components.googlefindmy.__init__")
         coordinator_module = importlib.import_module("custom_components.googlefindmy.coordinator")
@@ -249,6 +366,7 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
         sys.modules["homeassistant.components.recorder.history"] = history_module
 
         async def _exercise() -> None:
+            assert await integration.async_setup(hass, {}) is True
             setup_ok = await integration.async_setup_entry(hass, entry)
             assert setup_ok is True
 
@@ -286,6 +404,14 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             request = SimpleNamespace(query={"token": "token"})
             response = await view.get(request, "device-1")
             assert response.status == 200
+
+            migrate_handler = hass.services.registered[(DOMAIN, SERVICE_REBUILD_REGISTRY)]
+            await migrate_handler(SimpleNamespace(data={ATTR_MODE: MODE_MIGRATE}))
+            assert integration._async_soft_migrate_data_to_options.await_count == 2
+            assert integration._async_soft_migrate_data_to_options.await_args_list[-1] == call(
+                hass, entry
+            )
+            assert hass.config_entries.reload_calls == [entry.entry_id]
 
         loop.run_until_complete(_exercise())
     finally:
