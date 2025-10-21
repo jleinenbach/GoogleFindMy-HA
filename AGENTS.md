@@ -35,7 +35,7 @@
 > – python3 -m script.hassfest
 > – pytest -q *(inspect the output for any `DeprecationWarning`s and resolve each one before proceeding)*
 >
-> **optional escalation:** `PYTHONWARNINGS=error::DeprecationWarning pytest -q` *(turns new deprecations into hard failures so they cannot be overlooked—clear the root cause or document the upstream blocker before retrying without the flag).* 
+> **optional escalation:** `PYTHONWARNINGS=error::DeprecationWarning pytest -q` *(turns new deprecations into hard failures so they cannot be overlooked—clear the root cause or document the upstream blocker before retrying without the flag).*
 
 ---
 
