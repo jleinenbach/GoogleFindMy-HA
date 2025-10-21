@@ -23,7 +23,7 @@ RUFF_FORMAT_SCRIPT = (
 def _echo_command(command: Sequence[str]) -> None:
     """Log the command in a shell-friendly format."""
 
-    printable = " ".join(shlex.quote(part) for part in command)
+    printable = shlex.join(command)
     print(f"+ {printable}")
 
 
