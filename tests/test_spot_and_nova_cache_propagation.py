@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from custom_components.googlefindmy.SpotApi import spot_request as spot_module
+from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 from custom_components.googlefindmy.NovaApi import nova_request as nova_module
 
 
@@ -160,6 +161,26 @@ def test_async_spot_request_forwards_cache_to_picker(
     assert recorded["post_headers"]["Authorization"] == "Bearer spot-token"
     assert recorded["post_content"] == b"payload"
     assert recorded["client_kwargs"].get("http2") is True
+
+
+def test_invalidate_token_async_requires_cache() -> None:
+    """Token invalidation helper must not fall back to the global cache."""
+
+    async def _run() -> None:
+        with pytest.raises(MissingTokenCacheError):
+            await spot_module._invalidate_token_async("spot", "user@example.com")
+
+    asyncio.run(_run())
+
+
+def test_clear_aas_token_async_requires_cache() -> None:
+    """AAS cache clearer must require an entry-local cache."""
+
+    async def _run() -> None:
+        with pytest.raises(MissingTokenCacheError):
+            await spot_module._clear_aas_token_async()
+
+    asyncio.run(_run())
 
 
 def test_get_initial_token_async_uses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
