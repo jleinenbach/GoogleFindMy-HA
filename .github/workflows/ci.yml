@@ -7,8 +7,20 @@ on:
       - main
 
 jobs:
-  build:
+  hassfest:
+    name: Hassfest validation
     runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run hassfest
+        uses: home-assistant/actions/hassfest@master
+
+  tests:
+    name: Lint and tests
+    runs-on: ubuntu-latest
+    needs: hassfest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -33,9 +45,6 @@ jobs:
 
       - name: Run pre-commit
         run: pre-commit run --all-files
-
-      - name: Run hassfest
-        run: python3 -m script.hassfest
 
       - name: Run pytest
         run: pytest -q
