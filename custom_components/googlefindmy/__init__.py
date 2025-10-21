@@ -711,6 +711,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 "default_map_view_token_expiration": DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
                 "opt_map_view_token_expiration_key": OPT_MAP_VIEW_TOKEN_EXPIRATION,
                 "redact_url_token": _redact_url_token,
+                "soft_migrate_entry": _async_soft_migrate_data_to_options,
             }
             await async_register_services(hass, svc_ctx)
             bucket["services_registered"] = True
