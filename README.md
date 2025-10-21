@@ -120,7 +120,7 @@ The integration respects Google's rate limits by:
 
 Contributions are welcome and encouraged!
 
-To contrubuted, please:
+To contribute, please:
 1. Fork the repository
 2. Create a feature branch
 3. Install the development dependencies with `python -m pip install -r requirements-dev.txt`
