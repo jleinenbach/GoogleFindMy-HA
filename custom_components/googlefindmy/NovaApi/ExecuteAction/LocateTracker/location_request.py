@@ -22,6 +22,8 @@ from typing import (
 
 import aiohttp
 
+from custom_components.googlefindmy.Auth.token_cache import _get_default_cache
+
 # Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     create_action_request,
@@ -267,7 +269,8 @@ async def get_location_data_for_device(
     - When `namespace` is provided (e.g., entry_id), **TTL metadata** is namespaced.
     - When `cache` is provided, `async_nova_request` will prefer that entry-local
       TokenCache for **username**, **token content**, and (if no `cache_get/set`
-      overrides are provided) **TTL metadata** as well.
+      overrides are provided) **TTL metadata** as well. When `cache` is omitted
+      the legacy default cache is used as a defensive fallback.
 
     Args:
         canonic_device_id: The canonical ID of the device to locate.
@@ -280,6 +283,7 @@ async def get_location_data_for_device(
         refresh_override: Optional async function to refresh a token in isolation.
         namespace: Optional entry-scoped namespace (e.g., config_entry.entry_id).
         cache: TokenCache providing entry-scoped username/token/metadata storage.
+            Falls back to the legacy default cache when omitted.
 
     Returns:
         A list of dictionaries containing location data, or an empty list on failure.
@@ -297,36 +301,42 @@ async def get_location_data_for_device(
     ctx = _CallbackContext()
     loop = asyncio.get_running_loop()
 
-    if cache is None:
-        raise RuntimeError(
-            "TokenCache instance is required to decrypt E2EE location responses."
-        )
-    cache_ref = cast("TokenCache", cache)
+    cache_ref: "TokenCache"
+    if cache is not None:
+        cache_ref = cast("TokenCache", cache)
+    else:
+        try:
+            cache_ref = _get_default_cache()
+        except Exception as err:
+            raise RuntimeError(
+                "TokenCache instance is required to decrypt E2EE location responses."
+            ) from err
 
-    # Build namespaced cache wrappers if requested and no explicit overrides were given.
+    # Build cache accessors, preferring entry-local namespacing when provided.
     ns_get: Optional[Callable[[str], Awaitable[Any]]] = cache_get
     ns_set: Optional[Callable[[str, Any], Awaitable[None]]] = cache_set
+
     if namespace and (cache_get is None or cache_set is None):
-        try:
-            from custom_components.googlefindmy.Auth.token_cache import (
-                async_get_cached_value as _base_get,
-                async_set_cached_value as _base_set,
-            )
+        ns_prefix = f"{namespace}:"
+
+        if ns_get is None:
 
             async def _ns_get(key: str) -> Any:
-                return await _base_get(f"{namespace}:{key}")
+                return await cache_ref.async_get_cached_value(f"{ns_prefix}{key}")
+
+            ns_get = _ns_get
+
+        if ns_set is None:
 
             async def _ns_set(key: str, value: Any) -> None:
-                await _base_set(f"{namespace}:{key}", value)
+                await cache_ref.async_set_cached_value(f"{ns_prefix}{key}", value)
 
-            # Only override the missing side(s)
-            if ns_get is None:
-                ns_get = _ns_get
-            if ns_set is None:
-                ns_set = _ns_set
-        except Exception as e:
-            # If token_cache is unavailable for any reason, continue without namespacing.
-            _LOGGER.debug("Namespaced cache wrapper setup failed (%s); proceeding without namespace.", e)
+            ns_set = _ns_set
+    else:
+        if ns_get is None:
+            ns_get = cache_ref.async_get_cached_value
+        if ns_set is None:
+            ns_set = cache_ref.async_set_cached_value
 
     try:
         # Generate request UUID
@@ -371,7 +381,7 @@ async def get_location_data_for_device(
                 cache_set=ns_set,
                 refresh_override=refresh_override,
                 namespace=namespace,
-                cache=cache,  # NEW: pass entry-scoped TokenCache through
+                cache=cache_ref,  # pass entry-scoped TokenCache through
             )
         except asyncio.CancelledError:
             raise
