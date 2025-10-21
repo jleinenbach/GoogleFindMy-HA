@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from datetime import datetime, timezone
+import importlib
+import importlib.util
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy import map_view
 from custom_components.googlefindmy.const import DOMAIN
 
 
@@ -86,6 +89,71 @@ class _StubEntityRegistry:
 def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tracker selection must match explicit unique_id formats before fallback."""
 
+    http_module = ModuleType("homeassistant.components.http")
+
+    class _HttpViewStub:
+        def __init__(self, hass: Any | None = None) -> None:
+            self.hass = hass
+
+    http_module.HomeAssistantView = _HttpViewStub
+    monkeypatch.setitem(sys.modules, "homeassistant.components.http", http_module)
+
+    core_module = ModuleType("homeassistant.core")
+
+    class _HomeAssistantStub:  # pragma: no cover - structural stub
+        pass
+
+    core_module.HomeAssistant = _HomeAssistantStub
+    monkeypatch.setitem(sys.modules, "homeassistant.core", core_module)
+
+    helpers_module = ModuleType("homeassistant.helpers.entity_registry")
+    helpers_module.async_get = lambda _hass: None
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.helpers.entity_registry", helpers_module
+    )
+
+    dt_module = ModuleType("homeassistant.util.dt")
+    dt_module.utcnow = lambda: datetime.now(timezone.utc)
+    dt_module.as_local = lambda value: value
+    dt_module.UTC = timezone.utc
+    monkeypatch.setitem(sys.modules, "homeassistant.util.dt", dt_module)
+
+    util_module = ModuleType("homeassistant.util")
+    util_module.dt = dt_module
+    monkeypatch.setitem(sys.modules, "homeassistant.util", util_module)
+
+    custom_components_pkg = ModuleType("custom_components")
+    custom_components_pkg.__path__ = [
+        str(Path(__file__).resolve().parents[1] / "custom_components")
+    ]
+    monkeypatch.setitem(sys.modules, "custom_components", custom_components_pkg)
+
+    googlefindmy_pkg = ModuleType("custom_components.googlefindmy")
+    googlefindmy_pkg.__path__ = [
+        str(Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy")
+    ]
+    monkeypatch.setitem(sys.modules, "custom_components.googlefindmy", googlefindmy_pkg)
+
+    coordinator_module = ModuleType("custom_components.googlefindmy.coordinator")
+    coordinator_module.GoogleFindMyCoordinator = _StubCoordinator
+    monkeypatch.setitem(
+        sys.modules, "custom_components.googlefindmy.coordinator", coordinator_module
+    )
+
+    module_name = "custom_components.googlefindmy.map_view"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "googlefindmy"
+        / "map_view.py",
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError("Failed to load map_view module for testing")
+    map_view = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, map_view)
+    spec.loader.exec_module(map_view)
+
     device_id = "device-abc"
     coordinator = _StubCoordinator(
         devices=[
@@ -120,11 +188,13 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
         map_view,
         "_resolve_entry_by_token",
         lambda _hass, token: (entry, {token}) if token == "valid" else (None, None),
+        raising=False,
     )
     monkeypatch.setattr(
         map_view,
         "async_get_entity_registry",
         lambda _hass: registry,
+        raising=False,
     )
 
     history_calls: list[list[str]] = []
