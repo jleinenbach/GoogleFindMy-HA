@@ -473,15 +473,32 @@ class GoogleFindMyAPI:
         if receiver is None:
             _LOGGER.error("Cannot obtain FCM token: provider returned None.")
             return None
-        entry_id = self._namespace()
+        entry_id: Optional[str]
         try:
-            if entry_id:
+            raw_entry_id = getattr(self._cache, "entry_id", None)
+        except Exception:
+            raw_entry_id = None
+        if isinstance(raw_entry_id, str) and raw_entry_id.strip():
+            entry_id = raw_entry_id.strip()
+        else:
+            entry_id = self._namespace()
+        try:
+            if entry_id is not None:
                 token = receiver.get_fcm_token(entry_id)
             else:
-                _LOGGER.info(
-                    "FCM token request falling back to legacy scope: entry namespace unavailable."
-                )
                 token = receiver.get_fcm_token()
+        except TypeError:
+            _LOGGER.debug(
+                "FCM token provider does not accept entry-scoped lookups; falling back to legacy call."
+            )
+            try:
+                token = receiver.get_fcm_token()
+            except Exception as err:
+                _LOGGER.error(
+                    "Cannot obtain FCM token from shared receiver (legacy fallback failed): %s",
+                    _short_err(err),
+                )
+                return None
         except Exception as err:
             _LOGGER.error("Cannot obtain FCM token from shared receiver: %s", _short_err(err))
             return None
@@ -507,15 +524,32 @@ class GoogleFindMyAPI:
         if receiver is None:
             _LOGGER.debug("FCM readiness probe: provider returned None.")
             return None
-        entry_id = self._namespace()
+        entry_id: Optional[str]
         try:
-            if entry_id:
+            raw_entry_id = getattr(self._cache, "entry_id", None)
+        except Exception:
+            raw_entry_id = None
+        if isinstance(raw_entry_id, str) and raw_entry_id.strip():
+            entry_id = raw_entry_id.strip()
+        else:
+            entry_id = self._namespace()
+        try:
+            if entry_id is not None:
                 token = receiver.get_fcm_token(entry_id)
             else:
-                _LOGGER.debug(
-                    "FCM readiness probe falling back to legacy scope: entry namespace unavailable."
-                )
                 token = receiver.get_fcm_token()
+        except TypeError:
+            _LOGGER.debug(
+                "FCM readiness probe: receiver does not accept entry_id; retrying without scoped parameter."
+            )
+            try:
+                token = receiver.get_fcm_token()
+            except Exception as err:
+                _LOGGER.debug(
+                    "FCM readiness probe: legacy get_fcm_token call failed: %s",
+                    _short_err(err),
+                )
+                return None
         except Exception as err:
             _LOGGER.debug("FCM readiness probe: get_fcm_token failed: %s", _short_err(err))
             return None

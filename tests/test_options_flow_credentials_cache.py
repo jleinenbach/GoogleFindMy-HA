@@ -154,6 +154,74 @@ def test_options_flow_rotating_token_clears_cached_aas(monkeypatch: pytest.Monke
     asyncio.run(_exercise())
 
 
+def test_fcm_token_lookup_uses_entry_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify the API forwards the config entry ID to the shared FCM receiver."""
+
+    from custom_components.googlefindmy import api as api_module
+
+    class _CacheStub:
+        """Minimal cache exposing an entry ID attribute for the API wrapper."""
+
+        def __init__(self, entry_id: str) -> None:
+            self.entry_id = entry_id
+
+        async def async_get_cached_value(self, key: str) -> Any:
+            return None
+
+        async def async_set_cached_value(self, key: str, value: Any) -> None:
+            return None
+
+    class _Receiver:
+        def __init__(self) -> None:
+            self.calls: List[str | None] = []
+
+        def get_fcm_token(self, entry_id: str | None = None) -> str:
+            self.calls.append(entry_id)
+            assert entry_id == "entry-primary"
+            return "token-primary-abcdef"
+
+    receiver = _Receiver()
+    monkeypatch.setattr(api_module, "_FCM_ReceiverGetter", lambda: receiver)
+
+    api = GoogleFindMyAPI(cache=_CacheStub("entry-primary"))
+
+    token = api._get_fcm_token_for_action()
+
+    assert token == "token-primary-abcdef"
+    assert receiver.calls == ["entry-primary"]
+
+
+def test_fcm_token_lookup_falls_back_without_entry_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure legacy receivers without entry ID support continue to function."""
+
+    from custom_components.googlefindmy import api as api_module
+
+    class _CacheStub:
+        async def async_get_cached_value(self, key: str) -> Any:
+            return None
+
+        async def async_set_cached_value(self, key: str, value: Any) -> None:
+            return None
+
+    class _LegacyReceiver:
+        def __init__(self) -> None:
+            self.calls: List[str | None] = []
+
+        def get_fcm_token(self) -> str:
+            self.calls.append(None)
+            return "legacy-token-abcdef"
+
+    receiver = _LegacyReceiver()
+    monkeypatch.setattr(api_module, "_FCM_ReceiverGetter", lambda: receiver)
+
+    api = GoogleFindMyAPI(cache=_CacheStub())
+
+    token = api._get_fcm_token_for_action()
+
+    assert token == "legacy-token-abcdef"
+    assert receiver.calls == [None]
+
+
 def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure Play/Stop Sound submissions use the provided TokenCache with namespacing."""
 
