@@ -76,7 +76,7 @@ def owner_index_coordinator(
 
 
 def test_owner_index_updates_with_refresh(
-    owner_index_coordinator: tuple[GoogleFindMyCoordinator, _DummyAPI]
+    owner_index_coordinator: tuple[GoogleFindMyCoordinator, _DummyAPI],
 ) -> None:
     """Coordinator refresh claims canonical ids and prunes stale entries."""
 

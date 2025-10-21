@@ -180,12 +180,12 @@ class DiagnosticsBuffer:
 
     def add_warning(self, code: str, context: dict[str, Any]) -> None:
         """Record a warning with a semantic code and redacted context."""
-        key = f"{code}:{context.get('device_id','?')}"
+        key = f"{code}:{context.get('device_id', '?')}"
         self._add(self.warnings, key, context)
 
     def add_error(self, code: str, context: dict[str, Any]) -> None:
         """Record an error with a semantic code and redacted context."""
-        key = f"{code}:{context.get('device_id','?')}:{context.get('arg','')}"
+        key = f"{code}:{context.get('device_id', '?')}:{context.get('arg', '')}"
         self._add(self.errors, key, context)
 
     def to_dict(self) -> dict[str, Any]:
