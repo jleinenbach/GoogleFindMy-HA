@@ -72,7 +72,7 @@ AUTH_STATUS_DESC = BinarySensorEntityDescription(
     key="auth_status",
     translation_key=TRANSLATION_KEY_AUTH_STATUS,
     device_class=BinarySensorDeviceClass.PROBLEM,  # True => problem present
-    icon="mdi:key-alert",
+    icon="mdi:account-alert",
     entity_category=EntityCategory.DIAGNOSTIC,
 )
 
@@ -269,7 +269,7 @@ class GoogleFindMyAuthStatusSensor(
     def icon(self) -> str:
         """Return a dynamic icon to communicate the current auth state."""
         # Keep explicit icons for clarity, even with device_class=problem.
-        return "mdi:key-alert" if self.is_on else "mdi:key-check"
+        return "mdi:account-alert" if self.is_on else "mdi:account-check"
 
     @property
     def available(self) -> bool:
