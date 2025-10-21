@@ -51,6 +51,25 @@ def test_resolve_cli_cache_requires_entry(monkeypatch: pytest.MonkeyPatch) -> No
         nbe_list_devices._resolve_cli_cache("entry-one")
 
 
+def test_resolve_cli_cache_multiple_entries_require_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI helper should raise a clear error when multiple caches exist."""
+
+    monkeypatch.setattr(
+        nbe_list_devices,
+        "get_registered_entry_ids",
+        lambda: ["entry-one", "entry-two"],
+    )
+
+    with pytest.raises(RuntimeError) as err:
+        nbe_list_devices._resolve_cli_cache(None)
+
+    message = str(err.value)
+    assert "Multiple token caches registered" in message
+    assert "GOOGLEFINDMY_ENTRY_ID" in message
+
+
 def test_cli_main_passes_selected_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI helper should forward the selected cache/namespace to API calls."""
 

@@ -187,14 +187,12 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
             return None
 
         entry_items = list(_token_cache._INSTANCES.items())
-        if len(entry_items) > 1 and entry_id is None:
-            chosen_entry, chosen_cache = entry_items[0]
-            _LOGGER.warning(
-                "Legacy FcmReceiver shim found multiple TokenCache instances; defaulting to entry '%s'. "
-                "Provide entry_id=... or cache=... for deterministic behavior.",
-                chosen_entry,
+        if len(entry_items) > 1:
+            raise ValueError(
+                "Legacy FcmReceiver shim cannot auto-select between multiple TokenCache "
+                "instances. Provide entry_id=... or cache=... to target the intended "
+                "config entry."
             )
-            return chosen_cache
 
         return entry_items[0][1]
 

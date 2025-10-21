@@ -125,9 +125,10 @@ To contribute, please:
 2. Create a feature branch
 3. Install the development dependencies with `python -m pip install -r requirements-dev.txt`
 4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes
-5. Run `pytest -q`, fix any failures, and address every `DeprecationWarning` you encounter (consider rerunning with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings).
-6. Test thoroughly with your Find My devices
-7. Submit a pull request with detailed description
+5. **Run `ruff format` (or `ruff format --check`) before opening a PR.** The `pre-commit` hooks will refuse the commit when formatting is skipped, so always format first and restage any modified files.
+6. Run `pytest -q`, fix any failures, and address every `DeprecationWarning` you encounter (consider rerunning with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings).
+7. Test thoroughly with your Find My devices
+8. Submit a pull request with detailed description
 
 ### Development Scripts
 
@@ -135,6 +136,17 @@ This repository provides a thin wrapper around the official `hassfest` validator
 
 1. Install the development dependencies: `python -m pip install -r requirements-dev.txt`
 2. Run the validator: `python3 -m script.hassfest`
+
+## Legacy CLI helpers & token cache selection
+
+Several modules still expose lightweight CLI entry points (for example the device
+listing helper and the standalone "Play/Stop Sound" examples). These scripts now
+require you to target a specific Home Assistant config entry whenever more than
+one token cache is available. Set the environment variable
+`GOOGLEFINDMY_ENTRY_ID` to the desired config entry ID before running the CLI, or
+pass a `cache=` override when instantiating the legacy `FcmReceiver` shim. If you
+omit the entry ID while multiple caches are active the CLI will abort with a
+message listing the available IDs so you can pick the right account.
 
 ## Credits
 

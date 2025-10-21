@@ -198,12 +198,20 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
     if not entry_ids:
         raise MissingTokenCacheError()
 
-    if entry_id_hint is None:
+    if entry_id_hint is None or not entry_id_hint.strip():
+        if len(entry_ids) > 1:
+            available = ", ".join(sorted(entry_ids)) or "<none>"
+            raise RuntimeError(
+                "Multiple token caches registered. Provide the ConfigEntry ID via the "
+                "CLI argument or set GOOGLEFINDMY_ENTRY_ID. Mehrere Token-Caches "
+                "registriert. Bitte die ConfigEntry-ID per CLI angeben oder "
+                "GOOGLEFINDMY_ENTRY_ID setzen. Available IDs: {avail}.".format(
+                    avail=available
+                )
+            )
         raise MissingTokenCacheError()
 
     normalized = entry_id_hint.strip()
-    if not normalized:
-        raise MissingTokenCacheError()
 
     try:
         cache = get_cache_for_entry(normalized)
