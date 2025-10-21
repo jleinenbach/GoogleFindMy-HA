@@ -39,6 +39,9 @@ from .const import (
     MODE_REBUILD,
     REBUILD_REGISTRY_MODES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,  # ctx provides the key but we keep a local fallback constant
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    LEGACY_SERVICE_IDENTIFIER,
+    SERVICE_DEVICE_IDENTIFIER_PREFIX,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -246,43 +249,145 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             _LOGGER.error("Could not determine base URL for device refresh: %s", err)
             return
 
-        # Choose options from the *active* entry (deterministic primary).
-        config_entries = hass.config_entries.async_entries(DOMAIN)
-        primary = ctx["primary_active_entry"](config_entries) if ctx.get("primary_active_entry") else None
+        entries = hass.config_entries.async_entries(DOMAIN)
+        entries_by_id = {entry.entry_id: entry for entry in entries}
 
-        token_expiration_enabled = ctx.get("default_map_view_token_expiration", True)
-        if primary is not None and ctx.get("opt"):
-            key = ctx.get("opt_map_view_token_expiration_key", OPT_MAP_VIEW_TOKEN_EXPIRATION)
-            token_expiration_enabled = bool(ctx["opt"](primary, key, token_expiration_enabled))
+        default_expiration = bool(
+            ctx.get(
+                "default_map_view_token_expiration",
+                DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+            )
+        )
+        opt_reader = ctx.get("opt")
+        opt_key = ctx.get("opt_map_view_token_expiration_key", OPT_MAP_VIEW_TOKEN_EXPIRATION)
 
+        expiration_cache: dict[str, bool] = {}
+        token_cache: dict[str, str] = {}
         ha_uuid = str(hass.data.get("core.uuid", "ha"))
-        if token_expiration_enabled:
-            week = str(int(time.time() // 604800))  # weekly rotation bucket
-            auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
-        else:
-            auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
+        week_bucket = str(int(time.time() // 604800))
+
+        def _expiration_enabled(entry_id: str | None) -> bool:
+            cache_key = entry_id or ""
+            if cache_key in expiration_cache:
+                return expiration_cache[cache_key]
+
+            entry = entries_by_id.get(entry_id) if entry_id else None
+            enabled = default_expiration
+
+            if entry:
+                if callable(opt_reader):
+                    try:
+                        enabled = bool(opt_reader(entry, opt_key, default_expiration))
+                    except Exception:
+                        enabled = bool(
+                            entry.options.get(
+                                opt_key,
+                                entry.data.get(opt_key, default_expiration),
+                            )
+                        )
+                else:
+                    enabled = bool(
+                        entry.options.get(
+                            opt_key,
+                            entry.data.get(opt_key, default_expiration),
+                        )
+                    )
+
+            expiration_cache[cache_key] = bool(enabled)
+            return expiration_cache[cache_key]
+
+        def _token_for_entry(entry_id: str | None) -> str:
+            cache_key = entry_id or ""
+            if cache_key in token_cache:
+                return token_cache[cache_key]
+
+            entry_part = entry_id or ""
+            if _expiration_enabled(entry_id):
+                token_src = f"{ha_uuid}:{entry_part}:{week_bucket}"
+            else:
+                token_src = f"{ha_uuid}:{entry_part}:static"
+
+            token_cache[cache_key] = hashlib.md5(token_src.encode()).hexdigest()[:16]
+            return token_cache[cache_key]
+
+        def _device_is_service(device: Any) -> bool:
+            identifiers = getattr(device, "identifiers", set()) or set()
+            for domain, ident in identifiers:
+                if domain != DOMAIN:
+                    continue
+                ident_str = str(ident)
+                if ident_str == LEGACY_SERVICE_IDENTIFIER or ident_str.startswith(
+                    SERVICE_DEVICE_IDENTIFIER_PREFIX
+                ):
+                    return True
+            return False
+
+        def _canonical_identifier(device: Any, entry_id: str | None) -> str | None:
+            serial = getattr(device, "serial_number", None)
+            if isinstance(serial, str) and serial:
+                return serial
+
+            identifiers = getattr(device, "identifiers", set()) or set()
+            for domain, ident in identifiers:
+                if domain != DOMAIN:
+                    continue
+
+                ident_str = str(ident)
+                if ident_str == LEGACY_SERVICE_IDENTIFIER or ident_str.startswith(
+                    SERVICE_DEVICE_IDENTIFIER_PREFIX
+                ):
+                    continue
+
+                if entry_id:
+                    prefix = f"{entry_id}:"
+                    if ident_str.startswith(prefix):
+                        ident_str = ident_str[len(prefix) :]
+                elif ":" in ident_str:
+                    candidate, remainder = ident_str.split(":", 1)
+                    if candidate in entries_by_id:
+                        ident_str = remainder
+
+                return ident_str
+
+            return None
 
         dev_reg = dr.async_get(hass)
         updated_count = 0
-        for device in dev_reg.devices.values():
-            if any(identifier[0] == DOMAIN for identifier in device.identifiers):
-                dev_id = next(
-                    (ident for domain, ident in device.identifiers if domain == DOMAIN),
-                    None,
+        for device in getattr(dev_reg, "devices", {}).values():
+            identifiers = getattr(device, "identifiers", set()) or set()
+            if not any(domain == DOMAIN for domain, _ in identifiers):
+                continue
+
+            if _device_is_service(device):
+                continue
+
+            config_entry_ids = list(getattr(device, "config_entries", None) or [])
+            owner_entry_id: str | None = None
+            for candidate in config_entry_ids:
+                candidate_str = str(candidate)
+                if candidate_str in entries_by_id:
+                    owner_entry_id = candidate_str
+                    break
+                if owner_entry_id is None:
+                    owner_entry_id = candidate_str
+
+            canonical_id = _canonical_identifier(device, owner_entry_id)
+            if not canonical_id:
+                continue
+
+            auth_token = _token_for_entry(owner_entry_id)
+            new_config_url = f"{base_url}/api/googlefindmy/map/{canonical_id}?token={auth_token}"
+            dev_reg.async_update_device(
+                device_id=device.id,
+                configuration_url=new_config_url,
+            )
+            updated_count += 1
+            if ctx.get("redact_url_token"):
+                _LOGGER.debug(
+                    "Updated URL for device %s: %s",
+                    device.name_by_user or device.name,
+                    ctx["redact_url_token"](new_config_url),
                 )
-                if dev_id:
-                    new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
-                    dev_reg.async_update_device(
-                        device_id=device.id,
-                        configuration_url=new_config_url,
-                    )
-                    updated_count += 1
-                    if ctx.get("redact_url_token"):
-                        _LOGGER.debug(
-                            "Updated URL for device %s: %s",
-                            device.name_by_user or device.name,
-                            ctx["redact_url_token"](new_config_url),
-                        )
 
         _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
