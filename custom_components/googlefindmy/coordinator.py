@@ -68,7 +68,7 @@ from homeassistant.components.recorder import (
     get_instance as get_recorder,
     history as recorder_history,
 )
-from homeassistant.config_entries import ConfigEntryAuthFailed
+from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -704,7 +704,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             return ident
         return None
 
-    def _ensure_service_device_exists(self, entry: 'ConfigEntry | None' = None) -> None:
+    def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
 
         This keeps diagnostic entities (e.g. polling/auth-status) grouped under a stable

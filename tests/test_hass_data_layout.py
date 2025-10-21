@@ -442,8 +442,6 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
     asyncio.set_event_loop(loop)
 
     try:
-        issue_module = sys.modules["homeassistant.helpers.issue_registry"]
-
         integration = importlib.import_module("custom_components.googlefindmy.__init__")
 
         existing_entry = _StubConfigEntry()

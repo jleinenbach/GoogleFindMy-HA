@@ -9,7 +9,6 @@ import asyncio
 import datetime
 import logging
 import random
-import time
 from typing import Optional, Tuple
 
 import httpx

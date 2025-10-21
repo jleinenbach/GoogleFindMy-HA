@@ -2,7 +2,7 @@
 """Location history using Home Assistant's recorder properly."""
 import logging
 import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant

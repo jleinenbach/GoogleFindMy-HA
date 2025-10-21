@@ -129,9 +129,12 @@ if update_module is not None:
         data_coordinator.async_add_listener = _async_add_listener  # type: ignore[assignment]
         data_coordinator.async_update_listeners = _async_update_listeners  # type: ignore[assignment]
 
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from custom_components.googlefindmy.const import CONF_GOOGLE_EMAIL, DOMAIN
-from custom_components.googlefindmy.sensor import STATS_DESCRIPTIONS, GoogleFindMyStatsSensor
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator  # noqa: E402
+from custom_components.googlefindmy.const import CONF_GOOGLE_EMAIL, DOMAIN  # noqa: E402
+from custom_components.googlefindmy.sensor import (  # noqa: E402
+    STATS_DESCRIPTIONS,
+    GoogleFindMyStatsSensor,
+)
 
 
 class _StubHass:

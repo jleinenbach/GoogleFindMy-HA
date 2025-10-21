@@ -18,9 +18,6 @@ except ImportError:  # pragma: no cover - fallback for stripped test environment
 
 from .const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN, INTEGRATION_VERSION
 
-if False:  # pragma: no cover - hint for type checkers without runtime import
-    from .coordinator import GoogleFindMyCoordinator, StatusSnapshot
-
 
 def _normalize_email(value: Optional[str]) -> str:
     """Return a normalized email address (lowercase, trimmed)."""

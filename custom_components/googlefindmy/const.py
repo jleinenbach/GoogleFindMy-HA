@@ -8,7 +8,7 @@ Keep comments and docstrings in English; user-facing strings belong in translati
 from __future__ import annotations
 
 import time
-from typing import Any, Tuple
+from typing import Tuple
 
 # --------------------------------------------------------------------------------------
 # Core identifiers

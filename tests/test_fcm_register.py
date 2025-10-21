@@ -6,7 +6,6 @@ from __future__ import annotations
 # tests/test_fcm_register.py
 
 import asyncio
-import logging
 
 import types
 from dataclasses import dataclass

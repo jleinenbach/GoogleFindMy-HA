@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from typing import Any, Iterable, Optional, Tuple
+from typing import Any, Iterable, Tuple
 
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError, HomeAssistantError
@@ -59,7 +59,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         - "domain": str
         - "resolve_canonical": Callable[[HomeAssistant, str], Tuple[str, str]]
         - "is_active_entry": Callable[[ConfigEntry], bool]
-        - "primary_active_entry": Callable[[list[ConfigEntry]], Optional[ConfigEntry]]
+        - "primary_active_entry": Callable[[list[ConfigEntry]], ConfigEntry | None]
         - "opt": Callable[[ConfigEntry, str, Any], Any]
         - "default_map_view_token_expiration": bool
         - "opt_map_view_token_expiration_key": str

@@ -32,13 +32,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import hashlib
 import json
 import logging
 import os
 import socket
 import time
-from typing import Any, Collection, Iterable, Optional, Tuple
+from typing import Any, Collection, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -74,8 +73,6 @@ from .api import (
     unregister_fcm_receiver_provider as api_unregister_fcm_provider,
 )
 from .const import (
-    ATTR_DEVICE_IDS,
-    ATTR_MODE,
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
@@ -88,8 +85,6 @@ from .const import (
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
     DOMAIN,
-    MODE_MIGRATE,
-    MODE_REBUILD,
     OPTION_KEYS,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_DEVICE_POLL_DELAY,
@@ -99,13 +94,6 @@ from .const import (
     OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
-    REBUILD_REGISTRY_MODES,
-    SERVICE_LOCATE_DEVICE,
-    SERVICE_LOCATE_EXTERNAL,
-    SERVICE_PLAY_SOUND,
-    SERVICE_REBUILD_REGISTRY,
-    SERVICE_REFRESH_DEVICE_URLS,
-    SERVICE_STOP_SOUND,
     coerce_ignored_mapping,
 )
 from .coordinator import GoogleFindMyCoordinator

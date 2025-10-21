@@ -45,7 +45,6 @@ from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import async_
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
     async_get_eid_info,
-    get_eid_info,
 )
 
 _LOGGER = logging.getLogger(__name__)
