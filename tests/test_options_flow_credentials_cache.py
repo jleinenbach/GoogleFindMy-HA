@@ -256,10 +256,10 @@ def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> No
     async def _fail_set(key: str, value: Any) -> None:
         raise AssertionError("Global cache fallback must not be used for Play Sound")
 
-    monkeypatch.setattr(start_module, "_cache_get_default", _fail_get)
-    monkeypatch.setattr(start_module, "_cache_set_default", _fail_set)
-    monkeypatch.setattr(stop_module, "_cache_get_default", _fail_get)
-    monkeypatch.setattr(stop_module, "_cache_set_default", _fail_set)
+    monkeypatch.setattr(start_module, "_cache_get_default", _fail_get, raising=False)
+    monkeypatch.setattr(start_module, "_cache_set_default", _fail_set, raising=False)
+    monkeypatch.setattr(stop_module, "_cache_get_default", _fail_get, raising=False)
+    monkeypatch.setattr(stop_module, "_cache_set_default", _fail_set, raising=False)
 
     async def _exercise() -> None:
         cache_primary = _FakeCache("entry-one")
@@ -297,9 +297,9 @@ def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> No
         start_set = start_kwargs["cache_set"]
         assert start_get is not None
         assert start_set is not None
-        await start_get("entry-one:ttl")
+        await start_get("ttl")
         assert cache_primary.get_calls[-1] == "entry-one:ttl"
-        await start_set("entry-one:ttl", "value")
+        await start_set("ttl", "value")
         assert ("entry-one:ttl", "value") in cache_primary.set_calls
 
         _, _, stop_kwargs = stop_calls[0]
@@ -310,9 +310,9 @@ def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> No
         stop_set = stop_kwargs["cache_set"]
         assert stop_get is not None
         assert stop_set is not None
-        await stop_get("entry-one:ttl2")
+        await stop_get("ttl2")
         assert cache_primary.get_calls[-1] == "entry-one:ttl2"
-        await stop_set("entry-one:ttl2", "value2")
+        await stop_set("ttl2", "value2")
         assert ("entry-one:ttl2", "value2") in cache_primary.set_calls
 
     asyncio.run(_exercise())
