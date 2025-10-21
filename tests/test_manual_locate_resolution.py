@@ -180,6 +180,26 @@ def test_async_handle_manual_locate_success(
     assert "Successfully submitted manual locate for Bicycle" in caplog.text
 
 
+def test_async_handle_manual_locate_namespaced_identifier(
+    hass: HomeAssistant, registries: tuple[_StubDeviceRegistry, _StubEntityRegistry]
+) -> None:
+    """Namespaced registry identifiers are normalized before dispatch."""
+
+    device_registry, _ = registries
+    device_registry._mapping["device-namespace"] = SimpleNamespace(  # type: ignore[attr-defined]
+        id="ha-device-ns",
+        identifiers={(gfm.DOMAIN, "entry-1:canonical-ns")},
+        name="Namespaced Tag",
+        name_by_user=None,
+        config_entries={"entry-1"},
+    )
+    coordinator = _StubCoordinator()
+    asyncio.run(
+        gfm.async_handle_manual_locate(hass, coordinator, "device-namespace")
+    )
+    assert coordinator.calls == ["canonical-ns"]
+
+
 class _DiagRecorder:
     """Diagnostics stub recording add_error calls."""
 

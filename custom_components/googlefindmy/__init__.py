@@ -38,7 +38,7 @@ import logging
 import os
 import socket
 import time
-from typing import Any, Iterable, Optional, Tuple
+from typing import Any, Collection, Iterable, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -148,6 +148,23 @@ class RuntimeData:
 MyConfigEntry = ConfigEntry
 
 
+def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> str:
+    """Return canonical identifier, stripping entry namespace when applicable."""
+
+    if ":" not in ident:
+        return ident
+
+    config_entries: Collection[str] | None = getattr(device, "config_entries", None)
+    if not config_entries:
+        return ident
+
+    prefix, canonical = ident.split(":", 1)
+    if canonical and prefix in config_entries:
+        return canonical
+
+    return ident
+
+
 # --- BEGIN: Helpers for resolution and manual locate ---------------------------
 def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> Tuple[str, str]:
     """Resolve HA device_id/entity_id/canonical_id -> (canonical_id, friendly_name).
@@ -178,8 +195,9 @@ def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> Tuple[str, str
             except (TypeError, ValueError):
                 continue
             if domain == DOMAIN and isinstance(ident, str) and ident:
-                friendly = (dev.name_by_user or dev.name or ident).strip()
-                return ident, friendly
+                canonical = _normalize_device_identifier(dev, ident)
+                friendly = (dev.name_by_user or dev.name or canonical).strip()
+                return canonical, friendly
         raise HomeAssistantError(f"Device '{arg}' has no valid {DOMAIN} identifier")
 
     # 2) entity_id
@@ -194,8 +212,9 @@ def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> Tuple[str, str
                     except (TypeError, ValueError):
                         continue
                     if domain == DOMAIN and isinstance(ident, str) and ident:
-                        friendly = (dev.name_by_user or dev.name or ident).strip()
-                        return ident, friendly
+                        canonical = _normalize_device_identifier(dev, ident)
+                        friendly = (dev.name_by_user or dev.name or canonical).strip()
+                        return canonical, friendly
             raise HomeAssistantError(
                 f"Entity '{arg}' is not linked to a valid {DOMAIN} device"
             )
