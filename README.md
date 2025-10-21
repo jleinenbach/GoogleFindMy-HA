@@ -123,9 +123,10 @@ Contributions are welcome and encouraged!
 To contrubuted, please:
 1. Fork the repository
 2. Create a feature branch
-3. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes
-4. Test thoroughly with your Find My devices
-5. Submit a pull request with detailed description
+3. Install the development dependencies with `python -m pip install -r requirements-dev.txt`
+4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes
+5. Test thoroughly with your Find My devices
+6. Submit a pull request with detailed description
 
 ## Credits
 
