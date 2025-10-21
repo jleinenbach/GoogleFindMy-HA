@@ -67,7 +67,9 @@ class _StubEntityRegistry:
         ordered = OrderedDict((entry.entity_id, entry) for entry in entries)
         self.entities: OrderedDict[str, _StubEntityEntry] = ordered
 
-    def async_get_entity_id(self, domain: str, platform: str, unique_id: str) -> str | None:
+    def async_get_entity_id(
+        self, domain: str, platform: str, unique_id: str
+    ) -> str | None:
         for entry in self.entities.values():
             if (
                 entry.entity_id.startswith(f"{domain}.")
