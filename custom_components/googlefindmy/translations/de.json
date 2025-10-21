@@ -269,6 +269,12 @@
     },
     "stop_sound_failed": {
       "message": "Tonstopp auf '{device_id}' fehlgeschlagen: {error}"
+    },
+    "missing_token_cache": {
+      "message": "Token-Cache fehlt. Bitte den eintragsbezogenen TokenCache übergeben (z. B. entry.runtime_data.token_cache)."
+    },
+    "missing_namespace": {
+      "message": "Namespace fehlt. Übergebe den eintragsbezogenen Namespace bzw. die ConfigEntry-ID, um Metadaten sauber zu isolieren."
     }
   }
 }

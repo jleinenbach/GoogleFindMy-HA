@@ -257,21 +257,27 @@
       "description": "Some entities for **{entry}** already use the new unique ID format and conflict with the migration.\n\n**Count:** {count}\n**Examples:** {entities}\n\nTo resolve:\n1) Open **Settings → Devices & Services → Entities** and search for the listed entities.\n2) Remove or rename conflicting entities, or delete abandoned entries from other integrations.\n3) Reload the integration (or restart Home Assistant). The migration will retry automatically."
     }
   },
-  "exceptions": {
-    "device_not_found": {
-      "message": "Device '{device_id}' could not be found or is not part of this integration."
-    },
-    "no_active_entry": {
-      "message": "No active Google Find My Device entry is available. Ensure exactly one entry is enabled and try again."
-    },
-    "locate_failed": {
-      "message": "Failed to locate device '{device_id}': {error}"
-    },
-    "play_sound_failed": {
-      "message": "Failed to play sound on '{device_id}': {error}"
-    },
-    "stop_sound_failed": {
-      "message": "Failed to stop sound on '{device_id}': {error}"
+    "exceptions": {
+        "device_not_found": {
+            "message": "Device '{device_id}' could not be found or is not part of this integration."
+        },
+        "no_active_entry": {
+            "message": "No active Google Find My Device entry is available. Ensure exactly one entry is enabled and try again."
+        },
+        "locate_failed": {
+            "message": "Failed to locate device '{device_id}': {error}"
+        },
+        "play_sound_failed": {
+            "message": "Failed to play sound on '{device_id}': {error}"
+        },
+        "stop_sound_failed": {
+            "message": "Failed to stop sound on '{device_id}': {error}"
+        },
+        "missing_token_cache": {
+            "message": "Token cache missing. Provide the entry-specific TokenCache (for example, entry.runtime_data.token_cache)."
+        },
+        "missing_namespace": {
+            "message": "Namespace missing. Pass the entry-specific namespace or ConfigEntry ID to keep cached metadata isolated."
+        }
     }
-  }
 }

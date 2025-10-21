@@ -56,6 +56,7 @@ class _StubCache:
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
+        self.entry_id = "stub-entry"
 
     async def get(self, key: str) -> Any:
         return self._data.get(key)

@@ -17,12 +17,12 @@ from typing import (
     runtime_checkable,
     Awaitable,
     Any,
+    Dict,
+    List,
     cast,
 )
 
 import aiohttp
-
-from custom_components.googlefindmy.Auth.token_cache import _get_default_cache
 
 # Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
@@ -38,6 +38,10 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.example_data_provider import get_example_data
+from custom_components.googlefindmy.exceptions import (
+    MissingNamespaceError,
+    MissingTokenCacheError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -256,7 +260,7 @@ async def get_location_data_for_device(
     refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
     namespace: Optional[str] = None,
     cache: Optional["TokenCache"] = None,  # type: ignore[name-defined]
-) -> list:
+) -> List[Dict[str, Any]]:
     """Get location data for a device (async, HA-compatible).
 
     Orchestrates:
@@ -269,8 +273,7 @@ async def get_location_data_for_device(
     - When `namespace` is provided (e.g., entry_id), **TTL metadata** is namespaced.
     - When `cache` is provided, `async_nova_request` will prefer that entry-local
       TokenCache for **username**, **token content**, and (if no `cache_get/set`
-      overrides are provided) **TTL metadata** as well. When `cache` is omitted
-      the legacy default cache is used as a defensive fallback.
+      overrides are provided) **TTL metadata** as well.
 
     Args:
         canonic_device_id: The canonical ID of the device to locate.
@@ -283,7 +286,6 @@ async def get_location_data_for_device(
         refresh_override: Optional async function to refresh a token in isolation.
         namespace: Optional entry-scoped namespace (e.g., config_entry.entry_id).
         cache: TokenCache providing entry-scoped username/token/metadata storage.
-            Falls back to the legacy default cache when omitted.
 
     Returns:
         A list of dictionaries containing location data, or an empty list on failure.
@@ -301,23 +303,21 @@ async def get_location_data_for_device(
     ctx = _CallbackContext()
     loop = asyncio.get_running_loop()
 
-    cache_ref: "TokenCache"
-    if cache is not None:
-        cache_ref = cast("TokenCache", cache)
-    else:
-        try:
-            cache_ref = _get_default_cache()
-        except Exception as err:
-            raise RuntimeError(
-                "TokenCache instance is required to decrypt E2EE location responses."
-            ) from err
+    if cache is None:
+        raise MissingTokenCacheError()
+
+    cache_ref = cast("TokenCache", cache)
+
+    resolved_namespace = namespace or getattr(cache_ref, "entry_id", None)
+    if not resolved_namespace:
+        raise MissingNamespaceError()
 
     # Build cache accessors, preferring entry-local namespacing when provided.
     ns_get: Optional[Callable[[str], Awaitable[Any]]] = cache_get
     ns_set: Optional[Callable[[str, Any], Awaitable[None]]] = cache_set
 
-    if namespace and (cache_get is None or cache_set is None):
-        ns_prefix = f"{namespace}:"
+    if resolved_namespace and (cache_get is None or cache_set is None):
+        ns_prefix = f"{resolved_namespace}:"
 
         if ns_get is None:
 
@@ -380,7 +380,7 @@ async def get_location_data_for_device(
                 cache_get=ns_get,
                 cache_set=ns_set,
                 refresh_override=refresh_override,
-                namespace=namespace,
+                namespace=resolved_namespace,
                 cache=cache_ref,  # pass entry-scoped TokenCache through
             )
         except asyncio.CancelledError:

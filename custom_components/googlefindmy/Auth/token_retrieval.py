@@ -14,7 +14,8 @@ import gpsoauth
 
 # Use the async-first API; the legacy sync wrapper is intentionally unsupported.
 from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
-from custom_components.googlefindmy.Auth.token_cache import TokenCache, _get_default_cache
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -70,11 +71,8 @@ def _extract_android_id_from_credentials(fcm_creds: Any) -> int | None:
     return None
 
 
-async def _resolve_android_id(*, cache: TokenCache | None) -> int:
+async def _resolve_android_id(*, cache: TokenCache) -> int:
     """Resolve the android_id tied to the provided cache, with fallback."""
-
-    if cache is None:
-        return _ANDROID_ID
 
     try:
         fcm_creds = await cache.get("fcm_credentials")
@@ -200,10 +198,7 @@ def request_token(
 
     # Resolve the TokenCache (required for multi-account isolation).
     if cache is None:
-        try:
-            cache = _get_default_cache()
-        except Exception as err:  # noqa: BLE001 - propagate as ValueError for callers
-            raise ValueError("TokenCache instance is required for multi-account safety.") from err
+        raise MissingTokenCacheError()
 
     # Resolve the AAS token: prefer injected token; otherwise use async provider in an isolated loop.
     if aas_token is None:
@@ -256,7 +251,7 @@ async def async_request_token(
     """
     # Get the AAS token from injected token → injected provider → default provider.
     if cache is None:
-        raise ValueError("TokenCache instance is required for multi-account safety.")
+        raise MissingTokenCacheError()
 
     if aas_token is None:
         if aas_provider is not None:

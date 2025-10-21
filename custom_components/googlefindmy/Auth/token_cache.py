@@ -340,6 +340,20 @@ def _get_default_cache() -> TokenCache:
     )
 
 
+def get_cache_for_entry(entry_id: str) -> TokenCache:
+    """Return the registered TokenCache for a config entry ID."""
+
+    if entry_id in _INSTANCES:
+        return _INSTANCES[entry_id]
+    raise KeyError(f"No TokenCache registered for entry_id '{entry_id}'.")
+
+
+def get_registered_entry_ids() -> list[str]:
+    """Return a list of registered entry IDs (for diagnostics/CLI helpers)."""
+
+    return list(_INSTANCES)
+
+
 # ------------------------------- Public facade --------------------------------
 
 async def async_get_cached_value(name: str) -> Any:
