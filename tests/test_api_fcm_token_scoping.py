@@ -137,3 +137,40 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
 
     caches = [entry[4] for entry in submissions]
     assert caches == ["entry-1", "entry-2", "entry-1", "entry-2"]
+
+
+def test_async_get_device_location_uses_scoped_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Multi-account location requests must not fall back to legacy cache helpers."""
+
+    recorded: list[tuple[Optional[str], Any]] = []
+
+    async def fake_get_location_data(
+        canonic_device_id: str,
+        name: str,
+        *,
+        session: Any,
+        namespace: Optional[str],
+        cache: DummyCache,
+        **_: Any,
+    ) -> list[dict[str, Any]]:
+        recorded.append((namespace, cache))
+        return [{"canonic_id": canonic_device_id, "latitude": 1}]
+
+    monkeypatch.setattr(api_module, "get_location_data_for_device", fake_get_location_data)
+
+    api_entry_1 = GoogleFindMyAPI(cache=DummyCache(entry_id="entry-1"))
+    api_entry_2 = GoogleFindMyAPI(cache=DummyCache(entry_id="entry-2"))
+
+    async def _exercise() -> None:
+        loc1 = await api_entry_1.async_get_device_location("device-1", "Device 1")
+        loc2 = await api_entry_2.async_get_device_location("device-2", "Device 2")
+
+        assert loc1 == {"canonic_id": "device-1", "latitude": 1}
+        assert loc2 == {"canonic_id": "device-2", "latitude": 1}
+
+    asyncio.run(_exercise())
+
+    assert recorded == [
+        ("entry-1", api_entry_1._cache),  # type: ignore[attr-defined]
+        ("entry-2", api_entry_2._cache),  # type: ignore[attr-defined]
+    ]
