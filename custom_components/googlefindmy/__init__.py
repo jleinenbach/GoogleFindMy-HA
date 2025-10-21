@@ -907,9 +907,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     else:
         _LOGGER.debug("GoogleHomeFilter not available; continuing without it")
 
-    # Legacy pointer for other modules
     bucket = hass.data.setdefault(DOMAIN, {})
-    bucket[entry.entry_id] = coordinator
 
     # Coordinator setup (DR listeners, initial index, etc.)
     try:
@@ -1057,7 +1055,13 @@ async def async_remove_config_entry_device(
         return False
 
     try:
-        coordinator: GoogleFindMyCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
+        runtime_entry = runtime_bucket.get(entry.entry_id)
+        coordinator: GoogleFindMyCoordinator | None = getattr(runtime_entry, "coordinator", None)
+        if not isinstance(coordinator, GoogleFindMyCoordinator):
+            coordinator = getattr(entry, "runtime_data", None)
+            if not isinstance(coordinator, GoogleFindMyCoordinator):
+                coordinator = None
         if coordinator is not None:
             coordinator.purge_device(dev_id)
     except Exception as err:
@@ -1130,9 +1134,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         - Device owner index cleanup: remove all canonical_id claims for this entry (E2.5).
     """
     try:
-        coordinator: GoogleFindMyCoordinator | None = (
-            hass.data.get(DOMAIN, {}).get(entry.entry_id) or getattr(entry, "runtime_data", None)
-        )
+        entries_bucket: dict[str, RuntimeData] | None = hass.data.get(DOMAIN, {}).get("entries")  # type: ignore[assignment]
+        runtime_data = None if entries_bucket is None else entries_bucket.get(entry.entry_id)
+        coordinator: GoogleFindMyCoordinator | None = getattr(entry, "runtime_data", None)
+        if runtime_data and hasattr(runtime_data, "coordinator"):
+            coordinator = runtime_data.coordinator
         if coordinator:
             await coordinator.async_shutdown()
     except Exception as err:
@@ -1168,7 +1174,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _LOGGER.debug("Owner-index cleanup failed: %s", err)
 
     if ok:
-        hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
         try:
             entry.runtime_data = None  # type: ignore[assignment]
         except Exception:

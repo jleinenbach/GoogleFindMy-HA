@@ -50,6 +50,7 @@ from .const import (
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
 )
+from .coordinator import GoogleFindMyCoordinator
 
 # ---------------------------------------------------------------------------
 # Redaction policy
@@ -333,13 +334,21 @@ async def async_get_config_entry_diagnostics(
         integration_meta = {}
 
     # --- Coordinator / runtime_data (preferred) or hass.data fallback ---
-    coordinator = None
+    coordinator: GoogleFindMyCoordinator | None = None
     runtime = getattr(entry, "runtime_data", None)
-    if runtime:
-        # Allow either a direct coordinator or a holder object with attribute "coordinator"
-        coordinator = getattr(runtime, "coordinator", runtime)
+    if isinstance(runtime, GoogleFindMyCoordinator):
+        coordinator = runtime
+    elif runtime is not None and hasattr(runtime, "coordinator"):
+        candidate = getattr(runtime, "coordinator")
+        if isinstance(candidate, GoogleFindMyCoordinator):
+            coordinator = candidate
+
     if coordinator is None:
-        coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
+        runtime_entry = runtime_bucket.get(entry.entry_id)
+        candidate = getattr(runtime_entry, "coordinator", None)
+        if isinstance(candidate, GoogleFindMyCoordinator):
+            coordinator = candidate
 
     # --- Build a compact, anonymized options snapshot (no raw strings that could contain PII) ---
     opt = entry.options
