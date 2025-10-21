@@ -178,16 +178,29 @@ class GoogleFindMyMapView(HomeAssistantView):
             # ---- 4) Find the device_tracker entity (entity registry, scoped to this entry) ----
             entity_registry = async_get_entity_registry(self.hass)
             entity_id: str | None = None
+            entry_unique_id_candidates: list[str] = []
 
-            for entity in entity_registry.entities.values():
+            entry_id = entry.entry_id
+            if entry_id:
+                entry_unique_id_candidates.append(f"{entry_id}:{device_id}")
+                entry_unique_id_candidates.append(
+                    f"{DOMAIN}_{entry_id}_{device_id}"
+                )
+            entry_unique_id_candidates.append(f"{DOMAIN}_{device_id}")
+
+            for unique_id in entry_unique_id_candidates:
+                candidate_entity_id = entity_registry.async_get_entity_id(
+                    "device_tracker", DOMAIN, unique_id
+                )
+                if not candidate_entity_id:
+                    continue
+
+                registry_entry = entity_registry.async_get(candidate_entity_id)
                 if (
-                    entity.config_entry_id == entry.entry_id
-                    and entity.platform == DOMAIN
-                    and entity.entity_id.startswith("device_tracker.")
-                    and entity.unique_id
-                    and device_id in entity.unique_id
+                    registry_entry
+                    and registry_entry.config_entry_id == entry.entry_id
                 ):
-                    entity_id = entity.entity_id
+                    entity_id = candidate_entity_id
                     break
 
             if not entity_id:
