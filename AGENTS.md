@@ -21,6 +21,7 @@
 
   * **Auto-corrections applied:** trivial test failures (syntax, imports, obvious assertion drift) are automatically fixed when unambiguous (§3.1).
   * **Regression test added:** for `fix:` commits (or `fix/...` branches), add a minimal regression test if none existed (§3.2).
+* **Deprecation remediation.** Investigate and resolve every `DeprecationWarning` observed during implementation, local verification, or CI. Prefer code changes over warning filters; if a warning must persist, document the upstream blocker in the PR description with a follow-up issue reference.
 * **Coverage targets.** Keep **config flow at 100 %**; repo total **≥ 95 %**. If temporarily lower due to necessary code removal, **open a follow-up issue** to restore coverage and reference it in the PR.
 * **Behavioral safety.** No secrets/PII in logs; user-visible errors use translated `translation_key`s; entities report `unavailable` on communication failures.
 * **Docs/i18n (when user-facing behavior changes).** Update `README.md` and `translations/*`; no hard-coded UI strings in Python. Follow **Rule §9.DOC** for documentation/docstring preservation. Document any notable CI/test guidance adjustments directly in the PR description so automation instructions remain synchronized.
@@ -32,7 +33,9 @@
 > **bash commands:**
 > – pre-commit run --all-files *(required even though pre-commit.ci auto-applies hook fixes on PR branches)*
 > – python3 -m script.hassfest
-> – pytest -q
+> – pytest -q *(inspect the output for any `DeprecationWarning`s and resolve each one before proceeding)*
+>
+> **optional escalation:** `PYTHONWARNINGS=error::DeprecationWarning pytest -q` *(turns new deprecations into hard failures so they cannot be overlooked—clear the root cause or document the upstream blocker before retrying without the flag).*
 
 ---
 

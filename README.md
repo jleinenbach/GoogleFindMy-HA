@@ -120,13 +120,14 @@ The integration respects Google's rate limits by:
 
 Contributions are welcome and encouraged!
 
-To contrubuted, please:
+To contribute, please:
 1. Fork the repository
 2. Create a feature branch
 3. Install the development dependencies with `python -m pip install -r requirements-dev.txt`
 4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes
-5. Test thoroughly with your Find My devices
-6. Submit a pull request with detailed description
+5. Run `pytest -q`, fix any failures, and address every `DeprecationWarning` you encounter (consider rerunning with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings).
+6. Test thoroughly with your Find My devices
+7. Submit a pull request with detailed description
 
 ### Development Scripts
 
