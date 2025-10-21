@@ -2,11 +2,9 @@
 # script/precommit_hooks/ruff_format.py
 """Run Ruff format and report reformatted files."""
 
-from __future__ import annotations
-
 import subprocess
 import sys
-from typing import Sequence
+from collections.abc import Sequence
 
 
 def _split_args(argv: Sequence[str]) -> tuple[list[str], list[str]]:
