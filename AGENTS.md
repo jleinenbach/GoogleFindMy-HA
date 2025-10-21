@@ -14,7 +14,7 @@
 
 * **PR template alignment.** Complete [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) and keep the responses synchronized with the items listed below.
 * **AGENTS upkeep.** Before opening a PR, review all applicable `AGENTS.md` files and update them when improvements or corrections are evident.
-* **Contributor guidance hygiene.** Verify that root and scoped `AGENTS.md` files remain accurate, and refresh `.github` workflows/templates, testing documentation, or other contributor instructions when the work uncovers outdated guidance.
+* **Contributor guidance hygiene.** Verify that root and scoped `AGENTS.md` files remain accurate. When code or tests touch related automation or guidance, review and update the impacted `.github` workflows/templates, shared test utilities, and documentation so they stay current.
 * **Purpose & scope.** PR title/description state *what* changes and *why*, and which user scenarios are affected.
 * **Tests — creation & update (MUST).** Any code change ships unit/integration tests that cover the change; every bug fix includes a **regression test** (§3.2). Never reduce existing coverage without a follow-up to restore it.
 
@@ -22,7 +22,7 @@
   * **Regression test added:** for `fix:` commits (or `fix/...` branches), add a minimal regression test if none existed (§3.2).
 * **Coverage targets.** Keep **config flow at 100 %**; repo total **≥ 95 %**. If temporarily lower due to necessary code removal, **open a follow-up issue** to restore coverage and reference it in the PR.
 * **Behavioral safety.** No secrets/PII in logs; user-visible errors use translated `translation_key`s; entities report `unavailable` on communication failures.
-* **Docs/i18n (when user-facing behavior changes).** Update `README.md` and `translations/*`; no hard-coded UI strings in Python. Follow **Rule §9.DOC** for documentation/docstring preservation.
+* **Docs/i18n (when user-facing behavior changes).** Update `README.md` and `translations/*`; no hard-coded UI strings in Python. Follow **Rule §9.DOC** for documentation/docstring preservation. Document any notable CI/test guidance adjustments directly in the PR description so automation instructions remain synchronized.
 * **Deprecation check (concise).** Add 2–4 bullets with links to HA release notes/dev docs that might affect this change (§8).
 * **Quality-scale evidence (lightweight).** If a Quality-Scale rule is touched, append one evidence bullet in `quality_scale.yaml` (or propose adding the file). **Do not block** if it’s missing—note this in the PR.
 * **Historical context.** For regressions, reference implementations, or suspected newly introduced bugs, inspect the relevant commit history (e.g., `git log -- <file>`, `git show <commit>`, `git diff <old>..<new>`).
