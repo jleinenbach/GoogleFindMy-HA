@@ -250,11 +250,15 @@
     },
     "multiple_config_entries": {
       "title": "Se detectaron varias entradas de configuración",
-      "description": "Actualmente hay más de una entrada de configuración para esta integración:\n\n{entries}\n\nSolo se admite una única entrada. Ve a **Ajustes → Dispositivos y servicios**, abre **Google Find My Device** y elimina las entradas duplicadas hasta que quede exactamente una. Después recarga la integración (o reinicia Home Assistant)."
+      "description": "Google Find My Device ahora admite varias entradas de configuración, una por cuenta de Google. Si cada entrada usa una cuenta diferente, no es necesario hacer nada. Cuando se añade la misma cuenta dos veces, Home Assistant crea una reparación **Entradas de cuenta duplicadas** para el nuevo registro y que así puedas retirar o reactivar el correcto."
     },
     "unique_id_collision": {
       "title": "Conflicto de ID único de entidad detectado",
       "description": "Algunas entidades de **{entry}** ya usan el nuevo formato de ID único y entran en conflicto con la migración.\n\n**Cantidad:** {count}\n**Ejemplos:** {entities}\n\nPara resolverlo:\n1) Abre **Ajustes → Dispositivos y servicios → Entidades** y busca las entidades indicadas.\n2) Elimina o renombra las entidades en conflicto, o borra entradas abandonadas de otras integraciones.\n3) Recarga la integración (o reinicia Home Assistant). La migración volverá a intentarse automáticamente."
+    },
+    "duplicate_account_entries": {
+      "title": "Entradas de cuenta duplicadas detectadas",
+      "description": "Esta cuenta de Google (**{email}**) ya está configurada en otro registro:\n\n{entries}\n\nDesactiva o elimina las entradas duplicadas para que solo quede activa una por cuenta y, después, vuelve a cargar la integración (o reinicia Home Assistant)."
     }
   },
   "exceptions": {
@@ -269,6 +273,9 @@
     },
     "stop_sound_failed": {
       "message": "No se pudo detener el sonido en '{device_id}': {error}"
+    },
+    "no_active_entry": {
+      "message": "No hay ninguna entrada activa de Google Find My Device. Entradas activas: {active_count}/{total_count}. Activa una de las entradas configuradas ({entries}) o añade una cuenta nueva y vuelve a intentarlo."
     }
   }
 }

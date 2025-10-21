@@ -250,11 +250,15 @@
     },
     "multiple_config_entries": {
       "title": "Wykryto wiele wpisów konfiguracji",
-      "description": "Obecnie istnieje więcej niż jeden wpis konfiguracji dla tej integracji:\n\n{entries}\n\nObsługiwany jest tylko jeden wpis. Przejdź do **Ustawienia → Urządzenia i usługi**, otwórz **Google Find My Device** i usuń duplikaty tak, aby pozostał tylko jeden. Następnie przeładuj integrację (lub uruchom ponownie Home Assistant)."
+      "description": "Google Find My Device obsługuje teraz wiele wpisów konfiguracji – po jednym na każde konto Google. Jeśli każdy wpis dotyczy innego konta, nie są wymagane żadne działania. Gdy to samo konto zostanie dodane dwukrotnie, Home Assistant tworzy naprawę **Zduplikowane wpisy kont** dla nowego wpisu, aby można było usunąć lub ponownie włączyć właściwy."
     },
     "unique_id_collision": {
       "title": "Wykryto konflikt unikalnych ID encji",
       "description": "Niektóre encje dla **{entry}** używają już nowego formatu unikalnych ID i kolidują z migracją.\n\n**Liczba:** {count}\n**Przykłady:** {entities}\n\nAby rozwiązać problem:\n1) Otwórz **Ustawienia → Urządzenia i usługi → Encje** i wyszukaj wskazane encje.\n2) Usuń lub zmień nazwy kolidujących encji, albo usuń porzucone wpisy z innych integracji.\n3) Przeładuj integrację (lub uruchom ponownie Home Assistant). Migracja zostanie ponowiona automatycznie."
+    },
+    "duplicate_account_entries": {
+      "title": "Wykryto zduplikowane wpisy kont",
+      "description": "To konto Google (**{email}**) jest już skonfigurowane w innym wpisie:\n\n{entries}\n\nWyłącz lub usuń zduplikowane wpisy, aby dla każdego konta pozostał tylko jeden aktywny wpis, a następnie przeładuj integrację (lub uruchom ponownie Home Assistanta)."
     }
   },
   "exceptions": {
@@ -269,6 +273,9 @@
     },
     "stop_sound_failed": {
       "message": "Nie udało się zatrzymać dźwięku na '{device_id}': {error}"
+    },
+    "no_active_entry": {
+      "message": "Brak aktywnych wpisów Google Find My Device. Aktywne wpisy: {active_count}/{total_count}. Włącz jeden ze skonfigurowanych wpisów ({entries}) lub dodaj nowe konto i spróbuj ponownie."
     }
   }
 }

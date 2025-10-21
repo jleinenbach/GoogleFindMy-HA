@@ -87,9 +87,38 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         # Early exit: no active runtimes at all
         runtimes = list(_iter_runtimes(hass))
         if not runtimes:
+            configured_entries = []
+            active_count = 0
+            total_count = 0
+
+            config_entries = getattr(hass, "config_entries", None)
+            if config_entries is not None:
+                try:
+                    configured_entries = list(config_entries.async_entries(DOMAIN))
+                except Exception:  # pragma: no cover - defensive guard
+                    configured_entries = []
+
+            if configured_entries:
+                total_count = len(configured_entries)
+                is_active = ctx.get("is_active_entry")
+                if callable(is_active):
+                    active_count = sum(1 for entry in configured_entries if is_active(entry))
+                entry_titles = [
+                    entry.title or entry.entry_id
+                    for entry in configured_entries
+                ]
+                entries_placeholder = ", ".join(entry_titles) or "—"
+            else:
+                entries_placeholder = "—"
+
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
                 translation_key="no_active_entry",
+                translation_placeholders={
+                    "entries": entries_placeholder,
+                    "active_count": str(active_count),
+                    "total_count": str(total_count),
+                },
             )
 
         # Resolve canonical id & friendly name via context resolver (device_id/entity_id/canonical_id)

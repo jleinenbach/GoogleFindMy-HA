@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import sys
 from contextlib import suppress
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable
 from unittest.mock import AsyncMock, call
@@ -19,8 +21,10 @@ from custom_components.googlefindmy.const import (
     DATA_SECRET_BUNDLE,
     DOMAIN,
     MODE_MIGRATE,
+    SERVICE_LOCATE_DEVICE,
     SERVICE_REBUILD_REGISTRY,
 )
+from homeassistant.exceptions import ServiceValidationError
 
 
 class _StubCache:
@@ -305,6 +309,12 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             update_coordinator_module.UpdateFailed = _UpdateFailed
 
         integration = importlib.import_module("custom_components.googlefindmy.__init__")
+        config_entries_module = importlib.import_module("homeassistant.config_entries")
+        state_cls = config_entries_module.ConfigEntryState
+        if not hasattr(state_cls, "SETUP_IN_PROGRESS"):
+            setattr(state_cls, "SETUP_IN_PROGRESS", "setup_in_progress")
+        if not hasattr(state_cls, "SETUP_RETRY"):
+            setattr(state_cls, "SETUP_RETRY", "setup_retry")
         coordinator_module = importlib.import_module("custom_components.googlefindmy.coordinator")
         button_module = importlib.import_module("custom_components.googlefindmy.button")
         sys.modules.pop("custom_components.googlefindmy.map_view", None)
@@ -421,5 +431,135 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             with suppress(Exception):
                 loop.run_until_complete(task)
         loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A duplicate-account repair issue renders with translated placeholders."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        issue_module = sys.modules["homeassistant.helpers.issue_registry"]
+
+        integration = importlib.import_module("custom_components.googlefindmy.__init__")
+
+        existing_entry = _StubConfigEntry()
+        existing_entry.entry_id = "entry-existing"
+        existing_entry.title = "Primary Account"
+        existing_entry.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
+        existing_entry.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
+
+        new_entry = _StubConfigEntry()
+        new_entry.entry_id = "entry-new"
+        new_entry.title = "Duplicate Account"
+        new_entry.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
+        new_entry.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
+
+        hass = _StubHass(new_entry, loop)
+        hass.config_entries._entries.append(existing_entry)
+
+        recorded_issues: list[dict[str, Any]] = []
+
+        monkeypatch.setattr(integration.ir, "async_delete_issue", lambda *_, **__: None, raising=False)
+
+        def _record_issue(_hass: Any, _domain: str, issue_id: str, **kwargs: Any) -> None:
+            recorded_issues.append({"id": issue_id, **kwargs})
+
+        monkeypatch.setattr(integration.ir, "async_create_issue", _record_issue, raising=False)
+
+        async def _exercise() -> bool:
+            return await integration.async_setup_entry(hass, new_entry)
+
+        result = loop.run_until_complete(_exercise())
+        assert result is False
+        assert recorded_issues, "Expected duplicate-account issue to be recorded"
+
+        issue = recorded_issues[-1]
+        assert issue["translation_key"] == "duplicate_account_entries"
+        placeholders = issue["translation_placeholders"]
+        assert placeholders["email"] == "dup@example.com"
+        assert "Primary Account" in placeholders["entries"]
+
+        translation = json.loads(
+            Path("custom_components/googlefindmy/translations/en.json").read_text(encoding="utf-8")
+        )
+        template = translation["issues"]["duplicate_account_entries"]["description"]
+        rendered = template.format(**placeholders)
+        assert "dup@example.com" in rendered
+        assert "Primary Account" in rendered
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_service_no_active_entry_placeholders() -> None:
+    """Service validation exposes counts/list placeholders for inactive setups."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        services_module = importlib.import_module("custom_components.googlefindmy.services")
+
+        entries = [
+            SimpleNamespace(title="Account One", entry_id="entry-1", active=False),
+            SimpleNamespace(title="Account Two", entry_id="entry-2", active=False),
+        ]
+
+        class _ConfigEntriesStub:
+            def async_entries(self, domain: str) -> list[Any]:
+                assert domain == DOMAIN
+                return list(entries)
+
+        class _ServicesStub:
+            def __init__(self) -> None:
+                self.registered: dict[tuple[str, str], Callable[..., Any]] = {}
+
+            def async_register(self, domain: str, service: str, handler: Callable[..., Any]) -> None:
+                self.registered[(domain, service)] = handler
+
+        hass = SimpleNamespace(
+            data={},
+            services=_ServicesStub(),
+            config_entries=_ConfigEntriesStub(),
+        )
+
+        ctx: dict[str, Any] = {
+            "domain": DOMAIN,
+            "resolve_canonical": lambda _hass, device_id: (device_id, device_id),
+            "is_active_entry": lambda entry: getattr(entry, "active", False),
+            "primary_active_entry": lambda entries_list: None,
+            "opt": lambda entry, key, default=None: default,
+            "default_map_view_token_expiration": False,
+            "opt_map_view_token_expiration_key": "map_view_token_expiration",
+            "redact_url_token": lambda token: token,
+            "soft_migrate_entry": AsyncMock(),
+        }
+
+        loop.run_until_complete(services_module.async_register_services(hass, ctx))
+
+        handler = hass.services.registered[(DOMAIN, SERVICE_LOCATE_DEVICE)]
+        call = SimpleNamespace(data={"device_id": "device-1"})
+
+        with pytest.raises(ServiceValidationError) as errinfo:
+            loop.run_until_complete(handler(call))
+
+        error = errinfo.value
+        placeholders = error.translation_placeholders
+        assert placeholders["active_count"] == "0"
+        assert placeholders["total_count"] == "2"
+        assert "Account One" in placeholders["entries"]
+
+        translation = json.loads(
+            Path("custom_components/googlefindmy/translations/en.json").read_text(encoding="utf-8")
+        )
+        template = translation["exceptions"]["no_active_entry"]["message"]
+        rendered = template.format(**placeholders)
+        assert "0/2" in rendered
+        assert "Account One" in rendered
+    finally:
         loop.close()
         asyncio.set_event_loop(None)

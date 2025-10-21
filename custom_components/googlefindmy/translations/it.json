@@ -250,11 +250,15 @@
     },
     "multiple_config_entries": {
       "title": "Rilevate più voci di configurazione",
-      "description": "Esistono attualmente più voci di configurazione per questa integrazione:\n\n{entries}\n\nÈ supportata una sola voce. Vai su **Impostazioni → Dispositivi e servizi**, apri **Google Find My Device** e rimuovi i duplicati finché non ne rimane una sola. Poi ricarica l’integrazione (o riavvia Home Assistant)."
+      "description": "Google Find My Device ora supporta più voci di configurazione, una per ogni account Google. Se ogni voce utilizza un account diverso, non è necessaria alcuna azione. Quando lo stesso account viene aggiunto due volte, Home Assistant crea una riparazione **Voci di account duplicate** per la nuova voce così da poter rimuovere o riattivare quella corretta."
     },
     "unique_id_collision": {
       "title": "Rilevato conflitto di ID univoco dell’entità",
       "description": "Alcune entità di **{entry}** utilizzano già il nuovo formato di ID univoco e sono in conflitto con la migrazione.\n\n**Conteggio:** {count}\n**Esempi:** {entities}\n\nPer risolvere:\n1) Apri **Impostazioni → Dispositivi e servizi → Entità** e cerca le entità elencate.\n2) Rimuovi o rinomina le entità in conflitto, oppure elimina le voci non più utilizzate di altre integrazioni.\n3) Ricarica l’integrazione (o riavvia Home Assistant). La migrazione verrà ripetuta automaticamente."
+    },
+    "duplicate_account_entries": {
+      "title": "Rilevate voci di account duplicate",
+      "description": "Questo account Google (**{email}**) è già configurato in un'altra voce:\n\n{entries}\n\nDisattiva o rimuovi le voci duplicate in modo che rimanga attiva una sola voce per account, quindi ricarica l'integrazione (o riavvia Home Assistant)."
     }
   },
   "exceptions": {
@@ -269,6 +273,9 @@
     },
     "stop_sound_failed": {
       "message": "Impossibile interrompere il suono su '{device_id}': {error}"
+    },
+    "no_active_entry": {
+      "message": "Nessuna voce attiva di Google Find My Device è disponibile. Voci attive: {active_count}/{total_count}. Attiva una delle voci configurate ({entries}) oppure aggiungi un nuovo account e riprova."
     }
   }
 }
