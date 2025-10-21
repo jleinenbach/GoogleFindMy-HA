@@ -1,11 +1,17 @@
 # tests/test_location_request_cache_isolation.py
 
+# tests/test_location_request_cache_isolation.py
+
 import asyncio
 from typing import Any, Callable
 
 import pytest
 
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import location_request
+from custom_components.googlefindmy.exceptions import (
+    MissingNamespaceError,
+    MissingTokenCacheError,
+)
 
 
 class FakeTokenCache:
@@ -48,12 +54,7 @@ def test_locate_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPat
     """Locate flow must not fall back to the global cache when entry cache is provided."""
 
     primary_cache = FakeTokenCache("entry-one")
-    secondary_cache = FakeTokenCache("entry-two")
-
     receiver = DummyFcmReceiver()
-
-    def fail_default_cache() -> FakeTokenCache:
-        raise AssertionError("_get_default_cache should not be used when cache is provided")
 
     def fake_make_location_callback(
         *, ctx: Any, canonic_device_id: str, **_: Any
@@ -83,7 +84,6 @@ def test_locate_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPat
         return "00"
 
     monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda: receiver)
-    monkeypatch.setattr(location_request, "_get_default_cache", fail_default_cache)
     monkeypatch.setattr(location_request, "_make_location_callback", fake_make_location_callback)
     monkeypatch.setattr(location_request, "async_nova_request", fake_async_nova_request)
     monkeypatch.setattr(location_request, "create_location_request", lambda *args, **kwargs: "payload")
@@ -94,7 +94,6 @@ def test_locate_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPat
             name="Tracker",
             session=None,
             username="user@example.com",
-            namespace="entry-one",
             cache=primary_cache,
         )
 
@@ -103,6 +102,50 @@ def test_locate_request_prefers_entry_scoped_cache(monkeypatch: pytest.MonkeyPat
             ("set", "entry-one:ttl", "value"),
             ("get", "entry-one:ttl", None),
         ]
-        assert secondary_cache.calls == []
+        # Only the provided cache is used.
+        assert primary_cache.calls == [
+            ("set", "entry-one:ttl", "value"),
+            ("get", "entry-one:ttl", None),
+        ]
+
+    asyncio.run(_run())
+
+
+def test_locate_request_requires_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing cache should raise a translated MissingTokenCacheError."""
+
+    receiver = DummyFcmReceiver()
+    monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda: receiver)
+
+    async def _run() -> None:
+        with pytest.raises(MissingTokenCacheError):
+            await location_request.get_location_data_for_device(
+                canonic_device_id="device-123",
+                name="Tracker",
+            )
+
+    asyncio.run(_run())
+
+
+def test_locate_request_requires_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Caches without entry_id should trigger MissingNamespaceError."""
+
+    class _CacheWithoutEntry(FakeTokenCache):
+        def __init__(self) -> None:
+            super().__init__("entryless")
+            self.entry_id = ""
+
+    receiver = DummyFcmReceiver()
+    monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda: receiver)
+
+    cache = _CacheWithoutEntry()
+
+    async def _run() -> None:
+        with pytest.raises(MissingNamespaceError):
+            await location_request.get_location_data_for_device(
+                canonic_device_id="device-456",
+                name="Tracker",
+                cache=cache,
+            )
 
     asyncio.run(_run())

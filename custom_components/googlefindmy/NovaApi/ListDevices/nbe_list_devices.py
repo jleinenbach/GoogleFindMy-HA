@@ -6,9 +6,11 @@
 """Handles fetching the list of Find My devices from the Nova API."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import binascii
 import logging
+import os
 from typing import Optional, Callable, Awaitable, Any
 
 from aiohttp import ClientSession
@@ -21,7 +23,15 @@ from custom_components.googlefindmy.ProtoDecoders.decoder import (
     parse_device_list_protobuf,
     get_canonic_ids,
 )
-from custom_components.googlefindmy.Auth.token_cache import TokenCache  # entry-scoped cache
+from custom_components.googlefindmy.Auth.token_cache import (
+    TokenCache,  # entry-scoped cache
+    get_cache_for_entry,
+    get_registered_entry_ids,
+)
+from custom_components.googlefindmy.exceptions import (
+    MissingNamespaceError,
+    MissingTokenCacheError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -94,9 +104,25 @@ async def async_request_device_list(
         Hex-encoded Nova response payload.
 
     Raises:
+        MissingTokenCacheError: If no TokenCache is provided.
+        MissingNamespaceError: If no namespace/entry ID can be determined.
         RuntimeError / aiohttp.ClientError on transport failures.
         Nova* errors bubble via nova_request (handled by callers).
     """
+    if cache is None:
+        raise MissingTokenCacheError()
+
+    if namespace is None:
+        inferred_namespace = getattr(cache, "entry_id", None) or getattr(
+            cache, "namespace", None
+        )
+        if isinstance(inferred_namespace, str) and inferred_namespace.strip():
+            namespace = inferred_namespace.strip()
+        elif isinstance(cache, TokenCache):
+            raise MissingNamespaceError()
+        else:
+            namespace = None
+
     hex_payload = create_device_list_request()
 
     # Optionally wrap flow-local cache I/O with a namespace (only if overrides are supplied).
@@ -104,12 +130,16 @@ async def async_request_device_list(
     ns_set = cache_set
     if namespace:
         if cache_get is not None:
+
             async def _ns_get(key: str) -> Any:
                 return await cache_get(f"{namespace}:{key}")
+
             ns_get = _ns_get
         if cache_set is not None:
+
             async def _ns_set(key: str, value: Any) -> None:
                 await cache_set(f"{namespace}:{key}", value)
+
             ns_set = _ns_set
 
     # Delegate HTTP to Nova client (handles session provider & timeouts).
@@ -135,6 +165,7 @@ def request_device_list() -> str:
     - This wrapper spins a private event loop via `asyncio.run(...)`.
     - Do NOT call from inside an active event loop (will raise RuntimeError).
     - In Home Assistant, prefer `await async_request_device_list(...)` and await it.
+    - Requires `GOOGLEFINDMY_ENTRY_ID` to be set to the target config entry ID.
 
     Returns:
         The hex-encoded response from the Nova API.
@@ -142,8 +173,11 @@ def request_device_list() -> str:
     Raises:
         RuntimeError: If called from within a running asyncio event loop.
     """
+    entry_hint = os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+    cache, namespace = _resolve_cli_cache(entry_hint)
+
     try:
-        return asyncio.run(async_request_device_list())
+        return asyncio.run(async_request_device_list(cache=cache, namespace=namespace))
     except RuntimeError as err:
         # This indicates incorrect usage (called from within a running loop).
         _LOGGER.error(
@@ -155,15 +189,44 @@ def request_device_list() -> str:
 
 
 # ------------------------------ CLI helper ---------------------------------
-async def _async_cli_main() -> None:
+def _resolve_cli_cache(entry_id_hint: Optional[str]) -> tuple[TokenCache, str]:
+    """Return the entry-scoped cache/namespace for CLI usage or raise informative error."""
+
+    entry_ids = get_registered_entry_ids()
+    if not entry_ids:
+        raise MissingTokenCacheError()
+
+    if entry_id_hint is None:
+        raise MissingTokenCacheError()
+
+    normalized = entry_id_hint.strip()
+    if not normalized:
+        raise MissingTokenCacheError()
+
+    try:
+        cache = get_cache_for_entry(normalized)
+    except KeyError as err:
+        available = ", ".join(sorted(entry_ids)) or "<none>"
+        raise RuntimeError(
+            "Unknown entry_id '{entry}'. Available entry IDs: {avail}. "
+            "Unbekannte Entry-ID '{entry}'. Verfügbare IDs: {avail}."
+            .format(entry=normalized, avail=available)
+        ) from err
+
+    return cache, normalized
+
+
+async def _async_cli_main(entry_id: Optional[str] = None) -> None:
     """Asynchronous main function for the CLI experience (single event loop).
 
     This function provides an interactive command-line interface for fetching
     device locations or registering new microcontroller-based trackers.
     It is intended for development and testing purposes.
     """
+    cache, namespace = _resolve_cli_cache(entry_id or os.environ.get("GOOGLEFINDMY_ENTRY_ID"))
+
     print("Loading...")
-    result_hex = await async_request_device_list()
+    result_hex = await async_request_device_list(cache=cache, namespace=namespace)
 
     device_list = parse_device_list_protobuf(result_hex)
 
@@ -216,13 +279,33 @@ async def _async_cli_main() -> None:
             get_location_data_for_device,
         )
 
-        await get_location_data_for_device(selected_canonic_id, selected_device_name)
+        await get_location_data_for_device(
+            selected_canonic_id,
+            selected_device_name,
+            cache=cache,
+            namespace=namespace,
+        )
+
+
+def _parse_cli_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    """Parse CLI arguments for entry selection."""
+
+    parser = argparse.ArgumentParser(description="Google Find My Device CLI helper")
+    parser.add_argument(
+        "--entry",
+        help=(
+            "Config entry ID to target. Alternatively set GOOGLEFINDMY_ENTRY_ID."
+        ),
+    )
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     # This block allows the script to be run directly from the command line
     # for testing or manual device registration.
     try:
-        asyncio.run(_async_cli_main())
+        args = _parse_cli_args()
+        entry_hint = args.entry or os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+        asyncio.run(_async_cli_main(entry_hint))
     except KeyboardInterrupt:
         print("\nExiting.")
