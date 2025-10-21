@@ -156,7 +156,13 @@ def _stub_homeassistant() -> None:
         pass
 
     class ServiceValidationError(HomeAssistantError):
-        pass
+        """Stubbed ServiceValidationError carrying translation context."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args)
+            self.translation_domain = kwargs.get("translation_domain")
+            self.translation_key = kwargs.get("translation_key")
+            self.translation_placeholders = kwargs.get("translation_placeholders")
 
     exceptions_module.HomeAssistantError = HomeAssistantError
     exceptions_module.ConfigEntryNotReady = ConfigEntryNotReady
@@ -174,6 +180,15 @@ def _stub_homeassistant() -> None:
         module = ModuleType(module_name)
         sys.modules[module_name] = module
         setattr(helpers_pkg, sub, module)
+
+    issue_registry_module = sys.modules["homeassistant.helpers.issue_registry"]
+    issue_registry_module.IssueSeverity = SimpleNamespace(ERROR="error")
+
+    def _noop(*args, **kwargs) -> None:  # pragma: no cover - stubbed helper
+        return None
+
+    issue_registry_module.async_delete_issue = _noop
+    issue_registry_module.async_create_issue = _noop
 
     device_registry_module = sys.modules["homeassistant.helpers.device_registry"]
     device_registry_module.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
