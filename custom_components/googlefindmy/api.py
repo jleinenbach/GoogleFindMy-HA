@@ -105,7 +105,7 @@ class FcmReceiverProtocol(Protocol):
     token or None when not yet initialized.
     """
 
-    def get_fcm_token(self) -> Optional[str]: ...
+    def get_fcm_token(self, entry_id: Optional[str] = None) -> Optional[str]: ...
 
 
 @runtime_checkable
@@ -294,6 +294,9 @@ class _EphemeralCache:
 
 
 # ----------------------------- API class ------------------------------------
+_PREVIOUS_GOOGLEFINDMYAPI = globals().get("GoogleFindMyAPI")
+
+
 class GoogleFindMyAPI:
     """Async-first API wrapper for Google Find My Device.
 
@@ -470,8 +473,15 @@ class GoogleFindMyAPI:
         if receiver is None:
             _LOGGER.error("Cannot obtain FCM token: provider returned None.")
             return None
+        entry_id = self._namespace()
         try:
-            token = receiver.get_fcm_token()
+            if entry_id:
+                token = receiver.get_fcm_token(entry_id)
+            else:
+                _LOGGER.info(
+                    "FCM token request falling back to legacy scope: entry namespace unavailable."
+                )
+                token = receiver.get_fcm_token()
         except Exception as err:
             _LOGGER.error("Cannot obtain FCM token from shared receiver: %s", _short_err(err))
             return None
@@ -497,8 +507,15 @@ class GoogleFindMyAPI:
         if receiver is None:
             _LOGGER.debug("FCM readiness probe: provider returned None.")
             return None
+        entry_id = self._namespace()
         try:
-            token = receiver.get_fcm_token()
+            if entry_id:
+                token = receiver.get_fcm_token(entry_id)
+            else:
+                _LOGGER.debug(
+                    "FCM readiness probe falling back to legacy scope: entry namespace unavailable."
+                )
+                token = receiver.get_fcm_token()
         except Exception as err:
             _LOGGER.debug("FCM readiness probe: get_fcm_token failed: %s", _short_err(err))
             return None
@@ -1065,3 +1082,11 @@ class GoogleFindMyAPI:
         except Exception as err:
             _LOGGER.error("Failed to stop sound (async) on %s: %s", device_id, _short_err(err))
             return False
+
+
+if isinstance(_PREVIOUS_GOOGLEFINDMYAPI, type) and _PREVIOUS_GOOGLEFINDMYAPI is not GoogleFindMyAPI:
+    for _attr, _value in vars(GoogleFindMyAPI).items():
+        if _attr in {"__dict__", "__weakref__", "__annotations__"}:
+            continue
+        setattr(_PREVIOUS_GOOGLEFINDMYAPI, _attr, _value)
+    GoogleFindMyAPI = _PREVIOUS_GOOGLEFINDMYAPI

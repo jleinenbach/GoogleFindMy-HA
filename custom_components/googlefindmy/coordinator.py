@@ -1516,7 +1516,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
             # 4) Token as last resort
             try:
-                token = fcm.get_fcm_token()
+                entry_id = getattr(self.config_entry, "entry_id", None)
+                token = fcm.get_fcm_token(entry_id)
                 if isinstance(token, str) and len(token) >= 10:
                     return True
             except Exception:
