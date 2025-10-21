@@ -25,10 +25,10 @@ from custom_components.googlefindmy.Auth.adm_token_retrieval import (
 )
 
 from custom_components.googlefindmy.Auth.token_cache import (
-    async_set_cached_value,
     # Optional: entry-scoped cache object (when available at call sites)
     TokenCache,
 )
+from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -155,32 +155,26 @@ async def _invalidate_token_async(
     *,
     cache: TokenCache | None = None,
 ) -> None:
-    """Async invalidation of cached tokens (scoped to token owner's username; entry-scoped when `cache` provided)."""
-    if cache is not None:
-        if kind == "adm":
-            await cache.set(f"adm_token_{username}", None)
-        elif kind == "spot":
-            await cache.set(f"spot_token_{username}", None)
-            # AAS should be entry-scoped; invalidate in the same cache to force fresh chain
-            await cache.set(DATA_AAS_TOKEN, None)
-        return
+    """Async invalidation of cached tokens; requires an entry-scoped cache."""
 
-    # Fallback to global async facades
+    if cache is None:
+        raise MissingTokenCacheError()
+
     if kind == "adm":
-        await async_set_cached_value(f"adm_token_{username}", None)
+        await cache.set(f"adm_token_{username}", None)
     elif kind == "spot":
-        await async_set_cached_value(f"spot_token_{username}", None)
-        await async_set_cached_value(DATA_AAS_TOKEN, None)
+        await cache.set(f"spot_token_{username}", None)
+        # AAS should be entry-scoped; invalidate in the same cache to force fresh chain
+        await cache.set(DATA_AAS_TOKEN, None)
 
 
 async def _clear_aas_token_async(*, cache: TokenCache | None = None) -> None:
-    """Clear the cached AAS token in the selected cache (entry-scoped when provided)."""
+    """Clear the cached AAS token; requires an entry-scoped cache."""
 
-    if cache is not None:
-        await cache.set(DATA_AAS_TOKEN, None)
-        return
+    if cache is None:
+        raise MissingTokenCacheError()
 
-    await async_set_cached_value(DATA_AAS_TOKEN, None)
+    await cache.set(DATA_AAS_TOKEN, None)
 
 
 def spot_request(*_: object, **__: object) -> bytes:
