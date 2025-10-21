@@ -118,7 +118,7 @@ The integration respects Google's rate limits by:
 
 ## Contributing
 
-Contributions are welcome and encouraged! 
+Contributions are welcome and encouraged!
 
 To contrubuted, please:
 1. Fork the repository
@@ -127,6 +127,13 @@ To contrubuted, please:
 4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes
 5. Test thoroughly with your Find My devices
 6. Submit a pull request with detailed description
+
+### Development Scripts
+
+This repository provides a thin wrapper around the official `hassfest` validator so it can be executed with `python -m script.hassfest`.
+
+1. Install the development dependencies: `python -m pip install -r requirements-dev.txt`
+2. Run the validator: `python3 -m script.hassfest`
 
 ## Credits
 
