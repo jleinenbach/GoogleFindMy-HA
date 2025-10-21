@@ -171,6 +171,38 @@ class FcmReceiverHA:
         # Guard against concurrent start/stop/register races
         self._lock = asyncio.Lock()
 
+    @staticmethod
+    def _ensure_cache_entry_id(cache: Any, entry_id: str) -> None:
+        """Attach the entry_id to a cache instance when possible."""
+
+        try:
+            current = getattr(cache, "entry_id", None)
+        except Exception:  # noqa: BLE001 - attribute access guard
+            current = None
+
+        if isinstance(current, str):
+            normalized = current.strip()
+            if normalized and normalized != entry_id:
+                _LOGGER.warning(
+                    "[entry=%s] TokenCache provided to FCM receiver has mismatched entry_id '%s'; overriding.",
+                    entry_id,
+                    normalized,
+                )
+                try:
+                    setattr(cache, "entry_id", entry_id)
+                except Exception as err:  # noqa: BLE001 - best-effort
+                    _LOGGER.debug("[entry=%s] Failed to override cache entry_id: %s", entry_id, err)
+            elif not normalized:
+                try:
+                    setattr(cache, "entry_id", entry_id)
+                except Exception as err:  # noqa: BLE001 - best-effort
+                    _LOGGER.debug("[entry=%s] Failed to attach entry_id to cache: %s", entry_id, err)
+        else:
+            try:
+                setattr(cache, "entry_id", entry_id)
+            except Exception as err:  # noqa: BLE001 - best-effort
+                _LOGGER.debug("[entry=%s] Failed to tag cache with entry_id: %s", entry_id, err)
+
     # -------------------- Optional HA attach --------------------
 
     def attach_hass(self, hass) -> None:
@@ -214,6 +246,8 @@ class FcmReceiverHA:
 
     async def _ensure_client_for_entry(self, entry_id: str, cache) -> FcmPushClient | None:
         """Create or return the FCM client for the given entry (idempotent)."""
+        if cache is not None:
+            self._ensure_cache_entry_id(cache, entry_id)
         async with self._lock:
             if entry_id in self.pcs:
                 return self.pcs[entry_id]
@@ -406,6 +440,7 @@ class FcmReceiverHA:
             return
 
         if cache is not None:
+            self._ensure_cache_entry_id(cache, entry.entry_id)
             self._entry_caches[entry.entry_id] = cache
 
             pending_creds = self._pending_creds.pop(entry.entry_id, None)

@@ -60,9 +60,19 @@ class TokenCache:
             hass: The Home Assistant instance.
             entry_id: The unique ID of the ConfigEntry.
         """
+        if not isinstance(entry_id, str):
+            raise TypeError("TokenCache requires entry_id to be a string.")
+
+        normalized_entry_id = entry_id.strip()
+        if not normalized_entry_id:
+            raise ValueError("TokenCache requires a non-empty entry_id.")
+
         self._hass = hass
+        self.entry_id = normalized_entry_id
         # Each entry gets its own storage file: f"{STORAGE_KEY}_{entry_id}"
-        self._store: Store[CacheData] = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry_id}")
+        self._store: Store[CacheData] = Store(
+            hass, STORAGE_VERSION, f"{STORAGE_KEY}_{normalized_entry_id}"
+        )
         self._data: CacheData = {}
         self._write_lock = asyncio.Lock()
         self._per_key_locks: dict[str, asyncio.Lock] = {}
@@ -88,8 +98,14 @@ class TokenCache:
         if isinstance(data, dict):
             instance._data = data
             if "fcm_credentials" in instance._data:
-                instance._data["fcm_credentials"] = instance._normalize_fcm(instance._data["fcm_credentials"])
-            _LOGGER.debug("googlefindmy: Cache loaded from Store for entry '%s' (%d keys).", entry_id, len(instance._data))
+                instance._data["fcm_credentials"] = instance._normalize_fcm(
+                    instance._data["fcm_credentials"]
+                )
+            _LOGGER.debug(
+                "googlefindmy: Cache loaded from Store for entry '%s' (%d keys).",
+                instance.entry_id,
+                len(instance._data),
+            )
 
         if legacy_path:
             await instance._migrate_legacy_file(legacy_path)
@@ -268,6 +284,29 @@ _LEGACY_MIGRATION_DONE: bool = False
 
 def _register_instance(entry_id: str, instance: TokenCache) -> None:
     """Register a TokenCache instance for a config entry ID (internal)."""
+    cache_entry_id = getattr(instance, "entry_id", None)
+    if isinstance(cache_entry_id, str):
+        normalized = cache_entry_id.strip()
+        if normalized and normalized != entry_id:
+            _LOGGER.warning(
+                "TokenCache entry_id mismatch: registry key '%s' vs instance '%s'. Using registry key.",
+                entry_id,
+                normalized,
+            )
+            try:
+                setattr(instance, "entry_id", entry_id)
+            except Exception as err:  # noqa: BLE001 - defensive logging only
+                _LOGGER.debug("Failed to correct TokenCache entry_id to '%s': %s", entry_id, err)
+        elif not normalized:
+            try:
+                setattr(instance, "entry_id", entry_id)
+            except Exception as err:  # noqa: BLE001 - defensive logging only
+                _LOGGER.debug("Failed to assign entry_id '%s' to TokenCache instance: %s", entry_id, err)
+    else:
+        try:
+            setattr(instance, "entry_id", entry_id)
+        except Exception as err:  # noqa: BLE001 - defensive logging only
+            _LOGGER.debug("Failed to assign entry_id '%s' to TokenCache instance: %s", entry_id, err)
     _INSTANCES[entry_id] = instance
 
 

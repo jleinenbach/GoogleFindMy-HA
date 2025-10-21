@@ -13,6 +13,7 @@ class FakeTokenCache:
 
     def __init__(self, label: str) -> None:
         self.label = label
+        self.entry_id = label
         self.calls: list[tuple[str, str, Any | None]] = []
         self.values: dict[str, Any] = {}
 
