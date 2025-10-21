@@ -4,10 +4,12 @@
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
 """Handles sending a 'Stop Sound' command for a Google Find My Device."""
+
 from __future__ import annotations
 
 import asyncio
-from typing import Optional, Callable, Awaitable, Any, cast
+from typing import Any, cast
+from collections.abc import Callable, Awaitable
 
 import aiohttp
 from aiohttp import ClientSession
@@ -48,17 +50,17 @@ async def async_submit_stop_sound_request(
     canonic_device_id: str,
     gcm_registration_id: str,
     *,
-    session: Optional[ClientSession] = None,
+    session: ClientSession | None = None,
     # Entry-scope & flow-friendly optional parameters (all pass-through / optional):
-    namespace: Optional[str] = None,
-    username: Optional[str] = None,
-    token: Optional[str] = None,
-    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
-    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
-    refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+    namespace: str | None = None,
+    username: str | None = None,
+    token: str | None = None,
+    cache_get: Callable[[str], Awaitable[Any]] | None = None,
+    cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+    refresh_override: Callable[[], Awaitable[str | None]] | None = None,
     # NEW: entry-scoped TokenCache to keep credentials and TTL metadata local
-    cache: Optional[TokenCache] = None,
-) -> Optional[str]:
+    cache: TokenCache | None = None,
+) -> str | None:
     """Submit a 'Stop Sound' action using the shared async Nova client.
 
     This function handles the network request and robustly catches common API
@@ -158,7 +160,9 @@ if __name__ == "__main__":
     # function in a new event loop.
     async def _main():
         """Run a test execution of the stop sound request for development."""
-        from custom_components.googlefindmy.Auth.fcm_receiver import FcmReceiver  # sync-only CLI variant
+        from custom_components.googlefindmy.Auth.fcm_receiver import (
+            FcmReceiver,
+        )  # sync-only CLI variant
 
         sample_canonic_device_id = get_example_data("sample_canonic_device_id")
         fcm_token = FcmReceiver().register_for_location_updates(lambda x: None)

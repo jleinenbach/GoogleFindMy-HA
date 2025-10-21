@@ -1,10 +1,12 @@
 # tests/test_config_flow_initial_auth.py
 """Tests ensuring config flow initial auth preserves scoped tokens."""
+
 from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -195,7 +197,12 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         captured["result"] = {"title": title, "data": data, "options": options}
-        return {"type": "create_entry", "title": title, "data": data, "options": options}
+        return {
+            "type": "create_entry",
+            "title": title,
+            "data": data,
+            "options": options,
+        }
 
     async def _exercise() -> None:
         hass = _FlowHass()
@@ -239,7 +246,9 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
     assert data[DATA_AUTH_METHOD] == config_flow._AUTH_METHOD_SECRETS
 
 
-def test_ephemeral_probe_cache_allows_missing_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ephemeral_probe_cache_allows_missing_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Config-flow probes must tolerate ephemeral caches without entry IDs."""
 
     captured: dict[str, Any] = {}
@@ -252,7 +261,7 @@ def test_ephemeral_probe_cache_allows_missing_namespace(monkeypatch: pytest.Monk
         token: str | None = None,
         cache_get: Callable[[str], Awaitable[Any]] | None = None,
         cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
-        refresh_override: Callable[[], Awaitable[Optional[str]]] | None = None,
+        refresh_override: Callable[[], Awaitable[str | None]] | None = None,
         namespace: str | None = None,
     ) -> str:
         captured["username"] = username
@@ -281,7 +290,9 @@ def test_ephemeral_probe_cache_allows_missing_namespace(monkeypatch: pytest.Monk
     )
 
     async def _exercise() -> list[dict[str, Any]]:
-        api = GoogleFindMyAPI(oauth_token="aas_et/PROBE", google_email="Probe@Example.com")
+        api = GoogleFindMyAPI(
+            oauth_token="aas_et/PROBE", google_email="Probe@Example.com"
+        )
         return await api.async_get_basic_device_list(token="aas_et/PROBE")
 
     result = asyncio.run(_exercise())

@@ -11,6 +11,7 @@ Best practices:
 - End devices link to the per-entry *service device* via `via_device=(DOMAIN, f"integration_{entry_id}")`.
 - Sensors default to **enabled** so a fresh installation is immediately functional.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -114,7 +115,9 @@ STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
 }
 
 
-def _maybe_update_device_registry_name(hass: HomeAssistant, entity_id: str, new_name: str) -> None:
+def _maybe_update_device_registry_name(
+    hass: HomeAssistant, entity_id: str, new_name: str
+) -> None:
     """Write the real Google device label into the device registry once known.
 
     Never touch if the user renamed the device (name_by_user is set). Defensive behavior:
@@ -173,7 +176,10 @@ async def async_setup_entry(
     # Options-first toggle for diagnostic counters (single source of truth)
     try:
         from . import _opt  # type: ignore
-        enable_stats = _opt(entry, OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
+
+        enable_stats = _opt(
+            entry, OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES
+        )
     except Exception:
         enable_stats = entry.options.get(
             OPT_ENABLE_STATS_ENTITIES,
@@ -190,7 +196,9 @@ async def async_setup_entry(
         if created_stats:
             _LOGGER.debug("Stats sensors created: %s", ", ".join(created_stats))
         else:
-            _LOGGER.debug("Stats option enabled but no known counters were present in coordinator.stats")
+            _LOGGER.debug(
+                "Stats option enabled but no known counters were present in coordinator.stats"
+            )
 
     # Per-device last_seen sensors from current snapshot
     if coordinator.data:
@@ -211,7 +219,7 @@ async def async_setup_entry(
     def _add_new_sensors_on_update() -> None:
         try:
             new_entities: list[SensorEntity] = []
-            for device in (getattr(coordinator, "data", None) or []):
+            for device in getattr(coordinator, "data", None) or []:
                 dev_id = device.get("id")
                 dev_name = device.get("name")
                 if not dev_id or not dev_name or dev_id in known_ids:
@@ -221,7 +229,8 @@ async def async_setup_entry(
 
             if new_entities:
                 _LOGGER.info(
-                    "Discovered %d new devices; adding last_seen sensors", len(new_entities)
+                    "Discovered %d new devices; adding last_seen sensors",
+                    len(new_entities),
                 )
                 async_add_entities(new_entities, True)
         except (AttributeError, TypeError) as err:
@@ -247,7 +256,10 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True  # allow translated entity name to be used
 
     def __init__(
-        self, coordinator: GoogleFindMyCoordinator, stat_key: str, description: SensorEntityDescription
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        stat_key: str,
+        description: SensorEntityDescription,
     ) -> None:
         """Initialize the stats sensor.
 
@@ -259,7 +271,9 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._stat_key = stat_key
         self.entity_description = description
-        entry_id = getattr(getattr(coordinator, "config_entry", None), "entry_id", "default")
+        entry_id = getattr(
+            getattr(coordinator, "config_entry", None), "entry_id", "default"
+        )
         # Entry-scoped unique_id avoids collisions in multi-account setups.
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_{stat_key}"
         # Plain unit label; TOTAL_INCREASING counters represent event counts.
@@ -285,7 +299,9 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
 
         All counters live on the per-entry SERVICE device to keep the UI tidy.
         """
-        entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", "default")
+        entry_id = getattr(
+            getattr(self.coordinator, "config_entry", None), "entry_id", "default"
+        )
         ident = service_device_identifier(entry_id)
         return DeviceInfo(
             identifiers={ident},
@@ -315,13 +331,17 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
     _attr_entity_registry_enabled_default = True
     entity_description = LAST_SEEN_DESCRIPTION
 
-    def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:
+    def __init__(
+        self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]
+    ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._device = device
         self._device_id: str | None = device.get("id")
         safe_id = self._device_id if self._device_id is not None else "unknown"
-        entry_id = getattr(getattr(coordinator, "config_entry", None), "entry_id", "default")
+        entry_id = getattr(
+            getattr(coordinator, "config_entry", None), "entry_id", "default"
+        )
         # Namespace unique_id by entry for safety (keeps multi-entry setups clean).
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_{safe_id}_last_seen"
         self._attr_native_value: datetime | None = None
@@ -373,12 +393,14 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         # 1) Keep the raw device name synchronized with the coordinator snapshot.
         try:
             my_id = self._device_id or ""
-            for dev in (getattr(self.coordinator, "data", None) or []):
+            for dev in getattr(self.coordinator, "data", None) or []:
                 if dev.get("id") == my_id:
                     new_name = dev.get("name")
                     if new_name and new_name != self._device.get("name"):
                         self._device["name"] = new_name
-                        _maybe_update_device_registry_name(self.hass, self.entity_id, new_name)
+                        _maybe_update_device_registry_name(
+                            self.hass, self.entity_id, new_name
+                        )
                     break
         except (AttributeError, TypeError) as e:  # noqa: BLE001
             _LOGGER.debug("Name refresh failed for %s: %s", self._device_id, e)
@@ -409,7 +431,9 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                     new_dt = None
         except (AttributeError, TypeError, ValueError) as e:  # noqa: BLE001
             _LOGGER.debug(
-                "Invalid last_seen for %s: %s", self._device.get("name", self._device_id), e
+                "Invalid last_seen for %s: %s",
+                self._device.get("name", self._device_id),
+                e,
             )
             new_dt = None
 
@@ -435,7 +459,9 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
             data = await self.async_get_last_sensor_data()
             value = getattr(data, "native_value", None) if data else None
         except (RuntimeError, AttributeError) as e:  # noqa: BLE001
-            _LOGGER.debug("Failed to restore sensor state for %s: %s", self.entity_id, e)
+            _LOGGER.debug(
+                "Failed to restore sensor state for %s: %s", self.entity_id, e
+            )
             value = None
 
         if value in (None, "unknown", "unavailable"):
@@ -461,7 +487,10 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                 ts = value.timestamp()
         except (ValueError, TypeError) as ex:  # noqa: BLE001
             _LOGGER.debug(
-                "Could not parse restored value '%s' for %s: %s", value, self.entity_id, ex
+                "Could not parse restored value '%s' for %s: %s",
+                value,
+                self.entity_id,
+                ex,
             )
             ts = None
 
@@ -472,7 +501,9 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         try:
             self.coordinator.seed_device_last_seen(self._device_id, ts)
         except (AttributeError, TypeError) as e:  # noqa: BLE001
-            _LOGGER.debug("Failed to seed coordinator cache for %s: %s", self.entity_id, e)
+            _LOGGER.debug(
+                "Failed to seed coordinator cache for %s: %s", self.entity_id, e
+            )
             return
 
         # Set our native value now (no need to wait for next coordinator tick)
@@ -500,15 +531,21 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
                 allow_internal=True,
             )
         except (HomeAssistantError, RuntimeError) as e:
-            _LOGGER.debug("Could not determine Home Assistant URL, using fallback: %s", e)
+            _LOGGER.debug(
+                "Could not determine Home Assistant URL, using fallback: %s", e
+            )
             base_url = "http://homeassistant.local:8123"
 
         # Only provide a name if we have a real device label (no bootstrap placeholder)
         raw_name = (self._device.get("name") or "").strip()
-        use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
+        use_name = (
+            raw_name if raw_name and raw_name != "Google Find My Device" else None
+        )
 
         # Link this end device to the single per-entry service device
-        entry_id = getattr(getattr(self.coordinator, "config_entry", None), "entry_id", None)
+        entry_id = getattr(
+            getattr(self.coordinator, "config_entry", None), "entry_id", None
+        )
         via = service_device_identifier(entry_id) if entry_id else None
         dev_id = self._device["id"]
         entry_scoped_identifier = f"{entry_id}:{dev_id}" if entry_id else dev_id
@@ -541,6 +578,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         # Prefer the central _opt helper; fall back to direct options/data reads for safety.
         try:
             from . import _opt  # type: ignore
+
             token_expiration_enabled = _opt(
                 config_entry,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION,

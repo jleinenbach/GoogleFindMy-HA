@@ -263,19 +263,19 @@
   },
   "exceptions": {
     "device_not_found": {
-      "message": "Device '{device_id}' could not be found or is not part of this integration."
+      "message": "Device {device_id} could not be found or is not part of this integration."
     },
     "no_active_entry": {
       "message": "No active Google Find My Device entry is available. Active entries: {active_count}/{total_count}. Enable one of the configured entries ({entries}) or add a new account, then try again."
     },
     "locate_failed": {
-      "message": "Failed to locate device '{device_id}': {error}"
+      "message": "Failed to locate device {device_id}: {error}"
     },
     "play_sound_failed": {
-      "message": "Failed to play sound on '{device_id}': {error}"
+      "message": "Failed to play sound on {device_id}: {error}"
     },
     "stop_sound_failed": {
-      "message": "Failed to stop sound on '{device_id}': {error}"
+      "message": "Failed to stop sound on {device_id}: {error}"
     },
     "missing_token_cache": {
       "message": "Token cache missing. Provide the entry-specific TokenCache (for example, entry.runtime_data.token_cache)."

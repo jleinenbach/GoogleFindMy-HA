@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional, Callable, Awaitable
+from collections.abc import Callable, Awaitable
 
 from .username_provider import async_get_username
 from .token_cache import TokenCache
@@ -40,7 +40,7 @@ async def _async_generate_spot_token(
     username: str,
     *,
     cache: TokenCache,
-    aas_provider: Optional[Callable[[], Awaitable[str]]] = None,
+    aas_provider: Callable[[], Awaitable[str]] | None = None,
 ) -> str:
     """Generate a fresh Spot token for `username` without blocking the loop.
 
@@ -68,13 +68,17 @@ async def _async_generate_spot_token(
         return token
     except ImportError:
         # No async entrypoint exported; fall back to sync retriever in a thread.
-        _LOGGER.debug("async_request_token not available; falling back to sync retriever in a thread")
+        _LOGGER.debug(
+            "async_request_token not available; falling back to sync retriever in a thread"
+        )
         from .token_retrieval import request_token  # sync path
 
         if aas_provider is not None:
             aas_token_value = await aas_provider()
         else:
-            from .aas_token_retrieval import async_get_aas_token  # lazy import for fallback
+            from .aas_token_retrieval import (
+                async_get_aas_token,
+            )  # lazy import for fallback
 
             aas_token_value = await async_get_aas_token(cache=cache)
 
@@ -92,10 +96,10 @@ async def _async_generate_spot_token(
 
 
 async def async_get_spot_token(
-    username: Optional[str] = None,
+    username: str | None = None,
     *,
     cache: TokenCache,
-    aas_provider: Optional[Callable[[], Awaitable[str]]] = None,
+    aas_provider: Callable[[], Awaitable[str]] | None = None,
 ) -> str:
     """Return a Spot token for the given user (async, cached; entry-scoped when `cache` is provided).
 
@@ -118,15 +122,20 @@ async def async_get_spot_token(
         username = await async_get_username(cache=cache)
 
     if not isinstance(username, str) or not username:
-        raise RuntimeError("Google username is not configured; cannot obtain Spot token")
+        raise RuntimeError(
+            "Google username is not configured; cannot obtain Spot token"
+        )
 
     cache_key = f"spot_token_{username}"
 
     # Build an AAS provider that uses the SAME cache if the caller didn't supply one.
     if aas_provider is None:
+
         async def _fallback_aas_provider() -> str:
             from .aas_token_retrieval import async_get_aas_token  # lazy import
+
             return await async_get_aas_token(cache=cache)
+
         aas_provider = _fallback_aas_provider
 
     async def _generator() -> str:
@@ -137,5 +146,3 @@ async def async_get_spot_token(
         )
 
     return await cache.get_or_set(cache_key, _generator)
-
-

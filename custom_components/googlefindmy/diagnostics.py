@@ -17,12 +17,13 @@ Additional privacy hardening (message bodies):
   names. We therefore strip any parenthesized content from the prefix and avoid returning the free-form
   message body entirely. Only a coarse "where" tag, error type, and timestamp are exposed.
 """
+
 from __future__ import annotations
 
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
@@ -134,7 +135,7 @@ TO_REDACT: list[str] = [
 # ---------------------------------------------------------------------------
 
 
-def _monotonic_to_wall_seconds(last_mono: Optional[float]) -> Optional[float]:
+def _monotonic_to_wall_seconds(last_mono: float | None) -> float | None:
     """Convert a stored monotonic timestamp to wall-clock seconds since epoch (UTC).
 
     We infer the wall time using the current monotonic delta; this is best-effort
@@ -168,7 +169,7 @@ def _coerce_pos_int(value: Any, default: int) -> int:
         return default
 
 
-def _iso_utc(ts: Optional[float]) -> Optional[str]:
+def _iso_utc(ts: float | None) -> str | None:
     """Render epoch seconds as ISO 8601 UTC string, or None."""
     if not isinstance(ts, (int, float)) or ts <= 0:
         return None
@@ -210,12 +211,16 @@ def _concurrency_block(hass: HomeAssistant) -> dict[str, int]:
     """Return contention counters collected during setup/runtime."""
     bucket = hass.data.get(DOMAIN, {}) or {}
     return {
-        "fcm_lock_contention_count": int(bucket.get("fcm_lock_contention_count", 0) or 0),
-        "services_lock_contention_count": int(bucket.get("services_lock_contention_count", 0) or 0),
+        "fcm_lock_contention_count": int(
+            bucket.get("fcm_lock_contention_count", 0) or 0
+        ),
+        "services_lock_contention_count": int(
+            bucket.get("services_lock_contention_count", 0) or 0
+        ),
     }
 
 
-def _fcm_receiver_state(hass: HomeAssistant) -> Optional[dict[str, Any]]:
+def _fcm_receiver_state(hass: HomeAssistant) -> dict[str, Any] | None:
     """Summarize FCM receiver runtime health without leaking internals."""
     bucket = hass.data.get(DOMAIN, {}) or {}
     rcvr = bucket.get("fcm_receiver")
@@ -254,7 +259,7 @@ def _fcm_receiver_state(hass: HomeAssistant) -> Optional[dict[str, Any]]:
     }
 
 
-def _recent_errors_block(coordinator: Any) -> Optional[list[dict[str, Any]]]:
+def _recent_errors_block(coordinator: Any) -> list[dict[str, Any]] | None:
     """Convert coordinator.recent_errors (deque) to a redacted list.
 
     Original intent:
@@ -352,7 +357,9 @@ async def async_get_config_entry_diagnostics(
 
     # --- Build a compact, anonymized options snapshot (no raw strings that could contain PII) ---
     opt = entry.options
-    ignored_raw = opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
+    ignored_raw = (
+        opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
+    )
 
     # Coerce to handle legacy list[str] format gracefully
     if isinstance(ignored_raw, list):
@@ -364,12 +371,18 @@ async def async_get_config_entry_diagnostics(
 
     config_summary = {
         # Durations and numeric thresholds
-        "location_poll_interval": _coerce_pos_int(opt.get(OPT_LOCATION_POLL_INTERVAL, 300), 300),
+        "location_poll_interval": _coerce_pos_int(
+            opt.get(OPT_LOCATION_POLL_INTERVAL, 300), 300
+        ),
         "device_poll_delay": _coerce_pos_int(opt.get(OPT_DEVICE_POLL_DELAY, 5), 5),
-        "min_accuracy_threshold": _coerce_pos_int(opt.get(OPT_MIN_ACCURACY_THRESHOLD, 100), 100),
+        "min_accuracy_threshold": _coerce_pos_int(
+            opt.get(OPT_MIN_ACCURACY_THRESHOLD, 100), 100
+        ),
         "movement_threshold": _coerce_pos_int(opt.get(OPT_MOVEMENT_THRESHOLD, 50), 50),
         # Feature toggles
-        "google_home_filter_enabled": bool(opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, False)),
+        "google_home_filter_enabled": bool(
+            opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, False)
+        ),
         "enable_stats_entities": bool(
             opt.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
         ),
@@ -378,7 +391,9 @@ async def async_get_config_entry_diagnostics(
             opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
         ),
         # Counts only (never expose strings/IDs)
-        "google_home_filter_keywords_count": _count_keywords(opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS)),
+        "google_home_filter_keywords_count": _count_keywords(
+            opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS)
+        ),
         "ignored_devices_count": ignored_count,
     }
 
@@ -413,12 +428,16 @@ async def async_get_config_entry_diagnostics(
             known_devices_count = None
 
         try:
-            cache_items_count = len(getattr(coordinator, "_device_location_data", {}) or {})
+            cache_items_count = len(
+                getattr(coordinator, "_device_location_data", {}) or {}
+            )
         except (AttributeError, TypeError):
             cache_items_count = None
 
         try:
-            last_poll_wall = _monotonic_to_wall_seconds(getattr(coordinator, "_last_poll_mono", None))
+            last_poll_wall = _monotonic_to_wall_seconds(
+                getattr(coordinator, "_last_poll_mono", None)
+            )
         except (AttributeError, TypeError):
             last_poll_wall = None
 
@@ -440,11 +459,15 @@ async def async_get_config_entry_diagnostics(
 
         # Optional anonymous counters: enabled poll targets & present devices as seen last
         try:
-            enabled_poll_targets_count = len(getattr(coordinator, "_enabled_poll_device_ids", set()) or set())
+            enabled_poll_targets_count = len(
+                getattr(coordinator, "_enabled_poll_device_ids", set()) or set()
+            )
         except (AttributeError, TypeError):
             enabled_poll_targets_count = None
         try:
-            present_devices_seen_count = len(getattr(coordinator, "_present_device_ids", set()) or set())
+            present_devices_seen_count = len(
+                getattr(coordinator, "_present_device_ids", set()) or set()
+            )
         except (AttributeError, TypeError):
             present_devices_seen_count = None
 

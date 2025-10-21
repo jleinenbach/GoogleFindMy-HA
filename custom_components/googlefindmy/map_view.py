@@ -1,5 +1,6 @@
 # custom_components/googlefindmy/map_view.py
 """Map view for Google Find My Device locations."""
+
 from __future__ import annotations
 
 import hashlib
@@ -7,7 +8,7 @@ import hashlib
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any
 
 from aiohttp import web
 
@@ -29,6 +30,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # ------------------------------- HTML Helpers -------------------------------
 
+
 def _html_response(title: str, body: str, status: int = 200) -> web.Response:
     """Return a minimal HTML response (no secrets, no stacktraces)."""
     return web.Response(
@@ -47,7 +49,8 @@ def _html_response(title: str, body: str, status: int = 200) -> web.Response:
 
 # --------------------------- Token / Entry helpers ---------------------------
 
-def _week_bucket(now_ts: Optional[float] = None) -> int:
+
+def _week_bucket(now_ts: float | None = None) -> int:
     """Return the current 7-day bucket index (UTC)."""
     if now_ts is None:
         now_ts = time.time()
@@ -91,7 +94,9 @@ def _resolve_entry_by_token(hass: HomeAssistant, auth_token: str):
     for entry in hass.config_entries.async_entries(DOMAIN):
         token_exp = entry.options.get(
             OPT_MAP_VIEW_TOKEN_EXPIRATION,
-            entry.data.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
+            entry.data.get(
+                OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            ),
         )
         accepted = _entry_accept_tokens(hass, entry.entry_id, bool(token_exp))
         if auth_token in accepted:
@@ -100,6 +105,7 @@ def _resolve_entry_by_token(hass: HomeAssistant, auth_token: str):
 
 
 # ------------------------------- Map View -----------------------------------
+
 
 class GoogleFindMyMapView(HomeAssistantView):
     """View to serve device location maps."""
@@ -123,12 +129,18 @@ class GoogleFindMyMapView(HomeAssistantView):
         # ---- 1) Token check & entry resolution (401 on missing/invalid) ----
         auth_token = request.query.get("token")
         if not auth_token:
-            return _html_response("Unauthorized", "Missing authentication token.", status=401)
+            return _html_response(
+                "Unauthorized", "Missing authentication token.", status=401
+            )
 
         entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
         if not entry:
-            _LOGGER.debug("Map token mismatch (no entry resolved) for device_id=%s", device_id)
-            return _html_response("Unauthorized", "Invalid authentication token.", status=401)
+            _LOGGER.debug(
+                "Map token mismatch (no entry resolved) for device_id=%s", device_id
+            )
+            return _html_response(
+                "Unauthorized", "Invalid authentication token.", status=401
+            )
 
         # ---- 2) Coordinator + device membership check (404 if unknown in this entry) ----
         runtime = getattr(entry, "runtime_data", None)
@@ -147,16 +159,25 @@ class GoogleFindMyMapView(HomeAssistantView):
         data_list = getattr(coordinator, "data", None) or []
         device_known = any(dev.get("id") == device_id for dev in data_list)
         if not device_known:
-            _LOGGER.debug("Map requested for unknown device_id=%s in entry_id=%s", device_id, entry.entry_id)
+            _LOGGER.debug(
+                "Map requested for unknown device_id=%s in entry_id=%s",
+                device_id,
+                entry.entry_id,
+            )
             return _html_response("Not Found", "Device not found.", status=404)
 
         try:
             # ---- 3) Resolve a human-readable device name from THIS coordinator snapshot ----
-            device_name = next((d.get("name") for d in data_list if d.get("id") == device_id), None) or "Unknown Device"
+            device_name = (
+                next(
+                    (d.get("name") for d in data_list if d.get("id") == device_id), None
+                )
+                or "Unknown Device"
+            )
 
             # ---- 4) Find the device_tracker entity (entity registry, scoped to this entry) ----
             entity_registry = async_get_entity_registry(self.hass)
-            entity_id: Optional[str] = None
+            entity_id: str | None = None
 
             for entity in entity_registry.entities.values():
                 if (
@@ -189,7 +210,9 @@ class GoogleFindMyMapView(HomeAssistantView):
 
             if start_param:
                 try:
-                    start_time = datetime.fromisoformat(start_param.replace("Z", "+00:00"))
+                    start_time = datetime.fromisoformat(
+                        start_param.replace("Z", "+00:00")
+                    )
                     if start_time.tzinfo is None:
                         start_time = start_time.replace(tzinfo=dt_util.UTC)
                 except ValueError:
@@ -271,7 +294,9 @@ class GoogleFindMyMapView(HomeAssistantView):
             html_content = self._generate_map_html(
                 device_name, locations, device_id, start_time, end_time, accuracy_filter
             )
-            return web.Response(text=html_content, content_type="text/html", charset="utf-8")
+            return web.Response(
+                text=html_content, content_type="text/html", charset="utf-8"
+            )
 
         except Exception as err:  # defensive: HTML error page instead of raw tracebacks
             _LOGGER.error("Error generating map for device %s: %s", device_id, err)
@@ -393,7 +418,9 @@ class GoogleFindMyMapView(HomeAssistantView):
                 color = "red"
 
             # Convert UTC timestamp to Home Assistant timezone
-            timestamp_utc = datetime.fromisoformat(str(loc["timestamp"]).replace("Z", "+00:00"))
+            timestamp_utc = datetime.fromisoformat(
+                str(loc["timestamp"]).replace("Z", "+00:00")
+            )
             timestamp_local = dt_util.as_local(timestamp_utc)
 
             # Determine report source
@@ -680,7 +707,9 @@ class GoogleFindMyMapView(HomeAssistantView):
         </html>
         """
 
+
 # ------------------------------ Redirect View -------------------------------
+
 
 class GoogleFindMyMapRedirectView(HomeAssistantView):
     """View to redirect to appropriate map URL based on request origin."""
@@ -704,7 +733,9 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         # Require token but do not echo it back in logs.
         auth_token = request.query.get("token")
         if not auth_token:
-            return _html_response("Bad Request", "Missing authentication token.", status=400)
+            return _html_response(
+                "Bad Request", "Missing authentication token.", status=400
+            )
 
         # Preserve all query parameters (incl. start/end/accuracy/token) in the redirect.
         # Build a relative URL so the browser keeps the current origin automatically.

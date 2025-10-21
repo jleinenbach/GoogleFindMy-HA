@@ -44,10 +44,14 @@ def _stub_homeassistant() -> None:
             self.context: dict[str, object] = {}
             self.hass = None
 
-        async def async_show_form(self, *args, **kwargs):  # pragma: no cover - defensive
+        async def async_show_form(
+            self, *args, **kwargs
+        ):  # pragma: no cover - defensive
             return {"type": "form"}
 
-        async def async_show_menu(self, *args, **kwargs):  # pragma: no cover - defensive
+        async def async_show_menu(
+            self, *args, **kwargs
+        ):  # pragma: no cover - defensive
             return {"type": "menu"}
 
         async def async_abort(self, **kwargs):
@@ -59,10 +63,14 @@ def _stub_homeassistant() -> None:
     class OptionsFlow:
         """Minimal OptionsFlow stub for imports."""
 
-        async def async_show_form(self, *args, **kwargs):  # pragma: no cover - defensive
+        async def async_show_form(
+            self, *args, **kwargs
+        ):  # pragma: no cover - defensive
             return {"type": "form"}
 
-        async def async_create_entry(self, *, title: str, data):  # pragma: no cover - defensive
+        async def async_create_entry(
+            self, *, title: str, data
+        ):  # pragma: no cover - defensive
             return {"type": "create_entry", "title": title, "data": data}
 
     class OptionsFlowWithReload(OptionsFlow):
@@ -175,7 +183,12 @@ def _stub_homeassistant() -> None:
     )
     helpers_pkg.__path__ = getattr(helpers_pkg, "__path__", [])
 
-    for sub in ("device_registry", "entity_registry", "issue_registry", "update_coordinator"):
+    for sub in (
+        "device_registry",
+        "entity_registry",
+        "issue_registry",
+        "update_coordinator",
+    ):
         module_name = f"homeassistant.helpers.{sub}"
         module = ModuleType(module_name)
         sys.modules[module_name] = module
@@ -192,7 +205,9 @@ def _stub_homeassistant() -> None:
 
     device_registry_module = sys.modules["homeassistant.helpers.device_registry"]
     device_registry_module.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
-    device_registry_module.async_get = lambda _hass=None: SimpleNamespace(async_get=lambda _id: None)
+    device_registry_module.async_get = lambda _hass=None: SimpleNamespace(
+        async_get=lambda _id: None
+    )
 
     cv_module = ModuleType("homeassistant.helpers.config_validation")
 
@@ -237,23 +252,31 @@ def _stub_homeassistant() -> None:
     class DataUpdateCoordinator(Generic[_T]):
         """Minimal stub for DataUpdateCoordinator supporting subclassing."""
 
-        def __init__(self, hass=None, logger=None, name: str | None = None, update_interval=None):
+        def __init__(
+            self, hass=None, logger=None, name: str | None = None, update_interval=None
+        ):
             self.hass = hass
             self.logger = logger
             self.name = name or "coordinator"
             self.update_interval = update_interval
 
-        async def async_request_refresh(self) -> None:  # pragma: no cover - stubbed behaviour
+        async def async_request_refresh(
+            self,
+        ) -> None:  # pragma: no cover - stubbed behaviour
             return None
 
-        async def async_config_entry_first_refresh(self) -> None:  # pragma: no cover - stubbed behaviour
+        async def async_config_entry_first_refresh(
+            self,
+        ) -> None:  # pragma: no cover - stubbed behaviour
             return None
 
     update_coordinator_module.DataUpdateCoordinator = DataUpdateCoordinator
 
     event_module = ModuleType("homeassistant.helpers.event")
 
-    async def _async_call_later(*_args, **_kwargs):  # pragma: no cover - stubbed behaviour
+    async def _async_call_later(
+        *_args, **_kwargs
+    ):  # pragma: no cover - stubbed behaviour
         return None
 
     event_module.async_call_later = _async_call_later
@@ -272,7 +295,9 @@ def _stub_homeassistant() -> None:
 
     entity_registry_module.async_get = _async_get_entity_registry
 
-    util_pkg = sys.modules.setdefault("homeassistant.util", ModuleType("homeassistant.util"))
+    util_pkg = sys.modules.setdefault(
+        "homeassistant.util", ModuleType("homeassistant.util")
+    )
     dt_module = ModuleType("homeassistant.util.dt")
     dt_module.UTC = timezone.utc
     dt_module.utcnow = lambda: datetime.utcnow().replace(tzinfo=timezone.utc)

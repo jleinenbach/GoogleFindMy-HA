@@ -7,7 +7,7 @@ import asyncio
 import sys
 from contextlib import suppress
 from types import ModuleType
-from typing import Callable
+from collections.abc import Callable
 
 import pytest
 
@@ -19,7 +19,9 @@ if "homeassistant.components.sensor" not in sys.modules:
 
         _attr_native_value: int | None = None
 
-        async def async_added_to_hass(self) -> None:  # pragma: no cover - stub signature
+        async def async_added_to_hass(
+            self,
+        ) -> None:  # pragma: no cover - stub signature
             return None
 
         def async_write_ha_state(self) -> None:  # pragma: no cover - stub signature
@@ -105,7 +107,9 @@ if update_module is not None and not hasattr(update_module, "CoordinatorEntity")
 
 if update_module is not None:
     data_coordinator = getattr(update_module, "DataUpdateCoordinator", None)
-    if data_coordinator is not None and not hasattr(data_coordinator, "async_add_listener"):
+    if data_coordinator is not None and not hasattr(
+        data_coordinator, "async_add_listener"
+    ):
         original_init = data_coordinator.__init__
 
         def _init(self, *args, **kwargs):  # type: ignore[override]
@@ -129,9 +133,12 @@ if update_module is not None:
         data_coordinator.async_add_listener = _async_add_listener  # type: ignore[assignment]
         data_coordinator.async_update_listeners = _async_update_listeners  # type: ignore[assignment]
 
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from custom_components.googlefindmy.const import CONF_GOOGLE_EMAIL, DOMAIN
-from custom_components.googlefindmy.sensor import STATS_DESCRIPTIONS, GoogleFindMyStatsSensor
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator  # noqa: E402
+from custom_components.googlefindmy.const import CONF_GOOGLE_EMAIL, DOMAIN  # noqa: E402
+from custom_components.googlefindmy.sensor import (  # noqa: E402
+    STATS_DESCRIPTIONS,
+    GoogleFindMyStatsSensor,
+)
 
 
 class _StubHass:
@@ -163,7 +170,9 @@ class _StubCache:
         return None
 
 
-def test_increment_stat_notifies_registered_stats_sensor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_increment_stat_notifies_registered_stats_sensor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Stats increments must notify listeners so CoordinatorEntity state updates."""
 
     loop = asyncio.new_event_loop()
@@ -195,7 +204,9 @@ def test_increment_stat_notifies_registered_stats_sensor(monkeypatch: pytest.Mon
 
             sensor.async_write_ha_state = _mark_notified  # type: ignore[assignment]
 
-            remove_listener = coordinator.async_add_listener(sensor._handle_coordinator_update)
+            remove_listener = coordinator.async_add_listener(
+                sensor._handle_coordinator_update
+            )
             try:
                 assert sensor.native_value == 0
                 coordinator.increment_stat("background_updates")

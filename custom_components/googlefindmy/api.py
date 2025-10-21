@@ -20,11 +20,17 @@ Token/Auth handling (Step 5.1-D):
   - For per-device location and actions: logged and return {} / False to keep the
     polling cycle resilient (do not abort the sequential loop on a single error).
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import (
+    Any,
+    Protocol,
+    runtime_checkable,
+)
+from collections.abc import Awaitable, Callable
 
 from aiohttp import ClientError, ClientSession
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -76,7 +82,9 @@ def _is_multi_entry_guard_message(msg: str) -> bool:
     return ("Multiple config entries active" in m) or ("entry.runtime_data" in m)
 
 
-def _maybe_log_guard_once(context: str, *, email: Optional[str] = None, entry_id: Optional[str] = None) -> None:
+def _maybe_log_guard_once(
+    context: str, *, email: str | None = None, entry_id: str | None = None
+) -> None:
     """Log the multi-entry guard once at INFO; subsequent occurrences at DEBUG."""
     global _GUARD_LOGGED_ONCE
     extra = []
@@ -105,7 +113,7 @@ class FcmReceiverProtocol(Protocol):
     token or None when not yet initialized.
     """
 
-    def get_fcm_token(self, entry_id: Optional[str] = None) -> Optional[str]: ...
+    def get_fcm_token(self, entry_id: str | None = None) -> str | None: ...
 
 
 @runtime_checkable
@@ -123,7 +131,7 @@ class CacheProtocol(Protocol):
 
 
 # Module-local FCM provider getter; installed by the integration at setup time.
-_FCM_ReceiverGetter: Optional[Callable[[], FcmReceiverProtocol]] = None
+_FCM_ReceiverGetter: Callable[[], FcmReceiverProtocol] | None = None
 
 
 def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
@@ -147,7 +155,7 @@ def unregister_fcm_receiver_provider() -> None:
 
 
 # ----------------------------- Small helpers --------------------------------
-def _infer_can_ring_slot(device: Dict[str, Any]) -> Optional[bool]:
+def _infer_can_ring_slot(device: dict[str, Any]) -> bool | None:
     """Normalize a 'can ring' capability from various shapes; return None if unknown.
 
     We try multiple layouts because upstream protobuf decoders may evolve:
@@ -175,7 +183,7 @@ def _infer_can_ring_slot(device: Dict[str, Any]) -> Optional[bool]:
     return None
 
 
-def _build_can_ring_index(parsed_device_list: Any) -> Dict[str, bool]:
+def _build_can_ring_index(parsed_device_list: Any) -> dict[str, bool]:
     """Build a mapping canonical_id -> can_ring (where determinable).
 
     Args:
@@ -184,7 +192,7 @@ def _build_can_ring_index(parsed_device_list: Any) -> Dict[str, bool]:
     Returns:
         A dictionary mapping canonical device IDs to a boolean indicating if they can ring.
     """
-    index: Dict[str, bool] = {}
+    index: dict[str, bool] = {}
     try:
         devices = get_devices_with_location(parsed_device_list)
     except Exception:
@@ -211,9 +219,9 @@ class _EphemeralCache:
     def __init__(
         self,
         *,
-        oauth_token: Optional[str],
-        email: Optional[str],
-        secrets_bundle: Optional[Dict[str, Any]] = None,
+        oauth_token: str | None,
+        email: str | None,
+        secrets_bundle: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the ephemeral cache with credentials.
 
@@ -221,7 +229,7 @@ class _EphemeralCache:
             oauth_token: The OAuth token.
             email: The user's Google email address.
         """
-        self._data: Dict[str, Any] = {}
+        self._data: dict[str, Any] = {}
         if isinstance(email, str) and email:
             self._data[username_string] = email
         if isinstance(oauth_token, str) and oauth_token:
@@ -231,7 +239,9 @@ class _EphemeralCache:
             fcm_creds = secrets_bundle.get("fcm_credentials")
             if fcm_creds is not None:
                 self._data["fcm_credentials"] = fcm_creds
-                _LOGGER.debug("_EphemeralCache: injected fcm_credentials for validation probe.")
+                _LOGGER.debug(
+                    "_EphemeralCache: injected fcm_credentials for validation probe."
+                )
             else:
                 _LOGGER.debug(
                     "_EphemeralCache: secrets bundle provided without fcm_credentials;"
@@ -287,7 +297,7 @@ class _EphemeralCache:
         await self.set(name, result)
         return result
 
-    async def all(self) -> Dict[str, Any]:
+    async def all(self) -> dict[str, Any]:
         """Return a shallow copy of all cached values."""
 
         return dict(self._data)
@@ -314,12 +324,12 @@ class GoogleFindMyAPI:
 
     def __init__(
         self,
-        cache: Optional[CacheProtocol] = None,
+        cache: CacheProtocol | None = None,
         *,
-        session: Optional[ClientSession] = None,
-        oauth_token: Optional[str] = None,
-        google_email: Optional[str] = None,
-        secrets_bundle: Optional[Dict[str, Any]] = None,
+        session: ClientSession | None = None,
+        oauth_token: str | None = None,
+        google_email: str | None = None,
+        secrets_bundle: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the API wrapper.
 
@@ -356,17 +366,19 @@ class GoogleFindMyAPI:
 
         # Capability cache to avoid repeated network calls in capability checks.
         # Key: canonical device id, Value: can_ring (bool)
-        self._device_capabilities: Dict[str, bool] = {}
+        self._device_capabilities: dict[str, bool] = {}
 
     # ------------------------ Namespace helper (entry-scope) ------------------------
-    def _namespace(self) -> Optional[str]:
+    def _namespace(self) -> str | None:
         """Return an entry-scoped namespace for downstream Nova helpers.
 
         Prefer an explicit `entry_id` attribute on the cache; fall back to a generic
         `namespace` attribute if present. Returns None when no scope is available.
         """
         try:
-            ns = getattr(self._cache, "entry_id", None) or getattr(self._cache, "namespace", None)
+            ns = getattr(self._cache, "entry_id", None) or getattr(
+                self._cache, "namespace", None
+            )
             if isinstance(ns, str) and ns.strip():
                 return ns.strip()
         except Exception:
@@ -374,7 +386,7 @@ class GoogleFindMyAPI:
         return None
 
     # ------------------------ Internal processing helpers ------------------------
-    def _process_device_list_response(self, result_hex: str) -> List[Dict[str, Any]]:
+    def _process_device_list_response(self, result_hex: str) -> list[dict[str, Any]]:
         """Parse protobuf, update capability cache, and build basic device list.
 
         Args:
@@ -388,7 +400,7 @@ class GoogleFindMyAPI:
         if cap_index:
             self._device_capabilities.update(cap_index)
 
-        devices: List[Dict[str, Any]] = []
+        devices: list[dict[str, Any]] = []
         for device_name, canonic_id in get_canonic_ids(parsed):
             item = {
                 "name": device_name,
@@ -401,8 +413,8 @@ class GoogleFindMyAPI:
         return devices
 
     def _extend_with_empty_location_fields(
-        self, items: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Augment basic device entries with common location fields set to None.
 
         Args:
@@ -411,22 +423,20 @@ class GoogleFindMyAPI:
         Returns:
             A new list of device dictionaries with added placeholder location fields.
         """
-        extended: List[Dict[str, Any]] = []
+        extended: list[dict[str, Any]] = []
         for base in items:
-            dev = (
-                {
-                    **base,
-                    "latitude": None,
-                    "longitude": None,
-                    "altitude": None,
-                    "accuracy": None,
-                    "last_seen": None,
-                    "status": "No location data (requires individual request)",
-                    "is_own_report": None,
-                    "semantic_name": None,
-                    "battery_level": None,
-                }
-            )
+            dev = {
+                **base,
+                "latitude": None,
+                "longitude": None,
+                "altitude": None,
+                "accuracy": None,
+                "last_seen": None,
+                "status": "No location data (requires individual request)",
+                "is_own_report": None,
+                "semantic_name": None,
+                "battery_level": None,
+            }
             extended.append(dev)
         return extended
 
@@ -452,7 +462,7 @@ class GoogleFindMyAPI:
         return records[0]
 
     # ------------------------ FCM helper (via provider) --------------------------
-    def _get_fcm_token_for_action(self) -> Optional[str]:
+    def _get_fcm_token_for_action(self) -> str | None:
         """Return a valid FCM token for action requests via the shared receiver.
 
         Notes:
@@ -468,12 +478,14 @@ class GoogleFindMyAPI:
         try:
             receiver = _FCM_ReceiverGetter()
         except Exception as err:
-            _LOGGER.error("Cannot obtain FCM token: provider callable failed: %s", _short_err(err))
+            _LOGGER.error(
+                "Cannot obtain FCM token: provider callable failed: %s", _short_err(err)
+            )
             return None
         if receiver is None:
             _LOGGER.error("Cannot obtain FCM token: provider returned None.")
             return None
-        entry_id: Optional[str]
+        entry_id: str | None
         try:
             raw_entry_id = getattr(self._cache, "entry_id", None)
         except Exception:
@@ -500,14 +512,16 @@ class GoogleFindMyAPI:
                 )
                 return None
         except Exception as err:
-            _LOGGER.error("Cannot obtain FCM token from shared receiver: %s", _short_err(err))
+            _LOGGER.error(
+                "Cannot obtain FCM token from shared receiver: %s", _short_err(err)
+            )
             return None
         if not token or not isinstance(token, str) or len(token) < 10:
             _LOGGER.error("FCM token not available or invalid (via shared receiver).")
             return None
         return token
 
-    def _peek_fcm_token_quietly(self) -> Optional[str]:
+    def _peek_fcm_token_quietly(self) -> str | None:
         """Best-effort token probe for readiness checks (no ERROR-level log spam).
 
         Returns:
@@ -519,12 +533,14 @@ class GoogleFindMyAPI:
         try:
             receiver = _FCM_ReceiverGetter()
         except Exception as err:
-            _LOGGER.debug("FCM readiness probe: provider callable failed: %s", _short_err(err))
+            _LOGGER.debug(
+                "FCM readiness probe: provider callable failed: %s", _short_err(err)
+            )
             return None
         if receiver is None:
             _LOGGER.debug("FCM readiness probe: provider returned None.")
             return None
-        entry_id: Optional[str]
+        entry_id: str | None
         try:
             raw_entry_id = getattr(self._cache, "entry_id", None)
         except Exception:
@@ -551,7 +567,9 @@ class GoogleFindMyAPI:
                 )
                 return None
         except Exception as err:
-            _LOGGER.debug("FCM readiness probe: get_fcm_token failed: %s", _short_err(err))
+            _LOGGER.debug(
+                "FCM readiness probe: get_fcm_token failed: %s", _short_err(err)
+            )
             return None
         if not token or not isinstance(token, str) or len(token) < 10:
             _LOGGER.debug("FCM readiness probe: token missing or too short.")
@@ -561,14 +579,14 @@ class GoogleFindMyAPI:
     # ----------------------------- Device enumeration ----------------------------
     async def async_get_basic_device_list(
         self,
-        username: Optional[str] = None,
+        username: str | None = None,
         *,
         # Flow/local validation overrides (passed through to Nova):
-        token: Optional[str] = None,
-        cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
-        cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
-        refresh_override: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
-    ) -> List[Dict[str, Any]]:
+        token: str | None = None,
+        cache_get: Callable[[str], Awaitable[Any]] | None = None,
+        cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+        refresh_override: Callable[[], Awaitable[str | None]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Async variant of the lightweight device list used by HA flows/coordinator.
 
         This method fetches a list of devices associated with the Google account,
@@ -619,7 +637,9 @@ class GoogleFindMyAPI:
                 # Older helper signature (no pass-through); best-effort fallback matrix.
                 if sess is not None:
                     try:
-                        result_hex = await async_request_device_list(username, session=sess)  # type: ignore[misc]
+                        result_hex = await async_request_device_list(
+                            username, session=sess
+                        )  # type: ignore[misc]
                     except TypeError:
                         result_hex = await async_request_device_list(username)  # type: ignore[misc]
                 else:
@@ -637,13 +657,23 @@ class GoogleFindMyAPI:
         except NovaHTTPError as err:
             # Map 401/403 explicitly to ConfigEntryAuthFailed
             if getattr(err, "status", None) in (401, 403):
-                _LOGGER.error("Authentication failed (HTTP %s) while listing devices: %s", err.status, _short_err(err))
+                _LOGGER.error(
+                    "Authentication failed (HTTP %s) while listing devices: %s",
+                    err.status,
+                    _short_err(err),
+                )
                 raise ConfigEntryAuthFailed(_short_err(err)) from err
-            _LOGGER.warning("Device list temporarily unavailable (server error %s): %s", err.status, _short_err(err))
+            _LOGGER.warning(
+                "Device list temporarily unavailable (server error %s): %s",
+                err.status,
+                _short_err(err),
+            )
             raise UpdateFailed(_short_err(err)) from err
 
         except NovaAuthError as err:
-            _LOGGER.error("Authentication failed while listing devices: %s", _short_err(err))
+            _LOGGER.error(
+                "Authentication failed while listing devices: %s", _short_err(err)
+            )
             raise ConfigEntryAuthFailed(_short_err(err)) from err
 
         # Normalize gpsoauth/ADM "BadAuthentication" style failures to ConfigEntryAuthFailed
@@ -671,20 +701,30 @@ class GoogleFindMyAPI:
                 # and the flow can recognize the guard by message content.
                 raise UpdateFailed(_short_err(msg)) from err
 
-            _LOGGER.warning("Failed to get basic device list (runtime/value): %s", _short_err(err))
+            _LOGGER.warning(
+                "Failed to get basic device list (runtime/value): %s", _short_err(err)
+            )
             raise UpdateFailed(_short_err(err)) from err
 
         except ClientError as err:
             # Minimal-invasive change: do not degrade to empty success; signal transient failure.
-            _LOGGER.warning("Failed to get basic device list (async, network): %s", _short_err(err))
-            raise UpdateFailed(f"Network error fetching device list: {_short_err(err)}") from err
+            _LOGGER.warning(
+                "Failed to get basic device list (async, network): %s", _short_err(err)
+            )
+            raise UpdateFailed(
+                f"Network error fetching device list: {_short_err(err)}"
+            ) from err
 
         except Exception as err:
             # Do not mask unexpected errors as an empty list; let the coordinator keep last good data.
-            _LOGGER.error("Failed to get basic device list (async): %s", _short_err(err))
-            raise UpdateFailed(f"Unexpected error fetching device list: {_short_err(err)}") from err
+            _LOGGER.error(
+                "Failed to get basic device list (async): %s", _short_err(err)
+            )
+            raise UpdateFailed(
+                f"Unexpected error fetching device list: {_short_err(err)}"
+            ) from err
 
-    def get_basic_device_list(self) -> List[Dict[str, Any]]:
+    def get_basic_device_list(self) -> list[dict[str, Any]]:
         """Thin sync wrapper around async_get_basic_device_list for non-HA contexts.
 
         Guard:
@@ -705,7 +745,7 @@ class GoogleFindMyAPI:
             _LOGGER.error("Failed to get basic device list (sync): %s", _short_err(err))
             return []
 
-    def get_devices(self) -> List[Dict[str, Any]]:
+    def get_devices(self) -> list[dict[str, Any]]:
         """Return devices with basic info only; no up-front location fetch (sync wrapper).
 
         Returns:
@@ -719,7 +759,7 @@ class GoogleFindMyAPI:
     # --------------------------------- Location ----------------------------------
     async def async_get_device_location(
         self, device_id: str, device_name: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Async, HA-compatible location request for a single device.
 
         This function requests the location for a specific device and selects the most
@@ -740,7 +780,9 @@ class GoogleFindMyAPI:
         """
         try:
             _LOGGER.info(
-                "API v3.0 Async: Requesting location for %s (%s)", device_name, device_id
+                "API v3.0 Async: Requesting location for %s (%s)",
+                device_name,
+                device_id,
             )
             # Prefer new signature with entry namespace; fall back gracefully.
             try:
@@ -849,7 +891,7 @@ class GoogleFindMyAPI:
             )
             return {}
 
-    def get_device_location(self, device_id: str, device_name: str) -> Dict[str, Any]:
+    def get_device_location(self, device_id: str, device_name: str) -> dict[str, Any]:
         """Thin sync wrapper around async_get_device_location for non-HA contexts.
 
         Args:
@@ -866,14 +908,19 @@ class GoogleFindMyAPI:
                     "get_device_location() called inside an active event loop; use async_get_device_location()."
                 )
                 return {}
-            return loop.run_until_complete(self.async_get_device_location(device_id, device_name))
+            return loop.run_until_complete(
+                self.async_get_device_location(device_id, device_name)
+            )
         except Exception as err:
             _LOGGER.error(
-                "Failed to get location for %s (%s): %s", device_name, device_id, _short_err(err)
+                "Failed to get location for %s (%s): %s",
+                device_name,
+                device_id,
+                _short_err(err),
             )
             return {}
 
-    def locate_device(self, device_id: str) -> Dict[str, Any]:
+    def locate_device(self, device_id: str) -> dict[str, Any]:
         """Compatibility sync entrypoint for location (uses sync wrapper).
 
         Args:
@@ -930,7 +977,7 @@ class GoogleFindMyAPI:
         """Back-compat property variant of is_push_ready()."""
         return self.is_push_ready()
 
-    def can_play_sound(self, device_id: str) -> Optional[bool]:
+    def can_play_sound(self, device_id: str) -> bool | None:
         """Return a verdict whether 'Play Sound' is supported for this device.
 
         Strategy:
@@ -1024,13 +1071,19 @@ class GoogleFindMyAPI:
             )
             ok = result_hex is not None
             if ok:
-                _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
+                _LOGGER.info(
+                    "Play Sound (async) submitted successfully for %s", device_id
+                )
             else:
                 _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
             return bool(ok)
 
         except NovaAuthError as err:
-            _LOGGER.error("Authentication failed while playing sound on %s: %s", device_id, _short_err(err))
+            _LOGGER.error(
+                "Authentication failed while playing sound on %s: %s",
+                device_id,
+                _short_err(err),
+            )
             return False
 
         except NovaHTTPError as err:
@@ -1042,19 +1095,32 @@ class GoogleFindMyAPI:
                     _short_err(err),
                 )
                 return False
-            _LOGGER.warning("Server error (%s) while playing sound on %s: %s", err.status, device_id, _short_err(err))
+            _LOGGER.warning(
+                "Server error (%s) while playing sound on %s: %s",
+                err.status,
+                device_id,
+                _short_err(err),
+            )
             return False
 
         except NovaRateLimitError as err:
-            _LOGGER.warning("Play Sound rate-limited for %s: %s", device_id, _short_err(err))
+            _LOGGER.warning(
+                "Play Sound rate-limited for %s: %s", device_id, _short_err(err)
+            )
             return False
 
         except ClientError as err:
-            _LOGGER.error("Network error while playing sound on %s: %s", device_id, _short_err(err))
+            _LOGGER.error(
+                "Network error while playing sound on %s: %s",
+                device_id,
+                _short_err(err),
+            )
             return False
 
         except Exception as err:
-            _LOGGER.error("Failed to play sound (async) on %s: %s", device_id, _short_err(err))
+            _LOGGER.error(
+                "Failed to play sound (async) on %s: %s", device_id, _short_err(err)
+            )
             return False
 
     async def async_stop_sound(self, device_id: str) -> bool:
@@ -1084,13 +1150,19 @@ class GoogleFindMyAPI:
             )
             ok = result_hex is not None
             if ok:
-                _LOGGER.info("Stop Sound (async) submitted successfully for %s", device_id)
+                _LOGGER.info(
+                    "Stop Sound (async) submitted successfully for %s", device_id
+                )
             else:
                 _LOGGER.error("Stop Sound (async) submission failed for %s", device_id)
             return bool(ok)
 
         except NovaAuthError as err:
-            _LOGGER.error("Authentication failed while stopping sound on %s: %s", device_id, _short_err(err))
+            _LOGGER.error(
+                "Authentication failed while stopping sound on %s: %s",
+                device_id,
+                _short_err(err),
+            )
             return False
 
         except NovaHTTPError as err:
@@ -1102,23 +1174,39 @@ class GoogleFindMyAPI:
                     _short_err(err),
                 )
                 return False
-            _LOGGER.warning("Server error (%s) while stopping sound on %s: %s", err.status, device_id, _short_err(err))
+            _LOGGER.warning(
+                "Server error (%s) while stopping sound on %s: %s",
+                err.status,
+                device_id,
+                _short_err(err),
+            )
             return False
 
         except NovaRateLimitError as err:
-            _LOGGER.warning("Stop Sound rate-limited for %s: %s", device_id, _short_err(err))
+            _LOGGER.warning(
+                "Stop Sound rate-limited for %s: %s", device_id, _short_err(err)
+            )
             return False
 
         except ClientError as err:
-            _LOGGER.error("Network error while stopping sound on %s: %s", device_id, _short_err(err))
+            _LOGGER.error(
+                "Network error while stopping sound on %s: %s",
+                device_id,
+                _short_err(err),
+            )
             return False
 
         except Exception as err:
-            _LOGGER.error("Failed to stop sound (async) on %s: %s", device_id, _short_err(err))
+            _LOGGER.error(
+                "Failed to stop sound (async) on %s: %s", device_id, _short_err(err)
+            )
             return False
 
 
-if isinstance(_PREVIOUS_GOOGLEFINDMYAPI, type) and _PREVIOUS_GOOGLEFINDMYAPI is not GoogleFindMyAPI:
+if (
+    isinstance(_PREVIOUS_GOOGLEFINDMYAPI, type)
+    and _PREVIOUS_GOOGLEFINDMYAPI is not GoogleFindMyAPI
+):
     for _attr, _value in vars(GoogleFindMyAPI).items():
         if _attr in {"__dict__", "__weakref__", "__annotations__"}:
             continue

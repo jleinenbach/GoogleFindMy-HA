@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_async_retrieve_identity_key_threads_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_retrieve_identity_key_threads_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure owner-key retrieval receives the entry TokenCache."""
 
     from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
@@ -48,9 +50,7 @@ def test_async_retrieve_identity_key_threads_cache(monkeypatch: pytest.MonkeyPat
 
     cache = object()
     result = asyncio.run(
-        decrypt_locations.async_retrieve_identity_key(
-            DummyRegistration(), cache=cache
-        )
+        decrypt_locations.async_retrieve_identity_key(DummyRegistration(), cache=cache)
     )
 
     assert result == b"\x02" * 32
@@ -59,7 +59,9 @@ def test_async_retrieve_identity_key_threads_cache(monkeypatch: pytest.MonkeyPat
     assert "eid_cache" not in owner_calls
 
 
-def test_async_retrieve_identity_key_error_uses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_retrieve_identity_key_error_uses_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Even on failure the TokenCache must be propagated to diagnostics."""
 
     from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
@@ -181,7 +183,8 @@ def test_sync_decrypt_location_response_forwards_cache(
     device_update = object()
 
     result = decrypt_locations.decrypt_location_response_locations(
-        device_update, cache=cache  # type: ignore[arg-type]
+        device_update,
+        cache=cache,  # type: ignore[arg-type]
     )
 
     assert result == ["ok"]

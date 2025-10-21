@@ -263,16 +263,16 @@
   },
   "exceptions": {
     "device_not_found": {
-      "message": "El dispositivo '{device_id}' no se encontró o no pertenece a esta integración."
+      "message": "El dispositivo {device_id} no se encontró o no pertenece a esta integración."
     },
     "locate_failed": {
-      "message": "No se pudo localizar el dispositivo '{device_id}': {error}"
+      "message": "No se pudo localizar el dispositivo {device_id}: {error}"
     },
     "play_sound_failed": {
-      "message": "No se pudo reproducir sonido en '{device_id}': {error}"
+      "message": "No se pudo reproducir sonido en {device_id}: {error}"
     },
     "stop_sound_failed": {
-      "message": "No se pudo detener el sonido en '{device_id}': {error}"
+      "message": "No se pudo detener el sonido en {device_id}: {error}"
     },
     "no_active_entry": {
       "message": "No hay ninguna entrada activa de Google Find My Device. Entradas activas: {active_count}/{total_count}. Activa una de las entradas configuradas ({entries}) o añade una cuenta nueva y vuelve a intentarlo."

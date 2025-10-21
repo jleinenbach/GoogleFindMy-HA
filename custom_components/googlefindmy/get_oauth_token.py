@@ -14,9 +14,10 @@ sys.path.insert(0, current_dir)
 
 # Also add parent directories to handle custom_components structure
 parent_dir = os.path.dirname(current_dir)
-if 'custom_components' in current_dir:
+if "custom_components" in current_dir:
     # If we're inside custom_components, add the parent of custom_components
     sys.path.insert(0, os.path.dirname(parent_dir))
+
 
 def main():
     """Get OAuth token for Google Find My Device."""
@@ -24,14 +25,14 @@ def main():
     print("Google Find My Device - OAuth Token Generator")
     print("=" * 60)
     print()
-    
+
     try:
         # Import required packages directly
         import undetected_chromedriver as uc
         from selenium.webdriver.support.ui import WebDriverWait
         import shutil
         import platform
-        
+
         def find_chrome():
             """Find Chrome executable using known paths and system commands."""
             possiblePaths = [
@@ -43,7 +44,7 @@ def main():
                 "/usr/local/bin/google-chrome",
                 "/opt/google/chrome/chrome",
                 "/snap/bin/chromium",
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             ]
 
             # Check predefined paths
@@ -56,7 +57,9 @@ def main():
                 if platform.system() == "Windows":
                     chrome_path = shutil.which("chrome")
                 else:
-                    chrome_path = shutil.which("google-chrome") or shutil.which("chromium")
+                    chrome_path = shutil.which("google-chrome") or shutil.which(
+                        "chromium"
+                    )
                 if chrome_path:
                     return chrome_path
             except Exception as e:
@@ -67,29 +70,31 @@ def main():
         def create_driver(headless=False):
             """Create and configure Chrome driver."""
             chrome_executable = find_chrome()
-            
+
             if chrome_executable is None:
-                raise Exception("Chrome/Chromium not found. Please install Google Chrome or Chromium.")
+                raise Exception(
+                    "Chrome/Chromium not found. Please install Google Chrome or Chromium."
+                )
 
             options = uc.ChromeOptions()
             options.binary_location = chrome_executable
-            
+
             if headless:
                 options.add_argument("--headless")
-            
+
             # Additional options for better compatibility
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--disable-gpu")
             options.add_argument("--remote-debugging-port=9222")
-            
+
             return uc.Chrome(options=options)
-        
+
         print("This script will open Chrome to authenticate with Google.")
         print("After logging in, the OAuth token will be displayed.")
         print("Press Enter to continue...")
         input()
-        
+
         print("Opening Chrome browser...")
         driver = create_driver(headless=False)
 
@@ -98,14 +103,16 @@ def main():
             driver.get("https://accounts.google.com/EmbeddedSetup")
 
             # Wait until the "oauth_token" cookie is set
-            print("Waiting for authentication... Please complete the login process in the browser.")
+            print(
+                "Waiting for authentication... Please complete the login process in the browser."
+            )
             WebDriverWait(driver, 300).until(
                 lambda d: d.get_cookie("oauth_token") is not None
             )
 
             # Get the value of the "oauth_token" cookie
             oauth_token_cookie = driver.get_cookie("oauth_token")
-            oauth_token_value = oauth_token_cookie['value']
+            oauth_token_value = oauth_token_cookie["value"]
 
             if oauth_token_value:
                 print()
@@ -128,19 +135,20 @@ def main():
         finally:
             # Close the browser
             driver.quit()
-            
+
     except ImportError as e:
         print(f"Missing required package: {e}")
         print()
         print("Please install the required packages:")
         print("pip install selenium undetected-chromedriver")
         sys.exit(1)
-        
+
     except Exception as e:
         print(f"Error: {e}")
         print()
         print("Make sure you have Chrome installed and try again.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

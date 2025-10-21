@@ -35,7 +35,7 @@ import json
 import logging
 import re
 from binascii import Error as BinasciiError, unhexlify
-from typing import Any, Optional
+from typing import Any
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
@@ -47,6 +47,7 @@ _CACHE_KEY_BASE = "shared_key"  # canonical per-entry key in entry-scoped mode
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+
 
 def _decode_hex_32(s: str) -> bytes:
     """Decode a string as hex and ensure it is exactly 32 bytes.
@@ -96,7 +97,9 @@ def _decode_base64_like_32(s: str) -> bytes:
         except (ValueError, TypeError) as exc:
             raise ValueError("shared_key is not valid base64/base64url") from exc
     if len(b) != 32:
-        raise ValueError(f"shared_key (base64) has invalid length {len(b)} bytes (expected 32)")
+        raise ValueError(
+            f"shared_key (base64) has invalid length {len(b)} bytes (expected 32)"
+        )
     return b
 
 
@@ -109,6 +112,7 @@ async def _run_in_executor(func, *args):
 # -----------------------------------------------------------------------------
 # Retrieval strategies (cache-aware)
 # -----------------------------------------------------------------------------
+
 
 async def _derive_from_fcm_credentials(*, cache: TokenCache) -> str:
     """Try deriving the shared key from FCM credentials (non-interactive path).
@@ -136,7 +140,7 @@ async def _derive_from_fcm_credentials(*, cache: TokenCache) -> str:
     if not isinstance(creds, dict):
         raise RuntimeError("No FCM credentials available in cache")
 
-    private_b64: Optional[str] = None
+    private_b64: str | None = None
     keys_obj = creds.get("keys")
     if isinstance(keys_obj, dict):
         priv = keys_obj.get("private")
@@ -157,10 +161,14 @@ async def _derive_from_fcm_credentials(*, cache: TokenCache) -> str:
         try:
             der = base64.b64decode(v_padded)
         except (ValueError, TypeError) as exc:
-            raise RuntimeError(f"FCM private key is not valid base64/base64url: {exc}") from exc
+            raise RuntimeError(
+                f"FCM private key is not valid base64/base64url: {exc}"
+            ) from exc
 
     if len(der) < 32:
-        raise RuntimeError(f"FCM private key too short ({len(der)} bytes); cannot derive shared key")
+        raise RuntimeError(
+            f"FCM private key too short ({len(der)} bytes); cannot derive shared key"
+        )
 
     shared = der[-32:]
     return shared.hex()
@@ -183,7 +191,9 @@ async def _interactive_flow_hex() -> str:
     if isinstance(result, (bytes, bytearray)):
         b = bytes(result)
         if len(b) != 32:
-            raise RuntimeError(f"Interactive shared key has invalid length {len(b)} (expected 32)")
+            raise RuntimeError(
+                f"Interactive shared key has invalid length {len(b)} (expected 32)"
+            )
         return b.hex()
 
     if not isinstance(result, str) or not result.strip():
@@ -221,9 +231,13 @@ async def _retrieve_shared_key_hex(*, cache: TokenCache) -> str:
         import sys
 
         if sys.stdin and sys.stdin.isatty():
-            _LOGGER.info("Falling back to interactive shared key flow (CLI mode detected)")
+            _LOGGER.info(
+                "Falling back to interactive shared key flow (CLI mode detected)"
+            )
             return await _interactive_flow_hex()
-        raise RuntimeError("Interactive flow not available in non-interactive environment")
+        raise RuntimeError(
+            "Interactive flow not available in non-interactive environment"
+        )
     except Exception as err:
         raise RuntimeError(f"Failed to retrieve shared key: {err}") from err
 
@@ -232,6 +246,7 @@ async def _retrieve_shared_key_hex(*, cache: TokenCache) -> str:
 # Cache orchestration (entry-scoped vs global legacy)
 # -----------------------------------------------------------------------------
 
+
 def _user_scoped_key(username: str) -> str:
     return f"{_CACHE_KEY_BASE}_{username}"
 
@@ -239,7 +254,7 @@ def _user_scoped_key(username: str) -> str:
 async def _get_or_generate_shared_key_hex(
     *,
     cache: TokenCache,
-    username: Optional[str],
+    username: str | None,
 ) -> str:
     """Return the shared key hex string with proper scoping & one-time migration."""
     if cache is None:
@@ -269,10 +284,11 @@ async def _get_or_generate_shared_key_hex(
 # Public API (async-first, entry-scoped capable)
 # -----------------------------------------------------------------------------
 
+
 async def async_get_shared_key(
     *,
     cache: TokenCache,
-    username: Optional[str] = None,
+    username: str | None = None,
 ) -> bytes:
     """Return the 32-byte shared key (entry-scoped capable).
 
@@ -302,4 +318,3 @@ async def async_get_shared_key(
         await cache.set(_CACHE_KEY_BASE, b.hex())
         _LOGGER.info("Normalized cached shared_key to hex")
         return b
-

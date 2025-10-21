@@ -7,7 +7,7 @@ import asyncio
 import importlib
 import sys
 from types import ModuleType, SimpleNamespace
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import pytest
 
@@ -27,7 +27,9 @@ class _StubReceiver:
         self.stop_calls += 1
 
 
-def test_async_acquire_discards_invalid_cached_receiver(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_acquire_discards_invalid_cached_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A cached receiver without async registration methods is replaced."""
 
     hass = SimpleNamespace(data={DOMAIN: {}})
@@ -119,7 +121,7 @@ def test_multi_entry_buffers_prevent_global_cache_access(
 
     start_calls: list[str] = []
 
-    async def fake_start(self, entry_id: str, _cache: Optional[DummyCache]) -> None:
+    async def fake_start(self, entry_id: str, _cache: DummyCache | None) -> None:
         start_calls.append(entry_id)
 
     monkeypatch.setattr(FcmReceiverHA, "_start_supervisor_for_entry", fake_start)

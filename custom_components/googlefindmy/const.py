@@ -8,7 +8,6 @@ Keep comments and docstrings in English; user-facing strings belong in translati
 from __future__ import annotations
 
 import time
-from typing import Any, Tuple
 
 # --------------------------------------------------------------------------------------
 # Core identifiers
@@ -30,7 +29,7 @@ SERVICE_DEVICE_IDENTIFIER_PREFIX: str = "integration_"
 LEGACY_SERVICE_IDENTIFIER: str = "integration"
 
 
-def service_device_identifier(entry_id: str) -> Tuple[str, str]:
+def service_device_identifier(entry_id: str) -> tuple[str, str]:
     """Return the (domain, identifier) tuple for the per-entry 'service device'.
 
     Args:
@@ -47,13 +46,13 @@ def service_device_identifier(entry_id: str) -> Tuple[str, str]:
 # NOTE: Keep keys stable to avoid migration churn across releases.
 # --------------------------------------------------------------------------------------
 # Data (immutable / credentials): stored in config_entry.data
-CONF_OAUTH_TOKEN: str = "oauth_token"          # kept for backward compatibility
+CONF_OAUTH_TOKEN: str = "oauth_token"  # kept for backward compatibility
 # NOTE: This is a TokenCache key (persistent, rotating credential stored in HA Store),
 # NOT a config_entry.data key. Do not persist this inside entry.data.
-DATA_AAS_TOKEN: str = "aas_token"              # AAS token (TokenCache key; not in entry.data)
-CONF_GOOGLE_EMAIL: str = "google_email"        # helper key when individual tokens are used
-DATA_SECRET_BUNDLE: str = "secrets_data"       # full GoogleFindMyTools secrets.json content
-DATA_AUTH_METHOD: str = "auth_method"          # "secrets_json" | "individual_tokens"
+DATA_AAS_TOKEN: str = "aas_token"  # AAS token (TokenCache key; not in entry.data)
+CONF_GOOGLE_EMAIL: str = "google_email"  # helper key when individual tokens are used
+DATA_SECRET_BUNDLE: str = "secrets_data"  # full GoogleFindMyTools secrets.json content
+DATA_AUTH_METHOD: str = "auth_method"  # "secrets_json" | "individual_tokens"
 
 # Options (user-changeable): stored in config_entry.options
 # (tracked_devices removed in Step 2; device inclusion is managed via HA device enable/disable)
@@ -94,8 +93,8 @@ UPDATE_INTERVAL: int = 60  # seconds; DataUpdateCoordinator "tick" (lightweight)
 
 # Polling cadence
 DEFAULT_LOCATION_POLL_INTERVAL: int = 300  # seconds; start a new polling cycle
-DEFAULT_DEVICE_POLL_DELAY: int = 5         # seconds; inter-device delay within one cycle
-DEFAULT_MIN_POLL_INTERVAL: int = 60        # seconds; hard lower bound between cycles
+DEFAULT_DEVICE_POLL_DELAY: int = 5  # seconds; inter-device delay within one cycle
+DEFAULT_MIN_POLL_INTERVAL: int = 60  # seconds; hard lower bound between cycles
 
 # Manual locate policy (button/service)
 LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
@@ -103,7 +102,7 @@ LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
 
 # Quality/logic thresholds
 DEFAULT_MIN_ACCURACY_THRESHOLD: int = 100  # meters; drop worse fixes (0 => disabled)
-DEFAULT_MOVEMENT_THRESHOLD: int = 50       # meters; used for future movement gating
+DEFAULT_MOVEMENT_THRESHOLD: int = 50  # meters; used for future movement gating
 DEFAULT_ALLOW_HISTORY_FALLBACK: bool = False
 
 # Stats entities
@@ -111,7 +110,9 @@ DEFAULT_ENABLE_STATS_ENTITIES: bool = True
 
 # Google Home filter
 DEFAULT_GOOGLE_HOME_FILTER_ENABLED: bool = True
-DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS: str = "nest,google,home,mini,hub,display,chromecast,speaker"
+DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS: str = (
+    "nest,google,home,mini,hub,display,chromecast,speaker"
+)
 GOOGLE_HOME_SPAM_THRESHOLD_MINUTES: int = 15  # debounce for repeated detections
 
 # Map View token behavior
@@ -192,7 +193,9 @@ def coerce_ignored_mapping(raw: object) -> tuple[dict[str, dict], bool]:
                 out[dev_id] = {
                     _IGN_KEY_NAME: meta.get(_IGN_KEY_NAME) or dev_id,
                     _IGN_KEY_ALIASES: list(meta.get(_IGN_KEY_ALIASES) or []),
-                    _IGN_KEY_IGNORED_AT: int(meta.get(_IGN_KEY_IGNORED_AT) or _now_epoch()),
+                    _IGN_KEY_IGNORED_AT: int(
+                        meta.get(_IGN_KEY_IGNORED_AT) or _now_epoch()
+                    ),
                     _IGN_KEY_SOURCE: meta.get(_IGN_KEY_SOURCE) or "registry",
                 }
     else:

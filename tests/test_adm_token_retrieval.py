@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -83,16 +84,26 @@ def test_generate_adm_token_reuses_cached_aas(monkeypatch: pytest.MonkeyPatch) -
             return {"Token": "adm-token"}
 
         def fail_exchange(*args: Any, **kwargs: Any) -> dict[str, str]:
-            raise AssertionError("OAuth exchange must not be invoked for cached AAS path")
+            raise AssertionError(
+                "OAuth exchange must not be invoked for cached AAS path"
+            )
 
         async def fail_provider(*args: Any, **kwargs: Any) -> str:
-            raise AssertionError("AAS provider must not be called when cached token exists")
+            raise AssertionError(
+                "AAS provider must not be called when cached token exists"
+            )
 
-        monkeypatch.setattr(token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
-        monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fail_exchange)
+        monkeypatch.setattr(
+            token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+        monkeypatch.setattr(
+            aas_token_retrieval.gpsoauth, "exchange_token", fail_exchange
+        )
         monkeypatch.setattr(adm_token_retrieval, "async_get_aas_token", fail_provider)
 
-        token = await adm_token_retrieval._generate_adm_token("user@example.com", cache=cache)
+        token = await adm_token_retrieval._generate_adm_token(
+            "user@example.com", cache=cache
+        )
 
         assert token == "adm-token"
         assert perform_calls == [("user@example.com", "aas_et/CACHED")]
@@ -139,9 +150,13 @@ def test_generate_adm_token_falls_back_to_provider_when_aas_missing(
             return await aas_provider()
 
         monkeypatch.setattr(adm_token_retrieval, "async_get_aas_token", fake_provider)
-        monkeypatch.setattr(adm_token_retrieval, "async_request_token", fake_request_token)
+        monkeypatch.setattr(
+            adm_token_retrieval, "async_request_token", fake_request_token
+        )
 
-        token = await adm_token_retrieval._generate_adm_token("user@example.com", cache=cache)
+        token = await adm_token_retrieval._generate_adm_token(
+            "user@example.com", cache=cache
+        )
 
         assert token == "aas_et/FALLBACK"
         assert len(provider_calls) == 1
@@ -149,7 +164,9 @@ def test_generate_adm_token_falls_back_to_provider_when_aas_missing(
     asyncio.run(_exercise())
 
 
-def test_generate_adm_token_uses_provider_for_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generate_adm_token_uses_provider_for_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """OAuth-based setups must exchange the OAuth token and perform AAS→ADM once."""
 
     async def _exercise() -> None:
@@ -164,7 +181,9 @@ def test_generate_adm_token_uses_provider_for_oauth(monkeypatch: pytest.MonkeyPa
         exchange_calls: list[tuple[str, str]] = []
         perform_calls: list[str] = []
 
-        def fake_exchange_token(username: str, oauth_token: str, android_id: int) -> dict[str, str]:
+        def fake_exchange_token(
+            username: str, oauth_token: str, android_id: int
+        ) -> dict[str, str]:
             exchange_calls.append((username, oauth_token))
             return {"Token": "aas_et/NEW"}
 
@@ -177,10 +196,16 @@ def test_generate_adm_token_uses_provider_for_oauth(monkeypatch: pytest.MonkeyPa
             perform_calls.append(aas_token)
             return {"Token": "adm-token"}
 
-        monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange_token)
-        monkeypatch.setattr(token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
+        monkeypatch.setattr(
+            aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange_token
+        )
+        monkeypatch.setattr(
+            token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
 
-        token = await adm_token_retrieval._generate_adm_token("user@example.com", cache=cache)
+        token = await adm_token_retrieval._generate_adm_token(
+            "user@example.com", cache=cache
+        )
 
         assert token == "adm-token"
         assert exchange_calls == [("user@example.com", "oauth-token")]
@@ -190,7 +215,9 @@ def test_generate_adm_token_uses_provider_for_oauth(monkeypatch: pytest.MonkeyPa
     asyncio.run(_exercise())
 
 
-def test_async_request_token_uses_cached_android_id(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_request_token_uses_cached_android_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """async_request_token should use the android_id stored in FCM credentials."""
 
     async def _exercise() -> None:
@@ -208,9 +235,13 @@ def test_async_request_token_uses_cached_android_id(monkeypatch: pytest.MonkeyPa
             recorded["kwargs"] = kwargs
             return {"Token": "adm-token"}
 
-        monkeypatch.setattr(token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
+        monkeypatch.setattr(
+            token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
 
-        cache = _DummyTokenCache({"fcm_credentials": {"gcm": {"android_id": "0x1A2B3C"}}})
+        cache = _DummyTokenCache(
+            {"fcm_credentials": {"gcm": {"android_id": "0x1A2B3C"}}}
+        )
 
         token = await token_retrieval.async_request_token(
             "user@example.com",
@@ -247,7 +278,9 @@ def test_async_request_token_uses_constant_android_id_when_missing(
             recorded["android_id"] = android_id
             return {"Token": "adm-token"}
 
-        monkeypatch.setattr(token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
+        monkeypatch.setattr(
+            token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
 
         cache = _DummyTokenCache()
 
@@ -264,7 +297,9 @@ def test_async_request_token_uses_constant_android_id_when_missing(
     asyncio.run(_exercise())
 
 
-def test_perform_oauth_sync_missing_keys_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_perform_oauth_sync_missing_keys_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """gpsoauth responses without Token/Auth must raise a clear runtime error."""
 
     def fake_perform_oauth(
@@ -285,7 +320,10 @@ def test_perform_oauth_sync_missing_keys_raises(monkeypatch: pytest.MonkeyPatch)
             play_services=False,
         )
 
-def test_async_get_adm_token_retries_transient_error(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_async_get_adm_token_retries_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Transient failures should retry without clearing unrelated cache entries."""
 
     async def _exercise() -> None:
@@ -335,7 +373,9 @@ def test_async_get_adm_token_retries_transient_error(monkeypatch: pytest.MonkeyP
     asyncio.run(_exercise())
 
 
-def test_async_get_adm_token_invalid_aas_without_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_get_adm_token_invalid_aas_without_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Invalid AAS tokens without OAuth fallback must raise and clear cached AAS."""
 
     async def _exercise() -> None:
@@ -351,7 +391,9 @@ def test_async_get_adm_token_invalid_aas_without_oauth(monkeypatch: pytest.Monke
         ) -> str:
             raise InvalidAasTokenError("invalid AAS")
 
-        monkeypatch.setattr(token_retrieval, "_perform_oauth_sync", fake_perform_oauth_sync)
+        monkeypatch.setattr(
+            token_retrieval, "_perform_oauth_sync", fake_perform_oauth_sync
+        )
 
         cache = _DummyTokenCache(
             {
@@ -370,7 +412,9 @@ def test_async_get_adm_token_invalid_aas_without_oauth(monkeypatch: pytest.Monke
     asyncio.run(_exercise())
 
 
-def test_async_get_adm_token_oauth_fallback_success(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_get_adm_token_oauth_fallback_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A failed AAS path should fall back to OAuth once and restore the auth method."""
 
     async def _exercise() -> None:
@@ -392,12 +436,18 @@ def test_async_get_adm_token_oauth_fallback_success(monkeypatch: pytest.MonkeyPa
             assert aas_token == "aas_et/NEW"
             return "adm-token-new"
 
-        def fake_exchange_token(username: str, oauth_token: str, android_id: int) -> dict[str, str]:
+        def fake_exchange_token(
+            username: str, oauth_token: str, android_id: int
+        ) -> dict[str, str]:
             exchange_log.append(oauth_token)
             return {"Token": "aas_et/NEW"}
 
-        monkeypatch.setattr(token_retrieval, "_perform_oauth_sync", fake_perform_oauth_sync)
-        monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange_token)
+        monkeypatch.setattr(
+            token_retrieval, "_perform_oauth_sync", fake_perform_oauth_sync
+        )
+        monkeypatch.setattr(
+            aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange_token
+        )
 
         cache = _DummyTokenCache(
             {
@@ -407,7 +457,9 @@ def test_async_get_adm_token_oauth_fallback_success(monkeypatch: pytest.MonkeyPa
             }
         )
 
-        token = await adm_token_retrieval.async_get_adm_token(user, retries=1, cache=cache)
+        token = await adm_token_retrieval.async_get_adm_token(
+            user, retries=1, cache=cache
+        )
 
         assert token == "adm-token-new"
         assert perform_log == ["aas_et/OLD", "aas_et/NEW"]
@@ -473,7 +525,9 @@ def test_async_get_adm_token_oauth_fallback_success_after_retry(
     asyncio.run(_exercise())
 
 
-def test_async_get_adm_token_oauth_fallback_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_get_adm_token_oauth_fallback_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """If both AAS and OAuth paths fail, the last auth error must surface."""
 
     async def _exercise() -> None:
@@ -492,12 +546,18 @@ def test_async_get_adm_token_oauth_fallback_failure(monkeypatch: pytest.MonkeyPa
             perform_log.append(aas_token)
             raise InvalidAasTokenError("still invalid")
 
-        def fake_exchange_token(username: str, oauth_token: str, android_id: int) -> dict[str, str]:
+        def fake_exchange_token(
+            username: str, oauth_token: str, android_id: int
+        ) -> dict[str, str]:
             exchange_log.append(oauth_token)
             return {"Token": "aas_et/NEW"}
 
-        monkeypatch.setattr(token_retrieval, "_perform_oauth_sync", fake_perform_oauth_sync)
-        monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange_token)
+        monkeypatch.setattr(
+            token_retrieval, "_perform_oauth_sync", fake_perform_oauth_sync
+        )
+        monkeypatch.setattr(
+            aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange_token
+        )
 
         cache = _DummyTokenCache(
             {
@@ -566,7 +626,10 @@ def test_async_get_adm_token_oauth_fallback_not_reinvoked_after_transient_error(
         assert sleep_durations == [2.0]
 
         auth_method_writes = cache.values_for(DATA_AUTH_METHOD)
-        assert auth_method_writes.count(adm_token_retrieval._AUTH_METHOD_INDIVIDUAL_TOKENS) == 1
+        assert (
+            auth_method_writes.count(adm_token_retrieval._AUTH_METHOD_INDIVIDUAL_TOKENS)
+            == 1
+        )
         assert auth_method_writes[-1] == "secrets_json"
         assert cache._data.get(DATA_AUTH_METHOD) == "secrets_json"
         assert cache._data.get(CONF_OAUTH_TOKEN) == "oauth-token"
@@ -574,7 +637,9 @@ def test_async_get_adm_token_oauth_fallback_not_reinvoked_after_transient_error(
     asyncio.run(_exercise())
 
 
-def test_async_get_adm_token_oauth_path_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_get_adm_token_oauth_path_auth_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """OAuth-configured entries must not attempt a fallback on auth errors."""
 
     async def _exercise() -> None:
@@ -593,12 +658,18 @@ def test_async_get_adm_token_oauth_path_auth_error(monkeypatch: pytest.MonkeyPat
             perform_log.append(aas_token)
             raise InvalidAasTokenError("oauth auth failure")
 
-        def fake_exchange_token(username: str, oauth_token: str, android_id: int) -> dict[str, str]:
+        def fake_exchange_token(
+            username: str, oauth_token: str, android_id: int
+        ) -> dict[str, str]:
             exchange_log.append(oauth_token)
             return {"Token": "aas_et/NEW"}
 
-        monkeypatch.setattr(token_retrieval, "_perform_oauth_sync", fake_perform_oauth_sync)
-        monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange_token)
+        monkeypatch.setattr(
+            token_retrieval, "_perform_oauth_sync", fake_perform_oauth_sync
+        )
+        monkeypatch.setattr(
+            aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange_token
+        )
 
         cache = _DummyTokenCache(
             {
@@ -663,7 +734,9 @@ def test_async_get_adm_token_isolated_uses_bundle_android_id(
         recorded["android_id"] = android_id
         return {"Token": "adm-token"}
 
-    monkeypatch.setattr(adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
+    monkeypatch.setattr(
+        adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+    )
 
     bundle = {
         "aas_token": "aas-token",
@@ -698,7 +771,9 @@ def test_async_get_adm_token_isolated_prefers_cache_android_id(
         recorded["android_id"] = android_id
         return {"Token": "adm-token"}
 
-    monkeypatch.setattr(adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
+    monkeypatch.setattr(
+        adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+    )
 
     async def cache_get(key: str) -> Any:
         if key == "fcm_credentials":
@@ -738,7 +813,9 @@ def test_async_get_adm_token_isolated_falls_back_without_android_id(
         recorded["android_id"] = android_id
         return {"Token": "adm-token"}
 
-    monkeypatch.setattr(adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth)
+    monkeypatch.setattr(
+        adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+    )
 
     async def cache_get(key: str) -> Any:
         return None

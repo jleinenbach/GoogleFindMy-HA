@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import inspect
-from typing import Any, Awaitable, Dict, List
+from typing import Any
+from collections.abc import Awaitable
 
 import pytest
 
@@ -24,7 +25,7 @@ class _MemoryCache:
     """In-memory cache implementing the token cache contract used by the flow."""
 
     def __init__(self) -> None:
-        self._data: Dict[str, Any] = {}
+        self._data: dict[str, Any] = {}
 
     async def get(self, name: str) -> Any:
         return self._data.get(name)
@@ -52,10 +53,12 @@ class _RuntimeData:
 class _DummyEntry:
     """Minimal ConfigEntry substitute for exercising the options flow."""
 
-    def __init__(self, *, entry_id: str, data: Dict[str, Any], cache: _MemoryCache) -> None:
+    def __init__(
+        self, *, entry_id: str, data: dict[str, Any], cache: _MemoryCache
+    ) -> None:
         self.entry_id = entry_id
         self.data = data
-        self.options: Dict[str, Any] = {}
+        self.options: dict[str, Any] = {}
         self.runtime_data = _RuntimeData(cache)
 
 
@@ -64,13 +67,13 @@ class _DummyConfigEntries:
 
     def __init__(self, entry: _DummyEntry) -> None:
         self._entry = entry
-        self.updated_payloads: List[Dict[str, Any]] = []
-        self.reloaded: List[str] = []
+        self.updated_payloads: list[dict[str, Any]] = []
+        self.reloaded: list[str] = []
 
     def async_get_entry(self, entry_id: str) -> _DummyEntry | None:
         return self._entry if entry_id == self._entry.entry_id else None
 
-    def async_update_entry(self, entry: _DummyEntry, *, data: Dict[str, Any]) -> None:
+    def async_update_entry(self, entry: _DummyEntry, *, data: dict[str, Any]) -> None:
         assert entry is self._entry
         entry.data = data
         self.updated_payloads.append(data)
@@ -86,8 +89,8 @@ class _DummyHass:
 
     def __init__(self, entry: _DummyEntry, cache: _MemoryCache) -> None:
         self.config_entries = _DummyConfigEntries(entry)
-        self.data: Dict[str, Any] = {DOMAIN: {entry.entry_id: _RuntimeData(cache)}}
-        self._tasks: List[asyncio.Task[Any]] = []
+        self.data: dict[str, Any] = {DOMAIN: {entry.entry_id: _RuntimeData(cache)}}
+        self._tasks: list[asyncio.Task[Any]] = []
 
     def async_create_task(self, coro: Awaitable[Any]) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
@@ -100,7 +103,9 @@ class _DummyHass:
         await asyncio.gather(*self._tasks)
 
 
-def test_options_flow_rotating_token_clears_cached_aas(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_options_flow_rotating_token_clears_cached_aas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Replacing credentials in the options flow must drop cached AAS tokens."""
 
     async def _exercise() -> None:
@@ -124,9 +129,9 @@ def test_options_flow_rotating_token_clears_cached_aas(monkeypatch: pytest.Monke
 
         async def _fake_pick(
             email: str,
-            candidates: List[tuple[str, str]],
+            candidates: list[tuple[str, str]],
             *,
-            secrets_bundle: Dict[str, Any] | None = None,
+            secrets_bundle: dict[str, Any] | None = None,
         ) -> str | None:
             return candidates[0][1] if candidates else None
 
@@ -173,7 +178,7 @@ def test_fcm_token_lookup_uses_entry_id(monkeypatch: pytest.MonkeyPatch) -> None
 
     class _Receiver:
         def __init__(self) -> None:
-            self.calls: List[str | None] = []
+            self.calls: list[str | None] = []
 
         def get_fcm_token(self, entry_id: str | None = None) -> str:
             self.calls.append(entry_id)
@@ -191,7 +196,9 @@ def test_fcm_token_lookup_uses_entry_id(monkeypatch: pytest.MonkeyPatch) -> None
     assert receiver.calls == ["entry-primary"]
 
 
-def test_fcm_token_lookup_falls_back_without_entry_id(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fcm_token_lookup_falls_back_without_entry_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure legacy receivers without entry ID support continue to function."""
 
     from custom_components.googlefindmy import api as api_module
@@ -205,7 +212,7 @@ def test_fcm_token_lookup_falls_back_without_entry_id(monkeypatch: pytest.Monkey
 
     class _LegacyReceiver:
         def __init__(self) -> None:
-            self.calls: List[str | None] = []
+            self.calls: list[str | None] = []
 
         def get_fcm_token(self) -> str:
             self.calls.append(None)
@@ -235,9 +242,9 @@ def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> No
 
         def __init__(self, entry_id: str) -> None:
             self.entry_id = entry_id
-            self._data: Dict[str, Any] = {}
-            self.get_calls: List[str] = []
-            self.set_calls: List[tuple[str, Any]] = []
+            self._data: dict[str, Any] = {}
+            self.get_calls: list[str] = []
+            self.set_calls: list[tuple[str, Any]] = []
 
         async def async_get_cached_value(self, key: str) -> Any:
             self.get_calls.append(key)
@@ -268,10 +275,15 @@ def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> No
         api_primary = GoogleFindMyAPI(cache=cache_primary)
         _ = GoogleFindMyAPI(cache=cache_secondary)
 
-        monkeypatch.setattr(api_primary, "_get_fcm_token_for_action", lambda: "tok-1234567890", raising=False)
+        monkeypatch.setattr(
+            api_primary,
+            "_get_fcm_token_for_action",
+            lambda: "tok-1234567890",
+            raising=False,
+        )
 
-        start_calls: List[tuple[str, str, Dict[str, Any]]] = []
-        stop_calls: List[tuple[str, str, Dict[str, Any]]] = []
+        start_calls: list[tuple[str, str, dict[str, Any]]] = []
+        stop_calls: list[tuple[str, str, dict[str, Any]]] = []
 
         async def _fake_start(scope: str, payload: str, **kwargs: Any) -> str:
             start_calls.append((scope, payload, kwargs))

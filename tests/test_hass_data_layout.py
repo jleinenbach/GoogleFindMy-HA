@@ -10,7 +10,8 @@ import sys
 from contextlib import suppress
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 from unittest.mock import AsyncMock, call
 
 import pytest
@@ -69,7 +70,9 @@ class _StubConfigEntry:
 class _StubBus:
     """Event bus stub providing async_listen_once."""
 
-    def async_listen_once(self, _event: str, _callback: Callable[..., Any]) -> Callable[[], None]:
+    def async_listen_once(
+        self, _event: str, _callback: Callable[..., Any]
+    ) -> Callable[[], None]:
         return lambda: None
 
 
@@ -94,13 +97,19 @@ class _StubConfigEntries:
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
         return list(self._entries)
 
-    async def async_forward_entry_setups(self, entry: _StubConfigEntry, platforms: list[str]) -> None:
+    async def async_forward_entry_setups(
+        self, entry: _StubConfigEntry, platforms: list[str]
+    ) -> None:
         self.forward_calls.append((entry, tuple(platforms)))
 
-    async def async_unload_platforms(self, entry: _StubConfigEntry, _platforms: list[str]) -> bool:
+    async def async_unload_platforms(
+        self, entry: _StubConfigEntry, _platforms: list[str]
+    ) -> bool:
         return True
 
-    def async_update_entry(self, entry: _StubConfigEntry, *, options: dict[str, Any]) -> None:
+    def async_update_entry(
+        self, entry: _StubConfigEntry, *, options: dict[str, Any]
+    ) -> None:
         entry.options = options
 
     async def async_reload(self, entry_id: str) -> None:
@@ -113,14 +122,18 @@ class _StubServices:
     def __init__(self) -> None:
         self.registered: dict[tuple[str, str], Callable[..., Any]] = {}
 
-    def async_register(self, domain: str, service: str, handler: Callable[..., Any]) -> None:
+    def async_register(
+        self, domain: str, service: str, handler: Callable[..., Any]
+    ) -> None:
         self.registered[(domain, service)] = handler
 
 
 class _StubHass:
     """Home Assistant core stub with just enough surface for setup."""
 
-    def __init__(self, entry: _StubConfigEntry, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self, entry: _StubConfigEntry, loop: asyncio.AbstractEventLoop
+    ) -> None:
         from homeassistant.core import CoreState
 
         self.data: dict[str, Any] = {DOMAIN: {}, "core.uuid": "ha-uuid"}
@@ -132,7 +145,9 @@ class _StubHass:
         self._tasks: list[asyncio.Task[Any]] = []
         self.services = _StubServices()
 
-    def async_create_task(self, coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
+    def async_create_task(
+        self, coro: Any, *, name: str | None = None
+    ) -> asyncio.Task[Any]:
         task = self.loop.create_task(coro, name=name)
         self._tasks.append(task)
         return task
@@ -235,19 +250,25 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
                 setattr(components_pkg, "http", http_component)
 
         if "homeassistant.loader" not in sys.modules:
-            homeassistant_root = sys.modules.setdefault("homeassistant", ModuleType("homeassistant"))
+            homeassistant_root = sys.modules.setdefault(
+                "homeassistant", ModuleType("homeassistant")
+            )
             if not hasattr(homeassistant_root, "__path__"):
                 homeassistant_root.__path__ = []  # type: ignore[attr-defined]
             loader_module = ModuleType("homeassistant.loader")
 
-            async def _async_get_integration(_hass: Any, _domain: str) -> SimpleNamespace:
+            async def _async_get_integration(
+                _hass: Any, _domain: str
+            ) -> SimpleNamespace:
                 return SimpleNamespace(name="googlefindmy", version="0.0.0")
 
             loader_module.async_get_integration = _async_get_integration
             sys.modules["homeassistant.loader"] = loader_module
             setattr(homeassistant_root, "loader", loader_module)
 
-        helpers_pkg = sys.modules.setdefault("homeassistant.helpers", ModuleType("homeassistant.helpers"))
+        helpers_pkg = sys.modules.setdefault(
+            "homeassistant.helpers", ModuleType("homeassistant.helpers")
+        )
         if not hasattr(helpers_pkg, "__path__"):
             helpers_pkg.__path__ = []  # type: ignore[attr-defined]
         entity_module = sys.modules.get("homeassistant.helpers.entity")
@@ -257,6 +278,7 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             setattr(helpers_pkg, "entity", entity_module)
 
         if not hasattr(entity_module, "DeviceInfo"):
+
             class _DeviceInfo:
                 def __init__(self, **kwargs: Any) -> None:
                     for key, value in kwargs.items():
@@ -264,25 +286,38 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 
             entity_module.DeviceInfo = _DeviceInfo
 
-        entity_platform_module = sys.modules.get("homeassistant.helpers.entity_platform")
+        entity_platform_module = sys.modules.get(
+            "homeassistant.helpers.entity_platform"
+        )
         if entity_platform_module is None:
             entity_platform_module = ModuleType("homeassistant.helpers.entity_platform")
-            sys.modules["homeassistant.helpers.entity_platform"] = entity_platform_module
+            sys.modules["homeassistant.helpers.entity_platform"] = (
+                entity_platform_module
+            )
             setattr(helpers_pkg, "entity_platform", entity_platform_module)
 
         if not hasattr(entity_platform_module, "AddEntitiesCallback"):
             entity_platform_module.AddEntitiesCallback = Callable[[list[Any]], None]
 
-        helpers_pkg = sys.modules.setdefault("homeassistant.helpers", ModuleType("homeassistant.helpers"))
+        helpers_pkg = sys.modules.setdefault(
+            "homeassistant.helpers", ModuleType("homeassistant.helpers")
+        )
         if not hasattr(helpers_pkg, "__path__"):
             helpers_pkg.__path__ = []  # type: ignore[attr-defined]
-        update_coordinator_module = sys.modules.get("homeassistant.helpers.update_coordinator")
+        update_coordinator_module = sys.modules.get(
+            "homeassistant.helpers.update_coordinator"
+        )
         if update_coordinator_module is None:
-            update_coordinator_module = ModuleType("homeassistant.helpers.update_coordinator")
-            sys.modules["homeassistant.helpers.update_coordinator"] = update_coordinator_module
+            update_coordinator_module = ModuleType(
+                "homeassistant.helpers.update_coordinator"
+            )
+            sys.modules["homeassistant.helpers.update_coordinator"] = (
+                update_coordinator_module
+            )
             setattr(helpers_pkg, "update_coordinator", update_coordinator_module)
 
         if not hasattr(update_coordinator_module, "CoordinatorEntity"):
+
             class _CoordinatorEntity:
                 def __init__(self, coordinator: Any | None = None) -> None:
                     self.coordinator = coordinator
@@ -290,8 +325,16 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             update_coordinator_module.CoordinatorEntity = _CoordinatorEntity
 
         if not hasattr(update_coordinator_module, "DataUpdateCoordinator"):
+
             class _DataUpdateCoordinator:
-                def __init__(self, hass: Any, logger: Any | None = None, *, name: str | None = None, update_interval: Any | None = None) -> None:  # noqa: D401 - stub signature
+                def __init__(
+                    self,
+                    hass: Any,
+                    logger: Any | None = None,
+                    *,
+                    name: str | None = None,
+                    update_interval: Any | None = None,
+                ) -> None:  # noqa: D401 - stub signature
                     self.hass = hass
                     self.logger = logger
                     self.name = name
@@ -303,6 +346,7 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             update_coordinator_module.DataUpdateCoordinator = _DataUpdateCoordinator
 
         if not hasattr(update_coordinator_module, "UpdateFailed"):
+
             class _UpdateFailed(Exception):
                 pass
 
@@ -315,10 +359,14 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             setattr(state_cls, "SETUP_IN_PROGRESS", "setup_in_progress")
         if not hasattr(state_cls, "SETUP_RETRY"):
             setattr(state_cls, "SETUP_RETRY", "setup_retry")
-        coordinator_module = importlib.import_module("custom_components.googlefindmy.coordinator")
+        coordinator_module = importlib.import_module(
+            "custom_components.googlefindmy.coordinator"
+        )
         button_module = importlib.import_module("custom_components.googlefindmy.button")
         sys.modules.pop("custom_components.googlefindmy.map_view", None)
-        map_view_module = importlib.import_module("custom_components.googlefindmy.map_view")
+        map_view_module = importlib.import_module(
+            "custom_components.googlefindmy.map_view"
+        )
 
         config_entries_module = importlib.import_module("homeassistant.config_entries")
         state_cls = config_entries_module.ConfigEntryState
@@ -328,10 +376,14 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             setattr(state_cls, "SETUP_RETRY", "setup_retry")
 
         cache = _StubCache()
-        monkeypatch.setattr(integration.TokenCache, "create", AsyncMock(return_value=cache))
+        monkeypatch.setattr(
+            integration.TokenCache, "create", AsyncMock(return_value=cache)
+        )
         monkeypatch.setattr(integration, "_register_instance", lambda *_: None)
         monkeypatch.setattr(integration, "_unregister_instance", lambda *_: cache)
-        monkeypatch.setattr(integration, "_async_soft_migrate_data_to_options", AsyncMock())
+        monkeypatch.setattr(
+            integration, "_async_soft_migrate_data_to_options", AsyncMock()
+        )
         monkeypatch.setattr(integration, "_async_migrate_unique_ids", AsyncMock())
         monkeypatch.setattr(integration, "_async_save_secrets_data", AsyncMock())
         monkeypatch.setattr(integration, "_async_seed_manual_credentials", AsyncMock())
@@ -342,7 +394,9 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
                 self.hass = hass
 
         monkeypatch.setattr(integration, "GoogleFindMyMapView", _RegisterViewStub)
-        monkeypatch.setattr(integration, "GoogleFindMyMapRedirectView", _RegisterViewStub)
+        monkeypatch.setattr(
+            integration, "GoogleFindMyMapRedirectView", _RegisterViewStub
+        )
 
         dummy_fcm = SimpleNamespace(
             register_coordinator=lambda *_: None,
@@ -357,7 +411,9 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
         # Ensure isinstance checks in platform modules resolve to the stub coordinator.
-        monkeypatch.setattr(coordinator_module, "GoogleFindMyCoordinator", _StubCoordinator)
+        monkeypatch.setattr(
+            coordinator_module, "GoogleFindMyCoordinator", _StubCoordinator
+        )
         monkeypatch.setattr(integration, "GoogleFindMyCoordinator", _StubCoordinator)
         monkeypatch.setattr(button_module, "GoogleFindMyCoordinator", _StubCoordinator)
         monkeypatch.setattr(
@@ -393,7 +449,9 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 
             added_entities: list[Any] = []
 
-            def _collect_entities(entities: list[Any], _update_before_add: bool = False) -> None:
+            def _collect_entities(
+                entities: list[Any], _update_before_add: bool = False
+            ) -> None:
                 added_entities.extend(entities)
 
             await button_module.async_setup_entry(hass, entry, _collect_entities)
@@ -415,12 +473,14 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             response = await view.get(request, "device-1")
             assert response.status == 200
 
-            migrate_handler = hass.services.registered[(DOMAIN, SERVICE_REBUILD_REGISTRY)]
+            migrate_handler = hass.services.registered[
+                (DOMAIN, SERVICE_REBUILD_REGISTRY)
+            ]
             await migrate_handler(SimpleNamespace(data={ATTR_MODE: MODE_MIGRATE}))
             assert integration._async_soft_migrate_data_to_options.await_count == 2
-            assert integration._async_soft_migrate_data_to_options.await_args_list[-1] == call(
-                hass, entry
-            )
+            assert integration._async_soft_migrate_data_to_options.await_args_list[
+                -1
+            ] == call(hass, entry)
             assert hass.config_entries.reload_calls == [entry.entry_id]
 
         loop.run_until_complete(_exercise())
@@ -442,8 +502,6 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
     asyncio.set_event_loop(loop)
 
     try:
-        issue_module = sys.modules["homeassistant.helpers.issue_registry"]
-
         integration = importlib.import_module("custom_components.googlefindmy.__init__")
 
         existing_entry = _StubConfigEntry()
@@ -463,12 +521,18 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
 
         recorded_issues: list[dict[str, Any]] = []
 
-        monkeypatch.setattr(integration.ir, "async_delete_issue", lambda *_, **__: None, raising=False)
+        monkeypatch.setattr(
+            integration.ir, "async_delete_issue", lambda *_, **__: None, raising=False
+        )
 
-        def _record_issue(_hass: Any, _domain: str, issue_id: str, **kwargs: Any) -> None:
+        def _record_issue(
+            _hass: Any, _domain: str, issue_id: str, **kwargs: Any
+        ) -> None:
             recorded_issues.append({"id": issue_id, **kwargs})
 
-        monkeypatch.setattr(integration.ir, "async_create_issue", _record_issue, raising=False)
+        monkeypatch.setattr(
+            integration.ir, "async_create_issue", _record_issue, raising=False
+        )
 
         async def _exercise() -> bool:
             return await integration.async_setup_entry(hass, new_entry)
@@ -484,7 +548,9 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         assert "Primary Account" in placeholders["entries"]
 
         translation = json.loads(
-            Path("custom_components/googlefindmy/translations/en.json").read_text(encoding="utf-8")
+            Path("custom_components/googlefindmy/translations/en.json").read_text(
+                encoding="utf-8"
+            )
         )
         template = translation["issues"]["duplicate_account_entries"]["description"]
         rendered = template.format(**placeholders)
@@ -502,7 +568,9 @@ def test_service_no_active_entry_placeholders() -> None:
     asyncio.set_event_loop(loop)
 
     try:
-        services_module = importlib.import_module("custom_components.googlefindmy.services")
+        services_module = importlib.import_module(
+            "custom_components.googlefindmy.services"
+        )
 
         entries = [
             SimpleNamespace(title="Account One", entry_id="entry-1", active=False),
@@ -518,7 +586,9 @@ def test_service_no_active_entry_placeholders() -> None:
             def __init__(self) -> None:
                 self.registered: dict[tuple[str, str], Callable[..., Any]] = {}
 
-            def async_register(self, domain: str, service: str, handler: Callable[..., Any]) -> None:
+            def async_register(
+                self, domain: str, service: str, handler: Callable[..., Any]
+            ) -> None:
                 self.registered[(domain, service)] = handler
 
         hass = SimpleNamespace(
@@ -554,7 +624,9 @@ def test_service_no_active_entry_placeholders() -> None:
         assert "Account One" in placeholders["entries"]
 
         translation = json.loads(
-            Path("custom_components/googlefindmy/translations/en.json").read_text(encoding="utf-8")
+            Path("custom_components/googlefindmy/translations/en.json").read_text(
+                encoding="utf-8"
+            )
         )
         template = translation["exceptions"]["no_active_entry"]["message"]
         rendered = template.format(**placeholders)

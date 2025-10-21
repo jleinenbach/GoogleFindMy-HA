@@ -14,6 +14,7 @@ Entry-scope guarantees (C2):
 - Unique IDs are entry-scoped using the new schema: "<entry_id>:<device_id>".
 - Device Registry identifiers are also entry-scoped to avoid cross-account merges.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -228,9 +229,15 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             return
 
         # Standard device_tracker attributes (with safe fallbacks for legacy keys)
-        lat = last_state.attributes.get(ATTR_LATITUDE, last_state.attributes.get("latitude"))
-        lon = last_state.attributes.get(ATTR_LONGITUDE, last_state.attributes.get("longitude"))
-        acc = last_state.attributes.get(ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy"))
+        lat = last_state.attributes.get(
+            ATTR_LATITUDE, last_state.attributes.get("latitude")
+        )
+        lon = last_state.attributes.get(
+            ATTR_LONGITUDE, last_state.attributes.get("longitude")
+        )
+        acc = last_state.attributes.get(
+            ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy")
+        )
 
         restored: dict[str, Any] = {}
         try:
@@ -275,7 +282,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
                 allow_internal=True,
             )
         except HomeAssistantError as e:
-            _LOGGER.debug("Could not determine Home Assistant URL, using fallback: %s", e)
+            _LOGGER.debug(
+                "Could not determine Home Assistant URL, using fallback: %s", e
+            )
             base_url = "http://homeassistant.local:8123"
 
         entry_id = _entry_id_of(self.coordinator)
@@ -327,6 +336,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         # Prefer the central _opt helper; fall back to direct options/data reads.
         try:
             from . import _opt  # type: ignore
+
             token_expiration_enabled = _opt(
                 config_entry,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -491,7 +501,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
                         )
                         self._device["name"] = new_name
                         # Sync Device Registry (no-op if user renamed)
-                        _maybe_update_device_registry_name(self.hass, self.entity_id, new_name)
+                        _maybe_update_device_registry_name(
+                            self.hass, self.entity_id, new_name
+                        )
                         # Update entity display name (has_entity_name=False).
                         desired_display = self._display_name(new_name)
                         if self._attr_name != desired_display:
@@ -527,14 +539,11 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         lon = device_data.get("longitude")
 
         # Keep best-known fix when accuracy filtering rejects the current one.
-        is_good = (
-            min_accuracy_threshold <= 0
-            or (
-                accuracy is not None
-                and lat is not None
-                and lon is not None
-                and accuracy <= min_accuracy_threshold
-            )
+        is_good = min_accuracy_threshold <= 0 or (
+            accuracy is not None
+            and lat is not None
+            and lon is not None
+            and accuracy <= min_accuracy_threshold
         )
 
         if is_good:

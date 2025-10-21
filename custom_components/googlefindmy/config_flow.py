@@ -32,12 +32,11 @@ Docstring & comments:
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import voluptuous as vol
 
@@ -155,7 +154,7 @@ def _looks_like_jwt(value: str) -> bool:
     return value.count(".") >= 2 and value[:3] == "eyJ"
 
 
-def _disqualifies_for_persistence(value: str) -> Optional[str]:
+def _disqualifies_for_persistence(value: str) -> str | None:
     """Return a reason string if token must NOT be persisted.
 
     IMPORTANT CHANGE:
@@ -191,7 +190,9 @@ def _map_api_exc_to_error_key(err: Exception) -> str:
     except Exception:
         pass
 
-    if aiohttp is not None and isinstance(err, (aiohttp.ClientError, aiohttp.ServerTimeoutError)):  # type: ignore[attr-defined]
+    if aiohttp is not None and isinstance(
+        err, (aiohttp.ClientError, aiohttp.ServerTimeoutError)
+    ):  # type: ignore[attr-defined]
         return "cannot_connect"
     if any(k in name for k in ("timeout", "dns", "socket", "connection", "connect")):
         return "cannot_connect"
@@ -235,10 +236,11 @@ STEP_INDIVIDUAL_DATA_SCHEMA = vol.Schema(
     }
 )
 
+
 # ---------------------------
 # Extractors (email + token candidates with preference order)
 # ---------------------------
-def _extract_email_from_secrets(data: Dict[str, Any]) -> Optional[str]:
+def _extract_email_from_secrets(data: dict[str, Any]) -> str | None:
     """Best-effort extractor for the Google account email from secrets.json."""
     candidates = [
         "googleHomeUsername",
@@ -262,7 +264,9 @@ def _extract_email_from_secrets(data: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _extract_oauth_candidates_from_secrets(data: Dict[str, Any]) -> List[Tuple[str, str]]:
+def _extract_oauth_candidates_from_secrets(
+    data: dict[str, Any],
+) -> list[tuple[str, str]]:
     """Return plausible tokens in preferred order from a secrets bundle.
 
     Priority:
@@ -272,7 +276,7 @@ def _extract_oauth_candidates_from_secrets(data: Dict[str, Any]) -> List[Tuple[s
       4) 'fcm_credentials.fcm.registration.token' (registration token)  [discouraged]
     Duplicate values are de-duplicated while preserving source labels.
     """
-    cands: List[Tuple[str, str]] = []
+    cands: list[tuple[str, str]] = []
     seen: set[str] = set()
 
     def _add(label: str, value: Any) -> None:
@@ -300,14 +304,16 @@ def _extract_oauth_candidates_from_secrets(data: Dict[str, Any]) -> List[Tuple[s
     except Exception:
         pass
     try:
-        _add("fcm_registration", data["fcm_credentials"]["fcm"]["registration"]["token"])
+        _add(
+            "fcm_registration", data["fcm_credentials"]["fcm"]["registration"]["token"]
+        )
     except Exception:
         pass
 
     return cands
 
 
-def _cand_labels(cands: List[Tuple[str, str]]) -> str:
+def _cand_labels(cands: list[tuple[str, str]]) -> str:
     """Return a short, safe label list for candidates (no secrets)."""
     labels = [src for src, _ in cands][:5]
     tail = "…" if len(cands) > 5 else ""
@@ -317,7 +323,9 @@ def _cand_labels(cands: List[Tuple[str, str]]) -> str:
 # ---------------------------
 # API probing helpers (signature-robust)
 # ---------------------------
-async def _try_probe_devices(api: GoogleFindMyAPI, *, email: str, token: str) -> List[Dict[str, Any]]:
+async def _try_probe_devices(
+    api: GoogleFindMyAPI, *, email: str, token: str
+) -> list[dict[str, Any]]:
     """Call the API to fetch a basic device list using defensive signatures."""
     try:
         return await api.async_get_basic_device_list(username=email, token=token)  # type: ignore[call-arg]
@@ -338,7 +346,7 @@ async def _async_new_api_for_probe(
     email: str,
     token: str,
     *,
-    secrets_bundle: Optional[Dict[str, Any]] = None,
+    secrets_bundle: dict[str, Any] | None = None,
 ) -> GoogleFindMyAPI:
     """Create a fresh, ephemeral API instance for pre-flight validation."""
     try:
@@ -360,10 +368,10 @@ async def _async_new_api_for_probe(
 
 async def async_pick_working_token(
     email: str,
-    candidates: List[Tuple[str, str]],
+    candidates: list[tuple[str, str]],
     *,
-    secrets_bundle: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
+    secrets_bundle: dict[str, Any] | None = None,
+) -> str | None:
     """Try the candidate tokens in order until one passes a minimal online validation."""
     for source, token in candidates:
         try:
@@ -389,7 +397,7 @@ async def async_pick_working_token(
     return None
 
 
-def _cand_labels(candidates: List[Tuple[str, str]]) -> str:
+def _cand_labels(candidates: list[tuple[str, str]]) -> str:
     """Return a redacted, human-readable list of token candidate sources."""
     sources = {source for source, _token in candidates if source}
     if not sources:
@@ -401,12 +409,12 @@ def _cand_labels(candidates: List[Tuple[str, str]]) -> str:
 # Shared interpreter for either/or credential choice (initial flow & options)
 # ---------------------------
 def _interpret_credentials_choice(
-    user_input: Dict[str, Any],
+    user_input: dict[str, Any],
     *,
     secrets_field: str,
     token_field: str,
     email_field: str,
-) -> Tuple[Optional[str], Optional[str], Optional[List[Tuple[str, str]]], Optional[str]]:
+) -> tuple[str | None, str | None, list[tuple[str, str]] | None, str | None]:
     """Normalize flow input into a single authentication method.
 
     Returns:
@@ -460,7 +468,9 @@ _REAUTH_FIELD_SECRETS = "secrets_json"
 _REAUTH_FIELD_TOKEN = "new_oauth_token"
 
 
-def _interpret_reauth_choice(user_input: Dict[str, Any]) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
+def _interpret_reauth_choice(
+    user_input: dict[str, Any],
+) -> tuple[str | None, Any | None, str | None]:
     """Interpret reauth input where the email is fixed by the entry."""
     secrets_raw = (user_input.get(_REAUTH_FIELD_SECRETS) or "").strip()
     token_raw = (user_input.get(_REAUTH_FIELD_TOKEN) or "").strip()
@@ -486,7 +496,9 @@ def _interpret_reauth_choice(user_input: Dict[str, Any]) -> Tuple[Optional[str],
         return "secrets", parsed, None
 
     # Manual token path (email is fixed from the entry)
-    if not (_token_plausible(token_raw) and not _disqualifies_for_persistence(token_raw)):
+    if not (
+        _token_plausible(token_raw) and not _disqualifies_for_persistence(token_raw)
+    ):
         return None, None, "invalid_token"
 
     return "manual", token_raw, None
@@ -497,7 +509,7 @@ def _normalize_email(email: str | None) -> str:
     return (email or "").strip().lower()
 
 
-def _find_entry_by_email(hass, email: str) -> Optional[ConfigEntry]:
+def _find_entry_by_email(hass, email: str) -> ConfigEntry | None:
     """Return an existing entry that matches the normalized email, if any."""
     target = _normalize_email(email)
     for e in hass.config_entries.async_entries(DOMAIN):
@@ -516,8 +528,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         """Initialize transient flow state."""
-        self._auth_data: Dict[str, Any] = {}
-        self._available_devices: List[Tuple[str, str]] = []
+        self._auth_data: dict[str, Any] = {}
+        self._available_devices: list[tuple[str, str]] = []
 
     @staticmethod
     @callback
@@ -526,7 +538,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return OptionsFlowHandler()
 
     # ------------------ Step: choose authentication path ------------------
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Ask the user to choose how to provide credentials."""
         if user_input is not None:
             method = user_input.get("auth_method")
@@ -539,18 +553,22 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
 
     # ------------------ Step: secrets.json path ------------------
-    async def async_step_secrets_json(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_secrets_json(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Collect and validate secrets.json content, with failover and guard handling."""
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
 
         schema = STEP_SECRETS_DATA_SCHEMA
         if selector is not None:
-            schema = vol.Schema({vol.Required("secrets_json"): selector({"text": {"multiline": True}})})
+            schema = vol.Schema(
+                {vol.Required("secrets_json"): selector({"text": {"multiline": True}})}
+            )
 
         if user_input is not None:
-            raw = (user_input.get("secrets_json") or "")
+            raw = user_input.get("secrets_json") or ""
             _LOGGER.debug("Secrets step: received input (chars=%d).", len(raw))
-            parsed_secrets: Optional[Dict[str, Any]] = None
+            parsed_secrets: dict[str, Any] | None = None
             try:
                 parsed_candidate = json.loads(raw)
                 if isinstance(parsed_candidate, dict):
@@ -560,7 +578,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except (json.JSONDecodeError, TypeError):
                 parsed_secrets = None
             method, email, cands, err = _interpret_credentials_choice(
-                user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
+                user_input,
+                secrets_field="secrets_json",
+                token_field=CONF_OAUTH_TOKEN,
+                email_field=CONF_GOOGLE_EMAIL,
             )
             if err:
                 if err == "invalid_json":
@@ -590,7 +611,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     to_persist = chosen
                     bad_reason = _disqualifies_for_persistence(to_persist)
                     if bad_reason:
-                        alt = next((v for (_src, v) in cands if not _disqualifies_for_persistence(v)), None)
+                        alt = next(
+                            (
+                                v
+                                for (_src, v) in cands
+                                if not _disqualifies_for_persistence(v)
+                            ),
+                            None,
+                        )
                         if alt:
                             to_persist = alt
 
@@ -605,15 +633,22 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self._auth_data[DATA_AAS_TOKEN] = to_persist
                     return await self.async_step_device_selection()
 
-        return self.async_show_form(step_id="secrets_json", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="secrets_json", data_schema=schema, errors=errors
+        )
 
     # ------------------ Step: manual token + email ------------------
-    async def async_step_individual_tokens(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_individual_tokens(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Collect manual token and Google email, then validate."""
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
         if user_input is not None:
             method, email, cands, err = _interpret_credentials_choice(
-                user_input, secrets_field="secrets_json", token_field=CONF_OAUTH_TOKEN, email_field=CONF_GOOGLE_EMAIL
+                user_input,
+                secrets_field="secrets_json",
+                token_field=CONF_OAUTH_TOKEN,
+                email_field=CONF_GOOGLE_EMAIL,
             )
             if err:
                 errors["base"] = err
@@ -646,10 +681,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._auth_data.pop(DATA_SECRET_BUNDLE, None)
                     return await self.async_step_device_selection()
 
-        return self.async_show_form(step_id="individual_tokens", data_schema=STEP_INDIVIDUAL_DATA_SCHEMA, errors=errors)
+        return self.async_show_form(
+            step_id="individual_tokens",
+            data_schema=STEP_INDIVIDUAL_DATA_SCHEMA,
+            errors=errors,
+        )
 
     # ------------------ Shared: build API for final probe ------------------
-    async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, str, str]:
+    async def _async_build_api_and_username(self) -> tuple[GoogleFindMyAPI, str, str]:
         """Construct an ephemeral API client from transient flow credentials."""
         email = self._auth_data.get(CONF_GOOGLE_EMAIL)
         oauth = self._auth_data.get(CONF_OAUTH_TOKEN)
@@ -663,9 +702,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return api, email, oauth
 
     # ------------------ Step: device selection & non-secret options ------------------
-    async def async_step_device_selection(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_device_selection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Finalize the initial setup: optional device probe + non-secret options."""
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
 
         # Ensure unique_id is set (should already be done)
         email_for_uid = _normalize_email(self._auth_data.get(CONF_GOOGLE_EMAIL))
@@ -679,21 +720,32 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 api, username, token = await self._async_build_api_and_username()
                 devices = await _try_probe_devices(api, email=username, token=token)
                 if devices:
-                    self._available_devices = [(d.get("name") or d.get("id") or "", d.get("id") or "") for d in devices]
+                    self._available_devices = [
+                        (d.get("name") or d.get("id") or "", d.get("id") or "")
+                        for d in devices
+                    ]
             except Exception as err:  # noqa: BLE001
                 if not _is_multi_entry_guard_error(err):
                     key = _map_api_exc_to_error_key(err)
                     errors["base"] = key
 
         # Build options schema dynamically
-        schema_fields: Dict[Any, Any] = {
-            vol.Optional(OPT_LOCATION_POLL_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
-            vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
-            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
+        schema_fields: dict[Any, Any] = {
+            vol.Optional(OPT_LOCATION_POLL_INTERVAL): vol.All(
+                vol.Coerce(int), vol.Range(min=60, max=3600)
+            ),
+            vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=60)
+            ),
+            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(
+                vol.Coerce(int), vol.Range(min=25, max=500)
+            ),
             vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION): bool,
         }
         if OPT_MOVEMENT_THRESHOLD is not None:
-            schema_fields[vol.Optional(OPT_MOVEMENT_THRESHOLD)] = vol.All(vol.Coerce(int), vol.Range(min=10, max=200))
+            schema_fields[vol.Optional(OPT_MOVEMENT_THRESHOLD)] = vol.All(
+                vol.Coerce(int), vol.Range(min=10, max=200)
+            )
         if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
             schema_fields[vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED)] = bool
         if OPT_GOOGLE_HOME_FILTER_KEYWORDS is not None:
@@ -710,20 +762,38 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_MIN_ACCURACY_THRESHOLD,
             OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
         }
-        if OPT_MOVEMENT_THRESHOLD is not None and DEFAULT_MOVEMENT_THRESHOLD is not None:
+        if (
+            OPT_MOVEMENT_THRESHOLD is not None
+            and DEFAULT_MOVEMENT_THRESHOLD is not None
+        ):
             defaults[OPT_MOVEMENT_THRESHOLD] = DEFAULT_MOVEMENT_THRESHOLD
-        if OPT_GOOGLE_HOME_FILTER_ENABLED is not None and DEFAULT_GOOGLE_HOME_FILTER_ENABLED is not None:
-            defaults[OPT_GOOGLE_HOME_FILTER_ENABLED] = DEFAULT_GOOGLE_HOME_FILTER_ENABLED
-        if OPT_GOOGLE_HOME_FILTER_KEYWORDS is not None and DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS is not None:
-            defaults[OPT_GOOGLE_HOME_FILTER_KEYWORDS] = DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
-        if OPT_ENABLE_STATS_ENTITIES is not None and DEFAULT_ENABLE_STATS_ENTITIES is not None:
+        if (
+            OPT_GOOGLE_HOME_FILTER_ENABLED is not None
+            and DEFAULT_GOOGLE_HOME_FILTER_ENABLED is not None
+        ):
+            defaults[OPT_GOOGLE_HOME_FILTER_ENABLED] = (
+                DEFAULT_GOOGLE_HOME_FILTER_ENABLED
+            )
+        if (
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS is not None
+            and DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS is not None
+        ):
+            defaults[OPT_GOOGLE_HOME_FILTER_KEYWORDS] = (
+                DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
+            )
+        if (
+            OPT_ENABLE_STATS_ENTITIES is not None
+            and DEFAULT_ENABLE_STATS_ENTITIES is not None
+        ):
             defaults[OPT_ENABLE_STATS_ENTITIES] = DEFAULT_ENABLE_STATS_ENTITIES
 
-        schema_with_defaults = self.add_suggested_values_to_schema(base_schema, defaults)
+        schema_with_defaults = self.add_suggested_values_to_schema(
+            base_schema, defaults
+        )
 
         if user_input is not None:
             # Data = credentials; options = runtime settings
-            data_payload: Dict[str, Any] = {
+            data_payload: dict[str, Any] = {
                 DATA_AUTH_METHOD: self._auth_data.get(DATA_AUTH_METHOD),
                 # We persist AAS master tokens as well; they are required to mint service tokens.
                 CONF_OAUTH_TOKEN: self._auth_data.get(CONF_OAUTH_TOKEN),
@@ -735,17 +805,22 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if isinstance(aas_token, str) and aas_token:
                 data_payload[DATA_AAS_TOKEN] = aas_token
 
-            options_payload: Dict[str, Any] = {}
+            options_payload: dict[str, Any] = {}
             for k in schema_fields.keys():
                 # `k` may be a voluptuous marker; retrieve the underlying key
                 real_key = next(iter(getattr(k, "schema", {k})))
-                options_payload[real_key] = user_input.get(real_key, defaults.get(real_key))
-            options_payload[OPT_OPTIONS_SCHEMA_VERSION] = 2  # bump schema version at creation
+                options_payload[real_key] = user_input.get(
+                    real_key, defaults.get(real_key)
+                )
+            options_payload[OPT_OPTIONS_SCHEMA_VERSION] = (
+                2  # bump schema version at creation
+            )
 
             try:
                 return self.async_create_entry(
                     # **Change**: title is always the email for clear multi-account display
-                    title=self._auth_data.get(CONF_GOOGLE_EMAIL) or "Google Find My Device",
+                    title=self._auth_data.get(CONF_GOOGLE_EMAIL)
+                    or "Google Find My Device",
                     data=data_payload,
                     options=options_payload,  # type: ignore[call-arg]
                 )
@@ -754,20 +829,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 shadow = dict(data_payload)
                 shadow.update(options_payload)
                 return self.async_create_entry(
-                    title=self._auth_data.get(CONF_GOOGLE_EMAIL) or "Google Find My Device",
+                    title=self._auth_data.get(CONF_GOOGLE_EMAIL)
+                    or "Google Find My Device",
                     data=shadow,
                 )
 
-        return self.async_show_form(step_id="device_selection", data_schema=schema_with_defaults, errors=errors)
+        return self.async_show_form(
+            step_id="device_selection", data_schema=schema_with_defaults, errors=errors
+        )
 
     # ------------------ Reauthentication ------------------
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
         """Start a reauthentication flow linked to an existing entry context."""
         return await self.async_step_reauth_confirm()
 
-    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Collect and validate new credentials for this entry, then update+reload."""
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
 
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         assert entry is not None
@@ -776,7 +856,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if selector is not None:
             schema = vol.Schema(
                 {
-                    vol.Optional(_REAUTH_FIELD_SECRETS): selector({"text": {"multiline": True}}),
+                    vol.Optional(_REAUTH_FIELD_SECRETS): selector(
+                        {"text": {"multiline": True}}
+                    ),
                     vol.Optional(_REAUTH_FIELD_TOKEN): str,
                 }
             )
@@ -799,7 +881,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 try:
                     if method == "manual":
                         token = str(payload)
-                        chosen = await async_pick_working_token(fixed_email, [("manual", token)])
+                        chosen = await async_pick_working_token(
+                            fixed_email, [("manual", token)]
+                        )
                         if not chosen:
                             _LOGGER.warning(
                                 "Token validation failed for %s. No working token found among candidates (%s).",
@@ -809,7 +893,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             errors["base"] = "cannot_connect"
                         else:
                             if _disqualifies_for_persistence(chosen):
-                                _LOGGER.warning("Reauth: token looks like a JWT; persisting anyway due to validation.")
+                                _LOGGER.warning(
+                                    "Reauth: token looks like a JWT; persisting anyway due to validation."
+                                )
                             updated_data = {
                                 **entry.data,
                                 DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
@@ -821,11 +907,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
                             await self._async_clear_cached_aas_token(entry)
-                            return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
+                            return self.async_update_reload_and_abort(
+                                entry=entry,
+                                data=updated_data,
+                                reason="reauth_successful",
+                            )
 
                     elif method == "secrets":
-                        parsed: Dict[str, Any] = dict(payload)  # type: ignore[assignment]
-                        extracted_email = _normalize_email(_extract_email_from_secrets(parsed))
+                        parsed: dict[str, Any] = dict(payload)  # type: ignore[assignment]
+                        extracted_email = _normalize_email(
+                            _extract_email_from_secrets(parsed)
+                        )
                         cands = _extract_oauth_candidates_from_secrets(parsed)
 
                         if extracted_email and extracted_email != fixed_email:
@@ -849,7 +941,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 to_persist = chosen
                                 bad_reason = _disqualifies_for_persistence(to_persist)
                                 if bad_reason:
-                                    alt = next((v for (_src, v) in cands if not _disqualifies_for_persistence(v)), None)
+                                    alt = next(
+                                        (
+                                            v
+                                            for (_src, v) in cands
+                                            if not _disqualifies_for_persistence(v)
+                                        ),
+                                        None,
+                                    )
                                     if alt:
                                         to_persist = alt
                                 updated_data = {
@@ -858,12 +957,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     CONF_OAUTH_TOKEN: to_persist,
                                     DATA_SECRET_BUNDLE: parsed,
                                 }
-                                if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
+                                if isinstance(
+                                    to_persist, str
+                                ) and to_persist.startswith("aas_et/"):
                                     updated_data[DATA_AAS_TOKEN] = to_persist
                                 elif DATA_AAS_TOKEN in updated_data:
                                     updated_data.pop(DATA_AAS_TOKEN, None)
                                 await self._async_clear_cached_aas_token(entry)
-                                return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
+                                return self.async_update_reload_and_abort(
+                                    entry=entry,
+                                    data=updated_data,
+                                    reason="reauth_successful",
+                                )
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept first candidate and reload
@@ -880,7 +985,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
                             await self._async_clear_cached_aas_token(entry)
-                            return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
+                            return self.async_update_reload_and_abort(
+                                entry=entry,
+                                data=updated_data,
+                                reason="reauth_successful",
+                            )
                         if method == "secrets":
                             parsed = dict(payload)  # type: ignore[assignment]
                             cands = _extract_oauth_candidates_from_secrets(parsed)
@@ -891,12 +1000,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 CONF_OAUTH_TOKEN: token_first,
                                 DATA_SECRET_BUNDLE: parsed,
                             }
-                            if isinstance(token_first, str) and token_first.startswith("aas_et/"):
+                            if isinstance(token_first, str) and token_first.startswith(
+                                "aas_et/"
+                            ):
                                 updated_data[DATA_AAS_TOKEN] = token_first
                             else:
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                             await self._async_clear_cached_aas_token(entry)
-                            return self.async_update_reload_and_abort(entry=entry, data=updated_data, reason="reauth_successful")
+                            return self.async_update_reload_and_abort(
+                                entry=entry,
+                                data=updated_data,
+                                reason="reauth_successful",
+                            )
                     errors["base"] = _map_api_exc_to_error_key(err2)
 
         return self.async_show_form(
@@ -924,9 +1039,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Clearing cached AAS token via %s failed: %s", attr, err)
-        _LOGGER.debug("No compatible cache setter found to clear the cached AAS token for entry %s", entry.entry_id)
+        _LOGGER.debug(
+            "No compatible cache setter found to clear the cached AAS token for entry %s",
+            entry.entry_id,
+        )
 
-    def _get_entry_cache(self, entry: ConfigEntry) -> Optional[Any]:
+    def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
         """Return the TokenCache (or equivalent) for this entry if available."""
 
         rd = getattr(entry, "runtime_data", None)
@@ -967,12 +1085,16 @@ class OptionsFlowHandler(OptionsFlowBase):
           automatically when using `OptionsFlowWithReload` (if available).
     """
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Display a small menu for settings, credentials refresh, or visibility."""
-        return self.async_show_menu(step_id="init", menu_options=["settings", "credentials", "visibility"])
+        return self.async_show_menu(
+            step_id="init", menu_options=["settings", "credentials", "visibility"]
+        )
 
     # ---------- Helpers for live API/cache access ----------
-    def _get_entry_cache(self, entry: ConfigEntry) -> Optional[Any]:
+    def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
         """Proxy to the ConfigFlow cache lookup helper."""
 
         return ConfigFlow._get_entry_cache(self, entry)
@@ -1000,12 +1122,16 @@ class OptionsFlowHandler(OptionsFlowBase):
             except TypeError:
                 return GoogleFindMyAPI(token=oauth, email=email)  # type: ignore[call-arg]
 
-        raise RuntimeError("GoogleFindMyAPI requires either `cache=` or minimal flow credentials.")
+        raise RuntimeError(
+            "GoogleFindMyAPI requires either `cache=` or minimal flow credentials."
+        )
 
     # ---------- Settings (non-secret) ----------
-    async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Update non-secret options in a single form."""
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
 
         entry = self.config_entry
         opt = entry.options
@@ -1015,28 +1141,64 @@ class OptionsFlowHandler(OptionsFlowBase):
             return opt.get(cur_key, dat.get(cur_key, default_val))
 
         current = {
-            OPT_LOCATION_POLL_INTERVAL: _get(OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL),
-            OPT_DEVICE_POLL_DELAY: _get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
-            OPT_MIN_ACCURACY_THRESHOLD: _get(OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD),
-            OPT_MAP_VIEW_TOKEN_EXPIRATION: _get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
+            OPT_LOCATION_POLL_INTERVAL: _get(
+                OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
+            ),
+            OPT_DEVICE_POLL_DELAY: _get(
+                OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY
+            ),
+            OPT_MIN_ACCURACY_THRESHOLD: _get(
+                OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
+            ),
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: _get(
+                OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            ),
         }
-        if OPT_MOVEMENT_THRESHOLD is not None and DEFAULT_MOVEMENT_THRESHOLD is not None:
-            current[OPT_MOVEMENT_THRESHOLD] = _get(OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD)
-        if OPT_GOOGLE_HOME_FILTER_ENABLED is not None and DEFAULT_GOOGLE_HOME_FILTER_ENABLED is not None:
-            current[OPT_GOOGLE_HOME_FILTER_ENABLED] = _get(OPT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_ENABLED)
-        if OPT_GOOGLE_HOME_FILTER_KEYWORDS is not None and DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS is not None:
-            current[OPT_GOOGLE_HOME_FILTER_KEYWORDS] = _get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)
-        if OPT_ENABLE_STATS_ENTITIES is not None and DEFAULT_ENABLE_STATS_ENTITIES is not None:
-            current[OPT_ENABLE_STATS_ENTITIES] = _get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
+        if (
+            OPT_MOVEMENT_THRESHOLD is not None
+            and DEFAULT_MOVEMENT_THRESHOLD is not None
+        ):
+            current[OPT_MOVEMENT_THRESHOLD] = _get(
+                OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD
+            )
+        if (
+            OPT_GOOGLE_HOME_FILTER_ENABLED is not None
+            and DEFAULT_GOOGLE_HOME_FILTER_ENABLED is not None
+        ):
+            current[OPT_GOOGLE_HOME_FILTER_ENABLED] = _get(
+                OPT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_ENABLED
+            )
+        if (
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS is not None
+            and DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS is not None
+        ):
+            current[OPT_GOOGLE_HOME_FILTER_KEYWORDS] = _get(
+                OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
+            )
+        if (
+            OPT_ENABLE_STATS_ENTITIES is not None
+            and DEFAULT_ENABLE_STATS_ENTITIES is not None
+        ):
+            current[OPT_ENABLE_STATS_ENTITIES] = _get(
+                OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES
+            )
 
-        fields: Dict[Any, Any] = {
-            vol.Optional(OPT_LOCATION_POLL_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
-            vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
-            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
+        fields: dict[Any, Any] = {
+            vol.Optional(OPT_LOCATION_POLL_INTERVAL): vol.All(
+                vol.Coerce(int), vol.Range(min=60, max=3600)
+            ),
+            vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=60)
+            ),
+            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(
+                vol.Coerce(int), vol.Range(min=25, max=500)
+            ),
             vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION): bool,
         }
         if OPT_MOVEMENT_THRESHOLD is not None:
-            fields[vol.Optional(OPT_MOVEMENT_THRESHOLD)] = vol.All(vol.Coerce(int), vol.Range(min=10, max=200))
+            fields[vol.Optional(OPT_MOVEMENT_THRESHOLD)] = vol.All(
+                vol.Coerce(int), vol.Range(min=10, max=200)
+            )
         if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
             fields[vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED)] = bool
         if OPT_GOOGLE_HOME_FILTER_KEYWORDS is not None:
@@ -1060,11 +1222,17 @@ class OptionsFlowHandler(OptionsFlowBase):
         )
 
     # ---------- Visibility (restore ignored devices) ----------
-    async def async_step_visibility(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_visibility(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Display ignored devices and allow restoring them (remove from OPT_IGNORED_DEVICES)."""
         entry = self.config_entry
         options = dict(entry.options)
-        raw = options.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
+        raw = (
+            options.get(OPT_IGNORED_DEVICES)
+            or entry.data.get(OPT_IGNORED_DEVICES)
+            or {}
+        )
         ignored_map, _migrated = coerce_ignored_mapping(raw)
 
         if not ignored_map:
@@ -1073,9 +1241,14 @@ class OptionsFlowHandler(OptionsFlowBase):
         if callable(ignored_choices_for_ui):
             choices = ignored_choices_for_ui(ignored_map)  # type: ignore[misc]
         else:
-            choices = {dev_id: (meta.get("name") or dev_id) for dev_id, meta in ignored_map.items()}
+            choices = {
+                dev_id: (meta.get("name") or dev_id)
+                for dev_id, meta in ignored_map.items()
+            }
 
-        schema = vol.Schema({vol.Optional("unignore_devices", default=[]): cv.multi_select(choices)})
+        schema = vol.Schema(
+            {vol.Optional("unignore_devices", default=[]): cv.multi_select(choices)}
+        )
 
         if user_input is not None:
             to_restore = user_input.get("unignore_devices") or []
@@ -1092,7 +1265,9 @@ class OptionsFlowHandler(OptionsFlowBase):
         return self.async_show_form(step_id="visibility", data_schema=schema)
 
     # ---------- Credentials refresh ----------
-    async def async_step_credentials(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_credentials(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Refresh credentials without exposing current ones.
 
         IMPORTANT CHANGE:
@@ -1100,12 +1275,14 @@ class OptionsFlowHandler(OptionsFlowBase):
           mutations that can break unique_id semantics. Use a new integration entry
           to add another account.
         """
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
 
         if selector is not None:
             schema = vol.Schema(
                 {
-                    vol.Optional("new_secrets_json"): selector({"text": {"multiline": True}}),
+                    vol.Optional("new_secrets_json"): selector(
+                        {"text": {"multiline": True}}
+                    ),
                     vol.Optional("new_oauth_token"): str,
                 }
             )
@@ -1128,10 +1305,15 @@ class OptionsFlowHandler(OptionsFlowBase):
                     email = entry.data.get(CONF_GOOGLE_EMAIL)
                     if has_token:
                         token = (user_input.get("new_oauth_token") or "").strip()
-                        if not (_token_plausible(token) and not _disqualifies_for_persistence(token)):
+                        if not (
+                            _token_plausible(token)
+                            and not _disqualifies_for_persistence(token)
+                        ):
                             errors["base"] = "invalid_token"
                         else:
-                            chosen = await async_pick_working_token(email, [("manual", token)])
+                            chosen = await async_pick_working_token(
+                                email, [("manual", token)]
+                            )
                             if not chosen:
                                 _LOGGER.warning(
                                     "Token validation failed for %s. No working token found among candidates (%s).",
@@ -1146,13 +1328,21 @@ class OptionsFlowHandler(OptionsFlowBase):
                                     CONF_OAUTH_TOKEN: chosen,
                                 }
                                 updated_data.pop(DATA_SECRET_BUNDLE, None)
-                                if isinstance(chosen, str) and chosen.startswith("aas_et/"):
+                                if isinstance(chosen, str) and chosen.startswith(
+                                    "aas_et/"
+                                ):
                                     updated_data[DATA_AAS_TOKEN] = chosen
                                 else:
                                     updated_data.pop(DATA_AAS_TOKEN, None)
                                 await self._async_clear_cached_aas_token(entry)
-                                self.hass.config_entries.async_update_entry(entry, data=updated_data)
-                                self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+                                self.hass.config_entries.async_update_entry(
+                                    entry, data=updated_data
+                                )
+                                self.hass.async_create_task(
+                                    self.hass.config_entries.async_reload(
+                                        entry.entry_id
+                                    )
+                                )
                                 return self.async_abort(reason="reconfigure_successful")
 
                     if has_secrets and "new_secrets_json" in user_input:
@@ -1180,7 +1370,14 @@ class OptionsFlowHandler(OptionsFlowBase):
                                 else:
                                     to_persist = chosen
                                     if _disqualifies_for_persistence(to_persist):
-                                        alt = next((v for (_src, v) in cands if not _disqualifies_for_persistence(v)), None)
+                                        alt = next(
+                                            (
+                                                v
+                                                for (_src, v) in cands
+                                                if not _disqualifies_for_persistence(v)
+                                            ),
+                                            None,
+                                        )
                                         if alt:
                                             to_persist = alt
                                     updated_data = {
@@ -1189,14 +1386,24 @@ class OptionsFlowHandler(OptionsFlowBase):
                                         CONF_OAUTH_TOKEN: to_persist,
                                         DATA_SECRET_BUNDLE: parsed,
                                     }
-                                    if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
+                                    if isinstance(
+                                        to_persist, str
+                                    ) and to_persist.startswith("aas_et/"):
                                         updated_data[DATA_AAS_TOKEN] = to_persist
                                     else:
                                         updated_data.pop(DATA_AAS_TOKEN, None)
                                     await self._async_clear_cached_aas_token(entry)
-                                    self.hass.config_entries.async_update_entry(entry, data=updated_data)
-                                    self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
-                                    return self.async_abort(reason="reconfigure_successful")
+                                    self.hass.config_entries.async_update_entry(
+                                        entry, data=updated_data
+                                    )
+                                    self.hass.async_create_task(
+                                        self.hass.config_entries.async_reload(
+                                            entry.entry_id
+                                        )
+                                    )
+                                    return self.async_abort(
+                                        reason="reconfigure_successful"
+                                    )
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept input and let setup validate with entry-scoped cache
@@ -1223,17 +1430,25 @@ class OptionsFlowHandler(OptionsFlowBase):
                                 CONF_OAUTH_TOKEN: token_first,
                                 DATA_SECRET_BUNDLE: parsed,
                             }
-                            if isinstance(token_first, str) and token_first.startswith("aas_et/"):
+                            if isinstance(token_first, str) and token_first.startswith(
+                                "aas_et/"
+                            ):
                                 updated_data[DATA_AAS_TOKEN] = token_first
                             else:
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                         await self._async_clear_cached_aas_token(entry)
-                        self.hass.config_entries.async_update_entry(entry, data=updated_data)
-                        self.hass.async_create_task(self.hass.config_entries.async_reload(entry.entry_id))
+                        self.hass.config_entries.async_update_entry(
+                            entry, data=updated_data
+                        )
+                        self.hass.async_create_task(
+                            self.hass.config_entries.async_reload(entry.entry_id)
+                        )
                         return self.async_abort(reason="reconfigure_successful")
                     errors["base"] = _map_api_exc_to_error_key(err2)
 
-        return self.async_show_form(step_id="credentials", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="credentials", data_schema=schema, errors=errors
+        )
 
 
 # ---------- Custom exceptions ----------

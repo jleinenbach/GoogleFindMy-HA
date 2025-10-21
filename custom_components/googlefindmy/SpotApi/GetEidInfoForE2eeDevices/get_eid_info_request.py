@@ -58,7 +58,7 @@ def _build_request_bytes() -> bytes:
     return req.SerializeToString()
 
 
-async def _spot_call_async(scope: str, payload: bytes, *, cache: "TokenCache") -> bytes:
+async def _spot_call_async(scope: str, payload: bytes, *, cache: TokenCache) -> bytes:
     """Call the Spot API asynchronously.
 
     Prefer an async helper if available; otherwise run the sync helper in an executor.
@@ -100,7 +100,7 @@ async def _spot_call_async(scope: str, payload: bytes, *, cache: "TokenCache") -
 
 
 async def async_get_eid_info(
-    *, cache: "TokenCache"
+    *, cache: TokenCache
 ) -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesResponse:
     """Fetch and parse EID info for E2EE devices (async, preferred).
 

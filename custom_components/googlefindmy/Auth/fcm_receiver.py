@@ -22,7 +22,8 @@ If you still call into this file directly, please migrate to the shared receiver
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
 
 try:
     # Primary, explicit import path within the integration
@@ -53,10 +54,12 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         self,
         *,
         entry_id: str | None = None,
-        cache: "TokenCache" | None = None,
+        cache: TokenCache | None = None,
     ) -> None:
         # Resolve the cache used for reads/writes in legacy contexts.
-        self._cache: "TokenCache" | None = self._resolve_cache(entry_id=entry_id, cache=cache)
+        self._cache: TokenCache | None = self._resolve_cache(
+            entry_id=entry_id, cache=cache
+        )
         # Cache a snapshot of persisted credentials to keep legacy callers functional.
         creds = self._read_cached_credentials()
         # Normalize common storage shapes (dict or JSON-serialized dict)
@@ -73,7 +76,7 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
     # ----------------------------
     # Legacy API (no-op / accessors)
     # ----------------------------
-    def register_for_location_updates(self, callback: Callable[..., Any]) -> Optional[str]:
+    def register_for_location_updates(self, callback: Callable[..., Any]) -> str | None:
         """Accept legacy registration but do not attach a callback.
 
         Rationale:
@@ -90,7 +93,7 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         )
         return self.get_fcm_token()
 
-    def get_fcm_token(self) -> Optional[str]:
+    def get_fcm_token(self) -> str | None:
         """Return the current FCM token from the persisted credentials, if available."""
         creds = self._creds or self._read_cached_credentials()
         if isinstance(creds, str):
@@ -117,9 +120,11 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         (via `entry.async_on_unload` in `__init__.py`). Stopping from here could
         erroneously affect other config entries.
         """
-        _LOGGER.debug("Legacy FcmReceiver.stop_listening(): no-op in compatibility shim.")
+        _LOGGER.debug(
+            "Legacy FcmReceiver.stop_listening(): no-op in compatibility shim."
+        )
 
-    def get_android_id(self) -> Optional[str]:
+    def get_android_id(self) -> str | None:
         """Return the Android ID from persisted credentials, if available."""
         creds = self._creds or self._read_cached_credentials()
         if isinstance(creds, str):
@@ -162,8 +167,8 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
     # ----------------------------
     @staticmethod
     def _resolve_cache(
-        *, entry_id: str | None, cache: "TokenCache" | None
-    ) -> "TokenCache" | None:
+        *, entry_id: str | None, cache: TokenCache | None
+    ) -> TokenCache | None:
         """Return the TokenCache instance to use for legacy access."""
 
         if cache is not None:

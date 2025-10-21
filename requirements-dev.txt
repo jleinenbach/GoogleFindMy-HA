@@ -1,5 +1,4 @@
 -r custom_components/googlefindmy/requirements.txt
-hassfest>=2024.7.0
 mypy>=1.11
 pre-commit>=3.7
 pytest>=8.3

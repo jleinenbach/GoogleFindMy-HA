@@ -5,7 +5,7 @@ import logging
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
@@ -17,7 +17,7 @@ from custom_components.googlefindmy.api import GoogleFindMyAPI
 class DummyCache:
     """Minimal cache shim exposing an entry namespace for the API helper."""
 
-    entry_id: Optional[str] = None
+    entry_id: str | None = None
 
     async def async_get_cached_value(self, key: str) -> Any:
         return None
@@ -31,9 +31,9 @@ class TrackingReceiver:
 
     def __init__(self, tokens: dict[str, str]):
         self._tokens = tokens
-        self.calls: list[Optional[str]] = []
+        self.calls: list[str | None] = []
 
-    def get_fcm_token(self, entry_id: Optional[str] = None) -> Optional[str]:
+    def get_fcm_token(self, entry_id: str | None = None) -> str | None:
         self.calls.append(entry_id)
         if entry_id:
             if entry_id not in self._tokens:
@@ -42,7 +42,9 @@ class TrackingReceiver:
         return self._tokens.get("legacy")
 
 
-def test_get_fcm_token_prefers_entry_scope(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_get_fcm_token_prefers_entry_scope(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """Ensure API helper forwards entry_id to the receiver when available."""
 
     receiver = TrackingReceiver({"entry-1": "token-entry-1", "legacy": "legacy-token"})
@@ -77,17 +79,19 @@ def test_get_fcm_token_fallback_handles_missing_entry_id(
 def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     """Play/Stop Sound actions obtain the token tied to their entry."""
 
-    submissions: list[tuple[str, str, str, Optional[str], Optional[str]]] = []
+    submissions: list[tuple[str, str, str, str | None, str | None]] = []
 
     async def fake_submit_start(
         device_id: str,
         token: str,
         *,
         session: Any,
-        namespace: Optional[str],
+        namespace: str | None,
         cache: DummyCache,
     ) -> str:
-        submissions.append(("start", device_id, token, namespace, getattr(cache, "entry_id", None)))
+        submissions.append(
+            ("start", device_id, token, namespace, getattr(cache, "entry_id", None))
+        )
         return "ok"
 
     async def fake_submit_stop(
@@ -95,10 +99,12 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
         token: str,
         *,
         session: Any,
-        namespace: Optional[str],
+        namespace: str | None,
         cache: DummyCache,
     ) -> str:
-        submissions.append(("stop", device_id, token, namespace, getattr(cache, "entry_id", None)))
+        submissions.append(
+            ("stop", device_id, token, namespace, getattr(cache, "entry_id", None))
+        )
         return "ok"
 
     monkeypatch.setattr(
@@ -113,8 +119,12 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     api_entry_1 = GoogleFindMyAPI(cache=DummyCache(entry_id="entry-1"))
     api_entry_2 = GoogleFindMyAPI(cache=DummyCache(entry_id="entry-2"))
 
-    monkeypatch.setattr(api_entry_1, "_get_fcm_token_for_action", lambda: "token-entry-1")
-    monkeypatch.setattr(api_entry_2, "_get_fcm_token_for_action", lambda: "token-entry-2")
+    monkeypatch.setattr(
+        api_entry_1, "_get_fcm_token_for_action", lambda: "token-entry-1"
+    )
+    monkeypatch.setattr(
+        api_entry_2, "_get_fcm_token_for_action", lambda: "token-entry-2"
+    )
 
     async def _exercise() -> None:
         assert await api_entry_1.async_play_sound("device-1")
@@ -139,24 +149,28 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     assert caches == ["entry-1", "entry-2", "entry-1", "entry-2"]
 
 
-def test_async_get_device_location_uses_scoped_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_get_device_location_uses_scoped_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Multi-account location requests must not fall back to legacy cache helpers."""
 
-    recorded: list[tuple[Optional[str], Any]] = []
+    recorded: list[tuple[str | None, Any]] = []
 
     async def fake_get_location_data(
         canonic_device_id: str,
         name: str,
         *,
         session: Any,
-        namespace: Optional[str],
+        namespace: str | None,
         cache: DummyCache,
         **_: Any,
     ) -> list[dict[str, Any]]:
         recorded.append((namespace, cache))
         return [{"canonic_id": canonic_device_id, "latitude": 1}]
 
-    monkeypatch.setattr(api_module, "get_location_data_for_device", fake_get_location_data)
+    monkeypatch.setattr(
+        api_module, "get_location_data_for_device", fake_get_location_data
+    )
 
     api_entry_1 = GoogleFindMyAPI(cache=DummyCache(entry_id="entry-1"))
     api_entry_2 = GoogleFindMyAPI(cache=DummyCache(entry_id="entry-2"))

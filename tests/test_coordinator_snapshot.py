@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Dict, Optional, Tuple
 
 import asyncio
 
@@ -18,7 +17,9 @@ from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 class _DummyState:
     """Minimal Home Assistant state stub with GPS attributes."""
 
-    def __init__(self, latitude: float, longitude: float, accuracy: float | None) -> None:
+    def __init__(
+        self, latitude: float, longitude: float, accuracy: float | None
+    ) -> None:
         self.attributes = {
             "latitude": latitude,
             "longitude": longitude,
@@ -31,9 +32,9 @@ class _DummyStates:
     """Provide a mapping-like interface for hass.states."""
 
     def __init__(self) -> None:
-        self._data: Dict[str, _DummyState] = {}
+        self._data: dict[str, _DummyState] = {}
 
-    def get(self, entity_id: str) -> Optional[_DummyState]:
+    def get(self, entity_id: str) -> _DummyState | None:
         return self._data.get(entity_id)
 
     def set(self, entity_id: str, state: _DummyState) -> None:
@@ -44,12 +45,14 @@ class _DummyEntityRegistry:
     """Minimal entity registry stub supporting unique_id lookups."""
 
     def __init__(self) -> None:
-        self._entity_ids: Dict[Tuple[str, str, str], str] = {}
+        self._entity_ids: dict[tuple[str, str, str], str] = {}
 
     def add(self, platform: str, domain: str, unique_id: str, entity_id: str) -> None:
         self._entity_ids[(platform, domain, unique_id)] = entity_id
 
-    def async_get_entity_id(self, platform: str, domain: str, unique_id: str) -> Optional[str]:
+    def async_get_entity_id(
+        self, platform: str, domain: str, unique_id: str
+    ) -> str | None:
         return self._entity_ids.get((platform, domain, unique_id))
 
 
@@ -93,7 +96,9 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
     assert entry["longitude"] == pytest.approx(-122.0840575)
     assert entry["accuracy"] == pytest.approx(5.0)
     assert entry["status"] == "Using current state"
-    assert entry["last_seen"] == pytest.approx(int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()))
+    assert entry["last_seen"] == pytest.approx(
+        int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp())
+    )
 
 
 def test_snapshot_logs_formats_when_entity_missing(
@@ -126,6 +131,7 @@ def test_snapshot_logs_formats_when_entity_missing(
 
     assert result[0]["status"] == "Waiting for location poll"
     assert any(
-        "checked unique_id formats" in record.message and "entry-1:device-99" in record.message
+        "checked unique_id formats" in record.message
+        and "entry-1:device-99" in record.message
         for record in caplog.records
     )

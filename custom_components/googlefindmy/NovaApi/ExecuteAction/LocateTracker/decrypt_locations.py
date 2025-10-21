@@ -12,7 +12,7 @@ import logging
 import math
 import time
 from itertools import zip_longest
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from google.protobuf.message import DecodeError
 
@@ -75,7 +75,7 @@ def _status_name_safe(code: Any) -> str:
             return str(code)
 
 
-def create_google_maps_link(latitude: float, longitude: float) -> Optional[str]:
+def create_google_maps_link(latitude: float, longitude: float) -> str | None:
     """Return a Google Maps link for valid coordinates, otherwise None.
 
     Contract:
@@ -88,11 +88,15 @@ def create_google_maps_link(latitude: float, longitude: float) -> Optional[str]:
         lat_f = float(latitude)
         lon_f = float(longitude)
     except (TypeError, ValueError):
-        _LOGGER.debug("Invalid coordinate types for Maps link; skipping link generation")
+        _LOGGER.debug(
+            "Invalid coordinate types for Maps link; skipping link generation"
+        )
         return None
 
     if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
-        _LOGGER.debug("Out-of-bounds coordinates for Maps link; skipping link generation")
+        _LOGGER.debug(
+            "Out-of-bounds coordinates for Maps link; skipping link generation"
+        )
         return None
 
     return f"https://www.google.com/maps/search/?api=1&query={lat_f},{lon_f}"
@@ -104,7 +108,7 @@ def is_mcu_tracker(device_registration: DeviceRegistration) -> bool:
 
 
 async def async_retrieve_identity_key(
-    device_registration: DeviceRegistration, *, cache: "TokenCache"
+    device_registration: DeviceRegistration, *, cache: TokenCache
 ) -> bytes:
     """Retrieve the device Ephemeral Identity Key (EIK) asynchronously.
 
@@ -247,9 +251,7 @@ def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:
     return v
 
 
-async def _offload_decrypt_aes(
-    identity_key: bytes, encrypted_location: bytes
-) -> bytes:
+async def _offload_decrypt_aes(identity_key: bytes, encrypted_location: bytes) -> bytes:
     """Offload AES-GCM decryption; derive key hash cheaply on event loop."""
     identity_key_hash = hashlib.sha256(identity_key).digest()  # cheap hash → OK on loop
     return await asyncio.to_thread(
@@ -288,7 +290,7 @@ def _is_valid_latlon(lat: float, lon: float) -> bool:
     return True
 
 
-def _infer_report_hint(status_value: Any) -> Optional[str]:
+def _infer_report_hint(status_value: Any) -> str | None:
     """Infer a throttling hint from the protobuf Status.
 
     Strategy:
@@ -328,8 +330,8 @@ def _infer_report_hint(status_value: Any) -> Optional[str]:
 
 # ----------------------------- Main decryptor ---------------------------------
 async def async_decrypt_location_response_locations(
-    device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate, *, cache: "TokenCache"
-) -> List[Dict[str, Any]]:
+    device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate, *, cache: TokenCache
+) -> list[dict[str, Any]]:
     """Decrypt and normalize location reports into HA-friendly dicts (async).
 
     Guarantees:
@@ -356,14 +358,10 @@ async def async_decrypt_location_response_locations(
         _LOGGER.error("Device registration metadata missing or invalid: %s", exc)
         raise
 
-    identity_key = await async_retrieve_identity_key(
-        device_registration, cache=cache
-    )
+    identity_key = await async_retrieve_identity_key(device_registration, cache=cache)
 
     try:
-        locations_proto = (
-            device_update_protobuf.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
-        )
+        locations_proto = device_update_protobuf.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
     except Exception as exc:
         _LOGGER.error("Location information missing or invalid: %s", exc)
         raise
@@ -373,8 +371,8 @@ async def async_decrypt_location_response_locations(
     # Assemble reports (preserve semantics; own report is appended if present)
     recent_location = locations_proto.recentLocation
     recent_location_time = locations_proto.recentLocationTimestamp
-    network_locations: List[Any] = list(locations_proto.networkLocations)
-    network_locations_time: List[Any] = list(locations_proto.networkLocationTimestamps)
+    network_locations: list[Any] = list(locations_proto.networkLocations)
+    network_locations_time: list[Any] = list(locations_proto.networkLocationTimestamps)
     if locations_proto.HasField("recentLocation"):
         network_locations.append(recent_location)
         network_locations_time.append(recent_location_time)
@@ -389,7 +387,7 @@ async def async_decrypt_location_response_locations(
         network_locations = network_locations[:_MAX_REPORTS]
         network_locations_time = network_locations_time[:_MAX_REPORTS]
 
-    wrapped: List[WrappedLocation] = []
+    wrapped: list[WrappedLocation] = []
     if len(network_locations) != len(network_locations_time):
         _LOGGER.debug(
             "Mismatched report arrays: locations=%s timestamps=%s (dropping unmatched entries)",
@@ -458,13 +456,13 @@ async def async_decrypt_location_response_locations(
         return []
 
     # Convert to structured payloads for HA entities (with fail-fast validation)
-    structured: List[Dict[str, Any]] = []
+    structured: list[dict[str, Any]] = []
     for loc in wrapped:
         try:
             report_hint = _infer_report_hint(loc.status)  # may be None (conservative)
 
             if loc.status == Common_pb2.Status.SEMANTIC:
-                payload: Dict[str, Any] = {
+                payload: dict[str, Any] = {
                     "latitude": None,
                     "longitude": None,
                     "altitude": None,
@@ -535,9 +533,7 @@ async def async_decrypt_location_response_locations(
                     )  # lazy import (keeps __main__ dev check usable)
 
                     ts_local = dt_util.as_local(
-                        datetime.datetime.fromtimestamp(
-                            loc.time, tz=datetime.timezone.utc
-                        )
+                        datetime.datetime.fromtimestamp(loc.time, tz=datetime.UTC)
                     )
                     _LOGGER.debug(
                         "Time (local): %s | Status: %s | Own: %s",
@@ -566,8 +562,8 @@ async def async_decrypt_location_response_locations(
 def decrypt_location_response_locations(
     device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
     *,
-    cache: "TokenCache",
-) -> List[Dict[str, Any]]:
+    cache: TokenCache,
+) -> list[dict[str, Any]]:
     """Synchronous legacy facade.
 
     IMPORTANT:

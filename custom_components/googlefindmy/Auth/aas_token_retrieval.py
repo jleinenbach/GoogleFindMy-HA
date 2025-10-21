@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict
+from typing import Any
 
 import gpsoauth
 
@@ -59,6 +59,7 @@ _ANDROID_ID: int = 0x38918A453D071993
 # ---------------------------------------------------------------------------
 # Helpers (privacy-friendly logging, validation, brief error messages)
 # ---------------------------------------------------------------------------
+
 
 def _clip(s: Any, limit: int = 200) -> str:
     """Clip long strings to a safe length for logs."""
@@ -115,9 +116,10 @@ def _is_non_retryable_auth(err: Exception) -> bool:
 # Core exchange (executor offload)
 # ---------------------------------------------------------------------------
 
+
 async def _exchange_oauth_for_aas(
     username: str, oauth_token: str, android_id: int
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run the blocking gpsoauth exchange in an executor.
 
     Args:
@@ -132,7 +134,7 @@ async def _exchange_oauth_for_aas(
         RuntimeError: If the exchange fails or returns an invalid response.
     """
 
-    def _run() -> Dict[str, Any]:
+    def _run() -> dict[str, Any]:
         # gpsoauth.exchange_token(username, oauth_token, android_id) is blocking.
         return gpsoauth.exchange_token(username, oauth_token, android_id)
 
@@ -156,9 +158,7 @@ async def _exchange_oauth_for_aas(
                 _mask_email_for_logs(username),
                 _clip(err),
             )
-            raise RuntimeError(
-                f"gpsoauth authentication failed: {_clip(err)}"
-            ) from err
+            raise RuntimeError(f"gpsoauth authentication failed: {_clip(err)}") from err
         _LOGGER.error(
             "gpsoauth exchange failed unexpectedly for %s: %s",
             _mask_email_for_logs(username),
@@ -173,7 +173,9 @@ async def _exchange_oauth_for_aas(
     )
 
     if not isinstance(resp, dict) or not resp:
-        raise RuntimeError(f"Invalid response from gpsoauth: {_summarize_response(resp)}")
+        raise RuntimeError(
+            f"Invalid response from gpsoauth: {_summarize_response(resp)}"
+        )
     if "Token" not in resp:
         error_details = None
         resp_keys: list[str] | str = "N/A"
@@ -192,6 +194,7 @@ async def _exchange_oauth_for_aas(
 # ---------------------------------------------------------------------------
 # Token generation (entry-scoped when `cache` is provided)
 # ---------------------------------------------------------------------------
+
 
 async def _generate_aas_token(*, cache: TokenCache) -> str:
     """Generate an AAS token using the best available OAuth token and username.
@@ -291,7 +294,9 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:
             except (TypeError, ValueError):
                 _LOGGER.debug("android_id value from FCM credentials is not numeric")
         elif candidate is not None:
-            _LOGGER.debug("Unsupported android_id type in FCM credentials: %s", type(candidate))
+            _LOGGER.debug(
+                "Unsupported android_id type in FCM credentials: %s", type(candidate)
+            )
 
     if android_id is None:
         _LOGGER.warning(
@@ -308,7 +313,9 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:
         try:
             await cache.set(username_string, resp["Email"])
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Failed to persist normalized username from gpsoauth: %s", _clip(err))
+            _LOGGER.debug(
+                "Failed to persist normalized username from gpsoauth: %s", _clip(err)
+            )
 
     return str(resp["Token"])
 
@@ -316,6 +323,7 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:
 # ---------------------------------------------------------------------------
 # Public API (entry-scoped when `cache` is provided) with retries/backoff
 # ---------------------------------------------------------------------------
+
 
 async def async_get_aas_token(
     *,
@@ -362,7 +370,7 @@ async def async_get_aas_token(
                         _clip(exc),
                     )
                     break
-                sleep_s = backoff * (2 ** attempt)
+                sleep_s = backoff * (2**attempt)
                 _LOGGER.info(
                     "AAS token generation failed (attempt %d/%d): %s — retrying in %.1fs",
                     attempt + 1,
@@ -379,7 +387,10 @@ async def async_get_aas_token(
 
 # ----------------------- Legacy sync wrapper (unsupported) -----------------------
 
-def get_aas_token() -> str:  # pragma: no cover - legacy path kept for compatibility messaging
+
+def get_aas_token() -> (
+    str
+):  # pragma: no cover - legacy path kept for compatibility messaging
     """Legacy sync API is intentionally unsupported to prevent event loop deadlocks.
 
     Raises:

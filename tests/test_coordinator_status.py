@@ -102,7 +102,9 @@ def dummy_api(monkeypatch: pytest.MonkeyPatch) -> _DummyAPI:
 
 
 @pytest.fixture
-def coordinator(monkeypatch: pytest.MonkeyPatch, dummy_api: _DummyAPI) -> GoogleFindMyCoordinator:
+def coordinator(
+    monkeypatch: pytest.MonkeyPatch, dummy_api: _DummyAPI
+) -> GoogleFindMyCoordinator:
     """Instantiate a coordinator with lightweight stubs for hass/cache."""
 
     loop = asyncio.new_event_loop()

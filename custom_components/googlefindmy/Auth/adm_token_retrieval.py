@@ -46,7 +46,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 import gpsoauth
 
@@ -73,6 +74,7 @@ _AUTH_METHOD_INDIVIDUAL_TOKENS = "individual_tokens"
 # ---------------------------------------------------------------------------
 # Helpers (privacy-friendly logging, normalization, brief error messages)
 # ---------------------------------------------------------------------------
+
 
 def _mask_email(email: str | None) -> str:
     """Return a privacy-friendly representation of an email for logs."""
@@ -164,6 +166,7 @@ async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
 # Core token generation (delegates to central token retriever)
 # ---------------------------------------------------------------------------
 
+
 async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
     """
     Generate a new ADM token, honoring the original authentication method.
@@ -186,14 +189,18 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
     auth_method = await cache.get(DATA_AUTH_METHOD)
     use_oauth_provider = auth_method == _AUTH_METHOD_INDIVIDUAL_TOKENS
 
-    aas_token_direct: Optional[str] = None
-    aas_provider: Optional[Callable[[], Awaitable[str]]] = None
+    aas_token_direct: str | None = None
+    aas_provider: Callable[[], Awaitable[str]] | None = None
 
     if use_oauth_provider:
-        _LOGGER.debug("ADM token refresh path: using OAuth→AAS provider (individual tokens).")
+        _LOGGER.debug(
+            "ADM token refresh path: using OAuth→AAS provider (individual tokens)."
+        )
         aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
     else:
-        _LOGGER.debug("ADM token refresh path: reusing cached AAS token (secrets.json / master).")
+        _LOGGER.debug(
+            "ADM token refresh path: reusing cached AAS token (secrets.json / master)."
+        )
         aas_token_direct = await cache.get(DATA_AAS_TOKEN)
         if not isinstance(aas_token_direct, str) or not aas_token_direct:
             _LOGGER.warning(
@@ -220,21 +227,26 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
 
 async def _resolve_android_id_for_isolated_flow(
     *,
-    secrets_bundle: Optional[dict[str, Any]],
-    cache_get: Optional[Callable[[str], Awaitable[Any]]],
+    secrets_bundle: dict[str, Any] | None,
+    cache_get: Callable[[str], Awaitable[Any]] | None,
 ) -> int:
     """Resolve android_id for isolated exchanges using secrets or flow cache."""
 
     android_id: int | None = None
 
     if isinstance(secrets_bundle, dict):
-        android_id = _extract_android_id_from_credentials(secrets_bundle.get("fcm_credentials"))
+        android_id = _extract_android_id_from_credentials(
+            secrets_bundle.get("fcm_credentials")
+        )
 
     if android_id is None and cache_get is not None:
         try:
             cached_fcm = await cache_get("fcm_credentials")
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Isolated exchange: failed to read cached FCM credentials: %s", _clip(err))
+            _LOGGER.debug(
+                "Isolated exchange: failed to read cached FCM credentials: %s",
+                _clip(err),
+            )
         else:
             android_id = _extract_android_id_from_credentials(cached_fcm)
 
@@ -247,8 +259,9 @@ async def _resolve_android_id_for_isolated_flow(
 
     return android_id
 
+
 async def async_get_adm_token(
-    username: Optional[str] = None,
+    username: str | None = None,
     *,
     retries: int = 2,
     backoff: float = 1.0,
@@ -288,7 +301,7 @@ async def async_get_adm_token(
     async def _generator() -> str:
         return await _generate_adm_token(user, cache=cache)
 
-    last_exc: Optional[Exception] = None
+    last_exc: Exception | None = None
     attempts = max(1, retries + 1)
     tried_oauth_fallback = False
     fallback_active = False
@@ -348,7 +361,9 @@ async def async_get_adm_token(
                         tried_oauth_fallback = True
                         try:
                             try:
-                                auth_method_for_reset = await cache.get(DATA_AUTH_METHOD)
+                                auth_method_for_reset = await cache.get(
+                                    DATA_AUTH_METHOD
+                                )
                             except Exception as err:  # noqa: BLE001
                                 _LOGGER.debug(
                                     "Failed to read auth_method before OAuth fallback for %s: %s",
@@ -399,7 +414,7 @@ async def async_get_adm_token(
                 except Exception:
                     pass  # best-effort
 
-                sleep_s = backoff * (2 ** attempt)
+                sleep_s = backoff * (2**attempt)
                 _LOGGER.info(
                     "ADM token generation failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
                     attempt + 1,
@@ -446,6 +461,7 @@ async def async_get_adm_token(
 
 # --- Functions required by config_flow.py (isolated, no global cache touch) ---
 
+
 async def _perform_oauth_with_provided_aas(
     username: str,
     aas_token: str,
@@ -466,6 +482,7 @@ async def _perform_oauth_with_provided_aas(
     Raises:
         RuntimeError: If the OAuth response is invalid or missing the expected fields.
     """
+
     def _run() -> str:
         resp = gpsoauth.perform_oauth(
             username,
@@ -477,7 +494,9 @@ async def _perform_oauth_with_provided_aas(
         )
         if not isinstance(resp, dict):
             # Never include the raw `resp` in logs/errors
-            raise RuntimeError(f"gpsoauth.perform_oauth returned non-dict response ({type(resp).__name__})")
+            raise RuntimeError(
+                f"gpsoauth.perform_oauth returned non-dict response ({type(resp).__name__})"
+            )
         token_value = resp.get("Token")
         if not isinstance(token_value, str) or not token_value:
             legacy_value = resp.get("Auth")
@@ -507,10 +526,10 @@ async def _perform_oauth_with_provided_aas(
 async def async_get_adm_token_isolated(
     username: str,
     *,
-    aas_token: Optional[str] = None,
-    secrets_bundle: Optional[dict[str, Any]] = None,
-    cache_get: Optional[Callable[[str], Awaitable[Any]]] = None,
-    cache_set: Optional[Callable[[str, Any], Awaitable[None]]] = None,
+    aas_token: str | None = None,
+    secrets_bundle: dict[str, Any] | None = None,
+    cache_get: Callable[[str], Awaitable[Any]] | None = None,
+    cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
     retries: int = 1,
     backoff: float = 1.0,
 ) -> str:
@@ -535,7 +554,9 @@ async def async_get_adm_token_isolated(
     """
     user = (username or "").strip().lower()
     if not user:
-        raise RuntimeError("Username is empty/invalid; cannot retrieve ADM token (isolated).")
+        raise RuntimeError(
+            "Username is empty/invalid; cannot retrieve ADM token (isolated)."
+        )
 
     src_aas = (aas_token or "").strip()
     if not src_aas and isinstance(secrets_bundle, dict):
@@ -546,7 +567,7 @@ async def async_get_adm_token_isolated(
     if not src_aas:
         raise RuntimeError("Isolated ADM exchange requires an AAS token.")
 
-    last_exc: Optional[Exception] = None
+    last_exc: Exception | None = None
     attempts = max(1, retries + 1)
 
     android_id = await _resolve_android_id_for_isolated_flow(
@@ -556,7 +577,9 @@ async def async_get_adm_token_isolated(
 
     for attempt in range(attempts):
         try:
-            tok = await _perform_oauth_with_provided_aas(user, src_aas, android_id=android_id)
+            tok = await _perform_oauth_with_provided_aas(
+                user, src_aas, android_id=android_id
+            )
 
             # Best-effort: persist TTL metadata via provided flow-local cache.
             if cache_set is not None:
@@ -579,8 +602,12 @@ async def async_get_adm_token_isolated(
                         existing = None
                     if not existing:
                         await cache_set(probe_key, 3)
-                except Exception as meta_exc:  # never fail the exchange on metadata issues
-                    _LOGGER.debug("Isolated TTL metadata write skipped: %s", _clip(meta_exc))
+                except (
+                    Exception
+                ) as meta_exc:  # never fail the exchange on metadata issues
+                    _LOGGER.debug(
+                        "Isolated TTL metadata write skipped: %s", _clip(meta_exc)
+                    )
 
             return tok
 
@@ -594,7 +621,7 @@ async def async_get_adm_token_isolated(
                     _clip(exc),
                 )
                 break
-            sleep_s = backoff * (2 ** attempt)
+            sleep_s = backoff * (2**attempt)
             _LOGGER.info(
                 "Isolated ADM exchange failed (attempt %d/%d) for %s: %s — retrying in %.1fs",
                 attempt + 1,
@@ -607,4 +634,3 @@ async def async_get_adm_token_isolated(
 
     assert last_exc is not None
     raise last_exc
-
