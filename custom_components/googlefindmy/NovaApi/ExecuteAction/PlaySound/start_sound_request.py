@@ -171,7 +171,9 @@ if __name__ == "__main__":
         except ValueError as err:
             available_hint: str | None = None
             try:
-                from custom_components.googlefindmy.Auth import token_cache as _legacy_cache
+                from custom_components.googlefindmy.Auth import (
+                    token_cache as _legacy_cache,
+                )
 
                 entries = sorted(_legacy_cache._INSTANCES)
                 if entries:
@@ -179,16 +181,13 @@ if __name__ == "__main__":
             except Exception:  # noqa: BLE001 - best-effort hint only
                 available_hint = None
 
-            extra = (
-                f" Available entry IDs: {available_hint}."
-                if available_hint
-                else ""
-            )
+            extra = f" Available entry IDs: {available_hint}." if available_hint else ""
             print(
                 "Unable to resolve an FCM token cache for the CLI helper.\n"
                 f"{err}\n"
                 "Set GOOGLEFINDMY_ENTRY_ID to the desired ConfigEntry ID or "
-                "instantiate the shim with cache=... to pick a specific account." + extra,
+                "instantiate the shim with cache=... to pick a specific account."
+                + extra,
                 file=sys.stderr,
             )
             return

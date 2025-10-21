@@ -94,7 +94,7 @@ def test_shim_rejects_unknown_entry_id(
 
 
 def test_shim_requires_explicit_entry_when_multiple_caches(
-    multi_cache_registry: dict[str, _StubCache]
+    multi_cache_registry: dict[str, _StubCache],
 ) -> None:
     """Multiple caches require explicit entry selection to avoid ambiguity."""
 

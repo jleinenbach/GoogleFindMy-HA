@@ -69,6 +69,7 @@ def test_resolve_cli_cache_multiple_entries_require_hint(
     assert "Multiple token caches registered" in message
     assert "GOOGLEFINDMY_ENTRY_ID" in message
 
+
 def test_cli_main_passes_selected_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI helper should forward the selected cache/namespace to API calls."""
 
