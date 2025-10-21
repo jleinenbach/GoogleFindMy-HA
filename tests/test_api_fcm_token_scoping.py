@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -56,8 +57,10 @@ def test_get_fcm_token_prefers_entry_scope(monkeypatch: pytest.MonkeyPatch, capl
     assert "falling back to legacy scope" not in caplog.text
 
 
-def test_get_fcm_token_fallback_logs(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    """Legacy fallback emits a diagnostic when no entry namespace is available."""
+def test_get_fcm_token_fallback_handles_missing_entry_id(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Legacy fallback still returns a token when no entry namespace is available."""
 
     receiver = TrackingReceiver({"legacy": "legacy-token"})
     monkeypatch.setattr(api_module, "_FCM_ReceiverGetter", lambda: receiver)
@@ -68,7 +71,7 @@ def test_get_fcm_token_fallback_logs(monkeypatch: pytest.MonkeyPatch, caplog: py
 
     assert token == "legacy-token"
     assert receiver.calls == [None]
-    assert "falling back to legacy scope" in caplog.text
+    assert "Cannot obtain FCM token" not in caplog.text
 
 
 def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
