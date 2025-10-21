@@ -43,9 +43,7 @@ def test_start_cli_requires_explicit_entry(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         nbe_list_devices, "get_registered_entry_ids", lambda: ["entry-one"]
     )
-    monkeypatch.setattr(
-        nbe_list_devices, "get_cache_for_entry", lambda entry: cache
-    )
+    monkeypatch.setattr(nbe_list_devices, "get_cache_for_entry", lambda entry: cache)
 
     with pytest.raises(MissingTokenCacheError):
         asyncio.run(start_sound_request._async_cli_main(None))
@@ -118,9 +116,7 @@ def test_stop_cli_requires_explicit_entry(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         nbe_list_devices, "get_registered_entry_ids", lambda: ["entry-one"]
     )
-    monkeypatch.setattr(
-        nbe_list_devices, "get_cache_for_entry", lambda entry: cache
-    )
+    monkeypatch.setattr(nbe_list_devices, "get_cache_for_entry", lambda entry: cache)
 
     with pytest.raises(MissingTokenCacheError):
         asyncio.run(stop_sound_request._async_cli_main(None))
