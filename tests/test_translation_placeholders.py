@@ -46,9 +46,9 @@ def test_translation_placeholders() -> None:
         / "googlefindmy"
         / "translations"
     )
-    assert (
-        translations_dir.is_dir()
-    ), f"Translations directory not found: {translations_dir}"
+    assert translations_dir.is_dir(), (
+        f"Translations directory not found: {translations_dir}"
+    )
 
     language_placeholders: dict[str, dict[tuple[str, ...], set[str]]] = {}
 
@@ -57,9 +57,9 @@ def test_translation_placeholders() -> None:
             data = json.load(file)
         language_placeholders[json_file.stem] = _extract_placeholders(data)
 
-    assert (
-        BASE_LANGUAGE in language_placeholders
-    ), f"Base language '{BASE_LANGUAGE}' translation is missing."
+    assert BASE_LANGUAGE in language_placeholders, (
+        f"Base language '{BASE_LANGUAGE}' translation is missing."
+    )
 
     all_paths: set[tuple[str, ...]] = set()
     for placeholders in language_placeholders.values():
@@ -79,11 +79,17 @@ def test_translation_placeholders() -> None:
             placeholders_for_lang = placeholders.get(path, set())
 
             missing = union_placeholders - placeholders_for_lang - outdated_for_path
-            assert not missing, f"{language} translation for {path_display} is missing placeholders: {sorted(missing)}"
+            assert not missing, (
+                f"{language} translation for {path_display} is missing placeholders: {sorted(missing)}"
+            )
 
             placeholders_for_base = base_placeholders.get(path, set())
             extra = placeholders_for_lang - placeholders_for_base - outdated_for_path
             if language == BASE_LANGUAGE:
-                assert not extra, f"Base language {BASE_LANGUAGE} has placeholders not in outdated list at {path_display}: {sorted(extra)}"
+                assert not extra, (
+                    f"Base language {BASE_LANGUAGE} has placeholders not in outdated list at {path_display}: {sorted(extra)}"
+                )
             else:
-                assert not extra, f"{language} translation for {path_display} has unexpected placeholders: {sorted(extra)}"
+                assert not extra, (
+                    f"{language} translation for {path_display} has unexpected placeholders: {sorted(extra)}"
+                )
