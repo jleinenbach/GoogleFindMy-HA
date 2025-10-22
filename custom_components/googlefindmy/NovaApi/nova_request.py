@@ -571,16 +571,49 @@ class AsyncTTLPolicy(TTLPolicy):
         """Async 401 handling with stampede guard and async cache I/O."""
         lock = _get_async_refresh_lock()
         async with lock:
+            now = time.time()
+
             # Skip duplicate refresh if someone just refreshed recently.
-            current_issued = await self._get(self.k_issued)
-            if current_issued and time.time() - float(current_issued) < 2:
+            issued_raw = await self._get(self.k_issued)
+            issued: float | None
+            try:
+                issued = float(issued_raw) if issued_raw is not None else None
+            except (TypeError, ValueError):
+                self.log.debug(
+                    "Cached issued timestamp is invalid (value=%r); forcing refresh.",
+                    issued_raw,
+                )
+                issued = None
+
+            if issued is not None and (now - issued) < 2:
                 self.log.debug(
                     "Another task already refreshed the token; skipping duplicate refresh."
                 )
-                return None
+                token_value: str | None = None
+                token_base = f"adm_token_{self.username}"
+                for key in self._key_variants(token_base):
+                    try:
+                        candidate = await self._get(key)
+                    except Exception as err:  # noqa: BLE001 - defensive cache read
+                        self.log.debug(
+                            "Failed to read cached token from key '%s': %s", key, err
+                        )
+                        continue
+                    if isinstance(candidate, bytes):
+                        candidate = candidate.decode()
+                    if isinstance(candidate, str) and candidate:
+                        token_value = candidate
+                        break
 
-            now = time.time()
-            issued = await self._get(self.k_issued)
+                if token_value is not None:
+                    self._set_auth("Bearer " + token_value)
+                    return token_value
+
+                self.log.debug(
+                    "Recent refresh detected but no cached ADM token available; forcing refresh."
+                )
+                issued = None  # Ensure we fall through to refresh logic below.
+
             if issued is None:
                 self.log.info(
                     "Got 401 – issued timestamp missing; attempting token refresh (async)."
