@@ -322,6 +322,12 @@ class TTLPolicy:
     def k_armed(self):
         return f"{self._ns}adm_probe_armed_{self.username}"
 
+    def _key_variants(self, base: str) -> set[str]:
+        """Return the set of cache key variants for a given base name."""
+        if self._ns:
+            return {f"{self._ns}{base}", base}
+        return {base}
+
     @staticmethod
     def _jitter_sec(base: float, jitter_abs: float) -> float:
         """Apply symmetric ±jitter_abs (seconds); never return negative."""
@@ -377,16 +383,33 @@ class TTLPolicy:
 
     def _do_refresh(self, now: float) -> str | None:
         """Refresh token, update header and issuance timestamp, bootstrap startup probes if missing."""
-        try:
-            self._set(f"{self._ns}adm_token_{self.username}", None)  # best-effort clear
-        except Exception:
-            pass
+        bases_to_clear = (
+            f"adm_token_{self.username}",
+            f"adm_token_issued_at_{self.username}",
+        )
+        for base in bases_to_clear:
+            for key in self._key_variants(base):
+                try:
+                    self._set(key, None)
+                except Exception:
+                    pass
         tok = self._refresh()
         if tok:
             self._set_auth("Bearer " + tok)
-            self._set(self.k_issued, now)
-            if not self._get(self.k_startleft):
-                self._set(self.k_startleft, 3)  # bootstrap startup probes if missing
+            issued_base = f"adm_token_issued_at_{self.username}"
+            for key in self._key_variants(issued_base):
+                try:
+                    self._set(key, now)
+                except Exception:
+                    pass
+            if self._get(self.k_startleft) is None:
+                probe_base = f"adm_probe_startup_left_{self.username}"
+                for key in self._key_variants(probe_base):
+                    try:
+                        if self._get(key) is None:
+                            self._set(key, 3)
+                    except Exception:
+                        pass
         return tok
 
     def pre_request(self) -> None:
@@ -487,12 +510,16 @@ class AsyncTTLPolicy(TTLPolicy):
         return bool(await self._get(self.k_armed))
 
     async def _do_refresh_async(self, now: float) -> str | None:
-        try:
-            await self._set(
-                f"{self._ns}adm_token_{self.username}", None
-            )  # best-effort clear
-        except Exception:
-            pass
+        bases_to_clear = (
+            f"adm_token_{self.username}",
+            f"adm_token_issued_at_{self.username}",
+        )
+        for base in bases_to_clear:
+            for key in self._key_variants(base):
+                try:
+                    await self._set(key, None)
+                except Exception:
+                    pass
         try:
             tok = await self._refresh()  # async callable
         except InvalidAasTokenError as err:
@@ -506,9 +533,20 @@ class AsyncTTLPolicy(TTLPolicy):
             raise NovaAuthError(401, "AAS token invalid during ADM refresh") from err
         if tok:
             self._set_auth("Bearer " + tok)
-            await self._set(self.k_issued, now)
-            if not await self._get(self.k_startleft):
-                await self._set(self.k_startleft, 3)
+            issued_base = f"adm_token_issued_at_{self.username}"
+            for key in self._key_variants(issued_base):
+                try:
+                    await self._set(key, now)
+                except Exception:
+                    pass
+            if await self._get(self.k_startleft) is None:
+                probe_base = f"adm_probe_startup_left_{self.username}"
+                for key in self._key_variants(probe_base):
+                    try:
+                        if await self._get(key) is None:
+                            await self._set(key, 3)
+                    except Exception:
+                        pass
         return tok
 
     async def pre_request(self) -> None:
