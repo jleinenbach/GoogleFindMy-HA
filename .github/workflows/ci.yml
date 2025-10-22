@@ -19,7 +19,7 @@ jobs:
         uses: lewagon/wait-on-check-action@v1.3.3
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          check-regexp: '^hassfest (\(auto-fix\) / )?hassfest.*'
+          check-regexp: '^[Hh]assfest( \(auto-fix\)( / hassfest.*)?)?$'
           allowed-conclusions: 'success,failure,neutral'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 10
