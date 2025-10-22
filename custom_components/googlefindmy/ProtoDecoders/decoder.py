@@ -387,59 +387,78 @@ def _merge_semantics_if_near_ts(
     *,
     tolerance_s: float = _NEAR_TS_TOLERANCE_S,
 ) -> dict[str, Any]:
-    """Attach a semantic label from a candidate with the closest timestamp.
+    """Attach semantic labels and freshest timestamps to the best fix.
 
-    Behavior:
-        * If `best` already has a `semantic_name`, nothing changes.
-        * Otherwise, it searches for a candidate with a `semantic_name` whose
-          timestamp is within the `tolerance_s` window.
-        * If multiple matches exist, it deterministically chooses the one with the
-          smallest absolute time delta to the `best` location.
-
-    Rationale:
-        Sometimes the API provides a highly accurate GPS fix and a separate
-        semantic report ("Home") at almost the same time. This function merges
-        these two pieces of information, enriching the precise coordinate with
-        a human-readable place name.
-
-    Args:
-        best: The already-selected best location (assumed normalized).
-        normed_cands: The already-normalized list of all available candidates.
-        tolerance_s: The maximum time delta in seconds to consider timestamps "near".
-
-    Returns:
-        A (shallow) copy of `best` with the `semantic_name` field potentially filled.
+    This keeps the most useful coordinate payload while still promoting
+    fresher semantic-only reports so downstream consumers perceive the update
+    as new.
     """
+
+    def _extract_ts(raw_ts: Any) -> float:
+        try:
+            ts = float(raw_ts)
+        except (TypeError, ValueError):
+            return float("-inf")
+        if not math.isfinite(ts) or ts <= 0:
+            return float("-inf")
+        return ts
+
     out = dict(best)
+
+    # Track the semantic label currently attached to the outgoing payload.
+    semantic_label: str | None = None
+    semantic_ts = float("-inf")
     if out.get("semantic_name"):
-        return out
+        semantic_label = str(out["semantic_name"])
+        semantic_ts = _extract_ts(out.get("last_seen"))
 
-    try:
-        t_best = float(out.get("last_seen") or 0.0)
-    except (TypeError, ValueError):
-        t_best = 0.0
+    t_best = _extract_ts(out.get("last_seen"))
 
-    best_label: str | None = None
-    min_delta = float("inf")
-
-    if t_best > 0:
+    # Historical behaviour: borrow a semantic label very close to the coordinate
+    # fix timestamp when none is present yet.
+    if semantic_label is None and t_best > float("-inf"):
+        best_label: str | None = None
+        best_label_ts = float("-inf")
+        min_delta = float("inf")
         for n in normed_cands:
             label = n.get("semantic_name")
             if not label:
                 continue
-            try:
-                t = float(n.get("last_seen") or 0.0)
-            except (TypeError, ValueError):
-                t = 0.0
-            if t <= 0:
+            ts = _extract_ts(n.get("last_seen"))
+            if ts == float("-inf"):
                 continue
-            delta = abs(t - t_best)
+            delta = abs(ts - t_best)
             if delta <= tolerance_s and delta < min_delta:
                 best_label = str(label)
+                best_label_ts = ts
                 min_delta = delta
+        if best_label is not None:
+            semantic_label = best_label
+            semantic_ts = best_label_ts
 
-    if best_label:
-        out["semantic_name"] = best_label
+    latest_seen = t_best
+    latest_semantic_label = semantic_label
+    latest_semantic_ts = semantic_ts
+
+    for n in normed_cands:
+        ts = _extract_ts(n.get("last_seen"))
+        if ts > latest_seen:
+            latest_seen = ts
+
+        label = n.get("semantic_name")
+        if label:
+            if ts > latest_semantic_ts:
+                latest_semantic_label = str(label)
+                latest_semantic_ts = ts
+            elif latest_semantic_label is None and ts == latest_semantic_ts:
+                latest_semantic_label = str(label)
+
+    if latest_seen > float("-inf"):
+        out["last_seen"] = latest_seen
+
+    if latest_semantic_label:
+        out["semantic_name"] = latest_semantic_label
+
     return out
 
 

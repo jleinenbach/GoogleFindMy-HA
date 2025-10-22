@@ -3,7 +3,14 @@
 
 from __future__ import annotations
 
-from custom_components.googlefindmy.ProtoDecoders.decoder import _select_best_location
+from unittest.mock import patch
+
+from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
+from custom_components.googlefindmy.ProtoDecoders.decoder import (
+    _merge_semantics_if_near_ts,
+    _select_best_location,
+    get_devices_with_location,
+)
 
 
 def test_decoder_prefers_newer_coordinates_over_owner_status() -> None:
@@ -35,3 +42,57 @@ def test_decoder_prefers_newer_coordinates_over_owner_status() -> None:
     assert best["status"] == "aggregated"
     assert best["last_seen"] == 1_700_000_500.0
     assert best["altitude"] == 40.5
+
+
+def test_decoder_promotes_newer_semantic_only_report() -> None:
+    """Semantic-only refresh keeps coordinates but updates recency metadata."""
+
+    coordinate_fix = {
+        "status": "aggregated",
+        "last_seen": 1_700_000_000,
+        "latitude": 52.5200,
+        "longitude": 13.4050,
+        "accuracy": 120.0,
+    }
+
+    semantic_only = {
+        "status": "semantic_only",
+        "last_seen": 1_700_000_900,
+        "semantic_name": "Gym",
+        "_report_hint": "semantic_only",
+    }
+
+    best, normed = _select_best_location([coordinate_fix, semantic_only])
+    assert best is not None
+
+    merged = _merge_semantics_if_near_ts(best, normed)
+
+    assert merged["latitude"] == 52.52
+    assert merged["longitude"] == 13.405
+    assert merged["last_seen"] == 1_700_000_900.0
+    assert merged["semantic_name"] == "Gym"
+
+    devices_list = DeviceUpdate_pb2.DevicesList()
+    device = devices_list.deviceMetadata.add()
+    device.userDefinedDeviceName = "Tracker"
+    canonic = device.identifierInformation.canonicIds.canonicId.add()
+    canonic.id = "device-123"
+
+    # Ensure the proto advertises report availability so decrypt is invoked.
+    reports = device.information.locationInformation.reports
+    recent_location = reports.recentLocationAndNetworkLocations.recentLocation
+    recent_location.semanticLocation.locationName = "seed"
+
+    with patch(
+        "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations.decrypt_location_response_locations",
+        return_value=[coordinate_fix, semantic_only],
+    ):
+        rows = get_devices_with_location(devices_list)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["device_id"] == "device-123"
+    assert row["latitude"] == 52.52
+    assert row["longitude"] == 13.405
+    assert row["last_seen"] == 1_700_000_900.0
+    assert row["semantic_name"] == "Gym"
