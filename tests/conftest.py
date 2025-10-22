@@ -137,6 +137,15 @@ def _stub_homeassistant() -> None:
     const_module.Platform = Platform
     sys.modules["homeassistant.const"] = const_module
 
+    loader_module = ModuleType("homeassistant.loader")
+
+    async def _async_get_integration(_hass, _domain):  # pragma: no cover - stub
+        return SimpleNamespace(name="stub", version="0.0.0")
+
+    loader_module.async_get_integration = _async_get_integration
+    sys.modules["homeassistant.loader"] = loader_module
+    setattr(ha_pkg, "loader", loader_module)
+
     core_module = ModuleType("homeassistant.core")
 
     class CoreState:  # minimal CoreState stub
