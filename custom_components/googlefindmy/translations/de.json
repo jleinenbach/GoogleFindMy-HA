@@ -44,7 +44,8 @@
         "data": {
           "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
           "oauth_token": "Neuer OAuth-Token",
-          "google_email": "Google-E-Mail"
+          "google_email": "Google-E-Mail",
+          "new_oauth_token": "Neuer OAuth-Token"
         }
       }
     },
@@ -57,7 +58,8 @@
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen. Dies ist möglicherweise ein vorübergehendes Problem – bitte versuche es später erneut.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
-      "unknown": "Unerwarteter Fehler."
+      "unknown": "Unerwarteter Fehler.",
+      "email_mismatch": "Die bereitgestellten Anmeldedaten gehören zu einem anderen Google-Konto. Um dieses Konto hinzuzufügen, erstelle eine neue Integration; eine erneute Authentifizierung kann das Konto für diesen Eintrag nicht ändern."
     },
     "abort": {
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
@@ -210,12 +212,125 @@
         "name": "Abfrage aktiv"
       },
       "nova_auth_status": {
-        "name": "Status der Nova-API-Authentifizierung"
+        "name": "Status der Nova-API-Authentifizierung",
+        "state_attributes": {
+          "nova_api_status": {
+            "name": "Status der Nova-API"
+          },
+          "nova_api_status_reason": {
+            "name": "Grund für den Nova-API-Status"
+          },
+          "nova_api_status_changed_at": {
+            "name": "Nova-API-Status geändert am"
+          },
+          "nova_fcm_status": {
+            "name": "Status von Nova FCM"
+          },
+          "nova_fcm_status_reason": {
+            "name": "Grund für den Nova-FCM-Status"
+          },
+          "nova_fcm_status_changed_at": {
+            "name": "Nova-FCM-Status geändert am"
+          }
+        }
+      }
+    },
+    "device_tracker": {
+      "device": {
+        "name": "Gerät",
+        "state_attributes": {
+          "device_name": {
+            "name": "Gerätename"
+          },
+          "device_id": {
+            "name": "Geräte-ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantische Bezeichnung"
+          },
+          "battery_level": {
+            "name": "Batteriestand"
+          },
+          "last_seen": {
+            "name": "Zuletzt gesehen (gemeldet)"
+          },
+          "last_seen_utc": {
+            "name": "Zuletzt gesehen (UTC)"
+          },
+          "source_label": {
+            "name": "Quellenbezeichnung"
+          },
+          "source_rank": {
+            "name": "Quellenrang"
+          },
+          "is_own_report": {
+            "name": "Meldung vom eigenen Gerät"
+          },
+          "latitude": {
+            "name": "Breitengrad"
+          },
+          "longitude": {
+            "name": "Längengrad"
+          },
+          "accuracy_m": {
+            "name": "Genauigkeit (m)"
+          },
+          "altitude_m": {
+            "name": "Höhe (m)"
+          }
+        }
       }
     },
     "sensor": {
       "last_seen": {
-        "name": "Zuletzt gesehen"
+        "name": "Zuletzt gesehen",
+        "state_attributes": {
+          "device_name": {
+            "name": "Gerätename"
+          },
+          "device_id": {
+            "name": "Geräte-ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantische Bezeichnung"
+          },
+          "battery_level": {
+            "name": "Batteriestand"
+          },
+          "last_seen": {
+            "name": "Zuletzt gesehen (gemeldet)"
+          },
+          "last_seen_utc": {
+            "name": "Zuletzt gesehen (UTC)"
+          },
+          "source_label": {
+            "name": "Quellenbezeichnung"
+          },
+          "source_rank": {
+            "name": "Quellenrang"
+          },
+          "is_own_report": {
+            "name": "Meldung vom eigenen Gerät"
+          },
+          "latitude": {
+            "name": "Breitengrad"
+          },
+          "longitude": {
+            "name": "Längengrad"
+          },
+          "accuracy_m": {
+            "name": "Genauigkeit (m)"
+          },
+          "altitude_m": {
+            "name": "Höhe (m)"
+          }
+        }
       },
       "stat_background_updates": {
         "name": "Hintergrund-Aktualisierungen"
