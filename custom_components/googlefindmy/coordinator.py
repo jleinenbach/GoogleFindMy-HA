@@ -93,6 +93,7 @@ from .const import (
     OPT_IGNORED_DEVICES,
     UPDATE_INTERVAL,
     INTEGRATION_VERSION,
+    MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
     # Integration "service device" metadata
     SERVICE_DEVICE_NAME,
     SERVICE_DEVICE_MODEL,
@@ -2499,7 +2500,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             we drop it and reuse `invalid_ts_drop_count` to track this case to avoid
             adding a new counter (see diagnostics & stats entity mapping).
           * It is assumed that a staleness guard has already discarded updates where
-            `new_seen` is in the far past (< 2000) or far future (+10 min).
+            `new_seen` is in the far past (< 2000) or beyond the accepted future drift
+            tolerance.
         """
         existing = self._device_location_data.get(device_id)
         if not existing:
@@ -2511,7 +2513,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if n_seen_norm < 946684800.0:  # < 2000-01-01
                 self.increment_stat("invalid_ts_drop_count")
                 return False
-            if n_seen_norm > time.time() + 600.0:  # > +10min
+            if n_seen_norm > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S:
                 self.increment_stat("future_ts_drop_count")
                 return False
 

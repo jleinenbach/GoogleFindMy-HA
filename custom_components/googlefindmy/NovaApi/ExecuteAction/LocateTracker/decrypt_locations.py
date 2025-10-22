@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from google.protobuf.message import DecodeError
 
 from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import decrypt
+from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
     decrypt_aes_gcm,
     decrypt_eik,
@@ -46,11 +47,11 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
-_LOGGER = logging.getLogger(__name__)
-
 # Acceptable future drift for timestamps to accommodate timezone offsets and
-# clock skew while still rejecting obviously invalid data.
-_MAX_FUTURE_TIMESTAMP_DRIFT: float = 24 * 60 * 60  # 24 hours
+# clock skew while still rejecting obviously invalid data is centralized in
+# MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S (const.py) so downstream components stay
+# aligned on the same acceptance window.
+_LOGGER = logging.getLogger(__name__)
 # Soft limit to avoid pathological payloads; large batches are unusual and heavy.
 _MAX_REPORTS: int = 500
 
@@ -251,7 +252,7 @@ def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:
     # Plausibility: >= 2000-01-01 and <= now + realistic drift window
     if v < 946684800.0:
         return None
-    if v > (now_s + _MAX_FUTURE_TIMESTAMP_DRIFT):
+    if v > (now_s + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S):
         return None
     return v
 
