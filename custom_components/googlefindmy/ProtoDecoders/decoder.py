@@ -99,9 +99,7 @@ def custom_message_formatter(message, indent, _as_one_line):
                     nanos = getattr(value, "nanos", 0)
                     unix_time = float(secs) + float(nanos) / 1e9
 
-                    dt_utc = datetime.datetime.fromtimestamp(
-                        unix_time, tz=datetime.UTC
-                    )
+                    dt_utc = datetime.datetime.fromtimestamp(unix_time, tz=datetime.UTC)
                     utc_str = dt_utc.isoformat().replace("+00:00", "Z")
                     if display_tz_name == "UTC":
                         lines.append(
@@ -255,12 +253,13 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _get_rank_tuple(n: dict[str, Any]) -> tuple[int, int, float, float, str]:
-    """Create a sort key tuple with status-based prioritization.
+def _get_rank_tuple(n: dict[str, Any]) -> tuple[int, float, int, float, str]:
+    """Create a sort key tuple prioritizing recency before status.
+
     Priority (high to low):
-      1. Source/Status: Owner > Crowdsourced > Aggregated > Unknown
-      2. Presence of coordinates
-      3. Newer last_seen timestamp
+      1. Presence of coordinates
+      2. Newer ``last_seen`` timestamp
+      3. Source/Status: Owner > Crowdsourced > Aggregated > Unknown
       4. Better accuracy (smaller is better)
       5. Deterministic tie-breaker string
     """
@@ -342,11 +341,11 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[int, int, float, float, str]:
             n.get("semantic_name", ""),
         )
     )
-    return (status_rank, has_coords, seen_rank, acc_rank, stable_key)
+    return (has_coords, seen_rank, status_rank, acc_rank, stable_key)
 
 
 def _select_best_location(
-    cands: list[dict[str, Any]]
+    cands: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Choose the most useful location from a list of candidates.
 
@@ -354,9 +353,9 @@ def _select_best_location(
     clear priority hierarchy to find the single most relevant location report.
 
     Priority (high to low):
-        1) Status/Source (Owner > Crowdsourced > Aggregated)
-        2) Presence of coordinates
-        3) Newer `last_seen` timestamp
+        1) Presence of coordinates
+        2) Newer `last_seen` timestamp
+        3) Status/Source (Owner > Crowdsourced > Aggregated)
         4) Better accuracy (smaller is better)
         5) Deterministic tie-breaker (canonical stable key)
 
@@ -370,9 +369,11 @@ def _select_best_location(
         return None, []
 
     # Normalize once up front
-    normed_cands: list[dict[str, Any]] = [_normalize_location_dict(c or {}) for c in cands]
+    normed_cands: list[dict[str, Any]] = [
+        _normalize_location_dict(c or {}) for c in cands
+    ]
 
-    # Sort using the new rank tuple which prioritizes status
+    # Sort using the new rank tuple which prioritizes recency over status
     normed_cands.sort(key=_get_rank_tuple, reverse=True)
 
     best_candidate = normed_cands[0]
@@ -609,7 +610,9 @@ if __name__ == "__main__":
             check=True,
         )
         subprocess.run(
-            ["protoc", "--pyi_out=.", "ProtoDecoders/Common.proto"], cwd="../", check=True
+            ["protoc", "--pyi_out=.", "ProtoDecoders/Common.proto"],
+            cwd="../",
+            check=True,
         )
         subprocess.run(
             ["protoc", "--pyi_out=.", "ProtoDecoders/DeviceUpdate.proto"],
