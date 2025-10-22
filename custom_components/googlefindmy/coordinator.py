@@ -145,6 +145,9 @@ _COOLDOWN_MIN_HIGH_TRAFFIC_S = 5 * 60  # 5 minutes
 _COOLDOWN_OWNER_MIN_S = 60  # at least 1 minute
 _COOLDOWN_OWNER_MAX_S = 15 * 60  # at most 15 minutes
 
+# Altitude adjustments smaller than 1 m are considered noise for significance checks.
+_ALTITUDE_SIGNIFICANT_DELTA_M = 1.0
+
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     """Clamp value between lo and hi (inclusive)."""
@@ -2560,6 +2563,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         return True
                 except Exception:
                     pass
+
+            n_alt = new_data.get("altitude")
+            e_alt = existing.get("altitude")
+            if n_alt is None or e_alt is None:
+                if n_alt != e_alt:
+                    return True
+            else:
+                try:
+                    n_alt_f = float(n_alt)
+                    e_alt_f = float(e_alt)
+                except (TypeError, ValueError):
+                    if n_alt != e_alt:
+                        return True
+                else:
+                    if not (math.isfinite(n_alt_f) and math.isfinite(e_alt_f)):
+                        if n_alt_f != e_alt_f:
+                            return True
+                    elif abs(n_alt_f - e_alt_f) >= _ALTITUDE_SIGNIFICANT_DELTA_M:
+                        return True
 
         # Source or qualitative changes can still be valuable.
         if new_data.get("is_own_report") != existing.get("is_own_report"):
