@@ -86,8 +86,8 @@ class _StubEntityRegistry:
         return self.entities.get(entity_id)
 
 
-def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tracker selection must match explicit unique_id formats before fallback."""
+def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """Load the map_view module with stubbed Home Assistant dependencies."""
 
     http_module = ModuleType("homeassistant.components.http")
 
@@ -116,6 +116,26 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
     dt_module.utcnow = lambda: datetime.now(timezone.utc)
     dt_module.as_local = lambda value: value
     dt_module.UTC = timezone.utc
+    dt_module.as_utc = (
+        lambda value: value
+        if value.tzinfo is not None
+        else value.replace(tzinfo=timezone.utc)
+    )
+
+    def _parse_datetime(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    dt_module.parse_datetime = _parse_datetime
     monkeypatch.setitem(sys.modules, "homeassistant.util.dt", dt_module)
 
     util_module = ModuleType("homeassistant.util")
@@ -153,6 +173,13 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
     map_view = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, module_name, map_view)
     spec.loader.exec_module(map_view)
+    return map_view
+
+
+def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tracker selection must match explicit unique_id formats before fallback."""
+
+    map_view = _load_map_view_module(monkeypatch)
 
     device_id = "device-abc"
     coordinator = _StubCoordinator(
@@ -221,3 +248,128 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert response.status == 200
     assert history_calls == [["device_tracker.googlefindmy_primary"]]
+
+
+def test_map_view_uses_iso_last_seen_for_timeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISO last_seen strings must drive ordering and de-duplication."""
+
+    map_view = _load_map_view_module(monkeypatch)
+
+    device_id = "device-iso"
+    coordinator = _StubCoordinator(devices=[{"id": device_id, "name": "ISO Device"}])
+    entry = _StubEntry("entry-iso", coordinator)
+
+    registry = _StubEntityRegistry(
+        [
+            _StubEntityEntry(
+                entity_id="device_tracker.googlefindmy_primary",
+                unique_id=f"{entry.entry_id}:{device_id}",
+                config_entry_id=entry.entry_id,
+            )
+        ]
+    )
+
+    monkeypatch.setattr(
+        map_view, "GoogleFindMyCoordinator", _StubCoordinator, raising=False
+    )
+    monkeypatch.setattr(
+        map_view,
+        "_resolve_entry_by_token",
+        lambda _hass, token: (entry, {token}) if token == "valid" else (None, None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        map_view,
+        "async_get_entity_registry",
+        lambda _hass: registry,
+        raising=False,
+    )
+
+    iso_old = "2024-01-01T00:00:00Z"
+    iso_new = "2024-01-02T00:00:00Z"
+    history_states = [
+        SimpleNamespace(
+            attributes={
+                "latitude": "10.0",
+                "longitude": "20.0",
+                "last_seen": iso_old,
+                "gps_accuracy": 5,
+            },
+            last_updated=datetime(2024, 7, 1, tzinfo=timezone.utc),
+            state="one",
+        ),
+        SimpleNamespace(
+            attributes={
+                "latitude": "11.0",
+                "longitude": "21.0",
+                "last_seen": iso_new,
+                "gps_accuracy": 10,
+            },
+            last_updated=datetime(2024, 5, 1, tzinfo=timezone.utc),
+            state="two",
+        ),
+        SimpleNamespace(
+            attributes={
+                "latitude": "11.5",
+                "longitude": "21.5",
+                "last_seen": iso_new,
+                "gps_accuracy": 15,
+            },
+            last_updated=datetime(2024, 8, 1, tzinfo=timezone.utc),
+            state="duplicate",
+        ),
+    ]
+
+    def _stub_history(
+        _hass: Any, _start: Any, _end: Any, entity_ids: list[str]
+    ) -> dict[str, Any]:
+        assert entity_ids == ["device_tracker.googlefindmy_primary"]
+        return {"device_tracker.googlefindmy_primary": history_states}
+
+    history_module = ModuleType("homeassistant.components.recorder.history")
+    history_module.get_significant_states = _stub_history
+    monkeypatch.setitem(
+        sys.modules,
+        "homeassistant.components.recorder.history",
+        history_module,
+    )
+
+    captured_locations: list[dict[str, Any]] = []
+
+    def _capture_html(
+        self: Any,
+        _device_name: str,
+        locations: list[dict[str, Any]],
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> str:
+        captured_locations.extend(locations)
+        return "ok"
+
+    monkeypatch.setattr(
+        map_view.GoogleFindMyMapView,
+        "_generate_map_html",
+        _capture_html,
+        raising=False,
+    )
+
+    hass = _StubHass()
+    view = map_view.GoogleFindMyMapView(hass)
+
+    request = SimpleNamespace(query={"token": "valid"})
+    response = asyncio.run(view.get(request, device_id))
+
+    assert response.status == 200
+    assert len(captured_locations) == 2
+
+    iso_old_ts = datetime.fromisoformat(iso_old.replace("Z", "+00:00")).timestamp()
+    iso_new_ts = datetime.fromisoformat(iso_new.replace("Z", "+00:00")).timestamp()
+
+    assert captured_locations[0]["last_seen"] == pytest.approx(iso_old_ts)
+    assert captured_locations[1]["last_seen"] == pytest.approx(iso_new_ts)
+    assert captured_locations[0]["last_seen"] < captured_locations[1]["last_seen"]
+    assert captured_locations[0]["last_seen"] != pytest.approx(
+        history_states[0].last_updated.timestamp()
+    )

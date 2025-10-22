@@ -252,7 +252,7 @@ class GoogleFindMyMapView(HomeAssistantView):
 
             locations: list[dict[str, Any]] = []
             if entity_id in history:
-                last_seen = None
+                last_seen_epoch: float | None = None
                 for state in history[entity_id]:
                     lat_raw = state.attributes.get("latitude")
                     lon_raw = state.attributes.get("longitude")
@@ -264,18 +264,46 @@ class GoogleFindMyMapView(HomeAssistantView):
                     except (TypeError, ValueError):
                         continue
 
-                    current_last_seen = state.attributes.get("last_seen")
-                    try:
-                        # Fallback for invalid or missing last_seen in old recorder data
-                        if not (current_last_seen and float(current_last_seen) > 0):
-                            current_last_seen = state.last_updated.timestamp()
-                    except (ValueError, TypeError):
-                        current_last_seen = state.last_updated.timestamp()
+                    last_seen_attr = state.attributes.get("last_seen")
+                    last_seen_utc_attr = state.attributes.get("last_seen_utc")
+                    current_last_seen_dt: datetime | None = None
 
-                    if current_last_seen and current_last_seen == last_seen:
+                    for candidate in (last_seen_utc_attr, last_seen_attr):
+                        if candidate is None:
+                            continue
+                        if isinstance(candidate, datetime):
+                            current_last_seen_dt = candidate
+                        elif isinstance(candidate, (int, float)):
+                            try:
+                                current_last_seen_dt = datetime.fromtimestamp(
+                                    float(candidate), tz=dt_util.UTC
+                                )
+                            except (OSError, OverflowError, ValueError, TypeError):
+                                current_last_seen_dt = None
+                        elif isinstance(candidate, str):
+                            parsed_candidate = dt_util.parse_datetime(candidate)
+                            if parsed_candidate is not None:
+                                current_last_seen_dt = parsed_candidate
+                        if current_last_seen_dt is not None:
+                            break
+
+                    if current_last_seen_dt is None:
+                        current_last_seen_dt = state.last_updated
+                    elif current_last_seen_dt.tzinfo is None:
+                        current_last_seen_dt = current_last_seen_dt.replace(
+                            tzinfo=dt_util.UTC
+                        )
+
+                    current_last_seen_dt = dt_util.as_utc(current_last_seen_dt)
+                    current_last_seen_epoch = current_last_seen_dt.timestamp()
+
+                    if (
+                        last_seen_epoch is not None
+                        and current_last_seen_epoch == last_seen_epoch
+                    ):
                         # de-dupe by identical last_seen
                         continue
-                    last_seen = current_last_seen
+                    last_seen_epoch = current_last_seen_epoch
 
                     acc_raw = state.attributes.get("gps_accuracy", 0)
                     try:
@@ -289,7 +317,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                             "lon": lon,
                             "accuracy": acc,
                             "timestamp": state.last_updated.isoformat(),
-                            "last_seen": current_last_seen,
+                            "last_seen": current_last_seen_epoch,
                             "entity_id": entity_id,
                             "state": state.state,
                             "is_own_report": state.attributes.get("is_own_report"),
