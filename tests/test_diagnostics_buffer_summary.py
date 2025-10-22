@@ -25,6 +25,7 @@ class _StubDiagnosticsBuffer:
                 {
                     "code": "warn-device",
                     "device_id": "device-123",
+                    "device_name": "Living Room Phone",
                     "detail": self._WARNING_DETAIL,
                 }
             ],
@@ -32,6 +33,7 @@ class _StubDiagnosticsBuffer:
                 {
                     "code": "err-device",
                     "device_id": "device-987",
+                    "device_name": "Bedroom Tablet",
                     "detail": self._ERROR_DETAIL,
                 }
             ],
@@ -137,6 +139,7 @@ def test_async_get_config_entry_diagnostics_includes_buffer(
     assert len(warnings_preview) == 1
     first_warning = warnings_preview[0]
     assert "device_id" not in first_warning
+    assert "device_name" not in first_warning
     assert first_warning["detail"].endswith("…")
     assert len(first_warning["detail"]) <= 160
 
@@ -145,5 +148,6 @@ def test_async_get_config_entry_diagnostics_includes_buffer(
     assert len(errors_preview) == 1
     first_error = errors_preview[0]
     assert "device_id" not in first_error
+    assert "device_name" not in first_error
     assert first_error["detail"].endswith("…")
     assert len(first_error["detail"]) <= 160

@@ -194,8 +194,18 @@ def _sanitize_diag_entry(payload: Any) -> dict[str, Any]:
     """Return a diagnostics-friendly snapshot of a buffer entry."""
     if not isinstance(payload, dict):
         return {}
+
     sanitized: dict[str, Any] = {}
     for key, value in payload.items():
+        if not isinstance(key, str):
+            # Skip unknown key types to avoid leaking repr() content.
+            continue
+
+        lowered_key = key.casefold()
+        # Drop any name/title/label-like keys to avoid leaking human readable names.
+        if "name" in lowered_key or "title" in lowered_key or "label" in lowered_key:
+            continue
+
         if isinstance(value, (int, float, bool)) or value is None:
             sanitized[key] = value
         else:
