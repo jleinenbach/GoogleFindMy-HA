@@ -103,7 +103,7 @@ def test_get_best_location_prefers_newer_last_seen() -> None:
         # timestamp appears older but last_seen indicates fresher data
         "timestamp": now - 4000,
         "last_seen": now - 1200,
-        "accuracy": 5,
+        "accuracy": 50,
         "semantic_name": None,
     }
 
@@ -113,6 +113,32 @@ def test_get_best_location_prefers_newer_last_seen() -> None:
         best = recorder.get_best_location([older, newer])
 
     assert best is newer
+
+
+def test_get_best_location_handles_equal_rankings() -> None:
+    """Duplicate rankings should not trigger tuple comparison errors."""
+
+    hass = SimpleNamespace()
+    recorder = LocationRecorder(hass)  # type: ignore[arg-type]
+    now = 1_700_000_000.0
+
+    first = {
+        "timestamp": now - 60,
+        "accuracy": 25,
+        "semantic_name": None,
+    }
+    second = {
+        "timestamp": now - 60,
+        "accuracy": 25,
+        "semantic_name": None,
+    }
+
+    with patch(
+        "custom_components.googlefindmy.location_recorder.time.time", return_value=now
+    ):
+        best = recorder.get_best_location([first, second])
+
+    assert best is first
 
 
 class FakeState:
