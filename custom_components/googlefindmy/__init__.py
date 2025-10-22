@@ -119,14 +119,15 @@ try:
 except Exception:  # pragma: no cover
     GoogleHomeFilter = None  # type: ignore
 
-if hasattr(cv, "config_entry_only_config_schema"):
+try:
     CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-elif hasattr(cv, "empty_config_schema"):
-    CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
-else:  # pragma: no cover - kept for legacy tests without voluptuous helpers
-    import voluptuous as vol
+except AttributeError:
+    try:
+        CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
+    except AttributeError:  # pragma: no cover - kept for legacy tests without helpers
+        import voluptuous as vol
 
-    CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
+        CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
 
 _LOGGER = logging.getLogger(__name__)
 
