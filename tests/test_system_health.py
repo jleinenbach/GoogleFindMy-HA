@@ -136,6 +136,7 @@ def test_async_get_system_health_info_redacts_email() -> None:
         payload["last_successful_update"]
         == coordinator.last_update_success_time.isoformat()
     )
+    assert payload["fcm_status"]["changed_at"] == "1970-01-01T00:02:03Z"
 
     account_hash = payload.get("account_hash")
     assert isinstance(account_hash, str)

@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover - fallback for stripped test environment
     system_health_component = None  # type: ignore[assignment]
 
 from .const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN, INTEGRATION_VERSION
+from .coordinator import format_epoch_utc
 
 
 def _normalize_email(value: str | None) -> str:
@@ -126,8 +127,9 @@ def _get_fcm_snapshot(coordinator: Any) -> dict[str, Any] | None:
         data["state"] = state
     if reason is not None:
         data["reason"] = reason
-    if isinstance(changed_at, (int, float)):
-        data["changed_at"] = float(changed_at)
+    changed_at_iso = format_epoch_utc(changed_at)
+    if changed_at_iso is not None:
+        data["changed_at"] = changed_at_iso
     return data
 
 
