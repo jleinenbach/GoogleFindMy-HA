@@ -140,10 +140,20 @@ To contribute, please:
 
 ### Development Scripts
 
-This repository provides a thin wrapper around the official `hassfest` validator so it can be executed with `python -m script.hassfest`.
+Manifest validation (`hassfest`) now runs exclusively through the
+[`hassfest-auto-fix`](.github/workflows/hassfest-auto-fix.yml) workflow. Every
+push to `main` and every pull request automatically executes the
+[`home-assistant/actions/hassfest`](https://github.com/home-assistant/actions/tree/master/hassfest#readme)
+GitHub Action, which rewrites manifests when needed and re-runs the validator to
+confirm the fixes.
 
-1. Install the development dependencies: `python -m pip install -r requirements-dev.txt`
-2. Run the validator: `python3 -m script.hassfest`
+When you need to inspect or download the results locally:
+
+1. Open the relevant workflow run from the PR or commit.
+2. Expand the **Run hassfest (may rewrite manifest)** step to review the console
+   output, or download the generated artifact directly from the workflow UI.
+3. If you need a fresh validation pass, trigger the workflow manually from the
+   **Run workflow** button in the Actions tab or by re-running the job on the PR.
 
 ## Legacy CLI helpers & token cache selection
 
