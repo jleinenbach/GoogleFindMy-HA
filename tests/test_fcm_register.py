@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-# tests/test_fcm_register.py
-
 import asyncio
-
+import logging
 import types
 from dataclasses import dataclass
 from typing import Any
@@ -125,6 +123,44 @@ def test_gcm_register_html_retry_rotates_endpoints(
     assert all(call["data"]["sender"] == "1234567890123" for call in session.calls)
 
 
+def test_gcm_register_rotation_logs_reason_and_sender(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Switching endpoints logs HTTP status and current sender details."""
+
+    responses = [
+        _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
+        _FakeResponse(200, "token=abc123", {"Content-Type": "text/plain"}),
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with caplog.at_level(logging.WARNING):
+        result = asyncio.run(
+            register.gcm_register({"androidId": 11, "securityToken": 22})
+        )
+
+    assert result["token"] == "abc123"
+    assert any(
+        "GCM register switching endpoint /c2dm/register3 -> /c2dm/register due to HTTP 404"
+        in record.getMessage()
+        and "sender=1234567890123 (configured numeric sender)" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_gcm_register_fallback_succeeds_on_register(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -156,6 +192,38 @@ def test_gcm_register_fallback_succeeds_on_register(
         GCM_REGISTER3_URL,
         GCM_REGISTER_URL,
     ]
+
+
+def test_gcm_register_success_log_includes_sender(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Success log records endpoint and sender fallback context."""
+
+    responses = [
+        _FakeResponse(200, "token=success", {"Content-Type": "text/plain"}),
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    with caplog.at_level(logging.INFO):
+        result = asyncio.run(
+            register.gcm_register({"androidId": 1, "securityToken": 2})
+        )
+
+    assert result["token"] == "success"
+    assert any(
+        "GCM register succeeded via /c2dm/register3" in record.getMessage()
+        and "using sender=1234567890123 (configured numeric sender)"
+        in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,6 +288,50 @@ def test_gcm_register_falls_back_to_server_key(monkeypatch: pytest.MonkeyPatch) 
     assert len(session.calls) == 2
     assert session.calls[0]["data"]["sender"] == "1234567890123"
     assert session.calls[1]["data"]["sender"] == GCM_SERVER_KEY_B64
+
+
+def test_gcm_register_phone_registration_error_logs_sender(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """PHONE_REGISTRATION_ERROR debug log reports which sender was active."""
+
+    responses = [
+        _FakeResponse(
+            200, "Error=PHONE_REGISTRATION_ERROR", {"Content-Type": "text/plain"}
+        ),
+        _FakeResponse(200, "token=xyz", {"Content-Type": "text/plain"}),
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with caplog.at_level(logging.DEBUG):
+        result = asyncio.run(
+            register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3)
+        )
+
+    assert result["token"] == "xyz"
+    assert any(
+        "PHONE_REGISTRATION_ERROR" in record.getMessage()
+        and "sender=1234567890123 (configured numeric sender)" in record.getMessage()
+        for record in caplog.records
+    )
+    assert any(
+        "switching sender fallback" in record.getMessage()
+        and f"sender={GCM_SERVER_KEY_B64}" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_checkin_or_register_reuses_cached_credentials(

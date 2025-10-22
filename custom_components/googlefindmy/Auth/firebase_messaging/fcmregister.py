@@ -355,6 +355,39 @@ class FcmRegister:
         endpoints = (GCM_REGISTER3_URL, GCM_REGISTER_URL)
         endpoint_index = 0
 
+        def sender_mode(sender: str) -> str:
+            """Return a human readable label for the active sender."""
+
+            if sender == GCM_SERVER_KEY_B64:
+                return "legacy server key"
+            if sender == self.config.messaging_sender_id:
+                return "configured numeric sender"
+            return "custom sender"
+
+        def log_endpoint_switch(
+            reason: str, current_index: int, next_index: int
+        ) -> None:
+            """Log when we switch between /register3 and /register endpoints."""
+
+            current_indicator = (
+                "/c2dm/register3"
+                if endpoints[current_index] == GCM_REGISTER3_URL
+                else "/c2dm/register"
+            )
+            next_indicator = (
+                "/c2dm/register3"
+                if endpoints[next_index] == GCM_REGISTER3_URL
+                else "/c2dm/register"
+            )
+            _logger.warning(
+                "GCM register switching endpoint %s -> %s due to %s; sender=%s (%s)",
+                current_indicator,
+                next_indicator,
+                reason,
+                body["sender"],
+                sender_mode(body["sender"]),
+            )
+
         while attempt <= retries:
             url = endpoints[endpoint_index]
             indicator = (
@@ -393,7 +426,13 @@ class FcmRegister:
                     exc,
                 )
                 if attempt < retries:
-                    endpoint_index = (endpoint_index + 1) % len(endpoints)
+                    next_index = (endpoint_index + 1) % len(endpoints)
+                    log_endpoint_switch(
+                        f"exception={exc.__class__.__name__}",
+                        endpoint_index,
+                        next_index,
+                    )
+                    endpoint_index = next_index
                     await asyncio.sleep(1)
                 attempt += 1
                 continue
@@ -407,17 +446,7 @@ class FcmRegister:
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
                 if attempt < retries:
                     next_index = (endpoint_index + 1) % len(endpoints)
-                    next_indicator = (
-                        "/c2dm/register3"
-                        if endpoints[next_index] == GCM_REGISTER3_URL
-                        else "/c2dm/register"
-                    )
-                    _logger.warning(
-                        "GCM register 404/HTML via %s (status=%s); rotating to %s for next attempt.",
-                        indicator,
-                        status,
-                        next_indicator,
-                    )
+                    log_endpoint_switch(f"HTTP {status}", endpoint_index, next_index)
                     endpoint_index = next_index
                     await asyncio.sleep(0.5)
                 else:
@@ -442,10 +471,12 @@ class FcmRegister:
 
             if token:
                 _logger.info(
-                    "GCM register succeeded via %s on attempt %d/%d",
+                    "GCM register succeeded via %s on attempt %d/%d using sender=%s (%s)",
                     indicator,
                     attempt,
                     retries,
+                    body["sender"],
+                    sender_mode(body["sender"]),
                 )
                 return {
                     "token": token,
@@ -459,6 +490,11 @@ class FcmRegister:
                 if error_code == "PHONE_REGISTRATION_ERROR" and sender_index + 1 < len(
                     sender_candidates
                 ):
+                    _logger.debug(
+                        "GCM register encountered PHONE_REGISTRATION_ERROR with sender=%s (%s)",
+                        body["sender"],
+                        sender_mode(body["sender"]),
+                    )
                     sender_index += 1
                     body["sender"] = sender_candidates[sender_index]
                     label = (
@@ -467,9 +503,10 @@ class FcmRegister:
                         else "configured numeric sender"
                     )
                     _logger.warning(
-                        "GCM register error %s encountered; switching sender fallback to %s",
+                        "GCM register error %s encountered; switching sender fallback to %s (sender=%s)",
                         error_code,
                         label,
+                        body["sender"],
                     )
                     if attempt < retries:
                         await asyncio.sleep(1)
@@ -497,7 +534,14 @@ class FcmRegister:
                 )
 
             if attempt < retries:
-                endpoint_index = (endpoint_index + 1) % len(endpoints)
+                rotation_reason = (
+                    f"HTTP {status}" if status else last_error or "unknown"
+                )
+                if error_code:
+                    rotation_reason = f"error_code={error_code}"
+                next_index = (endpoint_index + 1) % len(endpoints)
+                log_endpoint_switch(rotation_reason, endpoint_index, next_index)
+                endpoint_index = next_index
                 await asyncio.sleep(1)
             attempt += 1
 
