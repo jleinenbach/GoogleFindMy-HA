@@ -96,3 +96,34 @@ def test_decoder_promotes_newer_semantic_only_report() -> None:
     assert row["longitude"] == 13.405
     assert row["last_seen"] == 1_700_000_900.0
     assert row["semantic_name"] == "Gym"
+
+
+def test_semantic_report_outranks_older_coordinate_candidate() -> None:
+    """A fresher semantic report without coords takes selection precedence."""
+
+    coordinate_fix = {
+        "status": "aggregated",
+        "last_seen": 1_700_000_000,
+        "latitude": 37.7749,
+        "longitude": -122.4194,
+        "accuracy": 30.0,
+    }
+
+    semantic_only = {
+        "status": "semantic_only",
+        "last_seen": 1_700_000_950,
+        "semantic_name": "Office",
+    }
+
+    best, normed = _select_best_location([coordinate_fix, semantic_only])
+
+    assert best["status"] == "semantic_only"
+    assert "latitude" not in best or best["latitude"] is None
+    assert best["last_seen"] == 1_700_000_950.0
+
+    merged = _merge_semantics_if_near_ts(best, normed)
+
+    assert merged["latitude"] == 37.7749
+    assert merged["longitude"] == -122.4194
+    assert merged["last_seen"] == 1_700_000_950.0
+    assert merged["semantic_name"] == "Office"

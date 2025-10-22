@@ -253,13 +253,13 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _get_rank_tuple(n: dict[str, Any]) -> tuple[int, float, int, float, str]:
-    """Create a sort key tuple prioritizing recency before status.
+def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
+    """Create a sort key tuple prioritizing the freshest timestamp.
 
     Priority (high to low):
-      1. Presence of coordinates
-      2. Newer ``last_seen`` timestamp
-      3. Source/Status: Owner > Crowdsourced > Aggregated > Unknown
+      1. Newer ``last_seen`` timestamp
+      2. Source/Status: Owner > Crowdsourced > Aggregated > Unknown
+      3. Presence of coordinates (tie-breaker when timestamps/status match)
       4. Better accuracy (smaller is better)
       5. Deterministic tie-breaker string
     """
@@ -341,7 +341,7 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[int, float, int, float, str]:
             n.get("semantic_name", ""),
         )
     )
-    return (has_coords, seen_rank, status_rank, acc_rank, stable_key)
+    return (seen_rank, status_rank, has_coords, acc_rank, stable_key)
 
 
 def _select_best_location(
@@ -353,9 +353,9 @@ def _select_best_location(
     clear priority hierarchy to find the single most relevant location report.
 
     Priority (high to low):
-        1) Presence of coordinates
-        2) Newer `last_seen` timestamp
-        3) Status/Source (Owner > Crowdsourced > Aggregated)
+        1) Newer `last_seen` timestamp
+        2) Status/Source (Owner > Crowdsourced > Aggregated)
+        3) Presence of coordinates (tie-breaker when timestamps/status match)
         4) Better accuracy (smaller is better)
         5) Deterministic tie-breaker (canonical stable key)
 
@@ -391,7 +391,9 @@ def _merge_semantics_if_near_ts(
 
     This keeps the most useful coordinate payload while still promoting
     fresher semantic-only reports so downstream consumers perceive the update
-    as new.
+    as new. When a semantic report outranks a coordinate fix, the latest
+    available coordinates are borrowed back after the merge so spatial data
+    remains populated.
     """
 
     def _extract_ts(raw_ts: Any) -> float:
@@ -404,6 +406,11 @@ def _merge_semantics_if_near_ts(
         return ts
 
     out = dict(best)
+
+    # Track the freshest coordinate-bearing candidate so semantic-only entries can
+    # still expose stable position data after the merge step.
+    best_coordinate: dict[str, Any] | None = None
+    best_coordinate_ts = float("-inf")
 
     # Track the semantic label currently attached to the outgoing payload.
     semantic_label: str | None = None
@@ -445,6 +452,14 @@ def _merge_semantics_if_near_ts(
         if ts > latest_seen:
             latest_seen = ts
 
+        if (
+            isinstance(n.get("latitude"), (int, float))
+            and isinstance(n.get("longitude"), (int, float))
+            and ts >= best_coordinate_ts
+        ):
+            best_coordinate = n
+            best_coordinate_ts = ts
+
         label = n.get("semantic_name")
         if label:
             if ts > latest_semantic_ts:
@@ -458,6 +473,12 @@ def _merge_semantics_if_near_ts(
 
     if latest_semantic_label:
         out["semantic_name"] = latest_semantic_label
+
+    if best_coordinate is not None:
+        for coord_field in ("latitude", "longitude", "accuracy", "altitude"):
+            value = best_coordinate.get(coord_field)
+            if value is not None:
+                out[coord_field] = value
 
     return out
 
