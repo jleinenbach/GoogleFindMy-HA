@@ -19,6 +19,45 @@ from custom_components.googlefindmy.const import (
     DATA_AUTH_METHOD,
 )
 from custom_components.googlefindmy.Auth.username_provider import username_string
+from homeassistant.helpers.update_coordinator import UpdateFailed
+
+
+def test_async_pick_working_token_accepts_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard errors must allow candidate tokens to pass during validation."""
+
+    attempts: list[tuple[str, str]] = []
+
+    async def _fake_new_api(
+        *, email: str, token: str, secrets_bundle: dict[str, Any] | None = None
+    ) -> object:
+        attempts.append((email, token))
+        return object()
+
+    async def _fake_probe(api: object, *, email: str, token: str) -> None:
+        # Expected flow: guard errors indicate entry-runtime constraints, so the
+        # flow should accept the token immediately and defer reconciliation to
+        # config entry setup where the runtime cache is available.
+        raise UpdateFailed("Multiple config entries active - pass entry.runtime_data")
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.config_flow._async_new_api_for_probe",
+        _fake_new_api,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.config_flow._try_probe_devices",
+        _fake_probe,
+    )
+
+    token = asyncio.run(
+        config_flow.async_pick_working_token(
+            "guard@example.com", [("cache", "aas_et/GUARD")]
+        )
+    )
+
+    assert token == "aas_et/GUARD"
+    assert attempts == [("guard@example.com", "aas_et/GUARD")]
 
 
 class _DummyResponse:
