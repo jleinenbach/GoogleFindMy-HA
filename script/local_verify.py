@@ -11,10 +11,6 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-DEFAULT_RUFF_EXCLUDES: tuple[str, ...] = (
-    "custom_components/googlefindmy/ProtoDecoders/",
-    "custom_components/googlefindmy/Auth/firebase_messaging/proto/",
-)
 RUFF_FORMAT_SCRIPT = (
     Path(__file__).resolve().parent / "precommit_hooks" / "ruff_format.py"
 )
@@ -38,28 +34,26 @@ def _run_command(command: Sequence[str]) -> int:
 
 
 def _build_ruff_command() -> list[str]:
-    """Return the Ruff format --check command with repository defaults."""
+    """Return the Ruff format --check command using repository defaults."""
 
-    command = [sys.executable, str(RUFF_FORMAT_SCRIPT), "--check"]
-    command.extend(f"--exclude={path}" for path in DEFAULT_RUFF_EXCLUDES)
-    return command
+    return [sys.executable, str(RUFF_FORMAT_SCRIPT), "--check"]
 
 
 def _build_pytest_command(pytest_args: Sequence[str] | None) -> list[str]:
     """Return the pytest command respecting optional overrides."""
 
-    command = ["pytest", "-q"]
+    command = ["pytest"]
     if pytest_args:
         command.extend(pytest_args)
     return command
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run Ruff format --check and pytest -q, returning the combined status."""
+    """Run Ruff format --check and pytest, returning the combined status."""
 
     parser = argparse.ArgumentParser(
         description=(
-            "Run Ruff format --check followed by pytest -q using the repository\n"
+            "Run Ruff format --check followed by pytest using the repository\n"
             "defaults so contributors can quickly mirror the required local"
             " checks."
         )
@@ -72,14 +66,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--skip-pytest",
         action="store_true",
-        help="Skip running pytest -q.",
+        help="Skip running pytest.",
     )
     parser.add_argument(
         "--pytest-args",
         nargs=argparse.REMAINDER,
         help=(
-            "Additional arguments to pass to pytest after the default '-q'. "
-            "Place this flag last and prefix pytest options with '--'."
+            "Additional arguments to pass to pytest after the repository "
+            "defaults. Place this flag last and prefix pytest options with "
+            "'--'."
         ),
     )
     args = parser.parse_args(list(argv) if argv is not None else None)

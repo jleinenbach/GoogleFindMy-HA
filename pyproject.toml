@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "googlefindmy-ha"
+version = "1.6.0"
+description = "Home Assistant integration for Google's Find My Device network."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "BSkando" }]
+dependencies = [
+    "gpsoauth>=2.0.0",
+    "beautifulsoup4>=4.14.2",
+    "pyscrypt>=1.6.2",
+    "pycryptodomex>=3.23.0",
+    "ecdsa>=0.19.1",
+    "pytz>=2025.2",
+    "protobuf>=6.33.0",
+    "http-ece>=1.2.1",
+    "undetected_chromedriver>=3.5.5",
+    "selenium>=4.37.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.11",
+    "pre-commit>=3.7",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.14.1",
+    "types-requests>=2.32.0.20240712",
+]
+
+[project.urls]
+homepage = "https://github.com/BSkando/GoogleFindMy-HA"
+documentation = "https://github.com/BSkando/GoogleFindMy-HA"
+repository = "https://github.com/BSkando/GoogleFindMy-HA"
+issue-tracker = "https://github.com/BSkando/GoogleFindMy-HA/issues"
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = [
+    "custom_components/googlefindmy/ProtoDecoders",
+    "custom_components/googlefindmy/Auth/firebase_messaging/proto",
+]
+
+[tool.pytest.ini_options]
+addopts = ["-q"]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+ignore_missing_imports = true
+show_error_codes = true
+namespace_packages = true
+mypy_path = ["custom_components"]
+exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
+
+[tool.coverage.run]
+branch = true
+source = [
+    "custom_components/googlefindmy",
+    "tests",
+]
+omit = [
+    "custom_components/googlefindmy/ProtoDecoders/*",
+    "custom_components/googlefindmy/Auth/firebase_messaging/proto/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "if __name__ == \"__main__\":",
+    "pragma: no cover",
+]
+
+[tool.coverage.paths]
+source = [
+    "custom_components/googlefindmy",
+    "*/site-packages/custom_components/googlefindmy",
+]

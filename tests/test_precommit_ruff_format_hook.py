@@ -46,3 +46,24 @@ def test_collect_changed_files_skips_diff_without_targets(
 
     assert ruff_format._collect_changed_files([]) == []
     assert not called
+
+
+def test_main_passes_through_check_without_custom_excludes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure ``--check`` is forwarded without injecting ``--exclude`` options."""
+
+    recorded_options: list[str] = []
+
+    def _fake_run(options, filenames):  # type: ignore[no-untyped-def]
+        recorded_options.extend(options)
+        return 0
+
+    monkeypatch.setattr(ruff_format, "_run_ruff", _fake_run)
+    monkeypatch.setattr(ruff_format, "_collect_changed_files", lambda filenames: [])
+
+    exit_code = ruff_format.main(["--check"])
+
+    assert exit_code == 0
+    assert "--check" in recorded_options
+    assert not any(option.startswith("--exclude") for option in recorded_options)
