@@ -152,6 +152,7 @@ def test_api_auth_error_preserves_fcm_status(
     assert coordinator.api_status.state == ApiStatus.REAUTH
     assert coordinator.fcm_status.state == FcmStatus.CONNECTED
     assert coordinator.config_entry.reauth_calls == 1
+    assert coordinator.hass.config_entries.calls == []
     assert "Invalid" in (coordinator.api_status.reason or "")
 
 

@@ -1156,50 +1156,24 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         self._reauth_initiated = True
 
-        # Prefer the ConfigEntry helper when available; fall back to the manager API.
         try:
             result = entry.async_start_reauth(self.hass)
-        except AttributeError:
-            result = None
-        else:
-            if asyncio.iscoroutine(result):
-                try:
-                    await result
-                except Exception as err:
-                    _LOGGER.debug("async_start_reauth(entry) failed: %s", err)
-                    self._reauth_initiated = False
-                return
-            if result is not None:
-                return
-
-        hass_config_entries = getattr(self.hass, "config_entries", None)
-        if hass_config_entries is None:
-            _LOGGER.debug(
-                "Home Assistant config_entries manager unavailable; cannot start reauth"
-            )
+        except AttributeError as err:
+            _LOGGER.debug("ConfigEntry missing async_start_reauth helper: %s", err)
             self._reauth_initiated = False
-            return
-
-        try:
-            result = hass_config_entries.async_start_reauth(entry)
-        except TypeError:
-            try:
-                result = hass_config_entries.async_start_reauth(entry.entry_id)
-            except Exception as err:
-                _LOGGER.debug("async_start_reauth(entry_id) failed: %s", err)
-                self._reauth_initiated = False
-                return
-        except Exception as err:
-            _LOGGER.debug("async_start_reauth fallback failed: %s", err)
+            raise ConfigEntryAuthFailed(
+                "ConfigEntry does not support async_start_reauth"
+            ) from err
+        except Exception:
             self._reauth_initiated = False
-            return
+            raise
 
         if asyncio.iscoroutine(result):
             try:
                 await result
-            except Exception as err:
-                _LOGGER.debug("async_start_reauth coroutine failed: %s", err)
+            except Exception:
                 self._reauth_initiated = False
+                raise
 
     @property
     def api_status(self) -> StatusSnapshot:
