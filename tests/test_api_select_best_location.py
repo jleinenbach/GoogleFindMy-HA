@@ -13,7 +13,9 @@ class _StubCache:
 
     entry_id = "test-entry"
 
-    async def async_get_cached_value(self, key: str) -> Any:  # pragma: no cover - not used
+    async def async_get_cached_value(
+        self, key: str
+    ) -> Any:  # pragma: no cover - not used
         return None
 
     async def async_set_cached_value(
