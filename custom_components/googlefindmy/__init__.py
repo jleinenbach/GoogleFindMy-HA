@@ -120,6 +120,9 @@ except Exception:  # pragma: no cover
     GoogleHomeFilter = None  # type: ignore
 
 try:
+    # Helper name has been `config_entry_only_config_schema` since Core 2023.7
+    # (renamed from `no_yaml_config_schema`). Retain fallbacks solely so legacy
+    # tests lacking the helper keep importing this module without exploding.
     CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 except AttributeError:
     try:
