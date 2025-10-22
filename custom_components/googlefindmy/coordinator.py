@@ -2501,6 +2501,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # Ensure last_updated is present
         slot.setdefault("last_updated", time.time())
 
+        # Preserve recency/coordinate fidelity before committing to cache.
+        slot = self._merge_with_existing_cache_row(device_id, slot)
+
         # Keep human-friendly name mapping up-to-date if provided alongside
         name = slot.get("name")
         if isinstance(name, str) and name:
@@ -2509,6 +2512,46 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._device_location_data[device_id] = slot
         # Increment background updates to account for push/manual commits.
         self.increment_stat("background_updates")
+
+    def _merge_with_existing_cache_row(
+        self, device_id: str, incoming: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge accepted payloads with cached rows while respecting recency."""
+
+        existing = self._device_location_data.get(device_id)
+        if not existing:
+            return incoming
+
+        merged = dict(existing)
+        merged.update(incoming)
+
+        existing_seen = _normalize_epoch_seconds(existing.get("last_seen"))
+        incoming_seen = _normalize_epoch_seconds(incoming.get("last_seen"))
+
+        # Keep monotonic last_seen timestamps when payloads arrive without a newer value.
+        if existing_seen is not None and (
+            incoming_seen is None or incoming_seen < existing_seen
+        ):
+            merged["last_seen"] = existing.get("last_seen")
+            if existing.get("last_seen_utc") is not None:
+                merged["last_seen_utc"] = existing.get("last_seen_utc")
+        elif (
+            incoming_seen is not None
+            and existing_seen is not None
+            and incoming_seen == existing_seen
+            and merged.get("last_seen_utc") is None
+            and existing.get("last_seen_utc") is not None
+        ):
+            merged["last_seen_utc"] = existing.get("last_seen_utc")
+
+        for coord_field in ("latitude", "longitude", "accuracy", "altitude"):
+            if (
+                merged.get(coord_field) is None
+                and existing.get(coord_field) is not None
+            ):
+                merged[coord_field] = existing.get(coord_field)
+
+        return merged
 
     # ---------------------------- Significance / gating ----------------------
     def _haversine_distance(
