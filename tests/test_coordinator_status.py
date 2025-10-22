@@ -49,6 +49,14 @@ class _DummyEntry:
         self.reauth_calls += 1
 
 
+class _LegacyEntry:
+    """ConfigEntry stub lacking the async_start_reauth helper."""
+
+    def __init__(self) -> None:
+        self.entry_id = "legacy-entry"
+        self.data = {CONF_GOOGLE_EMAIL: "legacy@example.com"}
+
+
 class _DummyHass:
     """Minimal Home Assistant stub for coordinator tests."""
 
@@ -202,3 +210,17 @@ def test_reauth_failure_does_not_mask_auth_error(
 
     assert coordinator.api_status.state == ApiStatus.REAUTH
     assert coordinator._reauth_initiated is False
+
+
+def test_reauth_falls_back_to_manager_when_entry_helper_missing(
+    coordinator: GoogleFindMyCoordinator,
+) -> None:
+    """Legacy cores without ConfigEntry helper still trigger manager fallback."""
+
+    coordinator.config_entry = _LegacyEntry()
+
+    loop = coordinator.hass.loop
+    loop.run_until_complete(coordinator._async_start_reauth_flow())
+
+    assert coordinator.hass.config_entries.calls == [coordinator.config_entry]
+    assert coordinator._reauth_initiated is True
