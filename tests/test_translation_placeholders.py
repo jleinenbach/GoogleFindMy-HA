@@ -1,5 +1,5 @@
 # tests/test_translation_placeholders.py
-"""Validate placeholder consistency across translations."""
+"""Translation placeholder consistency tests."""
 
 from __future__ import annotations
 
@@ -52,10 +52,13 @@ def test_translation_placeholders() -> None:
 
     language_placeholders: dict[str, dict[tuple[str, ...], set[str]]] = {}
 
+    language_data: dict[str, Any] = {}
+
     for json_file in sorted(translations_dir.glob("*.json")):
         with json_file.open("r", encoding="utf-8") as file:
             data = json.load(file)
         language_placeholders[json_file.stem] = _extract_placeholders(data)
+        language_data[json_file.stem] = data
 
     assert BASE_LANGUAGE in language_placeholders, (
         f"Base language '{BASE_LANGUAGE}' translation is missing."
@@ -66,6 +69,54 @@ def test_translation_placeholders() -> None:
         all_paths.update(placeholders.keys())
 
     base_placeholders = language_placeholders[BASE_LANGUAGE]
+
+    base_data = language_data[BASE_LANGUAGE]
+
+    def _collect_string_paths(
+        value: Any, path: tuple[str, ...], out: set[tuple[str, ...]]
+    ) -> None:
+        if isinstance(value, str):
+            out.add(path)
+            return
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                _collect_string_paths(child, path + (str(key),), out)
+        elif isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            for index, child in enumerate(value):
+                _collect_string_paths(child, path + (str(index),), out)
+
+    base_string_paths: set[tuple[str, ...]] = set()
+    _collect_string_paths(base_data, tuple(), base_string_paths)
+
+    def _resolve_path(container: Any, path: tuple[str, ...]) -> Any:
+        current = container
+        for element in path:
+            if isinstance(current, Mapping):
+                current = current[element]
+            elif isinstance(current, Sequence) and not isinstance(
+                current, (str, bytes, bytearray)
+            ):
+                current = current[int(element)]
+            else:
+                raise KeyError(path)
+        return current
+
+    for language, data in sorted(language_data.items()):
+        missing_paths: list[str] = []
+        for path in sorted(base_string_paths):
+            try:
+                value = _resolve_path(data, path)
+            except (KeyError, IndexError, ValueError):
+                missing_paths.append("/".join(path))
+                continue
+            assert isinstance(value, str), (
+                f"{language} translation for {'/'.join(path)} should be a string, got {type(value)!r}"
+            )
+        assert not missing_paths, (
+            f"{language} translation is missing strings for: {', '.join(missing_paths)}"
+        )
 
     for path in sorted(all_paths):
         union_placeholders: set[str] = set()

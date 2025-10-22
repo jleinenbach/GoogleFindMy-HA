@@ -210,12 +210,125 @@
         "name": "Polling"
       },
       "nova_auth_status": {
-        "name": "Nova API authentication status"
+        "name": "Nova API authentication status",
+        "state_attributes": {
+          "nova_api_status": {
+            "name": "Nova API status"
+          },
+          "nova_api_status_reason": {
+            "name": "Nova API status reason"
+          },
+          "nova_api_status_changed_at": {
+            "name": "Nova API status changed at"
+          },
+          "nova_fcm_status": {
+            "name": "Nova FCM status"
+          },
+          "nova_fcm_status_reason": {
+            "name": "Nova FCM status reason"
+          },
+          "nova_fcm_status_changed_at": {
+            "name": "Nova FCM status changed at"
+          }
+        }
+      }
+    },
+    "device_tracker": {
+      "device": {
+        "name": "Device",
+        "state_attributes": {
+          "device_name": {
+            "name": "Device name"
+          },
+          "device_id": {
+            "name": "Device ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantic label"
+          },
+          "battery_level": {
+            "name": "Battery level"
+          },
+          "last_seen": {
+            "name": "Last seen (reported)"
+          },
+          "last_seen_utc": {
+            "name": "Last seen (UTC)"
+          },
+          "source_label": {
+            "name": "Source label"
+          },
+          "source_rank": {
+            "name": "Source rank"
+          },
+          "is_own_report": {
+            "name": "Own-device report"
+          },
+          "latitude": {
+            "name": "Latitude"
+          },
+          "longitude": {
+            "name": "Longitude"
+          },
+          "accuracy_m": {
+            "name": "Accuracy (m)"
+          },
+          "altitude_m": {
+            "name": "Altitude (m)"
+          }
+        }
       }
     },
     "sensor": {
       "last_seen": {
-        "name": "Last Seen"
+        "name": "Last Seen",
+        "state_attributes": {
+          "device_name": {
+            "name": "Device name"
+          },
+          "device_id": {
+            "name": "Device ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantic label"
+          },
+          "battery_level": {
+            "name": "Battery level"
+          },
+          "last_seen": {
+            "name": "Last seen (reported)"
+          },
+          "last_seen_utc": {
+            "name": "Last seen (UTC)"
+          },
+          "source_label": {
+            "name": "Source label"
+          },
+          "source_rank": {
+            "name": "Source rank"
+          },
+          "is_own_report": {
+            "name": "Own-device report"
+          },
+          "latitude": {
+            "name": "Latitude"
+          },
+          "longitude": {
+            "name": "Longitude"
+          },
+          "accuracy_m": {
+            "name": "Accuracy (m)"
+          },
+          "altitude_m": {
+            "name": "Altitude (m)"
+          }
+        }
       },
       "stat_background_updates": {
         "name": "Background updates"

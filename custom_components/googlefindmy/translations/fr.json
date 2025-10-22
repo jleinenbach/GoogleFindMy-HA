@@ -44,7 +44,8 @@
         "data": {
           "secrets_json": "Nouveau secrets.json (contenu complet)",
           "oauth_token": "Nouveau jeton OAuth",
-          "google_email": "Adresse e-mail Google"
+          "google_email": "Adresse e-mail Google",
+          "new_oauth_token": "Nouveau jeton OAuth"
         }
       }
     },
@@ -57,7 +58,8 @@
       "cannot_connect": "Échec de la connexion à l’API Google. Il peut s’agir d’un problème temporaire — réessayez plus tard.",
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
       "required": "Ce champ est obligatoire.",
-      "unknown": "Erreur inattendue."
+      "unknown": "Erreur inattendue.",
+      "email_mismatch": "Les identifiants fournis appartiennent à un autre compte Google. Pour ajouter ce compte, créez une nouvelle intégration ; la réauthentification ne peut pas changer le compte de cette entrée."
     },
     "abort": {
       "already_configured": "Google Find My Device est déjà configuré.",
@@ -210,12 +212,125 @@
         "name": "Interrogation"
       },
       "nova_auth_status": {
-        "name": "Statut d’authentification de l’API Nova"
+        "name": "Statut d’authentification de l’API Nova",
+        "state_attributes": {
+          "nova_api_status": {
+            "name": "Statut de l’API Nova"
+          },
+          "nova_api_status_reason": {
+            "name": "Raison du statut de l’API Nova"
+          },
+          "nova_api_status_changed_at": {
+            "name": "Date de modification du statut de l’API Nova"
+          },
+          "nova_fcm_status": {
+            "name": "Statut Nova FCM"
+          },
+          "nova_fcm_status_reason": {
+            "name": "Raison du statut Nova FCM"
+          },
+          "nova_fcm_status_changed_at": {
+            "name": "Date de modification du statut Nova FCM"
+          }
+        }
+      }
+    },
+    "device_tracker": {
+      "device": {
+        "name": "Appareil",
+        "state_attributes": {
+          "device_name": {
+            "name": "Nom de l’appareil"
+          },
+          "device_id": {
+            "name": "ID de l’appareil"
+          },
+          "status": {
+            "name": "Statut"
+          },
+          "semantic_name": {
+            "name": "Libellé sémantique"
+          },
+          "battery_level": {
+            "name": "Niveau de batterie"
+          },
+          "last_seen": {
+            "name": "Vu pour la dernière fois (signalé)"
+          },
+          "last_seen_utc": {
+            "name": "Vu pour la dernière fois (UTC)"
+          },
+          "source_label": {
+            "name": "Libellé de la source"
+          },
+          "source_rank": {
+            "name": "Rang de la source"
+          },
+          "is_own_report": {
+            "name": "Rapport de l’appareil propre"
+          },
+          "latitude": {
+            "name": "Latitude"
+          },
+          "longitude": {
+            "name": "Longitude"
+          },
+          "accuracy_m": {
+            "name": "Précision (m)"
+          },
+          "altitude_m": {
+            "name": "Altitude (m)"
+          }
+        }
       }
     },
     "sensor": {
       "last_seen": {
-        "name": "Vu pour la dernière fois"
+        "name": "Vu pour la dernière fois",
+        "state_attributes": {
+          "device_name": {
+            "name": "Nom de l’appareil"
+          },
+          "device_id": {
+            "name": "ID de l’appareil"
+          },
+          "status": {
+            "name": "Statut"
+          },
+          "semantic_name": {
+            "name": "Libellé sémantique"
+          },
+          "battery_level": {
+            "name": "Niveau de batterie"
+          },
+          "last_seen": {
+            "name": "Vu pour la dernière fois (signalé)"
+          },
+          "last_seen_utc": {
+            "name": "Vu pour la dernière fois (UTC)"
+          },
+          "source_label": {
+            "name": "Libellé de la source"
+          },
+          "source_rank": {
+            "name": "Rang de la source"
+          },
+          "is_own_report": {
+            "name": "Rapport de l’appareil propre"
+          },
+          "latitude": {
+            "name": "Latitude"
+          },
+          "longitude": {
+            "name": "Longitude"
+          },
+          "accuracy_m": {
+            "name": "Précision (m)"
+          },
+          "altitude_m": {
+            "name": "Altitude (m)"
+          }
+        }
       },
       "stat_background_updates": {
         "name": "Mises à jour en arrière-plan"
@@ -273,6 +388,12 @@
     },
     "stop_sound_failed": {
       "message": "Échec de l’arrêt du son sur {device_id} : {error}"
+    },
+    "missing_token_cache": {
+      "message": "Cache de jetons manquant. Fournissez le TokenCache spécifique à l’entrée (par exemple entry.runtime_data.token_cache)."
+    },
+    "missing_namespace": {
+      "message": "Espace de noms manquant. Transmettez l’espace de noms spécifique à l’entrée ou l’ID de ConfigEntry pour isoler les métadonnées mises en cache."
     },
     "no_active_entry": {
       "message": "Aucune entrée Google Find My Device active n'est disponible. Entrées actives : {active_count}/{total_count}. Activez l'une des entrées configurées ({entries}) ou ajoutez un nouveau compte, puis réessayez."
