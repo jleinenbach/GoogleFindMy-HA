@@ -209,10 +209,22 @@ def test_fcm_background_decode_uses_entry_cache(
         captured["hex"] = hex_string
         return "parsed"
 
+    records = [
+        {"last_seen": 100, "semantic_name": "Office"},
+        {"last_seen": 200, "semantic_name": "Garage"},
+        {
+            "last_seen": 200,
+            "latitude": 52.520008,
+            "longitude": 13.404954,
+            "altitude": 31.5,
+            "source": "gps",
+        },
+    ]
+
     def fake_sync_decrypt(device_update, *, cache):  # type: ignore[no-untyped-def]
         captured["device_update"] = device_update
         captured["cache"] = cache
-        return [{"latitude": 1.0}]
+        return records
 
     monkeypatch.setattr(
         "custom_components.googlefindmy.ProtoDecoders.decoder.parse_device_update_protobuf",
@@ -225,7 +237,14 @@ def test_fcm_background_decode_uses_entry_cache(
 
     result = receiver._decode_background_location("entry", "payload")
 
-    assert result == {"latitude": 1.0}
+    assert result == {
+        "last_seen": 200,
+        "latitude": 52.520008,
+        "longitude": 13.404954,
+        "altitude": 31.5,
+        "source": "gps",
+    }
+    assert result is not records[2]
     assert captured["hex"] == "payload"
     assert captured["device_update"] == "parsed"
     assert captured["cache"] is cache

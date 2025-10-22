@@ -59,6 +59,7 @@ import base64
 import binascii
 import json
 import logging
+import math
 import random
 import time
 from typing import TYPE_CHECKING, Any
@@ -1041,7 +1042,36 @@ class FcmReceiverHA:
             locations = (
                 decrypt_location_response_locations(device_update, cache=cache) or []
             )
-            return locations[0] if locations else {}
+            if not locations:
+                return {}
+
+            best_record: dict | None = None
+            best_key: tuple[float, int, int] | None = None
+
+            for record in locations:
+                raw_last_seen = record.get("last_seen")
+                try:
+                    last_seen = float(raw_last_seen)
+                except (TypeError, ValueError):
+                    continue
+                if math.isnan(last_seen):
+                    continue
+
+                has_coordinates = int(
+                    record.get("latitude") is not None
+                    and record.get("longitude") is not None
+                )
+                has_altitude = int(record.get("altitude") is not None)
+
+                key = (last_seen, has_coordinates, has_altitude)
+                if best_key is None or key > best_key:
+                    best_record = record
+                    best_key = key
+
+            if best_record is not None:
+                return dict(best_record)
+
+            return dict(locations[0])
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to decode background location data: %s", err)
             return {}
