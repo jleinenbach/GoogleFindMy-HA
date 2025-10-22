@@ -48,6 +48,9 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Acceptable future drift for timestamps to accommodate timezone offsets and
+# clock skew while still rejecting obviously invalid data.
+_MAX_FUTURE_TIMESTAMP_DRIFT: float = 24 * 60 * 60  # 24 hours
 # Soft limit to avoid pathological payloads; large batches are unusual and heavy.
 _MAX_REPORTS: int = 500
 
@@ -245,8 +248,10 @@ def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:
     # Finite and plausibility check
     if not math.isfinite(v):
         return None
-    # Plausibility: >= 2000-01-01 and <= now + 10 minutes
-    if not (946684800.0 <= v <= (now_s + 600.0)):
+    # Plausibility: >= 2000-01-01 and <= now + realistic drift window
+    if v < 946684800.0:
+        return None
+    if v > (now_s + _MAX_FUTURE_TIMESTAMP_DRIFT):
         return None
     return v
 
