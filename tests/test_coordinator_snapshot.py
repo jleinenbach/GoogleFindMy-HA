@@ -14,6 +14,7 @@ from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
+    _sync_get_last_gps_from_history,
 )
 
 
@@ -21,13 +22,19 @@ class _DummyState:
     """Minimal Home Assistant state stub with GPS attributes."""
 
     def __init__(
-        self, latitude: float, longitude: float, accuracy: float | None
+        self,
+        latitude: float,
+        longitude: float,
+        accuracy: float | None,
+        extra_attrs: dict[str, object] | None = None,
     ) -> None:
         self.attributes = {
             "latitude": latitude,
             "longitude": longitude,
             "gps_accuracy": accuracy,
         }
+        if extra_attrs:
+            self.attributes.update(extra_attrs)
         self.last_updated = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 
@@ -104,6 +111,52 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
     )
 
 
+def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A persisted last_seen attribute should win over last_updated."""
+
+    entity_registry = _DummyEntityRegistry()
+    entity_registry.add(
+        "device_tracker",
+        DOMAIN,
+        "entry-1:device-42",
+        "device_tracker.googlefindmy_device_42",
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.coordinator.er.async_get",
+        lambda hass: entity_registry,
+    )
+
+    hass = SimpleNamespace(states=_DummyStates())
+    iso_seen = "2024-02-03T12:34:56Z"
+    hass.states.set(
+        "device_tracker.googlefindmy_device_42",
+        _DummyState(
+            latitude=37.4219999,
+            longitude=-122.0840575,
+            accuracy=5.0,
+            extra_attrs={"last_seen": iso_seen},
+        ),
+    )
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass
+    coordinator.allow_history_fallback = False
+    coordinator._device_location_data = {}
+    coordinator.location_poll_interval = 30
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
+
+    result = asyncio.run(
+        coordinator._async_build_device_snapshot_with_fallbacks(
+            devices=[{"id": "device-42", "name": "Pixel 8"}]
+        )
+    )
+
+    entry = result[0]
+    expected_ts = datetime.fromisoformat(iso_seen.replace("Z", "+00:00")).timestamp()
+    assert entry["last_seen"] == pytest.approx(expected_ts)
+    assert entry["last_seen_utc"] == iso_seen
+
+
 def test_snapshot_logs_formats_when_entity_missing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -156,3 +209,37 @@ def test_as_ha_attributes_emits_iso_timestamps() -> None:
     assert attrs["last_seen"] == "2023-11-14T22:13:20Z"
     assert attrs["last_seen_utc"] == "2023-11-14T22:13:20Z"
     assert "last_seen" in attrs and isinstance(attrs["last_seen"], str)
+
+
+def test_history_helper_preserves_last_seen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recorder fallback should forward stored last_seen timestamps."""
+
+    iso_seen = "2024-02-05T08:00:00Z"
+    history_state = SimpleNamespace(
+        attributes={
+            "latitude": 48.137154,
+            "longitude": 11.576124,
+            "gps_accuracy": 25.0,
+            "last_seen": iso_seen,
+        },
+        last_updated=datetime(2024, 2, 6, tzinfo=timezone.utc),
+    )
+
+    def _fake_get_last_state_changes(hass, limit, entity_ids):
+        return {entity_ids[0]: [history_state]}
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.coordinator.recorder_history.get_last_state_changes",
+        _fake_get_last_state_changes,
+        raising=False,
+    )
+
+    hass = SimpleNamespace()
+    result = _sync_get_last_gps_from_history(
+        hass, "device_tracker.googlefindmy_device_42"
+    )
+
+    assert result is not None
+    expected_ts = datetime.fromisoformat(iso_seen.replace("Z", "+00:00")).timestamp()
+    assert result["last_seen"] == pytest.approx(expected_ts)
+    assert result["status"] == "Using historical data"

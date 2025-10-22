@@ -63,7 +63,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -281,6 +281,38 @@ def _row_source_label(row: dict[str, Any]) -> tuple[int, str]:
     return 0, "semantic/unknown"
 
 
+def _parse_last_seen_timestamp(value: Any) -> float | None:
+    """Parse a last_seen candidate into epoch seconds."""
+
+    ts = _normalize_epoch_seconds(value)
+    if ts is not None:
+        return ts
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _resolve_last_seen_from_attributes(
+    attributes: Mapping[str, Any] | None, fallback: float | None
+) -> float | None:
+    """Prefer attribute-derived timestamps and fall back to provided default."""
+
+    if not attributes:
+        return fallback
+
+    candidate: Any = attributes.get("last_seen")
+    if candidate is None:
+        candidate = attributes.get("last_seen_utc")
+
+    ts = _parse_last_seen_timestamp(candidate)
+    if ts is not None:
+        return ts
+    return fallback
+
+
 def _sanitize_decoder_row(row: dict[str, Any]) -> dict[str, Any]:
     """Enforce protocol invariants and prepare HA attributes.
 
@@ -384,11 +416,14 @@ def _sync_get_last_gps_from_history(
         if lat is None or lon is None:
             return None
 
+        last_seen_ts = _resolve_last_seen_from_attributes(
+            attrs, last_state.last_updated.timestamp()
+        )
         return {
             "latitude": lat,
             "longitude": lon,
             "accuracy": attrs.get("gps_accuracy"),
-            "last_seen": int(last_state.last_updated.timestamp()),
+            "last_seen": last_seen_ts,
             "status": "Using historical data",
         }
     except Exception as err:
@@ -2238,13 +2273,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 lat = state.attributes.get("latitude")
                 lon = state.attributes.get("longitude")
                 acc = state.attributes.get("gps_accuracy")
+                last_seen_ts = _resolve_last_seen_from_attributes(
+                    state.attributes, state.last_updated.timestamp()
+                )
                 if lat is not None and lon is not None:
                     entry.update(
                         {
                             "latitude": lat,
                             "longitude": lon,
                             "accuracy": acc,
-                            "last_seen": int(state.last_updated.timestamp()),
+                            "last_seen": last_seen_ts,
                             "status": "Using current state",
                         }
                     )
