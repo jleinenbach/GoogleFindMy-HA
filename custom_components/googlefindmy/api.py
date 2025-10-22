@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from typing import (
     Any,
     Protocol,
@@ -50,6 +49,7 @@ from .NovaApi.ExecuteAction.PlaySound.stop_sound_request import (
 from .NovaApi.ListDevices.nbe_list_devices import async_request_device_list
 from .NovaApi.nova_request import NovaAuthError, NovaHTTPError, NovaRateLimitError
 from .ProtoDecoders.decoder import (
+    _select_best_location as _decoder_select_best_location,
     get_canonic_ids,
     get_devices_with_location,
     parse_device_list_protobuf,
@@ -459,38 +459,7 @@ class GoogleFindMyAPI:
         if not records:
             return {}
 
-        best_record: dict[str, Any] | None = None
-        best_key: tuple[float, int, float] | None = None
-
-        for record in records:
-            raw_last_seen = record.get("last_seen")
-            try:
-                last_seen = float(raw_last_seen)
-            except (TypeError, ValueError):
-                continue
-            if math.isnan(last_seen):
-                continue
-
-            own_report = 1 if record.get("is_own_report") is True else 0
-
-            raw_accuracy = record.get("accuracy")
-            try:
-                accuracy = float(raw_accuracy)
-            except (TypeError, ValueError):
-                accuracy = None
-            else:
-                if math.isnan(accuracy):
-                    accuracy = None
-
-            # Smaller accuracy denotes a more precise fix; convert to a score where
-            # larger is better while keeping ``None`` as the lowest priority.
-            accuracy_score = -accuracy if accuracy is not None else float("-inf")
-
-            key = (last_seen, own_report, accuracy_score)
-            if best_key is None or key > best_key:
-                best_record = record
-                best_key = key
-
+        best_record, _ = _decoder_select_best_location(records)
         if best_record is not None:
             return best_record
         return records[0]
