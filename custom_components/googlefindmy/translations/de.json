@@ -210,7 +210,7 @@
         "name": "Abfrage aktiv"
       },
       "nova_auth_status": {
-        "name": "Nova API authentication status"
+        "name": "Status der Nova-API-Authentifizierung"
       }
     },
     "sensor": {
