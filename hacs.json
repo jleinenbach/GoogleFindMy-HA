@@ -4,5 +4,5 @@
   "render_readme": true,
   "iot_class": "cloud_polling",
   "domains": ["device_tracker"],
-  "homeassistant": "2024.1.0"
+  "homeassistant": "2025.1.0"
 }
