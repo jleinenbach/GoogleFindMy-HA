@@ -115,6 +115,32 @@ def test_get_best_location_prefers_newer_last_seen() -> None:
     assert best is newer
 
 
+def test_get_best_location_handles_equal_rankings() -> None:
+    """Duplicate rankings should not trigger tuple comparison errors."""
+
+    hass = SimpleNamespace()
+    recorder = LocationRecorder(hass)  # type: ignore[arg-type]
+    now = 1_700_000_000.0
+
+    first = {
+        "timestamp": now - 60,
+        "accuracy": 25,
+        "semantic_name": None,
+    }
+    second = {
+        "timestamp": now - 60,
+        "accuracy": 25,
+        "semantic_name": None,
+    }
+
+    with patch(
+        "custom_components.googlefindmy.location_recorder.time.time", return_value=now
+    ):
+        best = recorder.get_best_location([first, second])
+
+    assert best is first
+
+
 class FakeState:
     """Minimal stand-in for Home Assistant State objects used by recorder."""
 

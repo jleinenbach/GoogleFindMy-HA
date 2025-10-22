@@ -130,18 +130,18 @@ class LocationRecorder:
             return accuracy + age_penalty + own_report_bonus
 
         try:
-            ranked: list[tuple[float, float, dict[str, Any], float | None]] = []
-            for loc in locations:
+            ranked: list[tuple[float, float, int, dict[str, Any], float | None]] = []
+            for idx, loc in enumerate(locations):
                 ts = _normalized_ts(loc)
                 score = calculate_score(loc, ts)
                 ts_rank = ts if ts is not None else float("-inf")
-                ranked.append((ts_rank, -score, loc, ts))
+                ranked.append((ts_rank, -score, -idx, loc, ts))
 
             if not ranked:
                 return {}
 
             ranked.sort(reverse=True)
-            _, _, best, best_ts = ranked[0]
+            _, _, _, best, best_ts = ranked[0]
 
             age_minutes = (
                 (current_time - best_ts) / 60 if best_ts is not None else float("inf")
