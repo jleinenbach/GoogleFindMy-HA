@@ -93,54 +93,64 @@ class LocationRecorder:
 
         current_time = time.time()
 
-        def calculate_score(loc):
+        def _normalized_ts(loc: dict[str, Any]) -> float | None:
+            ts = _normalize_epoch(loc.get("last_seen"))
+            if ts is None:
+                ts = _normalize_epoch(loc.get("timestamp"))
+            return ts
+
+        def calculate_score(loc: dict[str, Any], ts: float | None) -> float:
             """Calculate location score (lower is better)."""
             try:
                 accuracy = loc.get("accuracy", float("inf"))
                 semantic = loc.get("semantic_name")
                 if accuracy is None:
-                    if semantic:
-                        accuracy = float(0)
-                    else:
-                        accuracy = float("inf")
+                    accuracy = float(0) if semantic else float("inf")
                 else:
                     accuracy = float(accuracy)
-
-                ts = _normalize_epoch(loc.get("last_seen"))
-                if ts is None:
-                    ts = _normalize_epoch(loc.get("timestamp"))
-                if ts is None:
-                    return float("inf")
-
-                age_seconds = max(0.0, current_time - ts)
-
-                # Age penalty: 1m per 3 minutes
-                age_penalty = age_seconds / (3 * 60)
-
-                # Heavy penalty for old locations (> 2 hours)
-                if age_seconds > 2 * 60 * 60:
-                    age_penalty += 100
-
-                # Bonus for own reports
-                own_report_bonus = -2 if loc.get("is_own_report") else 0
-
-                return accuracy + age_penalty + own_report_bonus
-
             except (TypeError, ValueError):
+                accuracy = float("inf")
+
+            if ts is None:
+                # Without a usable timestamp the record cannot be fresher.
                 return float("inf")
 
-        try:
-            # Sort by score (best first)
-            sorted_locations = sorted(locations, key=calculate_score)
-            best = sorted_locations[0]
+            age_seconds = max(0.0, current_time - ts)
 
-            ts = _normalize_epoch(best.get("last_seen"))
-            if ts is None:
-                ts = _normalize_epoch(best.get("timestamp"))
-            age_minutes = ((current_time - ts) / 60) if ts is not None else float("inf")
+            # Age penalty: 1m per 3 minutes
+            age_penalty = age_seconds / (3 * 60)
+
+            # Heavy penalty for old locations (> 2 hours)
+            if age_seconds > 2 * 60 * 60:
+                age_penalty += 100
+
+            # Bonus for own reports
+            own_report_bonus = -2 if loc.get("is_own_report") else 0
+
+            return accuracy + age_penalty + own_report_bonus
+
+        try:
+            ranked: list[tuple[float, float, dict[str, Any], float | None]] = []
+            for loc in locations:
+                ts = _normalized_ts(loc)
+                score = calculate_score(loc, ts)
+                ts_rank = ts if ts is not None else float("-inf")
+                ranked.append((ts_rank, -score, loc, ts))
+
+            if not ranked:
+                return {}
+
+            ranked.sort(reverse=True)
+            _, _, best, best_ts = ranked[0]
+
+            age_minutes = (
+                (current_time - best_ts) / 60 if best_ts is not None else float("inf")
+            )
             _LOGGER.debug(
-                f"Selected best location: accuracy={best.get('accuracy')}m, "
-                f"age={age_minutes:.1f}min from {len(locations)} options"
+                "Selected best location: accuracy=%sm, age=%0.1fmin from %d options",
+                best.get("accuracy"),
+                age_minutes,
+                len(locations),
             )
 
             return best

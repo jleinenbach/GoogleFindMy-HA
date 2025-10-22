@@ -103,7 +103,7 @@ def test_get_best_location_prefers_newer_last_seen() -> None:
         # timestamp appears older but last_seen indicates fresher data
         "timestamp": now - 4000,
         "last_seen": now - 1200,
-        "accuracy": 5,
+        "accuracy": 50,
         "semantic_name": None,
     }
 
