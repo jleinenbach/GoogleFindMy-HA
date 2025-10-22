@@ -2,6 +2,7 @@
   "domain": "googlefindmy",
   "name": "Google Find My Device",
   "after_dependencies": ["recorder"],
+  "homeassistant": "2025.1.0",
   "codeowners": ["@BSkando"],
   "config_flow": true,
   "dependencies": ["http"],

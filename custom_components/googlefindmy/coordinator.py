@@ -575,7 +575,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._fcm_status_state: str = FcmStatus.UNKNOWN
         self._fcm_status_reason: str | None = None
         self._fcm_status_changed_at: float | None = None
-        self._reauth_initiated: bool = False
 
         # Performance metrics (timestamps, durations) & recent errors (bounded)
         self.performance_metrics: dict[str, float] = {}
@@ -1104,10 +1103,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             except Exception:
                 pass
 
-        if not failed:
-            # Allow future reauth flows once auth recovers.
-            self._reauth_initiated = False
-
     @property
     def auth_error_active(self) -> bool:
         """Expose the current "auth failed" condition for diagnostic entities (binary_sensor)."""
@@ -1144,62 +1139,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         except Exception:
             pass
 
-    async def _async_start_reauth_flow(self) -> None:
-        """Trigger Home Assistant's re-auth flow once per failure episode."""
-
-        if self._reauth_initiated:
-            return
-
-        entry = getattr(self, "config_entry", None)
-        if entry is None:
-            return
-
-        self._reauth_initiated = True
-
-        entry_helper = getattr(entry, "async_start_reauth", None)
-        if entry_helper is not None:
-            try:
-                result = entry_helper(self.hass)
-            except Exception:
-                self._reauth_initiated = False
-                raise
-
-            if asyncio.iscoroutine(result):
-                try:
-                    await result
-                except Exception:
-                    self._reauth_initiated = False
-                    raise
-            return
-
-        hass_config_entries = getattr(self.hass, "config_entries", None)
-        if hass_config_entries is None:
-            _LOGGER.debug(
-                "Home Assistant config_entries manager unavailable; cannot start reauth"
-            )
-            self._reauth_initiated = False
-            return
-
-        try:
-            result = hass_config_entries.async_start_reauth(entry)
-        except TypeError:
-            try:
-                result = hass_config_entries.async_start_reauth(entry.entry_id)
-            except Exception as err:
-                _LOGGER.debug("async_start_reauth(entry_id) failed: %s", err)
-                self._reauth_initiated = False
-                return
-        except Exception as err:
-            _LOGGER.debug("async_start_reauth fallback failed: %s", err)
-            self._reauth_initiated = False
-            return
-
-        if asyncio.iscoroutine(result):
-            try:
-                await result
-            except Exception as err:
-                _LOGGER.debug("async_start_reauth coroutine failed: %s", err)
-                self._reauth_initiated = False
+    # Former `_async_start_reauth_flow` helper removed: rely on HA's automatic
+    # reauth trigger when `ConfigEntryAuthFailed` bubbles up.
 
     @property
     def api_status(self) -> StatusSnapshot:
@@ -1877,14 +1818,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 failed=True,
                 reason=f"Auth failed while fetching device list: {reason}",
             )
-            try:
-                await self._async_start_reauth_flow()
-            except Exception as reauth_err:  # pragma: no cover - defensive guard
-                self._reauth_initiated = False
-                _LOGGER.exception(
-                    "Failed to initiate re-auth flow after auth failure: %s",
-                    self._short_error_message(reauth_err),
-                )
             raise auth_exc
         except UpdateFailed as update_err:
             # Let pre-wrapped UpdateFailed bubble as-is after updating status
