@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import (
     Any,
     Protocol,
@@ -441,9 +442,13 @@ class GoogleFindMyAPI:
         return extended
 
     def _select_best_location(self, records: list[dict[str, Any]]) -> dict[str, Any]:
-        """Pick the most relevant location record (latest last_seen if present).
+        """Pick the most relevant location record with sensible tie-breaking.
 
-        Prefer the entry with the highest 'last_seen' when available; otherwise, the first.
+        Primary ordering is driven by ``last_seen``. When multiple records share the
+        most recent timestamp, prefer ones reported by the device owner
+        (``is_own_report``). If ownership is also tied, fall back to the most precise
+        location (lowest accuracy value). Ultimately, list order wins when all
+        ranking metrics are identical.
 
         Args:
             records: A list of location data dictionaries for a device.
@@ -453,12 +458,41 @@ class GoogleFindMyAPI:
         """
         if not records:
             return {}
-        try:
-            with_ts = [r for r in records if r.get("last_seen") is not None]
-            if with_ts:
-                return max(with_ts, key=lambda r: float(r["last_seen"]))
-        except Exception:
-            pass
+
+        best_record: dict[str, Any] | None = None
+        best_key: tuple[float, int, float] | None = None
+
+        for record in records:
+            raw_last_seen = record.get("last_seen")
+            try:
+                last_seen = float(raw_last_seen)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(last_seen):
+                continue
+
+            own_report = 1 if record.get("is_own_report") is True else 0
+
+            raw_accuracy = record.get("accuracy")
+            try:
+                accuracy = float(raw_accuracy)
+            except (TypeError, ValueError):
+                accuracy = None
+            else:
+                if math.isnan(accuracy):
+                    accuracy = None
+
+            # Smaller accuracy denotes a more precise fix; convert to a score where
+            # larger is better while keeping ``None`` as the lowest priority.
+            accuracy_score = -accuracy if accuracy is not None else float("-inf")
+
+            key = (last_seen, own_report, accuracy_score)
+            if best_key is None or key > best_key:
+                best_record = record
+                best_key = key
+
+        if best_record is not None:
+            return best_record
         return records[0]
 
     # ------------------------ FCM helper (via provider) --------------------------
