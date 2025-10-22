@@ -324,7 +324,7 @@ EVENT_AUTH_ERROR: str = f"{DOMAIN}.authentication_error"
 EVENT_AUTH_OK: str = f"{DOMAIN}.authentication_ok"
 
 # Translation key for the dedicated auth-status binary_sensor entity.
-TRANSLATION_KEY_AUTH_STATUS: str = "auth_status"
+TRANSLATION_KEY_AUTH_STATUS: str = "nova_auth_status"
 
 # Issue key used for Repairs (translations use the same key).
 ISSUE_AUTH_EXPIRED_KEY: str = "auth_expired"

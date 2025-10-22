@@ -114,3 +114,42 @@ def test_auth_status_sensor_icon(event_state: bool, expected_icon: str) -> None:
     sensor._event_state = event_state
 
     assert sensor.icon == expected_icon
+
+
+def test_auth_status_sensor_attributes_include_nova_snapshots() -> None:
+    """Auth status sensor exposes Nova API and FCM diagnostic fields."""
+
+    coordinator = SimpleNamespace(
+        api_status=SimpleNamespace(
+            state="reauth_required",
+            reason="Token expired",
+            changed_at=1700000000.0,
+        ),
+        fcm_status=SimpleNamespace(
+            state="connected",
+            reason=None,
+            changed_at=1700000100.5,
+        ),
+    )
+    entry = SimpleNamespace(entry_id="entry-id")
+    sensor = GoogleFindMyAuthStatusSensor(coordinator, entry)
+
+    attrs = sensor.extra_state_attributes
+
+    assert attrs is not None
+    assert attrs["nova_api_status"] == "reauth_required"
+    assert attrs["nova_api_status_reason"] == "Token expired"
+    assert attrs["nova_api_status_changed_at"] == pytest.approx(1700000000.0)
+    assert attrs["nova_fcm_status"] == "connected"
+    assert "nova_fcm_status_reason" not in attrs
+    assert attrs["nova_fcm_status_changed_at"] == pytest.approx(1700000100.5)
+
+
+def test_auth_status_sensor_attributes_return_none_when_unavailable() -> None:
+    """Missing status snapshots result in no extra attributes."""
+
+    coordinator = SimpleNamespace(api_status=None, fcm_status=None)
+    entry = SimpleNamespace(entry_id="entry-id")
+    sensor = GoogleFindMyAuthStatusSensor(coordinator, entry)
+
+    assert sensor.extra_state_attributes is None
