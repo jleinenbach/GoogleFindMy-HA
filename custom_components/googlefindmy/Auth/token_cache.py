@@ -363,9 +363,14 @@ def _set_default_entry_id(entry_id: str) -> None:
 
 
 def _get_default_cache() -> TokenCache:
-    """Return the default cache instance or raise if ambiguous."""
+    """Return the default cache instance or raise if ambiguous/missing."""
     if _DEFAULT_ENTRY_ID and (cache := _INSTANCES.get(_DEFAULT_ENTRY_ID)):
         return cache
+    if not _INSTANCES:
+        raise RuntimeError(
+            "No TokenCache registered. Provide the entry-scoped TokenCache (for example, "
+            "entry.runtime_data.token_cache)."
+        )
     if len(_INSTANCES) == 1:
         return next(iter(_INSTANCES.values()))
     raise RuntimeError(

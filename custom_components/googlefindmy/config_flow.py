@@ -386,6 +386,16 @@ async def async_pick_working_token(
             )
             return token
         except Exception as err:  # noqa: BLE001
+            if _is_multi_entry_guard_error(err):
+                _LOGGER.debug(
+                    (
+                        "Token probe guarded but accepted (source=%s, email=%s). "
+                        "Deferring to entry-scoped caches for multi-account setup."
+                    ),
+                    source,
+                    _mask_email_for_logs(email),
+                )
+                return token
             key = _map_api_exc_to_error_key(err)
             _LOGGER.debug(
                 "Token probe failed (source=%s, mapped=%s, email=%s).",

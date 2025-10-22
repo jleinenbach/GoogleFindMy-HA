@@ -901,7 +901,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json"
     )
     cache = await TokenCache.create(hass, entry.entry_id, legacy_path=legacy_path)
-    _register_instance(entry.entry_id, cache)
 
     # Ensure deferred writes are flushed on HA shutdown
     async def _flush_on_stop(event) -> None:
@@ -1174,6 +1173,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             perf["setup_end_monotonic"] = time.monotonic()
     except Exception as err:
         _LOGGER.debug("Failed to set setup_end_monotonic: %s", err)
+
+    _register_instance(entry.entry_id, cache)
 
     return True
 

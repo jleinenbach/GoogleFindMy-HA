@@ -1,4 +1,5 @@
 # tests/test_token_cache_namespace.py
+
 """Regression tests for TokenCache entry_id propagation and namespacing."""
 
 from __future__ import annotations
@@ -8,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from custom_components.googlefindmy.Auth import token_cache
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy import api as googlefindmy_api
 
@@ -63,3 +65,37 @@ def test_token_cache_create_exposes_entry_id_for_namespace(
         await cache.close()
 
     asyncio.run(_run())
+
+
+def test_get_default_cache_errors_distinguish_empty_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No registered caches should surface a targeted guidance message."""
+
+    monkeypatch.setattr(token_cache, "_INSTANCES", {}, raising=False)
+    monkeypatch.setattr(token_cache, "_DEFAULT_ENTRY_ID", None, raising=False)
+
+    with pytest.raises(RuntimeError) as err:
+        token_cache._get_default_cache()
+
+    assert "No TokenCache registered" in str(err.value)
+    assert "entry.runtime_data.token_cache" in str(err.value)
+
+
+def test_get_default_cache_errors_distinguish_multi_entry_ambiguity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multiple registered caches must instruct callers to scope by entry."""
+
+    monkeypatch.setattr(
+        token_cache,
+        "_INSTANCES",
+        {"one": object(), "two": object()},
+        raising=False,
+    )
+    monkeypatch.setattr(token_cache, "_DEFAULT_ENTRY_ID", None, raising=False)
+
+    with pytest.raises(RuntimeError) as err:
+        token_cache._get_default_cache()
+
+    assert "Multiple config entries active" in str(err.value)

@@ -505,6 +505,84 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
         asyncio.set_event_loop(None)
 
 
+def test_setup_entry_failure_does_not_register_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup failures must not leave a TokenCache registered in the facade."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy.__init__")
+
+        entry = _StubConfigEntry()
+        hass = _StubHass(entry, loop)
+
+        monkeypatch.setattr(
+            integration.ir, "async_delete_issue", lambda *args, **kwargs: None
+        )
+        monkeypatch.setattr(
+            integration.ir, "async_create_issue", lambda *args, **kwargs: None
+        )
+        monkeypatch.setattr(
+            integration,
+            "_async_migrate_unique_ids",
+            AsyncMock(return_value=None),
+        )
+
+        dummy_cache = _StubCache()
+
+        async def _fake_create(cls, hass_obj, entry_id, legacy_path=None) -> _StubCache:  # type: ignore[override]
+            assert hass_obj is hass
+            assert entry_id == entry.entry_id
+            return dummy_cache
+
+        monkeypatch.setattr(
+            integration.TokenCache,
+            "create",
+            classmethod(_fake_create),
+        )
+
+        register_calls: list[tuple[str, Any]] = []
+        monkeypatch.setattr(
+            integration,
+            "_register_instance",
+            lambda entry_id, cache: register_calls.append((entry_id, cache)),
+        )
+
+        dummy_fcm = SimpleNamespace(
+            register_coordinator=lambda *_: None,
+            unregister_coordinator=lambda *_: None,
+            _start_listening=AsyncMock(return_value=None),
+            request_stop=lambda: None,
+        )
+        monkeypatch.setattr(
+            integration,
+            "_async_acquire_shared_fcm",
+            AsyncMock(return_value=dummy_fcm),
+        )
+
+        def _boom(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("boom during coordinator init")
+
+        monkeypatch.setattr(integration, "GoogleFindMyCoordinator", _boom)
+
+        with pytest.raises(RuntimeError):
+            loop.run_until_complete(integration.async_setup_entry(hass, entry))
+
+        assert register_calls == []
+    finally:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+            with suppress(Exception):
+                loop.run_until_complete(task)
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
 def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> None:
     """A duplicate-account repair issue renders with translated placeholders."""
 
