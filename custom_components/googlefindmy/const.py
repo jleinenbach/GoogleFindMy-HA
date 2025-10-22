@@ -105,6 +105,9 @@ DEFAULT_MIN_ACCURACY_THRESHOLD: int = 100  # meters; drop worse fixes (0 => disa
 DEFAULT_MOVEMENT_THRESHOLD: int = 50  # meters; used for future movement gating
 DEFAULT_ALLOW_HISTORY_FALLBACK: bool = False
 
+# Location timestamp acceptance window
+MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S: float = 24 * 60 * 60  # 24 hours
+
 # Stats entities
 DEFAULT_ENABLE_STATS_ENTITIES: bool = True
 
