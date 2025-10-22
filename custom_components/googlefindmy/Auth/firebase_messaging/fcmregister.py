@@ -349,24 +349,29 @@ class FcmRegister:
             "sender": sender_candidates[0],
         }
 
-        if self._log_debug_verbose:
-            _logger.debug(
-                "GCM Registration request (url=%s): app=%s, X-subtype=%s, device=%s, sender=%s",
-                GCM_REGISTER_URL,
-                body["app"],
-                self._redact(body["X-subtype"]),
-                self._redact(body["device"]),
-                body["sender"],
-            )
-
         last_error: str | Exception | None = None
         sender_index = 0
         attempt = 1
-        use_legacy_next = False
+        endpoints = (GCM_REGISTER3_URL, GCM_REGISTER_URL)
+        endpoint_index = 0
 
         while attempt <= retries:
-            url = GCM_REGISTER3_URL if use_legacy_next else GCM_REGISTER_URL
-            use_legacy_next = False
+            url = endpoints[endpoint_index]
+            indicator = (
+                "/c2dm/register3" if url == GCM_REGISTER3_URL else "/c2dm/register"
+            )
+
+            if self._log_debug_verbose:
+                _logger.debug(
+                    "GCM Registration request attempt %d/%d via %s: app=%s, X-subtype=%s, device=%s, sender=%s",
+                    attempt,
+                    retries,
+                    indicator,
+                    body["app"],
+                    self._redact(body["X-subtype"]),
+                    self._redact(body["device"]),
+                    body["sender"],
+                )
 
             try:
                 async with self._session.post(
@@ -381,13 +386,14 @@ class FcmRegister:
             except Exception as exc:  # network or aiohttp failure
                 last_error = exc
                 _logger.warning(
-                    "GCM register request failed at %s (attempt %d/%d): %s",
-                    url,
+                    "GCM register request failed via %s (attempt %d/%d): %s",
+                    indicator,
                     attempt,
                     retries,
                     exc,
                 )
                 if attempt < retries:
+                    endpoint_index = (endpoint_index + 1) % len(endpoints)
                     await asyncio.sleep(1)
                 attempt += 1
                 continue
@@ -396,21 +402,30 @@ class FcmRegister:
                 response_text
             )
 
-            if (
-                url == GCM_REGISTER_URL
-                and (status == 404 or html_like)
-                and attempt < retries
-            ):
+            if status == 404 or html_like:
                 snippet = response_text[:200]
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
-                _logger.warning(
-                    "GCM register: 404/HTML received at %s (status=%s); toggling endpoint to %s for next attempt.",
-                    url,
-                    status,
-                    GCM_REGISTER3_URL,
-                )
-                use_legacy_next = True
-                await asyncio.sleep(0.5)
+                if attempt < retries:
+                    next_index = (endpoint_index + 1) % len(endpoints)
+                    next_indicator = (
+                        "/c2dm/register3"
+                        if endpoints[next_index] == GCM_REGISTER3_URL
+                        else "/c2dm/register"
+                    )
+                    _logger.warning(
+                        "GCM register 404/HTML via %s (status=%s); rotating to %s for next attempt.",
+                        indicator,
+                        status,
+                        next_indicator,
+                    )
+                    endpoint_index = next_index
+                    await asyncio.sleep(0.5)
+                else:
+                    _logger.warning(
+                        "GCM register 404/HTML via %s (status=%s); no retries left.",
+                        indicator,
+                        status,
+                    )
                 attempt += 1
                 continue
 
@@ -426,10 +441,12 @@ class FcmRegister:
                     error_code = value.strip().upper()
 
             if token:
-                indicator = (
-                    "/c2dm/register3" if url == GCM_REGISTER3_URL else "/c2dm/register"
+                _logger.info(
+                    "GCM register succeeded via %s on attempt %d/%d",
+                    indicator,
+                    attempt,
+                    retries,
                 )
-                _logger.info("GCM register succeeded via %s", indicator)
                 return {
                     "token": token,
                     "app_id": gcm_app_id,
@@ -460,8 +477,8 @@ class FcmRegister:
                     continue
 
                 _logger.warning(
-                    "GCM register error at %s (attempt %d/%d): %s",
-                    url,
+                    "GCM register error via %s (attempt %d/%d): %s",
+                    indicator,
                     attempt,
                     retries,
                     last_error,
@@ -472,14 +489,15 @@ class FcmRegister:
                     snippet += " [html]"
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
                 _logger.warning(
-                    "GCM register unexpected response at %s (attempt %d/%d): %s",
-                    url,
+                    "GCM register unexpected response via %s (attempt %d/%d): %s",
+                    indicator,
                     attempt,
                     retries,
                     last_error,
                 )
 
             if attempt < retries:
+                endpoint_index = (endpoint_index + 1) % len(endpoints)
                 await asyncio.sleep(1)
             attempt += 1
 

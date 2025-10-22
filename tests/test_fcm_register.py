@@ -82,13 +82,14 @@ def test_gcm_register_uses_numeric_sender_by_default(
     result = asyncio.run(register.gcm_register({"androidId": 1, "securityToken": 2}))
 
     assert result["token"] == "abc123"
+    assert session.calls[0]["url"] == GCM_REGISTER3_URL
     assert session.calls[0]["data"]["sender"] == "1234567890123"
 
 
-def test_gcm_register_html_retry_uses_legacy_once(
+def test_gcm_register_html_retry_rotates_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """HTML/404 response triggers a single legacy retry before returning to the primary URL."""
+    """HTML/404 responses rotate between /register3 and /register endpoints."""
 
     responses = [
         _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
@@ -117,11 +118,44 @@ def test_gcm_register_html_retry_uses_legacy_once(
     assert result["token"] == "abc123"
     assert result["android_id"] == 42
     assert [call["url"] for call in session.calls] == [
+        GCM_REGISTER3_URL,
         GCM_REGISTER_URL,
+        GCM_REGISTER3_URL,
+    ]
+    assert all(call["data"]["sender"] == "1234567890123" for call in session.calls)
+
+
+def test_gcm_register_fallback_succeeds_on_register(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing /register3 attempt falls back to /register which succeeds."""
+
+    responses = [
+        _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
+        _FakeResponse(200, "token=abc123", {"Content-Type": "text/plain"}),
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    result = asyncio.run(register.gcm_register({"androidId": 11, "securityToken": 22}))
+
+    assert result["token"] == "abc123"
+    assert [call["url"] for call in session.calls] == [
         GCM_REGISTER3_URL,
         GCM_REGISTER_URL,
     ]
-    assert all(call["data"]["sender"] == "1234567890123" for call in session.calls)
 
 
 def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> None:
