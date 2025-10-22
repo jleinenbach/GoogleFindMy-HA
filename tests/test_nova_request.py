@@ -1,14 +1,17 @@
 # tests/test_nova_request.py
-"""Tests for Nova API async request helpers."""
+"""Tests for Nova API async request helpers and TTL policy."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from typing import Any
 from collections.abc import Awaitable, Callable
 
 import pytest
 
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.NovaApi.nova_request import (
     AsyncTTLPolicy,
     NovaAuthError,
@@ -49,6 +52,15 @@ class _DummySession:
             raise AssertionError("No responses left for nova_request test")
         self.calls.append({"args": _args, "kwargs": _kwargs})
         return self._responses.pop(0)
+
+
+class _FakeHass:
+    """Minimal Home Assistant stub for TokenCache interactions."""
+
+    async def async_add_executor_job(
+        self, func: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        return func(*args, **kwargs)
 
 
 class _StubCache:
@@ -200,6 +212,87 @@ def test_async_nova_request_refreshes_token_after_initial_401(
     assert len(session.calls) == 2
     second_headers = session.calls[1]["kwargs"].get("headers", {})
     assert second_headers.get("Authorization") == "Bearer adm-new"
+
+
+def test_async_ttl_policy_clears_bare_cache_on_refresh() -> None:
+    """401 refresh clears namespaced and bare keys so a new token is minted."""
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-refresh")
+        try:
+            logger = logging.getLogger("test_async_ttl_policy_refresh")
+            username = "user@example.com"
+            namespace = "entry-refresh"
+            bare_token_key = f"adm_token_{username}"
+            namespaced_token_key = f"{namespace}:{bare_token_key}"
+            issued_bare_key = f"adm_token_issued_at_{username}"
+            issued_ns_key = f"{namespace}:{issued_bare_key}"
+            probe_bare_key = f"adm_probe_startup_left_{username}"
+
+            await cache.set(bare_token_key, "stale-cache-token")
+            await cache.set(namespaced_token_key, "stale-ns-token")
+            await cache.set(issued_bare_key, 1.0)
+            await cache.set(issued_ns_key, 2.0)
+            await cache.set(probe_bare_key, 1)
+
+            minted_tokens = ["fresh-token"]
+            header: dict[str, str] = {}
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                cached = await cache.get(bare_token_key)
+                if isinstance(cached, str) and cached:
+                    return cached
+                if not minted_tokens:
+                    raise AssertionError("Expected to mint a fresh ADM token")
+                token = minted_tokens.pop(0)
+                await cache.set(bare_token_key, token)
+                await cache.set(namespaced_token_key, token)
+                return token
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logger,
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda bearer: header.__setitem__("value", bearer),
+                ns_prefix=namespace,
+            )
+
+            issued_at = time.time() - 900
+            await cache.set(policy.k_issued, issued_at)
+            await cache.set(issued_bare_key, issued_at - 30)
+            await cache.set(policy.k_startleft, 1)
+            await cache.set(probe_bare_key, 1)
+
+            result = await policy.on_401()
+
+            assert result == "fresh-token"
+            assert not minted_tokens
+            assert header["value"] == "Bearer fresh-token"
+            assert await cache.get(bare_token_key) == "fresh-token"
+            assert await cache.get(namespaced_token_key) == "fresh-token"
+
+            updated_issued_ns = await cache.get(policy.k_issued)
+            updated_issued_bare = await cache.get(issued_bare_key)
+            assert isinstance(updated_issued_ns, (int, float))
+            assert isinstance(updated_issued_bare, (int, float))
+            assert updated_issued_ns >= issued_at
+            assert updated_issued_bare >= issued_at
+
+            assert await cache.get(policy.k_startleft) == 3
+            assert await cache.get(probe_bare_key) == 3
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
 
 
 def test_async_nova_request_fetches_token_when_not_supplied(

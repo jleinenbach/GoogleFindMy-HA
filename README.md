@@ -109,6 +109,14 @@ The integration respects Google's rate limits by:
 - Minimum poll interval enforcement
 - Automatic retry with exponential backoff
 
+### 401 Unauthorized responses
+- When Google's Nova endpoint returns 401, the integration now clears both the
+  entry-scoped and global ADM token cache entries before refreshing. This
+  ensures a brand-new token is minted and stored automatically, without
+  requiring you to restart Home Assistant or re-run the configuration flow.
+- The regeneration also refreshes the associated metadata so subsequent
+  requests resume with the updated token immediately.
+
 ## Privacy and Security
 
 - All location data uses Google's end-to-end encryption
