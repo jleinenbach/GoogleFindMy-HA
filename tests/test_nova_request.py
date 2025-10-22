@@ -214,8 +214,8 @@ def test_async_nova_request_refreshes_token_after_initial_401(
     assert second_headers.get("Authorization") == "Bearer adm-new"
 
 
-def test_async_ttl_policy_clears_bare_cache_on_refresh() -> None:
-    """401 refresh clears namespaced and bare keys so a new token is minted."""
+def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:
+    """401 refresh clears stale token keys without resetting startup probe counters."""
 
     async def _run() -> None:
         hass = _FakeHass()
@@ -272,6 +272,9 @@ def test_async_ttl_policy_clears_bare_cache_on_refresh() -> None:
             await cache.set(policy.k_startleft, 1)
             await cache.set(probe_bare_key, 1)
 
+            assert await cache.get(policy.k_startleft) == 1
+            assert await cache.get(probe_bare_key) == 1
+
             result = await policy.on_401()
 
             assert result == "fresh-token"
@@ -287,8 +290,8 @@ def test_async_ttl_policy_clears_bare_cache_on_refresh() -> None:
             assert updated_issued_ns >= issued_at
             assert updated_issued_bare >= issued_at
 
-            assert await cache.get(policy.k_startleft) == 3
-            assert await cache.get(probe_bare_key) == 3
+            assert await cache.get(policy.k_startleft) == 1
+            assert await cache.get(probe_bare_key) == 1
         finally:
             await cache.close()
 

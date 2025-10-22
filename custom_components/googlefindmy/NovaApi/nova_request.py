@@ -386,7 +386,6 @@ class TTLPolicy:
         bases_to_clear = (
             f"adm_token_{self.username}",
             f"adm_token_issued_at_{self.username}",
-            f"adm_probe_startup_left_{self.username}",
         )
         for base in bases_to_clear:
             for key in self._key_variants(base):
@@ -403,11 +402,12 @@ class TTLPolicy:
                     self._set(key, now)
                 except Exception:
                     pass
-            if not self._get(self.k_startleft):
+            if self._get(self.k_startleft) is None:
                 probe_base = f"adm_probe_startup_left_{self.username}"
                 for key in self._key_variants(probe_base):
                     try:
-                        self._set(key, 3)
+                        if self._get(key) is None:
+                            self._set(key, 3)
                     except Exception:
                         pass
         return tok
@@ -513,7 +513,6 @@ class AsyncTTLPolicy(TTLPolicy):
         bases_to_clear = (
             f"adm_token_{self.username}",
             f"adm_token_issued_at_{self.username}",
-            f"adm_probe_startup_left_{self.username}",
         )
         for base in bases_to_clear:
             for key in self._key_variants(base):
@@ -540,11 +539,12 @@ class AsyncTTLPolicy(TTLPolicy):
                     await self._set(key, now)
                 except Exception:
                     pass
-            if not await self._get(self.k_startleft):
+            if await self._get(self.k_startleft) is None:
                 probe_base = f"adm_probe_startup_left_{self.username}"
                 for key in self._key_variants(probe_base):
                     try:
-                        await self._set(key, 3)
+                        if await self._get(key) is None:
+                            await self._set(key, 3)
                     except Exception:
                         pass
         return tok
