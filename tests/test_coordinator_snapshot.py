@@ -11,7 +11,10 @@ import asyncio
 import pytest
 
 from custom_components.googlefindmy.const import DOMAIN
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import (
+    GoogleFindMyCoordinator,
+    _as_ha_attributes,
+)
 
 
 class _DummyState:
@@ -135,3 +138,21 @@ def test_snapshot_logs_formats_when_entity_missing(
         and "entry-1:device-99" in record.message
         for record in caplog.records
     )
+
+
+def test_as_ha_attributes_emits_iso_timestamps() -> None:
+    """Coordinator attributes should not expose raw epoch floats."""
+
+    attrs = _as_ha_attributes(
+        {
+            "id": "device-1",
+            "name": "Pixel",
+            "status": "online",
+            "last_seen": 1_700_000_000,
+        }
+    )
+
+    assert attrs is not None
+    assert attrs["last_seen"] == "2023-11-14T22:13:20Z"
+    assert attrs["last_seen_utc"] == "2023-11-14T22:13:20Z"
+    assert "last_seen" in attrs and isinstance(attrs["last_seen"], str)

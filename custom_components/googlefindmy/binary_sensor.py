@@ -54,7 +54,7 @@ from .const import (
     issue_id_for,
     service_device_identifier,
 )
-from .coordinator import GoogleFindMyCoordinator
+from .coordinator import GoogleFindMyCoordinator, format_epoch_utc
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -278,10 +278,10 @@ class GoogleFindMyAuthStatusSensor(
         return True
 
     @property
-    def extra_state_attributes(self) -> dict[str, str | float | None] | None:
+    def extra_state_attributes(self) -> dict[str, str | None] | None:
         """Expose Nova API and push transport health snapshots."""
 
-        attributes: dict[str, str | float | None] = {}
+        attributes: dict[str, str | None] = {}
 
         status = getattr(self.coordinator, "api_status", None)
         state = getattr(status, "state", None)
@@ -291,8 +291,9 @@ class GoogleFindMyAuthStatusSensor(
         if isinstance(reason, str) and reason:
             attributes["nova_api_status_reason"] = reason
         changed_at = getattr(status, "changed_at", None)
-        if isinstance(changed_at, (int, float)):
-            attributes["nova_api_status_changed_at"] = float(changed_at)
+        changed_at_iso = format_epoch_utc(changed_at)
+        if changed_at_iso is not None:
+            attributes["nova_api_status_changed_at"] = changed_at_iso
 
         fcm_status = getattr(self.coordinator, "fcm_status", None)
         fcm_state = getattr(fcm_status, "state", None)
@@ -302,8 +303,9 @@ class GoogleFindMyAuthStatusSensor(
         if isinstance(fcm_reason, str) and fcm_reason:
             attributes["nova_fcm_status_reason"] = fcm_reason
         fcm_changed_at = getattr(fcm_status, "changed_at", None)
-        if isinstance(fcm_changed_at, (int, float)):
-            attributes["nova_fcm_status_changed_at"] = float(fcm_changed_at)
+        fcm_changed_at_iso = format_epoch_utc(fcm_changed_at)
+        if fcm_changed_at_iso is not None:
+            attributes["nova_fcm_status_changed_at"] = fcm_changed_at_iso
 
         return attributes or None
 

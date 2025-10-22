@@ -139,10 +139,10 @@ def test_auth_status_sensor_attributes_include_nova_snapshots() -> None:
     assert attrs is not None
     assert attrs["nova_api_status"] == "reauth_required"
     assert attrs["nova_api_status_reason"] == "Token expired"
-    assert attrs["nova_api_status_changed_at"] == pytest.approx(1700000000.0)
+    assert attrs["nova_api_status_changed_at"] == "2023-11-14T22:13:20Z"
     assert attrs["nova_fcm_status"] == "connected"
     assert "nova_fcm_status_reason" not in attrs
-    assert attrs["nova_fcm_status_changed_at"] == pytest.approx(1700000100.5)
+    assert attrs["nova_fcm_status_changed_at"] == "2023-11-14T22:15:00.500000Z"
 
 
 def test_auth_status_sensor_attributes_return_none_when_unavailable() -> None:

@@ -216,6 +216,20 @@ def _normalize_epoch_seconds(ts: Any) -> float | None:
         return None
 
 
+# NOTE: keep helper public for reuse in entities/system health snapshots.
+def format_epoch_utc(value: Any) -> str | None:
+    """Return an ISO 8601 UTC timestamp for epoch values (seconds or ms)."""
+
+    ts = _normalize_epoch_seconds(value)
+    if ts is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 # --- Decoder-row Normalization & Attribute Helpers -------------------------
 _MISSING = object()
 
@@ -285,14 +299,7 @@ def _sanitize_decoder_row(row: dict[str, Any]) -> dict[str, Any]:
 
     ts = _normalize_epoch_seconds(r.get("last_seen"))
     r["last_seen"] = ts  # Store normalized float
-    if ts:
-        try:
-            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            r["last_seen_utc"] = dt.isoformat().replace("+00:00", "Z")
-        except Exception:
-            r["last_seen_utc"] = None
-    else:
-        r["last_seen_utc"] = None
+    r["last_seen_utc"] = format_epoch_utc(ts)
 
     r["source_label"] = label
     r["source_rank"] = rank
@@ -317,14 +324,17 @@ def _as_ha_attributes(row: dict[str, Any] | None) -> dict[str, Any] | None:
     acc = _cf(r.get("accuracy"))
     alt = _cf(r.get("altitude"))
 
+    last_seen_iso = format_epoch_utc(r.get("last_seen"))
+    last_seen_utc = r.get("last_seen_utc") or last_seen_iso
+
     out: dict[str, Any] = {
         "device_name": r.get("name"),
         "device_id": r.get("device_id") or r.get("id"),
         "status": r.get("status"),
         "semantic_name": r.get("semantic_name"),
         "battery_level": r.get("battery_level"),
-        "last_seen": r.get("last_seen"),
-        "last_seen_utc": r.get("last_seen_utc"),
+        "last_seen": last_seen_iso,
+        "last_seen_utc": last_seen_utc,
         "source_label": r.get("source_label"),
         "source_rank": r.get("source_rank"),
         "is_own_report": r.get("is_own_report"),
