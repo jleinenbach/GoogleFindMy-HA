@@ -278,16 +278,34 @@ class GoogleFindMyAuthStatusSensor(
         return True
 
     @property
-    def extra_state_attributes(self) -> dict[str, str | None] | None:
-        """Expose API polling status as part of the diagnostic context."""
+    def extra_state_attributes(self) -> dict[str, str | float | None] | None:
+        """Expose Nova API and push transport health snapshots."""
+
+        attributes: dict[str, str | float | None] = {}
 
         status = getattr(self.coordinator, "api_status", None)
-        if status is None:
-            return None
-        attributes: dict[str, str | None] = {"api_status": status.state}
-        if status.reason:
-            attributes["api_status_reason"] = status.reason
-        return attributes
+        state = getattr(status, "state", None)
+        if isinstance(state, str):
+            attributes["nova_api_status"] = state
+        reason = getattr(status, "reason", None)
+        if isinstance(reason, str) and reason:
+            attributes["nova_api_status_reason"] = reason
+        changed_at = getattr(status, "changed_at", None)
+        if isinstance(changed_at, (int, float)):
+            attributes["nova_api_status_changed_at"] = float(changed_at)
+
+        fcm_status = getattr(self.coordinator, "fcm_status", None)
+        fcm_state = getattr(fcm_status, "state", None)
+        if isinstance(fcm_state, str):
+            attributes["nova_fcm_status"] = fcm_state
+        fcm_reason = getattr(fcm_status, "reason", None)
+        if isinstance(fcm_reason, str) and fcm_reason:
+            attributes["nova_fcm_status_reason"] = fcm_reason
+        fcm_changed_at = getattr(fcm_status, "changed_at", None)
+        if isinstance(fcm_changed_at, (int, float)):
+            attributes["nova_fcm_status_changed_at"] = float(fcm_changed_at)
+
+        return attributes or None
 
     @property
     def device_info(self) -> DeviceInfo:

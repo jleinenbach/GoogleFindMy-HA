@@ -209,8 +209,8 @@
       "polling": {
         "name": "Polling"
       },
-      "auth_status": {
-        "name": "Authentication status"
+      "nova_auth_status": {
+        "name": "Nova API authentication status"
       }
     },
     "sensor": {
