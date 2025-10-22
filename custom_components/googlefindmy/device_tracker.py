@@ -178,6 +178,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     _attr_entity_category = None  # ensure tracker is not diagnostic
     # Default to enabled in the registry for per-device trackers
     _attr_entity_registry_enabled_default = True
+    _attr_translation_key = "device"
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----
     @staticmethod
