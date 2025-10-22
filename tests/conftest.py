@@ -134,6 +134,8 @@ def _stub_homeassistant() -> None:
 
     const_module.EVENT_HOMEASSISTANT_STARTED = "start"
     const_module.EVENT_HOMEASSISTANT_STOP = "stop"
+    const_module.ATTR_LATITUDE = "latitude"
+    const_module.ATTR_LONGITUDE = "longitude"
     const_module.Platform = Platform
     sys.modules["homeassistant.const"] = const_module
 
@@ -343,8 +345,15 @@ def _stub_homeassistant() -> None:
 
     recorder_module = ModuleType("homeassistant.components.recorder")
     recorder_module.get_instance = lambda *args, **kwargs: None
-    recorder_module.history = ModuleType("homeassistant.components.recorder.history")
+    history_module = ModuleType("homeassistant.components.recorder.history")
+
+    def _no_history(*args, **kwargs):  # pragma: no cover - stub
+        raise NotImplementedError
+
+    history_module.get_significant_states = _no_history
+    recorder_module.history = history_module
     sys.modules["homeassistant.components.recorder"] = recorder_module
+    sys.modules["homeassistant.components.recorder.history"] = history_module
     setattr(components_pkg, "recorder", recorder_module)
 
 
