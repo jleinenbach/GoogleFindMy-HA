@@ -210,7 +210,7 @@
         "name": "Sondeo"
       },
       "nova_auth_status": {
-        "name": "Nova API authentication status"
+        "name": "Estado de autenticación de la API Nova"
       }
     },
     "sensor": {

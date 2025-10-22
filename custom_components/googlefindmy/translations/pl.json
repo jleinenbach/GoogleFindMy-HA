@@ -210,7 +210,7 @@
         "name": "Odpytywanie"
       },
       "nova_auth_status": {
-        "name": "Nova API authentication status"
+        "name": "Status uwierzytelniania interfejsu API Nova"
       }
     },
     "sensor": {
