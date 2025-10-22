@@ -103,7 +103,7 @@ STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
     "low_quality_dropped": SensorEntityDescription(
         key="low_quality_dropped",
         translation_key="stat_low_quality_dropped",
-        icon="mdi:target-off",
+        icon="mdi:target",
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
     "non_significant_dropped": SensorEntityDescription(
