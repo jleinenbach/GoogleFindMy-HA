@@ -190,6 +190,52 @@ def _safe_truncate(text: Any, limit: int = 160) -> str:
     return s[: max(0, limit - 1)] + "…"
 
 
+def _sanitize_diag_entry(payload: Any) -> dict[str, Any]:
+    """Return a diagnostics-friendly snapshot of a buffer entry."""
+    if not isinstance(payload, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, (int, float, bool)) or value is None:
+            sanitized[key] = value
+        else:
+            sanitized[key] = _safe_truncate(value)
+    return sanitized
+
+
+def _diagnostics_buffer_summary(raw: Any) -> dict[str, Any]:
+    """Sanitize a diagnostics buffer payload for coordinator diagnostics."""
+    if not isinstance(raw, dict):
+        return {}
+
+    summary: dict[str, Any] = {}
+
+    raw_summary = raw.get("summary")
+    if isinstance(raw_summary, dict):
+        sanitized_summary: dict[str, Any] = {}
+        for key, value in raw_summary.items():
+            if isinstance(value, (int, float)):
+                sanitized_summary[key] = value
+            else:
+                sanitized_summary[key] = _safe_truncate(value, 48)
+        if sanitized_summary:
+            summary["summary"] = sanitized_summary
+
+    raw_warnings = raw.get("warnings")
+    if isinstance(raw_warnings, list) and raw_warnings:
+        summary["warnings_preview"] = [
+            _sanitize_diag_entry(item) for item in raw_warnings[:5]
+        ]
+
+    raw_errors = raw.get("errors")
+    if isinstance(raw_errors, list) and raw_errors:
+        summary["errors_preview"] = [
+            _sanitize_diag_entry(item) for item in raw_errors[:5]
+        ]
+
+    return summary
+
+
 def _perf_durations(perf: dict[str, Any]) -> dict[str, Any]:
     """Compute stable setup durations (seconds) from monotonic stamps if present."""
     try:
@@ -484,6 +530,16 @@ async def async_get_config_entry_diagnostics(
             coordinator_block["setup_performance"] = setup_perf
         if recent_errors:
             coordinator_block["recent_errors"] = recent_errors
+
+        diag_buffer = getattr(coordinator, "_diag", None)
+        if diag_buffer is not None and hasattr(diag_buffer, "to_dict"):
+            try:
+                raw_diag = diag_buffer.to_dict()
+            except Exception:
+                raw_diag = None
+            sanitized_diag = _diagnostics_buffer_summary(raw_diag)
+            if sanitized_diag:
+                coordinator_block["diagnostics_buffer"] = sanitized_diag
 
     # Concurrency & FCM receiver (global, not per-entry)
     concurrency = _concurrency_block(hass)
