@@ -2,9 +2,10 @@
 """Location history using Home Assistant's recorder properly."""
 
 import logging
+import math
 import time
 from typing import Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from homeassistant.core import HomeAssistant
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
@@ -50,9 +51,16 @@ class LocationRecorder:
                         # Extract location from attributes
                         attrs = state.attributes or {}
                         if ATTR_LATITUDE in attrs and ATTR_LONGITUDE in attrs:
+                            last_seen_ts, last_seen_utc = _extract_last_seen(attrs)
+                            fallback_ts = state.last_changed.timestamp()
+                            timestamp = (
+                                last_seen_ts
+                                if last_seen_ts is not None
+                                else fallback_ts
+                            )
                             locations.append(
                                 {
-                                    "timestamp": state.last_changed.timestamp(),
+                                    "timestamp": timestamp,
                                     "latitude": attrs.get(ATTR_LATITUDE),
                                     "longitude": attrs.get(ATTR_LONGITUDE),
                                     "accuracy": attrs.get(
@@ -61,6 +69,8 @@ class LocationRecorder:
                                     "is_own_report": attrs.get("is_own_report", False),
                                     "altitude": attrs.get("altitude"),
                                     "state": state.state,
+                                    "last_seen": last_seen_ts,
+                                    "last_seen_utc": last_seen_utc,
                                 }
                             )
 
@@ -96,7 +106,13 @@ class LocationRecorder:
                 else:
                     accuracy = float(accuracy)
 
-                age_seconds = current_time - loc.get("timestamp", 0)
+                ts = _normalize_epoch(loc.get("last_seen"))
+                if ts is None:
+                    ts = _normalize_epoch(loc.get("timestamp"))
+                if ts is None:
+                    return float("inf")
+
+                age_seconds = max(0.0, current_time - ts)
 
                 # Age penalty: 1m per 3 minutes
                 age_penalty = age_seconds / (3 * 60)
@@ -118,7 +134,10 @@ class LocationRecorder:
             sorted_locations = sorted(locations, key=calculate_score)
             best = sorted_locations[0]
 
-            age_minutes = (current_time - best.get("timestamp", 0)) / 60
+            ts = _normalize_epoch(best.get("last_seen"))
+            if ts is None:
+                ts = _normalize_epoch(best.get("timestamp"))
+            age_minutes = ((current_time - ts) / 60) if ts is not None else float("inf")
             _LOGGER.debug(
                 f"Selected best location: accuracy={best.get('accuracy')}m, "
                 f"age={age_minutes:.1f}min from {len(locations)} options"
@@ -129,3 +148,67 @@ class LocationRecorder:
         except Exception as e:
             _LOGGER.error(f"Failed to select best location: {e}")
             return locations[0] if locations else {}
+
+
+def _normalize_epoch(value: Any) -> float | None:
+    """Normalize epoch timestamps (seconds) allowing milliseconds and ISO strings."""
+
+    if value is None:
+        return None
+
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                dt = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.timestamp()
+        return None
+
+    if not math.isfinite(f):
+        return None
+    if f > 1_000_000_000_000:
+        f = f / 1000.0
+    return f
+
+
+def _extract_last_seen(attrs: dict[str, Any]) -> tuple[float | None, str | None]:
+    """Return normalized last_seen epoch seconds and the best UTC ISO string."""
+
+    raw_last_seen = attrs.get("last_seen")
+    raw_last_seen_utc = attrs.get("last_seen_utc")
+
+    last_seen_ts = _normalize_epoch(raw_last_seen)
+    if last_seen_ts is None:
+        last_seen_ts = _normalize_epoch(raw_last_seen_utc)
+
+    last_seen_utc = _coerce_iso(raw_last_seen_utc)
+    if last_seen_utc is None and isinstance(raw_last_seen, str):
+        last_seen_utc = raw_last_seen.strip() or None
+    if last_seen_utc is None and last_seen_ts is not None:
+        try:
+            dt = datetime.fromtimestamp(last_seen_ts, tz=timezone.utc)
+            last_seen_utc = dt.isoformat().replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            last_seen_utc = None
+
+    return last_seen_ts, last_seen_utc
+
+
+def _coerce_iso(value: Any) -> str | None:
+    """Return the value if it is a non-empty string."""
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
