@@ -14,6 +14,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Wait for hassfest auto-fix workflow to finish
+        uses: lewagon/wait-on-check-action@v1.3.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          check-regexp: hassfest \(auto-fix\) / hassfest.*
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
       - name: Run hassfest
         uses: home-assistant/actions/hassfest@master
 
