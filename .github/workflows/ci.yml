@@ -14,6 +14,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Wait for hassfest auto-fix workflow to finish
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: lewagon/wait-on-check-action@v1.3.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          check-regexp: '^[Hh]assfest( \(auto-fix\)( / hassfest.*)?)?$'
+          allowed-conclusions: 'success,failure,neutral'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
       - name: Run hassfest
         uses: home-assistant/actions/hassfest@master
 
