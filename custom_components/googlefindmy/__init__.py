@@ -119,6 +119,19 @@ try:
 except Exception:  # pragma: no cover
     GoogleHomeFilter = None  # type: ignore
 
+try:
+    # Helper name has been `config_entry_only_config_schema` since Core 2023.7
+    # (renamed from `no_yaml_config_schema`). Retain fallbacks solely so legacy
+    # tests lacking the helper keep importing this module without exploding.
+    CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+except AttributeError:
+    try:
+        CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
+    except AttributeError:  # pragma: no cover - kept for legacy tests without helpers
+        import voluptuous as vol
+
+        CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
+
 _LOGGER = logging.getLogger(__name__)
 
 # Platforms provided by this integration
@@ -128,18 +141,6 @@ PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
 ]
-
-# This integration can only be configured via config entries; gracefully handle
-# older HA cores lacking modern helpers.
-try:
-    CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-except AttributeError:
-    try:
-        CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
-    except AttributeError:  # pragma: no cover - legacy fallback for old tests
-        import voluptuous as vol
-
-        CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
 
 # Latest config entry schema version handled by this integration
 CONFIG_ENTRY_VERSION: int = 2

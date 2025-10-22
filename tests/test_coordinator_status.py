@@ -14,7 +14,7 @@ from custom_components.googlefindmy.coordinator import (
     GoogleFindMyCoordinator,
 )
 from custom_components.googlefindmy.const import CONF_GOOGLE_EMAIL, DOMAIN
-from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.exceptions import ConfigEntryAuthFailed
 
 
 class _DummyBus:
@@ -141,7 +141,7 @@ def test_api_auth_error_preserves_fcm_status(
     coordinator: GoogleFindMyCoordinator,
     dummy_api: _DummyAPI,
 ) -> None:
-    """ConfigEntryAuthFailed triggers reauth but keeps push status untouched."""
+    """ConfigEntryAuthFailed surfaces while keeping push transport marked connected."""
 
     dummy_api.raise_auth = True
 
@@ -151,7 +151,8 @@ def test_api_auth_error_preserves_fcm_status(
 
     assert coordinator.api_status.state == ApiStatus.REAUTH
     assert coordinator.fcm_status.state == FcmStatus.CONNECTED
-    assert coordinator.config_entry.reauth_calls == 1
+    assert coordinator.config_entry.reauth_calls == 0
+    assert coordinator.hass.config_entries.calls == []
     assert "Invalid" in (coordinator.api_status.reason or "")
 
 
@@ -159,7 +160,7 @@ def test_api_status_recovers_after_success(
     coordinator: GoogleFindMyCoordinator,
     dummy_api: _DummyAPI,
 ) -> None:
-    """Successful polling resets API status and clears the reauth flag."""
+    """Successful polling resets API status and clears the auth error flag."""
 
     # First, simulate a failure to set reauth state.
     dummy_api.raise_auth = True
@@ -178,26 +179,4 @@ def test_api_status_recovers_after_success(
     assert coordinator.api_status.state == ApiStatus.OK
     assert coordinator.api_status.reason is None
     assert coordinator.fcm_status.state == FcmStatus.CONNECTED
-    assert coordinator._reauth_initiated is False
-
-
-def test_reauth_failure_does_not_mask_auth_error(
-    coordinator: GoogleFindMyCoordinator,
-    dummy_api: _DummyAPI,
-) -> None:
-    """Reauth helper errors should not swallow ConfigEntryAuthFailed."""
-
-    dummy_api.raise_auth = True
-
-    async def failing_reauth() -> None:
-        coordinator._reauth_initiated = True
-        raise HomeAssistantError("reauth boom")
-
-    coordinator._async_start_reauth_flow = failing_reauth  # type: ignore[assignment]
-
-    loop = coordinator.hass.loop
-    with pytest.raises(ConfigEntryAuthFailed):
-        loop.run_until_complete(coordinator._async_update_data())
-
-    assert coordinator.api_status.state == ApiStatus.REAUTH
-    assert coordinator._reauth_initiated is False
+    assert coordinator.auth_error_active is False
