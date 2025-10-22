@@ -214,6 +214,117 @@ def test_async_nova_request_refreshes_token_after_initial_401(
     assert second_headers.get("Authorization") == "Bearer adm-new"
 
 
+class _CoordinatedSession:
+    """Session stub orchestrating overlapping ADM refresh behavior."""
+
+    def __init__(self, allow_refresh: asyncio.Event) -> None:
+        self._allow_refresh = allow_refresh
+        self._initial_calls = 0
+        self.calls: list[dict[str, Any]] = []
+
+    def post(self, *_args: object, **kwargs: Any) -> _DummyResponse:
+        headers = kwargs.get("headers", {})
+        auth = headers.get("Authorization")
+        status: int
+        body: bytes
+
+        if auth == "Bearer initial-token":
+            self._initial_calls += 1
+            if self._initial_calls >= 2:
+                self._allow_refresh.set()
+            status, body = 401, b"unauthorized"
+        elif auth == "Bearer refreshed-token":
+            status, body = 200, b"ok"
+        else:  # pragma: no cover - defensive guard for unexpected headers
+            raise AssertionError(f"Unexpected Authorization header: {auth!r}")
+
+        self.calls.append(
+            {
+                "auth": auth,
+                "status": status,
+                "headers": dict(headers),
+            }
+        )
+        return _DummyResponse(status, body)
+
+
+def test_async_nova_request_reuses_cached_token_after_recent_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Overlapping 401 retries reuse the freshly cached ADM token."""
+
+    cache = _StubCache()
+    username = "user@example.com"
+    namespace = "entry-id"
+    bare_token_key = f"adm_token_{username}"
+    namespaced_token_key = f"{namespace}:{bare_token_key}"
+
+    async def _exercise() -> tuple[list[str], list[dict[str, Any]], int]:
+        allow_refresh = asyncio.Event()
+        session = _CoordinatedSession(allow_refresh)
+
+        await cache.set(bare_token_key, "initial-token")
+        await cache.set(namespaced_token_key, "initial-token")
+
+        refresh_calls = 0
+
+        async def _fake_get_adm_token(
+            user: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            assert user == username
+            cached = await cache.get(bare_token_key)
+            if isinstance(cached, str) and cached:
+                return cached
+            return "initial-token"
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+
+        async def _refresh_override() -> str:
+            nonlocal refresh_calls
+            refresh_calls += 1
+            await allow_refresh.wait()
+            token = "refreshed-token"
+            await cache.set(bare_token_key, token)
+            await cache.set(namespaced_token_key, token)
+            return token
+
+        tasks = [
+            asyncio.create_task(
+                async_nova_request(
+                    "scope",
+                    "00",
+                    username=username,
+                    cache=cache,
+                    session=session,
+                    namespace=namespace,
+                    refresh_override=_refresh_override,
+                )
+            )
+            for _ in range(2)
+        ]
+
+        results = await asyncio.gather(*tasks)
+        return results, session.calls, refresh_calls
+
+    results, calls, refreshes = asyncio.run(_exercise())
+
+    assert results == ["6f6b", "6f6b"]
+    assert refreshes == 1
+
+    statuses = [call["status"] for call in calls]
+    assert statuses.count(401) == 2
+    assert statuses.count(200) == 2
+    successful_auths = [call["auth"] for call in calls if call["status"] == 200]
+    assert successful_auths == ["Bearer refreshed-token", "Bearer refreshed-token"]
+
+
 def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:
     """401 refresh clears stale token keys without resetting startup probe counters."""
 
