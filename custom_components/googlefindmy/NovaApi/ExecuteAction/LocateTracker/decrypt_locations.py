@@ -240,7 +240,7 @@ def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:
         except (TypeError, ValueError):
             return None
 
-    # Unit heuristic (ms/µs)
+    # Unit heuristic (ms/us)
     if v > 1e15:  # microseconds
         v /= 1e6
     elif v > 1e12:  # milliseconds
