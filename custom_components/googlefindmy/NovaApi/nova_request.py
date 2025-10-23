@@ -533,10 +533,11 @@ class AsyncTTLPolicy(TTLPolicy):
             self.log.error(
                 "ADM token refresh failed because the cached AAS token was rejected; re-authentication is required."
             )
-            try:
-                await self._set(f"{self._ns}{DATA_AAS_TOKEN}", None)
-            except Exception:
-                pass
+            for key in self._key_variants(DATA_AAS_TOKEN):
+                try:
+                    await self._set(key, None)
+                except Exception:
+                    pass
             raise NovaAuthError(401, "AAS token invalid during ADM refresh") from err
         if tok:
             token_base = f"adm_token_{self.username}"
