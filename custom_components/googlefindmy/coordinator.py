@@ -2392,7 +2392,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # Cancel a pending writer, if any, and schedule a fresh one (loop-local).
             if self._stats_save_task and not self._stats_save_task.done():
                 self._stats_save_task.cancel()
-            self._stats_save_task = self.hass.loop.create_task(
+            create_task = getattr(
+                self.hass, "async_create_background_task", self.hass.async_create_task
+            )
+            self._stats_save_task = create_task(
                 self._debounced_save_stats(),
                 name=f"{DOMAIN}.save_stats_debounced",
             )

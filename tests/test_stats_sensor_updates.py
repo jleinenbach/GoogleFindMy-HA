@@ -163,11 +163,17 @@ class _StubConfigEntry:
 class _StubCache:
     """No-op cache implementation satisfying coordinator expectations."""
 
+    def __init__(self) -> None:
+        self.saved_calls: list[tuple[str, dict[str, int]]] = []
+
     async def async_get_cached_value(self, key: str) -> None:  # noqa: D401 - stub signature
         return None
 
     async def async_set_cached_value(self, key: str, value: dict[str, int]) -> None:  # noqa: D401 - stub signature
-        return None
+        self.saved_calls.append((key, value))
+        event = getattr(self, "event", None)
+        if event is not None:
+            event.set()
 
 
 def test_increment_stat_notifies_registered_stats_sensor(
@@ -214,6 +220,47 @@ def test_increment_stat_notifies_registered_stats_sensor(
                 assert sensor.native_value == 1
             finally:
                 remove_listener()
+
+        loop.run_until_complete(_exercise())
+    finally:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+            with suppress(Exception):
+                loop.run_until_complete(task)
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_increment_stat_persists_stats(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stats increments must trigger persistence via the debounced writer."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        hass = _StubHass(loop)
+        cache = _StubCache()
+        coordinator = GoogleFindMyCoordinator(hass, cache=cache)
+        coordinator.config_entry = _StubConfigEntry()
+        coordinator._stats_debounce_seconds = 0
+
+        # Ensure debounced writes run immediately without scheduling real tasks.
+        def _noop_schedule() -> None:
+            return None
+
+        monkeypatch.setattr(coordinator, "async_update_listeners", _noop_schedule)
+
+        async def _exercise() -> None:
+            stats_persisted = asyncio.Event()
+            cache.event = stats_persisted
+            coordinator.increment_stat("background_updates")
+            await asyncio.wait_for(stats_persisted.wait(), timeout=0.1)
+            assert cache.saved_calls
+            key, value = cache.saved_calls[-1]
+            assert key == "integration_stats"
+            assert value["background_updates"] == 1
 
         loop.run_until_complete(_exercise())
     finally:
