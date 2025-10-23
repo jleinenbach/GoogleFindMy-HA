@@ -473,8 +473,8 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
                     return None
 
             monkeypatch.setattr(
-                map_view_module,
-                "async_get_entity_registry",
+                map_view_module.er,
+                "async_get",
                 lambda _hass: _StubEntityRegistry(),
             )
 

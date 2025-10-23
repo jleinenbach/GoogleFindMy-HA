@@ -12,7 +12,7 @@ from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .coordinator import GoogleFindMyCoordinator
@@ -172,7 +172,7 @@ class GoogleFindMyMapView(HomeAssistantView):
             )
 
             # ---- 4) Find the device_tracker entity (entity registry, scoped to this entry) ----
-            entity_registry = async_get_entity_registry(self.hass)
+            entity_registry = er.async_get(self.hass)
             entity_id: str | None = None
             entry_unique_id_candidates: list[str] = []
 
