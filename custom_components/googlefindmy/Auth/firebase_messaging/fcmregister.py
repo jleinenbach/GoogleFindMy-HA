@@ -444,11 +444,37 @@ class FcmRegister:
             if status == 404 or html_like:
                 snippet = response_text[:200]
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                fallback_triggered = False
+                if sender_index + 1 < len(sender_candidates):
+                    # Treat persistent HTML/404 responses as a signal to advance to the
+                    # next sender candidate so we do not waste the entire retry budget
+                    # on an endpoint that is not provisioned for the numeric sender.
+                    previous_sender = body["sender"]
+                    sender_index += 1
+                    body["sender"] = sender_candidates[sender_index]
+                    endpoint_index = 0
+                    fallback_triggered = True
+                    _logger.warning(
+                        "GCM register received HTML/404 via %s; switching sender from %s (%s) to %s (%s)",
+                        indicator,
+                        previous_sender,
+                        sender_mode(previous_sender),
+                        body["sender"],
+                        sender_mode(body["sender"]),
+                    )
                 if attempt < retries:
-                    next_index = (endpoint_index + 1) % len(endpoints)
-                    log_endpoint_switch(f"HTTP {status}", endpoint_index, next_index)
-                    endpoint_index = next_index
-                    await asyncio.sleep(0.5)
+                    if not fallback_triggered:
+                        next_index = (endpoint_index + 1) % len(endpoints)
+                        log_endpoint_switch(
+                            f"HTTP {status}", endpoint_index, next_index
+                        )
+                        endpoint_index = next_index
+                    else:
+                        if self._log_debug_verbose:
+                            _logger.debug(
+                                "GCM register resetting endpoint rotation after HTML/404 sender fallback"
+                            )
+                    await asyncio.sleep(1 if fallback_triggered else 0.5)
                 else:
                     _logger.warning(
                         "GCM register 404/HTML via %s (status=%s); no retries left.",
