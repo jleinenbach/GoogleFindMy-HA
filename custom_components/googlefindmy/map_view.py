@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timedelta
+from html import escape
 from typing import Any
+from urllib.parse import quote
 
 from aiohttp import web
 
@@ -352,13 +355,22 @@ class GoogleFindMyMapView(HomeAssistantView):
         start_local = start_local_tz.strftime("%Y-%m-%dT%H:%M")
         end_local = end_local_tz.strftime("%Y-%m-%dT%H:%M")
 
+        device_name_html = escape(device_name, quote=True)
+        start_local_attr = escape(start_local, quote=True)
+        end_local_attr = escape(end_local, quote=True)
+        accuracy_attr = escape(str(accuracy_filter), quote=True)
+
+        start_query_encoded = escape(quote(start_time.isoformat()), quote=True)
+        end_query_encoded = escape(quote(end_time.isoformat()), quote=True)
+        accuracy_query_encoded = escape(quote(str(accuracy_filter)), quote=True)
+
         if not locations:
             # Empty state page with controls for time range selection
             return f"""
             <!DOCTYPE html>
             <html>
             <head>
-                <title>{device_name} - Location Map</title>
+                <title>{device_name_html} - Location Map</title>
                 <meta charset="utf-8" />
                 <style>
                     body {{ font-family: Arial, sans-serif; margin: 20px; }}
@@ -375,16 +387,16 @@ class GoogleFindMyMapView(HomeAssistantView):
                 </style>
             </head>
             <body>
-                <h1>{device_name}</h1>
-                <div class="controls">
+                <h1>{device_name_html}</h1>
+                <div class="controls" id="mapControls" data-initial-start="{start_query_encoded}" data-initial-end="{end_query_encoded}">
                     <h3>Select Time Range</h3>
                     <div class="time-control">
                         <label for="startTime">Start:</label>
-                        <input type="datetime-local" id="startTime" value="{start_local}">
+                        <input type="datetime-local" id="startTime" value="{start_local_attr}">
                     </div>
                     <div class="time-control">
                         <label for="endTime">End:</label>
-                        <input type="datetime-local" id="endTime" value="{end_local}">
+                        <input type="datetime-local" id="endTime" value="{end_local_attr}">
                     </div>
                     <div class="quick-buttons">
                         <button onclick="setQuickRange(1)">Last 1 Day</button>
@@ -401,6 +413,40 @@ class GoogleFindMyMapView(HomeAssistantView):
                 </div>
 
                 <script>
+                function updateLocationWithParams(updates) {{
+                    const existing = window.location.search.slice(1);
+                    const keys = Object.keys(updates);
+                    const preserved = existing
+                        ? existing.split('&').filter(Boolean).filter((pair) => {{
+                            const [rawKey] = pair.split('=');
+                            if (!rawKey) {{
+                                return false;
+                            }}
+                            let decodedKey = rawKey;
+                            try {{
+                                decodedKey = decodeURIComponent(rawKey);
+                            }} catch (err) {{
+                                decodedKey = rawKey;
+                            }}
+                            return !keys.includes(decodedKey);
+                        }})
+                        : [];
+
+                    keys.forEach((key) => {{
+                        const value = updates[key];
+                        if (value === null || value === undefined) {{
+                            return;
+                        }}
+                        preserved.push(`${{encodeURIComponent(key)}}=${{encodeURIComponent(value)}}`);
+                    }});
+
+                    const query = preserved.join('&');
+                    const path = window.location.pathname;
+                    const hash = window.location.hash || '';
+                    const nextUrl = query ? `${{path}}?${{query}}${{hash}}` : `${{path}}{{hash}}`;
+                    window.location.href = nextUrl;
+                }}
+
                 function setQuickRange(days) {{
                     const end = new Date();
                     const start = new Date(end.getTime() - (days * 24 * 60 * 60 * 1000));
@@ -422,11 +468,31 @@ class GoogleFindMyMapView(HomeAssistantView):
                         return;
                     }}
 
-                    const url = new URL(window.location.href);
-                    url.searchParams.set('start', startTime + ':00Z');
-                    url.searchParams.set('end', endTime + ':00Z');
-                    window.location.href = url.toString();
+                    updateLocationWithParams({{
+                        start: `${{startTime}}:00Z`,
+                        end: `${{endTime}}:00Z`,
+                    }});
                 }}
+
+                document.addEventListener('DOMContentLoaded', function() {{
+                    const controls = document.getElementById('mapControls');
+                    if (controls) {{
+                        const startAttr = controls.dataset.initialStart;
+                        const endAttr = controls.dataset.initialEnd;
+                        if (startAttr) {{
+                            const decodedStart = decodeURIComponent(startAttr);
+                            if (!document.getElementById('startTime').value) {{
+                                document.getElementById('startTime').value = decodedStart.slice(0, 16);
+                            }}
+                        }}
+                        if (endAttr) {{
+                            const decodedEnd = decodeURIComponent(endAttr);
+                            if (!document.getElementById('endTime').value) {{
+                                document.getElementById('endTime').value = decodedEnd.slice(0, 16);
+                            }}
+                        }}
+                    }}
+                }});
                 </script>
             </body>
             </html>
@@ -440,6 +506,8 @@ class GoogleFindMyMapView(HomeAssistantView):
         markers_js: list[str] = []
         for i, loc in enumerate(locations):
             accuracy = float(loc.get("accuracy", 0.0))
+            lat = float(loc.get("lat", 0.0))
+            lon = float(loc.get("lon", 0.0))
 
             # Color based on accuracy
             if accuracy <= 5:
@@ -467,31 +535,44 @@ class GoogleFindMyMapView(HomeAssistantView):
                 report_source = "❓ Unknown"
                 report_color = "#6c757d"  # Gray
 
-            # Semantic location if available
-            semantic_info = ""
+            timestamp_display = escape(
+                timestamp_local.strftime("%Y-%m-%d %H:%M:%S %Z"), quote=True
+            )
+            report_source_html = escape(report_source, quote=True)
             semantic_location = loc.get("semantic_location")
-            if semantic_location:
-                semantic_info = f"<b>Location Name:</b> {semantic_location}<br>"
+            entity_id_text = escape(str(loc.get("entity_id", "Unknown")), quote=True)
+            state_text = escape(str(loc.get("state", "Unknown")), quote=True)
 
-            popup_text = f"""
-            <b>Location {i + 1}</b><br>
-            <b>Coordinates:</b> {loc["lat"]:.6f}, {loc["lon"]:.6f}<br>
-            <b>GPS Accuracy:</b> {accuracy:.1f} meters<br>
-            <b>Timestamp:</b> {timestamp_local.strftime("%Y-%m-%d %H:%M:%S %Z")}<br>
-            <b style="color: {report_color}">Report Source:</b> <span style="color: {report_color}">{report_source}</span><br>
-            {semantic_info}<b>Entity ID:</b> {loc.get("entity_id", "Unknown")}<br>
-            <b>Entity State:</b> {loc.get("state", "Unknown")}<br>
-            """
+            popup_parts = [
+                f"<b>Location {i + 1}</b><br>",
+                f"<b>Coordinates:</b> {lat:.6f}, {lon:.6f}<br>",
+                f"<b>GPS Accuracy:</b> {accuracy:.1f} meters<br>",
+                f"<b>Timestamp:</b> {timestamp_display}<br>",
+                (
+                    f'<b style="color: {report_color}">Report Source:</b> '
+                    f'<span style="color: {report_color}">{report_source_html}</span><br>'
+                ),
+            ]
+            if semantic_location:
+                popup_parts.append(
+                    f"<b>Location Name:</b> {escape(str(semantic_location), quote=True)}<br>"
+                )
+            popup_parts.append(f"<b>Entity ID:</b> {entity_id_text}<br>")
+            popup_parts.append(f"<b>Entity State:</b> {state_text}<br>")
+
+            popup_html = "".join(popup_parts)
+            popup_js = json.dumps(popup_html)
+            tooltip_js = json.dumps(f"Accuracy: {accuracy:.1f}m")
 
             markers_js.append(
                 f"""
-                var marker_{i} = L.marker([{loc["lat"]}, {loc["lon"]}]);
+                var marker_{i} = L.marker([{lat}, {lon}]);
                 marker_{i}.accuracy = {accuracy};
-                marker_{i}.bindPopup(`{popup_text}`);
-                marker_{i}.bindTooltip('Accuracy: {accuracy:.1f}m');
+                marker_{i}.bindPopup({popup_js});
+                marker_{i}.bindTooltip({tooltip_js});
                 marker_{i}.addTo(map);
 
-                var circle_{i} = L.circle([{loc["lat"]}, {loc["lon"]}], {{
+                var circle_{i} = L.circle([{lat}, {lon}], {{
                     radius: {accuracy},
                     color: '{color}',
                     fillColor: '{color}',
@@ -508,7 +589,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>{device_name} - Location Map</title>
+            <title>{device_name_html} - Location Map</title>
             <meta charset="utf-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -568,22 +649,22 @@ class GoogleFindMyMapView(HomeAssistantView):
             </style>
         </head>
         <body>
-            <div class="filter-panel collapsed" id="filterPanel">
+            <div class="filter-panel collapsed" id="filterPanel" data-initial-start="{start_query_encoded}" data-initial-end="{end_query_encoded}" data-initial-accuracy="{accuracy_query_encoded}">
                 <button class="toggle-btn" onclick="toggleFilters()">📅 Filters</button>
 
                 <div class="filter-content" id="filterContent">
-                    <h2>{device_name}</h2>
+                    <h2>{device_name_html}</h2>
                     <div class="info">{len(locations)} locations shown</div>
                     <div class="current-time" id="currentTime">🕐 Loading current time...</div>
 
                     <div class="filter-section">
                         <div class="filter-control">
                             <label for="startTime">Start:</label>
-                            <input type="datetime-local" id="startTime" value="{start_local}">
+                            <input type="datetime-local" id="startTime" value="{start_local_attr}">
                         </div>
                         <div class="filter-control">
                             <label for="endTime">End:</label>
-                            <input type="datetime-local" id="endTime" value="{end_local}">
+                            <input type="datetime-local" id="endTime" value="{end_local_attr}">
                         </div>
                     </div>
 
@@ -592,7 +673,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                             <label for="accuracySlider">Accuracy Filter:</label>
                             <div class="slider-container">
                                 <input type="range" id="accuracySlider" class="accuracy-slider"
-                                       min="0" max="300" value="{accuracy_filter}" oninput="updateAccuracyFilter()">
+                                       min="0" max="300" value="{accuracy_attr}" oninput="updateAccuracyFilter()">
                                 <span class="accuracy-value" id="accuracyValue">Disabled</span>
                             </div>
                         </div>
@@ -605,6 +686,40 @@ class GoogleFindMyMapView(HomeAssistantView):
 
             <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
             <script>
+                function updateLocationWithParams(updates) {{
+                    const queryString = window.location.search.slice(1);
+                    const keys = Object.keys(updates);
+                    const preserved = queryString
+                        ? queryString.split('&').filter(Boolean).filter((pair) => {{
+                            const [rawKey] = pair.split('=');
+                            if (!rawKey) {{
+                                return false;
+                            }}
+                            let decodedKey = rawKey;
+                            try {{
+                                decodedKey = decodeURIComponent(rawKey);
+                            }} catch (err) {{
+                                decodedKey = rawKey;
+                            }}
+                            return !keys.includes(decodedKey);
+                        }})
+                        : [];
+
+                    keys.forEach((key) => {{
+                        const value = updates[key];
+                        if (value === null || value === undefined) {{
+                            return;
+                        }}
+                        preserved.push(`${{encodeURIComponent(key)}}=${{encodeURIComponent(value)}}`);
+                    }});
+
+                    const query = preserved.join('&');
+                    const basePath = window.location.pathname;
+                    const hash = window.location.hash || '';
+                    const destination = query ? `${{basePath}}?${{query}}${{hash}}` : `${{basePath}}{{hash}}`;
+                    window.location.href = destination;
+                }}
+
                 var map = L.map('map').setView([{center_lat}, {center_lon}], 13);
 
                 L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
@@ -706,21 +821,50 @@ class GoogleFindMyMapView(HomeAssistantView):
                         return;
                     }}
 
-                    const url = new URL(window.location.href);
-                    url.searchParams.set('start', startTime + ':00Z');
-                    url.searchParams.set('end', endTime + ':00Z');
-                    if (accuracyFilter > 0) {{
-                        url.searchParams.set('accuracy', accuracyFilter);
+                    const updates = {{
+                        start: `${{startTime}}:00Z`,
+                        end: `${{endTime}}:00Z`,
+                    }};
+                    if (parseInt(accuracyFilter, 10) > 0) {{
+                        updates.accuracy = accuracyFilter;
                     }} else {{
-                        url.searchParams.delete('accuracy');
+                        updates.accuracy = null;
                     }}
-                    window.location.href = url.toString();
+
+                    updateLocationWithParams(updates);
                 }}
 
                 document.addEventListener('DOMContentLoaded', function() {{
+                    const filterPanel = document.getElementById('filterPanel');
+                    if (filterPanel) {{
+                        const startAttr = filterPanel.dataset.initialStart;
+                        const endAttr = filterPanel.dataset.initialEnd;
+                        const accuracyAttr = filterPanel.dataset.initialAccuracy;
+
+                        if (startAttr) {{
+                            const decodedStart = decodeURIComponent(startAttr);
+                            if (!document.getElementById('startTime').value) {{
+                                document.getElementById('startTime').value = decodedStart.slice(0, 16);
+                            }}
+                        }}
+                        if (endAttr) {{
+                            const decodedEnd = decodeURIComponent(endAttr);
+                            if (!document.getElementById('endTime').value) {{
+                                document.getElementById('endTime').value = decodedEnd.slice(0, 16);
+                            }}
+                        }}
+                        if (accuracyAttr) {{
+                            const decodedAccuracy = decodeURIComponent(accuracyAttr);
+                            const slider = document.getElementById('accuracySlider');
+                            if (slider && decodedAccuracy !== '') {{
+                                slider.value = decodedAccuracy;
+                            }}
+                        }}
+                    }}
+
                     updateAccuracyFilter();
-                    const initialFilter = {accuracy_filter};
-                    if (initialFilter > 0) {{ filterMarkersByAccuracy(initialFilter); }}
+                    const sliderValue = parseInt(document.getElementById('accuracySlider').value, 10);
+                    if (sliderValue > 0) {{ filterMarkersByAccuracy(sliderValue); }}
 
                     function updateCurrentTime() {{
                         const now = new Date();
