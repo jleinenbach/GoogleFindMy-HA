@@ -12,6 +12,9 @@ from collections.abc import Awaitable, Callable
 import pytest
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (
+    async_request_device_list,
+)
 from custom_components.googlefindmy.NovaApi.nova_request import (
     AsyncTTLPolicy,
     NovaAuthError,
@@ -323,6 +326,78 @@ def test_async_nova_request_reuses_cached_token_after_recent_refresh(
     assert statuses.count(200) == 2
     successful_auths = [call["auth"] for call in calls if call["status"] == 200]
     assert successful_auths == ["Bearer refreshed-token", "Bearer refreshed-token"]
+
+
+def test_device_list_namespace_override_does_not_double_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Namespace-aware overrides must not prefix keys twice when 401 triggers a refresh."""
+
+    cache = _StubCache()
+    namespace = "entry-double"
+    username = "user@example.com"
+
+    get_keys: list[str] = []
+    set_keys: list[str] = []
+
+    async def _cache_get_override(key: str) -> Any:
+        get_keys.append(key)
+        return await cache.get(key)
+
+    async def _cache_set_override(key: str, value: Any) -> None:
+        set_keys.append(key)
+        await cache.set(key, value)
+
+    session = _DummySession(
+        [
+            _DummyResponse(401, b"unauthorized"),
+            _DummyResponse(200, b"\xde\xad\xbe\xef"),
+        ]
+    )
+
+    async def _fake_initial_token(
+        user: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        resolved = (user or username).lower()
+        await cache.set(f"adm_token_{resolved}", "initial-token")
+        return "initial-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_initial_token,
+    )
+
+    async def _refresh_override() -> str:
+        token = "refreshed-token"
+        await cache.set(f"adm_token_{username}", token)
+        await cache.set(f"{namespace}:adm_token_{username}", token)
+        return token
+
+    async def _exercise() -> str:
+        return await async_request_device_list(
+            username,
+            session=session,
+            cache=cache,
+            cache_get=_cache_get_override,
+            cache_set=_cache_set_override,
+            refresh_override=_refresh_override,
+            namespace=namespace,
+        )
+
+    result_hex = asyncio.run(_exercise())
+
+    assert result_hex == "deadbeef"
+    double_prefixed = [
+        key
+        for key in [*get_keys, *set_keys]
+        if key.startswith(f"{namespace}:{namespace}:")
+    ]
+    assert not double_prefixed
+    assert f"{namespace}:adm_token_issued_at_{username}" in set_keys
 
 
 def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:
