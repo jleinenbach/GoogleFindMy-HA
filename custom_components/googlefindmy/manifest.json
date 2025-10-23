@@ -11,6 +11,7 @@
   "issue_tracker": "https://github.com/BSkando/GoogleFindMy-HA/issues",
   "loggers": ["custom_components.googlefindmy"],
   "requirements": [
+    "aiohttp>=3.9.5",
     "beautifulsoup4>=4.12.3",
     "cryptography>=43.0.3",
     "ecdsa>=0.19.1",
