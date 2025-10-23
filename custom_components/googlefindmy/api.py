@@ -737,13 +737,17 @@ class GoogleFindMyAPI:
             A list of device dictionaries.
         """
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                _LOGGER.error(
-                    "get_basic_device_list() called inside an active event loop; use async_get_basic_device_list()."
-                )
-                return []
-            return loop.run_until_complete(self.async_get_basic_device_list())
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            _LOGGER.error(
+                "get_basic_device_list() called inside an active event loop; use async_get_basic_device_list()."
+            )
+            return []
+
+        try:
+            return asyncio.run(self.async_get_basic_device_list())
         except Exception as err:
             _LOGGER.error("Failed to get basic device list (sync): %s", _short_err(err))
             return []
@@ -905,15 +909,17 @@ class GoogleFindMyAPI:
             A dictionary containing location data, or an empty dictionary on failure.
         """
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                _LOGGER.error(
-                    "get_device_location() called inside an active event loop; use async_get_device_location()."
-                )
-                return {}
-            return loop.run_until_complete(
-                self.async_get_device_location(device_id, device_name)
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            _LOGGER.error(
+                "get_device_location() called inside an active event loop; use async_get_device_location()."
             )
+            return {}
+
+        try:
+            return asyncio.run(self.async_get_device_location(device_id, device_name))
         except Exception as err:
             _LOGGER.error(
                 "Failed to get location for %s (%s): %s",
@@ -1011,13 +1017,17 @@ class GoogleFindMyAPI:
             True if the command was sent successfully, False otherwise.
         """
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                _LOGGER.error(
-                    "play_sound() called inside an active event loop; use async_play_sound()."
-                )
-                return False
-            return loop.run_until_complete(self.async_play_sound(device_id))
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            _LOGGER.error(
+                "play_sound() called inside an active event loop; use async_play_sound()."
+            )
+            return False
+
+        try:
+            return asyncio.run(self.async_play_sound(device_id))
         except Exception as err:
             _LOGGER.error("Failed to play sound on %s: %s", device_id, _short_err(err))
             return False
@@ -1032,13 +1042,17 @@ class GoogleFindMyAPI:
             True if the command was sent successfully, False otherwise.
         """
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                _LOGGER.error(
-                    "stop_sound() called inside an active event loop; use async_stop_sound()."
-                )
-                return False
-            return loop.run_until_complete(self.async_stop_sound(device_id))
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            _LOGGER.error(
+                "stop_sound() called inside an active event loop; use async_stop_sound()."
+            )
+            return False
+
+        try:
+            return asyncio.run(self.async_stop_sound(device_id))
         except Exception as err:
             _LOGGER.error("Failed to stop sound on %s: %s", device_id, _short_err(err))
             return False

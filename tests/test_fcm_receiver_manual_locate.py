@@ -1,8 +1,11 @@
 # tests/test_fcm_receiver_manual_locate.py
+"""Tests for manual locate registration and background decode helpers."""
+
 from __future__ import annotations
 
 import asyncio
 from typing import Any
+from collections.abc import Callable
 
 import pytest
 
@@ -96,3 +99,65 @@ def test_manual_locate_registration_and_cleanup(
         assert device_id not in receiver.location_update_callbacks
 
     asyncio.run(_run())
+
+
+def test_run_callback_async_uses_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The callback helper delegates work to ``asyncio.to_thread`` when available."""
+
+    receiver = FcmReceiverHA()
+    invoked: list[tuple[str, str]] = []
+    recorded: list[tuple[object, tuple[str, str]]] = []
+
+    async def fake_to_thread(func: Callable[[str, str], Any], /, *args: str) -> None:
+        recorded.append((func, args))
+        func(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+
+    def callback(canonic: str, payload_hex: str) -> None:
+        invoked.append((canonic, payload_hex))
+
+    async def _run() -> None:
+        await receiver._run_callback_async(callback, "dev-1", "deadbeef")
+
+    asyncio.run(_run())
+
+    assert recorded == [(callback, ("dev-1", "deadbeef"))]
+    assert invoked == [("dev-1", "deadbeef")]
+
+
+def test_process_background_update_uses_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Background decode is executed in a worker thread helper."""
+
+    receiver = FcmReceiverHA()
+    schedule_calls: list[tuple[str, str]] = []
+
+    def decode_stub(entry_id: str, payload_hex: str) -> dict[str, Any]:
+        return {"latitude": 1.0, "payload": payload_hex, "entry_id": entry_id}
+
+    async def fake_to_thread(
+        func: Callable[[str, str], dict[str, Any]], /, *args: str
+    ) -> dict[str, Any]:
+        assert func is decode_stub
+        return func(*args)
+
+    monkeypatch.setattr(receiver, "_decode_background_location", decode_stub)
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        receiver, "_schedule_flush", lambda key: schedule_calls.append(key)
+    )
+
+    async def _run() -> None:
+        await receiver._process_background_update(
+            "entry-1", "canonic-1", "c0ffee", {"entry-1", "entry-2"}
+        )
+
+    asyncio.run(_run())
+
+    key = ("entry-1", "canonic-1")
+    assert key in receiver._pending
+    assert receiver._pending[key]["latitude"] == 1.0
+    assert receiver._pending_targets[key] == {"entry-1", "entry-2"}
+    assert schedule_calls == [key]

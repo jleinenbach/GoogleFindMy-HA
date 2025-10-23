@@ -62,7 +62,7 @@ import logging
 import math
 import random
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 from collections.abc import Callable
 
 if TYPE_CHECKING:
@@ -105,6 +105,23 @@ except Exception:  # pragma: no cover
     FcmPushClientConfig = object  # type: ignore
 
 _LOGGER = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+async def _call_in_executor(func: Callable[..., _T], /, *args: Any) -> _T:
+    """Run ``func`` in a background thread with wide Python compatibility."""
+
+    to_thread = getattr(asyncio, "to_thread", None)
+    if to_thread is not None:
+        return await to_thread(func, *args)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop_policy().get_event_loop()
+
+    return await loop.run_in_executor(None, func, *args)
 
 
 class FcmReceiverHA:
@@ -853,8 +870,7 @@ class FcmReceiverHA:
         self, callback: Callable[[str, str], None], canonic_id: str, hex_string: str
     ) -> None:
         """Run a potentially blocking callback in a thread."""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, callback, canonic_id, hex_string)
+        await _call_in_executor(callback, canonic_id, hex_string)
 
     # -------------------- Push-path decode → debounce → flush --------------------
 
@@ -871,8 +887,8 @@ class FcmReceiverHA:
         enable precise fan-out in `_flush(...)`.
         """
         try:
-            location_data = await asyncio.get_event_loop().run_in_executor(
-                None, self._decode_background_location, entry_id, hex_string
+            location_data = await _call_in_executor(
+                self._decode_background_location, entry_id, hex_string
             )
             if not location_data:
                 _LOGGER.debug(
