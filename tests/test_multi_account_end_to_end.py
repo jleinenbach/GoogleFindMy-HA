@@ -114,6 +114,7 @@ class _StubFcm:
         self.tokens: dict[str, str] = {}
 
     def register_coordinator(self, coordinator: _StubCoordinator) -> None:
+        assert coordinator.cache is not None
         token = f"fcm-token-{coordinator.cache.entry_id}"
         self.tokens[coordinator.cache.entry_id] = token
         self.registered.append(coordinator)

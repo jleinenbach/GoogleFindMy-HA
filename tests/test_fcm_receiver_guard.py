@@ -357,3 +357,90 @@ def test_receiver_reuses_hass_managed_session(
     assert isinstance(created, DummyPushClient)
     assert recorded["hass"] is hass
     assert recorded["session"] is sentinel_session
+
+
+def test_register_coordinator_exposes_cache_and_tracks_push_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registering a coordinator wires its cache and counts background updates."""
+
+    receiver = FcmReceiverHA()
+
+    class DummyCache:
+        def __init__(self, entry_id: str) -> None:
+            self.entry_id = entry_id
+            self.data: dict[str, object] = {}
+
+        async def get(self, key: str) -> object | None:
+            return self.data.get(key)
+
+        async def set(self, key: str, value: object | None) -> None:
+            self.data[key] = value
+
+    class DummyEntry:
+        def __init__(self, entry_id: str) -> None:
+            self.entry_id = entry_id
+            self.options: dict[str, object] = {}
+
+    class DummyCoordinator:
+        def __init__(self, entry_id: str) -> None:
+            self.config_entry = DummyEntry(entry_id)
+            self._cache = DummyCache(entry_id)
+            self.performance_metrics: dict[str, int] = {}
+            self.updated: list[tuple[str, dict[str, object]]] = []
+            self.push_calls: list[list[str]] = []
+            self.google_home_filter = None
+
+        @property
+        def cache(self) -> DummyCache:
+            return self._cache
+
+        def update_device_cache(
+            self, device_id: str, location_data: dict[str, object]
+        ) -> None:
+            self.updated.append((device_id, dict(location_data)))
+            self.increment_stat("background_updates")
+
+        def increment_stat(self, name: str) -> None:
+            self.performance_metrics[name] = self.performance_metrics.get(name, 0) + 1
+
+        def push_updated(self, device_ids: list[str]) -> None:
+            self.push_calls.append(list(device_ids))
+
+        def is_ignored(self, _device_id: str) -> bool:
+            return False
+
+    started: list[tuple[str, DummyCache | None]] = []
+
+    async def fake_start(
+        self, entry_id: str, cache: DummyCache | None
+    ) -> None:  # pragma: no cover - simple proxy
+        started.append((entry_id, cache))
+
+    monkeypatch.setattr(FcmReceiverHA, "_start_supervisor_for_entry", fake_start)
+
+    coord = DummyCoordinator("entry-test")
+
+    async def _exercise() -> None:
+        await receiver.async_initialize()
+        receiver.register_coordinator(coord)
+        await asyncio.sleep(0)
+        key = ("entry-test", "device-1")
+        receiver._pending[key] = {
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "last_updated": 1234.0,
+        }
+        receiver._pending_targets[key] = {"entry-test"}
+        await receiver._flush(key)
+        await asyncio.sleep(0)
+
+    asyncio.run(_exercise())
+
+    assert receiver._entry_caches["entry-test"] is coord.cache
+    assert started == [("entry-test", coord.cache)]
+    assert coord.performance_metrics["background_updates"] == 1
+    assert coord.updated == [
+        ("device-1", {"latitude": 1.0, "longitude": 2.0, "last_updated": 1234.0})
+    ]
+    assert coord.push_calls == [["device-1"]]
