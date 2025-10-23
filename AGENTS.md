@@ -199,6 +199,34 @@ Add to the PR description:
 > fresh validation, use the **Run workflow** button in the Actions tab or re-run
 > the job from the PR UI.
 
+### 10.1 Type-checking policy — mypy strict on edited Python files
+
+**Applicability:** Only the Python files touched by the current edit/PR (generated
+artifacts remain exempt when explicitly flagged by repo configuration).
+
+1. **Identify Python paths.** Use `git diff --name-only --relative -- '*.py'`
+   against `HEAD` and narrow the list to files actually modified in this edit. If
+   Git metadata is unavailable, derive the list directly from the edit context.
+2. **Respect local configuration.** When `pyproject.toml`, `mypy.ini`,
+   `.mypy.ini`, or `setup.cfg` exists, invoke `mypy` without extra overrides so the
+   repository configuration remains authoritative.
+3. **Run the strict check.** Execute `mypy -q <changed-files>` when a
+   configuration file is present; otherwise run `mypy -q --strict <changed-files>`.
+   Install/upgrade mypy locally (`python -m pip install --upgrade mypy`) if it is
+   missing.
+4. **Resolve every diagnostic.** Add precise type annotations, tighten `Optional`
+   handling, and avoid blanket `Any`. Use `# type: ignore[...]` only when the
+   specific error code cannot be eliminated and document the rationale nearby.
+5. **Re-run until clean.** Repeat the command in step 3 until mypy exits with code
+   0 for all edited files.
+
+**Acceptance criteria:**
+
+* Clean mypy run (exit code 0) covering every touched Python file.
+* No new broad or unscoped `# type: ignore` directives.
+* Repository-level mypy configuration is honored; fallback strict mode is used
+  only when no configuration file exists.
+
 ---
 
 ## 11) Clean & Secure Coding Standard (Python 3.12 + Home Assistant 2025.10)
@@ -365,3 +393,9 @@ Add to the PR description:
 * [`custom_components/googlefindmy/FMDN.md`](custom_components/googlefindmy/FMDN.md) — canonical reference detailing cryptography, provisioning flows, BLE behavior, and failure modes underpinning modules such as [`custom_components/googlefindmy/api.py`](custom_components/googlefindmy/api.py), [`custom_components/googlefindmy/coordinator.py`](custom_components/googlefindmy/coordinator.py), and the BLE parsers in [`custom_components/googlefindmy/ProtoDecoders/`](custom_components/googlefindmy/ProtoDecoders/).
 
 See also: [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md) for additional, curated reference URLs.
+
+### 7) Type checking (mypy)
+
+* mypy — Command line reference: [https://mypy.readthedocs.io/en/stable/command_line.html](https://mypy.readthedocs.io/en/stable/command_line.html)
+* mypy — Configuration reference: [https://mypy.readthedocs.io/en/stable/config_file.html](https://mypy.readthedocs.io/en/stable/config_file.html)
+* mypy — Getting started & strict mode: [https://mypy.readthedocs.io/en/stable/getting_started.html](https://mypy.readthedocs.io/en/stable/getting_started.html)
