@@ -14,7 +14,6 @@ Best practices:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 from datetime import datetime, timezone
@@ -45,6 +44,8 @@ from .const import (
     SERVICE_DEVICE_NAME,
     SERVICE_DEVICE_MODEL,
     SERVICE_DEVICE_MANUFACTURER,
+    map_token_hex_digest,
+    map_token_secret_seed,
     service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
@@ -577,7 +578,8 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         """Generate a hardened token for map authentication (entry-scoped + weekly/static).
 
         Token formula (kept consistent with buttons, tracker and map_view):
-            md5( f"{ha_uuid}:{entry_id}:{week|static}" )[:16]
+            secret = map_token_secret_seed(...)
+            token  = map_token_hex_digest(secret)
         """
         config_entry = getattr(self.coordinator, "config_entry", None)
 
@@ -605,9 +607,8 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
 
         if token_expiration_enabled:
-            week = str(int(time.time() // 604800))  # weekly-rolling
-            secret = f"{ha_uuid}:{entry_id}:{week}"
+            seed = map_token_secret_seed(ha_uuid, entry_id, True, now=int(time.time()))
         else:
-            secret = f"{ha_uuid}:{entry_id}:static"
+            seed = map_token_secret_seed(ha_uuid, entry_id, False)
 
-        return hashlib.md5(secret.encode()).hexdigest()[:16]
+        return map_token_hex_digest(seed)

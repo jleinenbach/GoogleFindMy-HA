@@ -21,7 +21,6 @@ Quality & design notes (HA Platinum guidelines)
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 from typing import Any
@@ -41,6 +40,8 @@ from .const import (
     DOMAIN,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,  # <-- use the constant (C2)
     SERVICE_LOCATE_DEVICE,
+    map_token_hex_digest,
+    map_token_secret_seed,
     service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator
@@ -282,7 +283,8 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         """Generate a hardened map token (entry-scoped + weekly/static).
 
         Token formula (kept consistent with other platforms & map_view):
-            md5( f"{ha_uuid}:{entry_id}:{week|static}" )[:16]
+            secret = map_token_secret_seed(...)
+            token  = map_token_hex_digest(secret)
         """
         config_entry = getattr(self.coordinator, "config_entry", None)
 
@@ -309,12 +311,11 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         entry_id = getattr(config_entry, "entry_id", "") if config_entry else ""
         ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
         if token_expiration_enabled:
-            week = str(int(time.time() // 604800))  # 7-day bucket
-            token_src = f"{ha_uuid}:{entry_id}:{week}"
+            seed = map_token_secret_seed(ha_uuid, entry_id, True, now=int(time.time()))
         else:
-            token_src = f"{ha_uuid}:{entry_id}:static"
+            seed = map_token_secret_seed(ha_uuid, entry_id, False)
 
-        return hashlib.md5(token_src.encode()).hexdigest()[:16]
+        return map_token_hex_digest(seed)
 
 
 # ----------------------------- Play Sound -----------------------------------

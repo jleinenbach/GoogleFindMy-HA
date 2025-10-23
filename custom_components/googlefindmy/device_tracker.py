@@ -17,7 +17,6 @@ Entry-scope guarantees (C2):
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 from typing import Any
@@ -42,6 +41,8 @@ from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    map_token_hex_digest,
+    map_token_secret_seed,
     service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
@@ -330,7 +331,8 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         """Generate a hardened token for map authentication (entry-scoped + weekly/static).
 
         Token formula:
-            md5( f"{ha_uuid}:{entry_id}:{week|static}" )[:16]
+            secret = map_token_secret_seed(...)
+            token  = map_token_hex_digest(secret)
         """
         config_entry = getattr(self.coordinator, "config_entry", None)
 
@@ -360,14 +362,13 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
 
         if token_expiration_enabled:
             # Weekly-rolling token (7-day bucket).
-            week = str(int(time.time() // 604800))
-            secret = f"{ha_uuid}:{entry_id}:{week}"
+            seed = map_token_secret_seed(ha_uuid, entry_id, True, now=int(time.time()))
         else:
             # Static token (no rotation).
-            secret = f"{ha_uuid}:{entry_id}:static"
+            seed = map_token_secret_seed(ha_uuid, entry_id, False)
 
-        # Short md5 digest slice is fine here; this token does not gate sensitive operations.
-        return hashlib.md5(secret.encode()).hexdigest()[:16]
+        # Short SHA-256 digest slice is fine here; this token does not gate sensitive operations.
+        return map_token_hex_digest(seed)
 
     def _current_row(self) -> dict[str, Any] | None:
         """Get current device data from the coordinator's public cache API."""
