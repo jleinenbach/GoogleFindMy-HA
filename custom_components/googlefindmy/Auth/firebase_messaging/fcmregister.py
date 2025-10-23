@@ -322,12 +322,11 @@ class FcmRegister:
 
         Notes:
             Legacy upstream clients always used the legacy server key sender, which
-            succeeded quickly but never exercised the numeric sender path. Our
-            implementation first tries the configured numeric sender and, when the
-            server responds with HTML/404, immediately advances to the legacy
-            sender before the next attempt. This preserves compatibility with
-            modern projects while still converging in a single retry wave even when
-            Google stops accepting the numeric sender.
+            still succeeds instantly for most accounts. We keep that behaviour as
+            the first attempt and only fall back to the configured numeric sender
+            when Google rejects the legacy key (HTML/404 or explicit error). This
+            matches observed production success rates while retaining support for
+            modern projects that require the numeric sender.
         """
         gcm_app_id = f"wp:{self.config.bundle_id}#{uuid.uuid4()}"
         android_id = options["androidId"]
@@ -339,17 +338,17 @@ class FcmRegister:
         }
 
         sender_candidates: list[str] = []
+
+        # Prefer the legacy server key because it consistently succeeds without
+        # additional retries for existing deployments.
+        sender_candidates.append(GCM_SERVER_KEY_B64)
+
         if (
             isinstance(self.config.messaging_sender_id, str)
             and self.config.messaging_sender_id
+            and self.config.messaging_sender_id != GCM_SERVER_KEY_B64
         ):
             sender_candidates.append(self.config.messaging_sender_id)
-
-        if GCM_SERVER_KEY_B64 not in sender_candidates:
-            sender_candidates.append(GCM_SERVER_KEY_B64)
-
-        if not sender_candidates:
-            sender_candidates = [GCM_SERVER_KEY_B64]
 
         body = {
             "app": self.config.chrome_id,

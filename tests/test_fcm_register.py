@@ -54,10 +54,10 @@ class _FakeSession:
         return self._responses.pop(0)
 
 
-def test_gcm_register_uses_numeric_sender_by_default(
+def test_gcm_register_prefers_legacy_sender_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The initial request uses the configured numeric sender value."""
+    """The initial request starts with the legacy server key sender."""
 
     responses = [
         _FakeResponse(200, "token=abc123", {"Content-Type": "text/plain"}),
@@ -81,7 +81,7 @@ def test_gcm_register_uses_numeric_sender_by_default(
 
     assert result["token"] == "abc123"
     assert session.calls[0]["url"] == GCM_REGISTER3_URL
-    assert session.calls[0]["data"]["sender"] == "1234567890123"
+    assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
 def test_gcm_register_html_response_triggers_sender_fallback(
@@ -124,9 +124,9 @@ def test_gcm_register_html_response_triggers_sender_fallback(
         GCM_REGISTER_URL,
     ]
     assert [call["data"]["sender"] for call in session.calls] == [
+        GCM_SERVER_KEY_B64,
         "1234567890123",
-        GCM_SERVER_KEY_B64,
-        GCM_SERVER_KEY_B64,
+        "1234567890123",
     ]
     assert any(
         "switching sender from" in record.getMessage()
@@ -207,8 +207,8 @@ def test_gcm_register_fallback_succeeds_on_second_attempt(
         GCM_REGISTER3_URL,
     ]
     assert [call["data"]["sender"] for call in session.calls] == [
-        "1234567890123",
         GCM_SERVER_KEY_B64,
+        "1234567890123",
     ]
 
 
@@ -238,7 +238,7 @@ def test_gcm_register_success_log_includes_sender(
     assert result["token"] == "success"
     assert any(
         "GCM register succeeded via /c2dm/register3" in record.getMessage()
-        and "using sender=1234567890123 (configured numeric sender)"
+        and f"using sender={GCM_SERVER_KEY_B64} (legacy server key)"
         in record.getMessage()
         for record in caplog.records
     )
@@ -274,8 +274,10 @@ def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(session.calls) == 2
 
 
-def test_gcm_register_falls_back_to_server_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """PHONE_REGISTRATION_ERROR triggers a second attempt using the legacy server key."""
+def test_gcm_register_falls_back_to_numeric_sender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PHONE_REGISTRATION_ERROR triggers a second attempt using the numeric sender."""
 
     responses = [
         _FakeResponse(
@@ -304,8 +306,8 @@ def test_gcm_register_falls_back_to_server_key(monkeypatch: pytest.MonkeyPatch) 
 
     assert result["token"] == "xyz"
     assert len(session.calls) == 2
-    assert session.calls[0]["data"]["sender"] == "1234567890123"
-    assert session.calls[1]["data"]["sender"] == GCM_SERVER_KEY_B64
+    assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
+    assert session.calls[1]["data"]["sender"] == "1234567890123"
 
 
 def test_gcm_register_phone_registration_error_logs_sender(
@@ -342,12 +344,12 @@ def test_gcm_register_phone_registration_error_logs_sender(
     assert result["token"] == "xyz"
     assert any(
         "PHONE_REGISTRATION_ERROR" in record.getMessage()
-        and "sender=1234567890123 (configured numeric sender)" in record.getMessage()
+        and f"sender={GCM_SERVER_KEY_B64} (legacy server key)" in record.getMessage()
         for record in caplog.records
     )
     assert any(
         "switching sender fallback" in record.getMessage()
-        and f"sender={GCM_SERVER_KEY_B64}" in record.getMessage()
+        and "sender=1234567890123" in record.getMessage()
         for record in caplog.records
     )
 
