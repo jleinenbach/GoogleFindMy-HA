@@ -111,12 +111,13 @@ def test_locate_request_prefers_entry_scoped_cache(
         )
 
         assert result == [{"canonic_id": "device-123"}]
-        assert primary_cache.calls == [
-            ("set", "entry-one:ttl", "value"),
-            ("get", "entry-one:ttl", None),
-        ]
-        # Only the provided cache is used.
-        assert primary_cache.calls == [
+        calls = primary_cache.calls
+        assert calls[0][:2] == ("get", "entry-one:nova_contributor_mode")
+        assert calls[1][:2] == ("get", "entry-one:nova_last_network_mode_switch")
+        assert calls[2][0] == "set"
+        assert calls[2][1] == "entry-one:nova_last_network_mode_switch"
+        assert isinstance(calls[2][2], int)
+        assert calls[3:] == [
             ("set", "entry-one:ttl", "value"),
             ("get", "entry-one:ttl", None),
         ]
@@ -135,6 +136,91 @@ def test_start_sound_request_requires_cache() -> None:
             )
 
     asyncio.run(_run())
+
+
+def test_location_request_persists_mode_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Contributor mode overrides are persisted and forwarded to the request builder."""
+
+    cache = FakeTokenCache("entry-override")
+    receiver = DummyFcmReceiver()
+
+    monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda: receiver)
+
+    def fake_make_location_callback(
+        *, ctx: Any, canonic_device_id: str, **_: Any
+    ) -> Callable[[str, str], None]:
+        def _callback(response_canonic_id: str, _: str) -> None:
+            ctx.data = [{"canonic_id": response_canonic_id}]
+            ctx.event.set()
+
+        return _callback
+
+    monkeypatch.setattr(
+        location_request, "_make_location_callback", fake_make_location_callback
+    )
+
+    async def fake_async_nova_request(
+        api_scope: str,
+        hex_payload: str,
+        *,
+        cache_get: Callable[[str], Awaitable[Any]],
+        cache_set: Callable[[str, Any], Awaitable[None]],
+        cache: FakeTokenCache,
+        namespace: str | None,
+        **kwargs: Any,
+    ) -> str:
+        await cache_set("ttl", "value")
+        await cache_get("ttl")
+        return hex_payload
+
+    monkeypatch.setattr(location_request, "async_nova_request", fake_async_nova_request)
+
+    captured: dict[str, Any] = {}
+
+    def fake_create_location_request(
+        device_id: str,
+        fcm_token: str,
+        request_uuid: str,
+        *,
+        contributor_mode: str,
+        last_mode_switch: int,
+    ) -> str:
+        captured["mode"] = contributor_mode
+        captured["switch"] = last_mode_switch
+        return "payload"
+
+    monkeypatch.setattr(
+        location_request, "create_location_request", fake_create_location_request
+    )
+
+    async def _run() -> None:
+        await location_request.get_location_data_for_device(
+            canonic_device_id="device-override",
+            name="Tracker",
+            cache=cache,
+            contributor_mode="high_traffic",
+            last_mode_switch=1_700_000_000,
+        )
+
+    asyncio.run(_run())
+
+    assert captured["mode"] == "high_traffic"
+    assert captured["switch"] == 1_700_000_000
+
+    calls = cache.calls
+    assert calls[0][:2] == ("get", "entry-override:nova_contributor_mode")
+    assert calls[1] == ("set", "entry-override:nova_contributor_mode", "high_traffic")
+    assert calls[2] == (
+        "set",
+        "entry-override:nova_last_network_mode_switch",
+        1_700_000_000,
+    )
+    assert calls[3:] == [
+        ("set", "entry-override:ttl", "value"),
+        ("get", "entry-override:ttl", None),
+    ]
 
 
 def test_stop_sound_request_requires_cache() -> None:

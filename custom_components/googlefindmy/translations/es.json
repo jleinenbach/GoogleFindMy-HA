@@ -101,10 +101,12 @@
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Palabras clave del filtro (separadas por comas)",
           "enable_stats_entities": "Crear entidades de estadísticas",
-          "map_view_token_expiration": "Activar caducidad del token de la vista de mapa"
+          "map_view_token_expiration": "Activar caducidad del token de la vista de mapa",
+          "contributor_mode": "Modo de contribución de ubicaciones"
         },
         "data_description": {
-          "map_view_token_expiration": "Si está activado, los tokens de la vista de mapa caducan tras 1 semana. Si está desactivado (por defecto), no caducan."
+          "map_view_token_expiration": "Si está activado, los tokens de la vista de mapa caducan tras 1 semana. Si está desactivado (por defecto), no caducan.",
+          "contributor_mode": "\"high_traffic\" mantiene el modo agregado predeterminado de Google. \"in_all_areas\" habilita informes colaborativos más rápidos."
         }
       },
       "visibility": {

@@ -38,8 +38,29 @@ from custom_components.googlefindmy.exceptions import (
     MissingNamespaceError,
     MissingTokenCacheError,
 )
+from custom_components.googlefindmy.const import (
+    CACHE_KEY_CONTRIBUTOR_MODE,
+    CACHE_KEY_LAST_MODE_SWITCH,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
+    DEFAULT_CONTRIBUTOR_MODE,
+    LOCATION_REQUEST_TIMEOUT_S,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _normalize_contributor_mode(mode: str | None) -> str:
+    """Return a sanitized contributor mode string."""
+
+    if isinstance(mode, str):
+        normalized = mode.strip().lower()
+        if normalized in (
+            CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+            CONTRIBUTOR_MODE_IN_ALL_AREAS,
+        ):
+            return normalized
+    return DEFAULT_CONTRIBUTOR_MODE
 
 
 # -----------------------------------------------------------------------------
@@ -79,7 +100,12 @@ def unregister_fcm_receiver_provider() -> None:
 
 
 def create_location_request(
-    canonic_device_id: str, fcm_registration_id: str, request_uuid: str
+    canonic_device_id: str,
+    fcm_registration_id: str,
+    request_uuid: str,
+    *,
+    contributor_mode: str = DEFAULT_CONTRIBUTOR_MODE,
+    last_mode_switch: int | None = None,
 ) -> str:
     """Build and serialize a LocateTracker action request.
 
@@ -90,6 +116,8 @@ def create_location_request(
         canonic_device_id: The canonical ID of the target device.
         fcm_registration_id: The FCM token for push notifications.
         request_uuid: A unique identifier for this request.
+        contributor_mode: Contributor preference ("high_traffic" or "in_all_areas").
+        last_mode_switch: Epoch timestamp when the contributor mode last changed.
 
     Returns:
         A hex-encoded string representing the serialized protobuf message.
@@ -98,16 +126,25 @@ def create_location_request(
         DeviceUpdate_pb2,
     )  # lazy import
 
+    normalized_mode = _normalize_contributor_mode(contributor_mode)
+    if last_mode_switch is None or last_mode_switch <= 0:
+        last_mode_switch = int(time.time())
+
     action_request = create_action_request(
         canonic_device_id, fcm_registration_id, request_uuid=request_uuid
     )
 
-    # Use a current timestamp; server treats this as an arbitrary marker.
     action_request.action.locateTracker.lastHighTrafficEnablingTime.seconds = int(
-        time.time()
+        last_mode_switch
     )
-    action_request.action.locateTracker.contributorType = (
-        DeviceUpdate_pb2.SpotContributorType.FMDN_ALL_LOCATIONS
+
+    proto_mode_map = {
+        CONTRIBUTOR_MODE_HIGH_TRAFFIC: DeviceUpdate_pb2.SpotContributorType.FMDN_HIGH_TRAFFIC,
+        CONTRIBUTOR_MODE_IN_ALL_AREAS: DeviceUpdate_pb2.SpotContributorType.FMDN_ALL_LOCATIONS,
+    }
+    action_request.action.locateTracker.contributorType = proto_mode_map.get(
+        normalized_mode,
+        DeviceUpdate_pb2.SpotContributorType.FMDN_ALL_LOCATIONS,
     )
 
     # Convert to hex string
@@ -288,6 +325,8 @@ async def get_location_data_for_device(
     refresh_override: Callable[[], Awaitable[str | None]] | None = None,
     namespace: str | None = None,
     cache: TokenCache | None = None,  # type: ignore[name-defined]
+    contributor_mode: str | None = None,
+    last_mode_switch: int | None = None,
 ) -> list[dict[str, Any]]:
     """Get location data for a device (async, HA-compatible).
 
@@ -314,6 +353,8 @@ async def get_location_data_for_device(
         refresh_override: Optional async function to refresh a token in isolation.
         namespace: Optional entry-scoped namespace (e.g., config_entry.entry_id).
         cache: TokenCache providing entry-scoped username/token/metadata storage.
+        contributor_mode: Contributor preference ("high_traffic" or "in_all_areas").
+        last_mode_switch: Epoch timestamp when the contributor mode last changed.
 
     Returns:
         A list of dictionaries containing location data, or an empty list on failure.
@@ -340,6 +381,29 @@ async def get_location_data_for_device(
     if not resolved_namespace:
         raise MissingNamespaceError()
 
+    async def _cache_get_raw(key: str) -> Any:
+        getter = getattr(cache_ref, "async_get_cached_value", None)
+        if callable(getter):
+            return await getter(key)
+        fallback = getattr(cache_ref, "get", None)
+        if callable(fallback):
+            result = fallback(key)
+            if asyncio.iscoroutine(result):
+                return await result
+            return result
+        return None
+
+    async def _cache_set_raw(key: str, value: Any) -> None:
+        setter = getattr(cache_ref, "async_set_cached_value", None)
+        if callable(setter):
+            await setter(key, value)
+            return
+        fallback = getattr(cache_ref, "set", None)
+        if callable(fallback):
+            result = fallback(key, value)
+            if asyncio.iscoroutine(result):
+                await result
+
     # Build cache accessors, preferring entry-local namespacing when provided.
     ns_get: Callable[[str], Awaitable[Any]] | None = cache_get
     ns_set: Callable[[str, Any], Awaitable[None]] | None = cache_set
@@ -350,21 +414,61 @@ async def get_location_data_for_device(
         if ns_get is None:
 
             async def _ns_get(key: str) -> Any:
-                return await cache_ref.async_get_cached_value(f"{ns_prefix}{key}")
+                return await _cache_get_raw(f"{ns_prefix}{key}")
 
             ns_get = _ns_get
 
         if ns_set is None:
 
             async def _ns_set(key: str, value: Any) -> None:
-                await cache_ref.async_set_cached_value(f"{ns_prefix}{key}", value)
+                await _cache_set_raw(f"{ns_prefix}{key}", value)
 
             ns_set = _ns_set
     else:
         if ns_get is None:
-            ns_get = cache_ref.async_get_cached_value
+            ns_get = _cache_get_raw
         if ns_set is None:
-            ns_set = cache_ref.async_set_cached_value
+            ns_set = _cache_set_raw
+
+    mode = _normalize_contributor_mode(contributor_mode)
+    resolved_last_mode_switch: int | None = (
+        int(last_mode_switch)
+        if isinstance(last_mode_switch, (int, float)) and last_mode_switch > 0
+        else None
+    )
+
+    try:
+        cached_mode = await ns_get(CACHE_KEY_CONTRIBUTOR_MODE)  # type: ignore[misc]
+    except Exception as err:  # pragma: no cover - defensive logging
+        _LOGGER.debug("Failed to load contributor mode from cache: %s", err)
+        cached_mode = None
+
+    if contributor_mode is None and isinstance(cached_mode, str):
+        mode = _normalize_contributor_mode(cached_mode)
+    elif contributor_mode is not None:
+        try:
+            await ns_set(CACHE_KEY_CONTRIBUTOR_MODE, mode)  # type: ignore[misc]
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug("Failed to persist contributor mode override: %s", err)
+
+    if resolved_last_mode_switch is None:
+        try:
+            cached_switch = await ns_get(CACHE_KEY_LAST_MODE_SWITCH)  # type: ignore[misc]
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug("Failed to load contributor mode timestamp: %s", err)
+        else:
+            if isinstance(cached_switch, (int, float)) and cached_switch > 0:
+                resolved_last_mode_switch = int(cached_switch)
+
+    if resolved_last_mode_switch is None:
+        resolved_last_mode_switch = int(time.time())
+
+    try:
+        await ns_set(  # type: ignore[misc]
+            CACHE_KEY_LAST_MODE_SWITCH, resolved_last_mode_switch
+        )
+    except Exception as err:  # pragma: no cover - defensive logging
+        _LOGGER.debug("Failed to persist contributor mode timestamp: %s", err)
 
     try:
         # Generate request UUID
@@ -395,7 +499,11 @@ async def get_location_data_for_device(
 
         # Create location request payload
         hex_payload = create_location_request(
-            canonic_device_id, fcm_token, request_uuid
+            canonic_device_id,
+            fcm_token,
+            request_uuid,
+            contributor_mode=mode,
+            last_mode_switch=resolved_last_mode_switch,
         )
 
         # Send location request to Google API (async; HA session preferred if provided)
@@ -446,7 +554,7 @@ async def get_location_data_for_device(
         _LOGGER.info("Location request accepted for %s; awaiting FCM data...", name)
 
         # Wait efficiently for FCM callback to signal completion
-        timeout = 60  # seconds
+        timeout = LOCATION_REQUEST_TIMEOUT_S
         _LOGGER.info("Waiting for location response for %s...", name)
         try:
             await asyncio.wait_for(ctx.event.wait(), timeout=timeout)

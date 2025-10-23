@@ -99,10 +99,12 @@
           "google_home_filter_enabled": "Filter Google Home devices",
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
           "enable_stats_entities": "Create statistics entities",
-          "map_view_token_expiration": "Enable map view token expiration"
+          "map_view_token_expiration": "Enable map view token expiration",
+          "contributor_mode": "Location contributor mode"
         },
         "data_description": {
-          "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire."
+          "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire.",
+          "contributor_mode": "Choose \"high_traffic\" for aggregated network-only updates (Google's default) or \"in_all_areas\" to opt into crowdsourced reports for faster coverage."
         }
       },
       "visibility": {

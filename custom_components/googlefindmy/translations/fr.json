@@ -101,10 +101,12 @@
           "google_home_filter_enabled": "Filtrer les appareils Google Home",
           "google_home_filter_keywords": "Mots-clés du filtre (séparés par des virgules)",
           "enable_stats_entities": "Créer des entités de statistiques",
-          "map_view_token_expiration": "Activer l’expiration du jeton de la vue carte"
+          "map_view_token_expiration": "Activer l’expiration du jeton de la vue carte",
+          "contributor_mode": "Mode de contribution de localisation"
         },
         "data_description": {
-          "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas."
+          "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas.",
+          "contributor_mode": "\"high_traffic\" conserve le mode agrégé par défaut de Google. \"in_all_areas\" active des signalements participatifs plus rapides."
         }
       },
       "visibility": {

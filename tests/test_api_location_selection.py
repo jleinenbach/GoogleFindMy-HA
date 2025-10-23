@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from aiohttp import ClientSession
 
 from custom_components.googlefindmy.api import GoogleFindMyAPI
@@ -187,3 +188,43 @@ def test_sync_wrappers_use_provided_session_loop() -> None:
     finally:
         loop.run_until_complete(session.close())
         loop.close()
+
+
+def test_api_forwards_contributor_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Contributor mode settings are passed to the location request helper."""
+
+    captured: dict[str, Any] = {}
+
+    async def fake_get_location_data_for_device(
+        device_id: str,
+        device_name: str,
+        *,
+        session: ClientSession | None = None,
+        namespace: str | None = None,
+        cache: Any,
+        contributor_mode: str | None = None,
+        last_mode_switch: int | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        captured["mode"] = contributor_mode
+        captured["switch"] = last_mode_switch
+        return []
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.api.get_location_data_for_device",
+        fake_get_location_data_for_device,
+    )
+
+    async def _run() -> None:
+        api = GoogleFindMyAPI(
+            cache=_StubCache(),
+            contributor_mode="high_traffic",
+            contributor_mode_switch_epoch=1_700_000_000,
+        )
+
+        await api.async_get_device_location("dev-1", "Tracker")
+
+    asyncio.run(_run())
+
+    assert captured["mode"] == "high_traffic"
+    assert captured["switch"] == 1_700_000_000
