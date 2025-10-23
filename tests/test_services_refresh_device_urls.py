@@ -132,7 +132,6 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(
 
     asyncio.run(_run_refresh())
 
-    week_bucket = str(fake_now // 604800)
     expected_entry_one_token = const.map_token_hex_digest(
         const.map_token_secret_seed("ha-uuid", "entry-1", False)
     )
