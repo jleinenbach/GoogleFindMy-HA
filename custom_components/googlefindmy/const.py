@@ -18,6 +18,12 @@ DOMAIN: str = "googlefindmy"
 INTEGRATION_VERSION: str = "1.6.0"
 
 # --------------------------------------------------------------------------------------
+# Shared textual constants
+# --------------------------------------------------------------------------------------
+# Use the Greek small letter mu instead of the deprecated micro sign.
+MICRO: str = "\u03bc"
+
+# --------------------------------------------------------------------------------------
 # Service device metadata & helpers (to enforce consistent identifiers across platforms)
 # --------------------------------------------------------------------------------------
 SERVICE_DEVICE_NAME: str = "Google Find My Integration"

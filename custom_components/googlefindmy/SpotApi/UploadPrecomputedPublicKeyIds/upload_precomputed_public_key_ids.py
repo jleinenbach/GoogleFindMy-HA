@@ -5,6 +5,7 @@
 #
 import time
 
+from custom_components.googlefindmy.const import MICRO
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     generate_eid,
@@ -56,7 +57,10 @@ def refresh_custom_trackers(device_list: DevicesList):
             request.deviceEids.append(new_truncated_ids)
 
     if needs_upload:
-        print("[UploadPrecomputedPublicKeyIds] Updating your registered µC devices...")
+        print(
+            "[UploadPrecomputedPublicKeyIds] Updating your registered "
+            f"{MICRO}C devices..."
+        )
         try:
             bytes_data = request.SerializeToString()
             spot_request("UploadPrecomputedPublicKeyIds", bytes_data)
