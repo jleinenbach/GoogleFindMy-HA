@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 import pytest
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
 from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (
     async_request_device_list,
 )
@@ -477,6 +478,48 @@ def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:
 
             assert await cache.get(policy.k_startleft) == 1
             assert await cache.get(probe_bare_key) == 1
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
+
+
+def test_async_ttl_policy_clears_namespaced_aas_token_on_invalid_refresh() -> None:
+    """Invalid AAS tokens remove both namespaced and bare cache keys."""
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-invalid-aas")
+        try:
+            namespace = "entry-invalid-aas"
+
+            await cache.set(DATA_AAS_TOKEN, "seed-bare")
+            await cache.set(f"{namespace}:{DATA_AAS_TOKEN}", "seed-ns")
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                raise InvalidAasTokenError("expired")
+
+            policy = AsyncTTLPolicy(
+                username="user@example.com",
+                logger=logging.getLogger("test_async_ttl_invalid_aas"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            with pytest.raises(NovaAuthError):
+                await policy._do_refresh_async(time.time())
+
+            assert await cache.get(DATA_AAS_TOKEN) is None
+            assert await cache.get(f"{namespace}:{DATA_AAS_TOKEN}") is None
         finally:
             await cache.close()
 
