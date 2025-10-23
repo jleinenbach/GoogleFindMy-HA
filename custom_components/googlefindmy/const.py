@@ -7,6 +7,7 @@ Keep comments and docstrings in English; user-facing strings belong in translati
 
 from __future__ import annotations
 
+import hashlib
 import time
 
 # --------------------------------------------------------------------------------------
@@ -358,7 +359,8 @@ def map_token_secret_seed(
 ) -> str:
     """Return the secret seed string used to derive map-view tokens.
 
-    Callers should hash the returned value (e.g. md5) and slice as desired.
+    Callers should pass the seed to :func:`map_token_hex_digest` to obtain the
+    user-facing token string used in map URLs and entity configuration links.
 
     Args:
         ha_uuid: Home Assistant instance UUID (e.g., `hass.data["core.uuid"]`).
@@ -378,6 +380,17 @@ def map_token_secret_seed(
         week = now // WEEK_SECONDS
         return f"{safe_uuid}:{entry_id}:{week}"
     return f"{safe_uuid}:{entry_id}:static"
+
+
+def map_token_hex_digest(seed: str) -> str:
+    """Return the 16-character hex token derived from a seed value.
+
+    The helper generates a SHA-256 digest of ``seed`` and truncates it to the
+    first 16 hexadecimal characters, ensuring a consistent token format across
+    all components.
+    """
+
+    return hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 
 __all__ = [
@@ -453,4 +466,5 @@ __all__ = [
     "ignored_choices_for_ui",
     "WEEK_SECONDS",
     "map_token_secret_seed",
+    "map_token_hex_digest",
 ]

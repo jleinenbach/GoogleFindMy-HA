@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
-
 import logging
 import time
 from datetime import datetime, timedelta
@@ -20,9 +18,12 @@ from homeassistant.util import dt as dt_util
 from .coordinator import GoogleFindMyCoordinator
 
 from .const import (
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    WEEK_SECONDS,
+    map_token_hex_digest,
+    map_token_secret_seed,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,13 +51,6 @@ def _html_response(title: str, body: str, status: int = 200) -> web.Response:
 # --------------------------- Token / Entry helpers ---------------------------
 
 
-def _week_bucket(now_ts: float | None = None) -> int:
-    """Return the current 7-day bucket index (UTC)."""
-    if now_ts is None:
-        now_ts = time.time()
-    return int(now_ts // 604800)
-
-
 def _entry_accept_tokens(
     hass: HomeAssistant,
     entry_id: str,
@@ -65,8 +59,8 @@ def _entry_accept_tokens(
     """Compute the accepted tokens for a given entry_id.
 
     Contract (must match Buttons/Sensor/Tracker):
-      secret = f"{ha_uuid}:{entry_id}:{week|static}"
-      token  = md5(secret).hexdigest()[:16]
+      secret = map_token_secret_seed(...)
+      token  = map_token_hex_digest(secret)
 
     For weekly tokens, accept the current and previous bucket (grace on week rollover).
     For static tokens, accept only the static form.
@@ -74,14 +68,16 @@ def _entry_accept_tokens(
     ha_uuid = str(hass.data.get("core.uuid", "ha"))
     tokens: set[str] = set()
     if token_expiration_enabled:
-        current = _week_bucket()
-        prev = current - 1
-        for wk in (current, prev):
-            secret = f"{ha_uuid}:{entry_id}:{wk}"
-            tokens.add(hashlib.md5(secret.encode()).hexdigest()[:16])
+        now = int(time.time())
+        current_secret = map_token_secret_seed(ha_uuid, entry_id, True, now=now)
+        prev_secret = map_token_secret_seed(
+            ha_uuid, entry_id, True, now=now - WEEK_SECONDS
+        )
+        tokens.add(map_token_hex_digest(current_secret))
+        tokens.add(map_token_hex_digest(prev_secret))
     else:
-        secret = f"{ha_uuid}:{entry_id}:static"
-        tokens.add(hashlib.md5(secret.encode()).hexdigest()[:16])
+        secret = map_token_secret_seed(ha_uuid, entry_id, False)
+        tokens.add(map_token_hex_digest(secret))
     return tokens
 
 

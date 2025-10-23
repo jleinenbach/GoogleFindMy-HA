@@ -15,7 +15,6 @@ Compatibility
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 from typing import Any
@@ -43,6 +42,8 @@ from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     LEGACY_SERVICE_IDENTIFIER,
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
+    map_token_hex_digest,
+    map_token_secret_seed,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -299,7 +300,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         expiration_cache: dict[str, bool] = {}
         token_cache: dict[str, str] = {}
         ha_uuid = str(hass.data.get("core.uuid", "ha"))
-        week_bucket = str(int(time.time() // 604800))
+        now = int(time.time())
 
         def _expiration_enabled(entry_id: str | None) -> bool:
             cache_key = entry_id or ""
@@ -338,11 +339,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
             entry_part = entry_id or ""
             if _expiration_enabled(entry_id):
-                token_src = f"{ha_uuid}:{entry_part}:{week_bucket}"
+                seed = map_token_secret_seed(ha_uuid, entry_part, True, now=now)
             else:
-                token_src = f"{ha_uuid}:{entry_part}:static"
+                seed = map_token_secret_seed(ha_uuid, entry_part, False)
 
-            token_cache[cache_key] = hashlib.md5(token_src.encode()).hexdigest()[:16]
+            token_cache[cache_key] = map_token_hex_digest(seed)
             return token_cache[cache_key]
 
         def _device_is_service(device: Any) -> bool:

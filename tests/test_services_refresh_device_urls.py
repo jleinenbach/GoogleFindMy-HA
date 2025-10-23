@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -134,10 +133,12 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(
     asyncio.run(_run_refresh())
 
     week_bucket = str(fake_now // 604800)
-    expected_entry_one_token = hashlib.md5(b"ha-uuid:entry-1:static").hexdigest()[:16]
-    expected_entry_two_token = hashlib.md5(
-        f"ha-uuid:entry-2:{week_bucket}".encode()
-    ).hexdigest()[:16]
+    expected_entry_one_token = const.map_token_hex_digest(
+        const.map_token_secret_seed("ha-uuid", "entry-1", False)
+    )
+    expected_entry_two_token = const.map_token_hex_digest(
+        const.map_token_secret_seed("ha-uuid", "entry-2", True, now=fake_now)
+    )
 
     assert device_registry.updated == {
         "ha-dev-1": f"{base_url}/api/googlefindmy/map/device-alpha?token={expected_entry_one_token}",
