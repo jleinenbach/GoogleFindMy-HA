@@ -11,16 +11,18 @@ requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "BSkando" }]
 dependencies = [
-    "gpsoauth>=2.0.0",
-    "beautifulsoup4>=4.14.2",
-    "pyscrypt>=1.6.2",
-    "pycryptodomex>=3.23.0",
+    "beautifulsoup4>=4.12.3",
+    "cryptography>=43.0.3",
     "ecdsa>=0.19.1",
-    "pytz>=2025.2",
-    "protobuf>=6.32.0",
+    "gpsoauth>=2.0.0",
+    "h2>=4.1.0",
     "http-ece>=1.2.1",
-    "undetected_chromedriver>=3.5.5",
+    "httpx[http2]>=0.28.0",
+    "protobuf>=6.32.0",
+    "pycryptodomex>=3.23.0",
+    "pyscrypt>=1.6.2",
     "selenium>=4.37.0",
+    "undetected_chromedriver>=3.5.5",
 ]
 
 [project.optional-dependencies]
