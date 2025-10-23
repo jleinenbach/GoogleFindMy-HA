@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
+
+from aiohttp import ClientSession
 
 from custom_components.googlefindmy.api import GoogleFindMyAPI
 
@@ -28,6 +31,44 @@ def _make_api() -> GoogleFindMyAPI:
     """Helper to build the API with the lightweight stub cache."""
 
     return GoogleFindMyAPI(cache=_StubCache())
+
+
+class _SyncHarness(GoogleFindMyAPI):
+    """Test harness overriding async calls for sync-wrapper tests."""
+
+    def __init__(self) -> None:
+        super().__init__(cache=_StubCache())
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def async_get_basic_device_list(self) -> list[dict[str, Any]]:
+        self.calls.append(("basic", ()))
+        return [{"id": "stub"}]
+
+    async def async_get_device_location(
+        self, device_id: str, device_name: str
+    ) -> dict[str, Any]:
+        self.calls.append(("loc", (device_id, device_name)))
+        return {"id": device_id, "name": device_name}
+
+    async def async_play_sound(self, device_id: str) -> bool:
+        self.calls.append(("play", (device_id,)))
+        return True
+
+    async def async_stop_sound(self, device_id: str) -> bool:
+        self.calls.append(("stop", (device_id,)))
+        return True
+
+
+class _LoopCaptureHarness(GoogleFindMyAPI):
+    """Harness capturing the loop used by sync wrappers when a session is provided."""
+
+    def __init__(self, session: ClientSession) -> None:
+        super().__init__(cache=_StubCache(), session=session)
+        self.loops: list[asyncio.AbstractEventLoop] = []
+
+    async def async_get_basic_device_list(self) -> list[dict[str, Any]]:
+        self.loops.append(asyncio.get_running_loop())
+        return []
 
 
 def test_select_best_location_prefers_owner_report() -> None:
@@ -90,3 +131,59 @@ def test_select_best_location_prefers_precision_without_owner() -> None:
 
     assert best["tag"] == "precise"
     assert best["accuracy"] == 5.0
+
+
+def test_sync_wrappers_execute_without_running_loop() -> None:
+    """Sync helpers execute successfully when no loop is active."""
+
+    api = _SyncHarness()
+
+    basic = api.get_basic_device_list()
+    assert basic == [{"id": "stub"}]
+
+    location = api.get_device_location("dev-1", "Device 1")
+    assert location == {"id": "dev-1", "name": "Device 1"}
+
+    assert api.play_sound("dev-2") is True
+    assert api.stop_sound("dev-3") is True
+
+    assert api.calls == [
+        ("basic", ()),
+        ("loc", ("dev-1", "Device 1")),
+        ("play", ("dev-2",)),
+        ("stop", ("dev-3",)),
+    ]
+
+
+def test_sync_wrappers_guard_when_loop_running() -> None:
+    """Sync helpers refuse to run when an event loop is already active."""
+
+    api = _SyncHarness()
+
+    async def _runner() -> None:
+        assert api.get_basic_device_list() == []
+        assert api.get_device_location("dev-1", "Device 1") == {}
+        assert api.play_sound("dev-2") is False
+        assert api.stop_sound("dev-3") is False
+
+    asyncio.run(_runner())
+    assert api.calls == []
+
+
+def test_sync_wrappers_use_provided_session_loop() -> None:
+    """Sync helpers reuse the loop tied to an injected session."""
+
+    loop = asyncio.new_event_loop()
+
+    async def _setup() -> tuple[ClientSession, _LoopCaptureHarness]:
+        session = ClientSession()
+        harness = _LoopCaptureHarness(session)
+        return session, harness
+
+    session, harness = loop.run_until_complete(_setup())
+    try:
+        assert harness.get_basic_device_list() == []
+        assert harness.loops == [loop]
+    finally:
+        loop.run_until_complete(session.close())
+        loop.close()
