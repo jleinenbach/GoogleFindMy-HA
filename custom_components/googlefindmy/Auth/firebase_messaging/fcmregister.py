@@ -319,6 +319,15 @@ class FcmRegister:
         Returns:
             Dict with token/app_id/android_id/security_token on success, otherwise
             ``None``.
+
+        Notes:
+            Legacy upstream clients always used the legacy server key sender, which
+            succeeded quickly but never exercised the numeric sender path. Our
+            implementation first tries the configured numeric sender and, when the
+            server responds with HTML/404, immediately advances to the legacy
+            sender before the next attempt. This preserves compatibility with
+            modern projects while still converging in a single retry wave even when
+            Google stops accepting the numeric sender.
         """
         gcm_app_id = f"wp:{self.config.bundle_id}#{uuid.uuid4()}"
         android_id = options["androidId"]
