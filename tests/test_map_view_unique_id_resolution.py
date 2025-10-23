@@ -383,3 +383,37 @@ def test_map_view_uses_iso_last_seen_for_timeline(
     assert captured_locations[0]["last_seen"] != pytest.approx(
         history_states[0].last_updated.timestamp()
     )
+
+
+def test_map_view_html_uses_iso_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Embedded scripts must convert date inputs via toISOString and local formatters."""
+
+    map_view = _load_map_view_module(monkeypatch)
+    hass = _StubHass()
+    view = map_view.GoogleFindMyMapView(hass)
+
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    locations = [
+        {
+            "lat": 10.0,
+            "lon": 20.0,
+            "accuracy": 5.0,
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "last_seen": start.timestamp(),
+            "entity_id": "device_tracker.sample",
+            "state": "home",
+            "is_own_report": True,
+            "semantic_location": "Sample",
+        }
+    ]
+
+    html_with_locations = view._generate_map_html(
+        "Device", locations, "device-1", start, end, 0
+    )
+    html_empty = view._generate_map_html("Device", [], "device-1", start, end, 0)
+
+    assert "startDate.toISOString()" in html_with_locations
+    assert "startDate.toISOString()" in html_empty
+    assert "getFullYear()" in html_with_locations
+    assert "getFullYear()" in html_empty

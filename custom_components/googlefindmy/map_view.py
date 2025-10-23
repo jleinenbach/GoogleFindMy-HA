@@ -454,39 +454,64 @@ class GoogleFindMyMapView(HomeAssistantView):
                 }}
 
                 function formatDateTime(date) {{
-                    return date.toISOString().slice(0, 16);
+                    const year = date.getFullYear();
+                    const month = String(date.getMonth() + 1).padStart(2, '0');
+                    const day = String(date.getDate()).padStart(2, '0');
+                    const hours = String(date.getHours()).padStart(2, '0');
+                    const minutes = String(date.getMinutes()).padStart(2, '0');
+                    return `${{year}}-${{month}}-${{day}}T${{hours}}:${{minutes}}`;
                 }}
 
                 function updateMap() {{
-                    const startTime = document.getElementById('startTime').value;
-                    const endTime = document.getElementById('endTime').value;
+                    const startField = document.getElementById('startTime');
+                    const endField = document.getElementById('endTime');
+                    const startValue = startField ? startField.value : '';
+                    const endValue = endField ? endField.value : '';
 
-                    if (!startTime || !endTime) {{
+                    if (!startValue || !endValue) {{
                         alert('Please select both start and end times');
                         return;
                     }}
 
+                    const startDate = new Date(startValue);
+                    const endDate = new Date(endValue);
+
+                    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {{
+                        alert('Please provide valid start and end times');
+                        return;
+                    }}
+
                     updateLocationWithParams({{
-                        start: `${{startTime}}:00Z`,
-                        end: `${{endTime}}:00Z`,
+                        start: startDate.toISOString(),
+                        end: endDate.toISOString(),
                     }});
                 }}
 
                 document.addEventListener('DOMContentLoaded', function() {{
                     const controls = document.getElementById('mapControls');
                     if (controls) {{
+                        const startField = document.getElementById('startTime');
+                        const endField = document.getElementById('endTime');
                         const startAttr = controls.dataset.initialStart;
                         const endAttr = controls.dataset.initialEnd;
-                        if (startAttr) {{
+
+                        if (startAttr && startField && !startField.value) {{
                             const decodedStart = decodeURIComponent(startAttr);
-                            if (!document.getElementById('startTime').value) {{
-                                document.getElementById('startTime').value = decodedStart.slice(0, 16);
+                            const parsedStart = new Date(decodedStart);
+                            if (!Number.isNaN(parsedStart.getTime())) {{
+                                startField.value = formatDateTime(parsedStart);
+                            }} else {{
+                                startField.value = decodedStart.slice(0, 16);
                             }}
                         }}
-                        if (endAttr) {{
+
+                        if (endAttr && endField && !endField.value) {{
                             const decodedEnd = decodeURIComponent(endAttr);
-                            if (!document.getElementById('endTime').value) {{
-                                document.getElementById('endTime').value = decodedEnd.slice(0, 16);
+                            const parsedEnd = new Date(decodedEnd);
+                            if (!Number.isNaN(parsedEnd.getTime())) {{
+                                endField.value = formatDateTime(parsedEnd);
+                            }} else {{
+                                endField.value = decodedEnd.slice(0, 16);
                             }}
                         }}
                     }}
@@ -807,21 +832,39 @@ class GoogleFindMyMapView(HomeAssistantView):
                     document.getElementById('startTime').value = formatDateTime(start);
                 }}
 
-                function formatDateTime(date) {{ return date.toISOString().slice(0, 16); }}
+                function formatDateTime(date) {{
+                    const year = date.getFullYear();
+                    const month = String(date.getMonth() + 1).padStart(2, '0');
+                    const day = String(date.getDate()).padStart(2, '0');
+                    const hours = String(date.getHours()).padStart(2, '0');
+                    const minutes = String(date.getMinutes()).padStart(2, '0');
+                    return `${{year}}-${{month}}-${{day}}T${{hours}}:${{minutes}}`;
+                }}
 
                 function updateMap() {{
-                    const startTime = document.getElementById('startTime').value;
-                    const endTime = document.getElementById('endTime').value;
-                    const accuracyFilter = document.getElementById('accuracySlider').value;
+                    const startField = document.getElementById('startTime');
+                    const endField = document.getElementById('endTime');
+                    const accuracyField = document.getElementById('accuracySlider');
+                    const startValue = startField ? startField.value : '';
+                    const endValue = endField ? endField.value : '';
+                    const accuracyFilter = accuracyField ? accuracyField.value : '';
 
-                    if (!startTime || !endTime) {{
+                    if (!startValue || !endValue) {{
                         alert('Please select both start and end times');
                         return;
                     }}
 
+                    const startDate = new Date(startValue);
+                    const endDate = new Date(endValue);
+
+                    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {{
+                        alert('Please provide valid start and end times');
+                        return;
+                    }}
+
                     const updates = {{
-                        start: `${{startTime}}:00Z`,
-                        end: `${{endTime}}:00Z`,
+                        start: startDate.toISOString(),
+                        end: endDate.toISOString(),
                     }};
                     if (parseInt(accuracyFilter, 10) > 0) {{
                         updates.accuracy = accuracyFilter;
@@ -835,20 +878,28 @@ class GoogleFindMyMapView(HomeAssistantView):
                 document.addEventListener('DOMContentLoaded', function() {{
                     const filterPanel = document.getElementById('filterPanel');
                     if (filterPanel) {{
+                        const startField = document.getElementById('startTime');
+                        const endField = document.getElementById('endTime');
                         const startAttr = filterPanel.dataset.initialStart;
                         const endAttr = filterPanel.dataset.initialEnd;
                         const accuracyAttr = filterPanel.dataset.initialAccuracy;
 
-                        if (startAttr) {{
+                        if (startAttr && startField && !startField.value) {{
                             const decodedStart = decodeURIComponent(startAttr);
-                            if (!document.getElementById('startTime').value) {{
-                                document.getElementById('startTime').value = decodedStart.slice(0, 16);
+                            const parsedStart = new Date(decodedStart);
+                            if (!Number.isNaN(parsedStart.getTime())) {{
+                                startField.value = formatDateTime(parsedStart);
+                            }} else {{
+                                startField.value = decodedStart.slice(0, 16);
                             }}
                         }}
-                        if (endAttr) {{
+                        if (endAttr && endField && !endField.value) {{
                             const decodedEnd = decodeURIComponent(endAttr);
-                            if (!document.getElementById('endTime').value) {{
-                                document.getElementById('endTime').value = decodedEnd.slice(0, 16);
+                            const parsedEnd = new Date(decodedEnd);
+                            if (!Number.isNaN(parsedEnd.getTime())) {{
+                                endField.value = formatDateTime(parsedEnd);
+                            }} else {{
+                                endField.value = decodedEnd.slice(0, 16);
                             }}
                         }}
                         if (accuracyAttr) {{
