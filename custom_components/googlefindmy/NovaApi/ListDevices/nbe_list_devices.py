@@ -130,19 +130,26 @@ async def async_request_device_list(
     # Optionally wrap flow-local cache I/O with a namespace (only if overrides are supplied).
     ns_get = cache_get
     ns_set = cache_set
+
     if namespace:
-        if cache_get is not None:
+        ns_prefix = f"{namespace}:"
+        if ns_get is None:
 
             async def _ns_get(key: str) -> Any:
-                return await cache_get(f"{namespace}:{key}")
+                return await cache.async_get_cached_value(f"{ns_prefix}{key}")
 
             ns_get = _ns_get
-        if cache_set is not None:
+        if ns_set is None:
 
             async def _ns_set(key: str, value: Any) -> None:
-                await cache_set(f"{namespace}:{key}", value)
+                await cache.async_set_cached_value(f"{ns_prefix}{key}", value)
 
             ns_set = _ns_set
+    else:
+        if ns_get is None:
+            ns_get = cache.async_get_cached_value
+        if ns_set is None:
+            ns_set = cache.async_set_cached_value
 
     # Delegate HTTP to Nova client (handles session provider & timeouts).
     # Pass through entry-scoped TokenCache (preferred) and the namespace.
