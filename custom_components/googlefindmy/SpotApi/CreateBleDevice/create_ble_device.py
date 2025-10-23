@@ -7,6 +7,7 @@
 import secrets
 import time
 
+from custom_components.googlefindmy.const import MICRO
 from custom_components.googlefindmy.FMDNCrypto.key_derivation import FMDNOwnerOperations
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
@@ -41,7 +42,7 @@ def register_esp32():
     register_request.fastPairModelId = mcu_fast_pair_model_id
 
     # Description
-    register_request.description.userDefinedName = "GoogleFindMyTools micro-controller"
+    register_request.description.userDefinedName = f"GoogleFindMyTools {MICRO}C"
     register_request.description.deviceType = SpotDeviceType.DEVICE_TYPE_BEACON
 
     # Device Components Information
@@ -93,7 +94,7 @@ def register_esp32():
 
     # General
     register_request.manufacturerName = "GoogleFindMyTools"
-    register_request.modelName = "micro-controller"
+    register_request.modelName = f"{MICRO}C"
 
     ownerKeys = FMDNOwnerOperations()
     ownerKeys.generate_keys(identity_key=eik)

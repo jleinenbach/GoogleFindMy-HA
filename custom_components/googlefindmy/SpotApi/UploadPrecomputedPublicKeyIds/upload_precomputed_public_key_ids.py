@@ -5,6 +5,7 @@
 #
 import time
 
+from custom_components.googlefindmy.const import MICRO
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     generate_eid,
@@ -42,7 +43,17 @@ def refresh_custom_trackers(device_list: DevicesList):
                 device.identifierInformation.canonicIds.canonicId[0].id
             )
 
-            identity_key = retrieve_identity_key(device.information.deviceRegistration)
+            try:
+                identity_key = retrieve_identity_key(
+                    device.information.deviceRegistration
+                )
+            except RuntimeError as exc:
+                print(
+                    "[UploadPrecomputedPublicKeyIds] Identity key refresh requires the async "
+                    "API. "
+                    f"{exc}"
+                )
+                return
             next_eids = get_next_eids(
                 identity_key,
                 new_truncated_ids.pairDate,
@@ -57,7 +68,8 @@ def refresh_custom_trackers(device_list: DevicesList):
 
     if needs_upload:
         print(
-            "[UploadPrecomputedPublicKeyIds] Updating your registered micro-controller devices..."
+            "[UploadPrecomputedPublicKeyIds] Updating your registered "
+            f"{MICRO}C devices..."
         )
         try:
             bytes_data = request.SerializeToString()
