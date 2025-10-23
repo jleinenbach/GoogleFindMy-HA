@@ -12,7 +12,10 @@ from collections.abc import Callable
 import pytest
 
 from custom_components.googlefindmy.const import DOMAIN
-from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
+from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
+    FcmReceiverHA,
+    _call_in_executor,
+)
 
 
 class _StubReceiver:
@@ -75,6 +78,33 @@ def test_async_acquire_discards_invalid_cached_receiver(
     assert recorded_getters["loc"]() is new_receiver
     assert recorded_getters["api"]() is new_receiver
     assert hass.data[DOMAIN]["fcm_refcount"] == 1
+
+
+def test_call_in_executor_without_running_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback path without a running loop executes synchronously."""
+
+    monkeypatch.setattr(asyncio, "to_thread", None, raising=False)
+
+    def _raise_runtime_error() -> asyncio.AbstractEventLoop:
+        raise RuntimeError("no running event loop")
+
+    monkeypatch.setattr(asyncio, "get_running_loop", _raise_runtime_error)
+
+    calls: list[int] = []
+
+    def _work(value: int) -> int:
+        calls.append(value)
+        return value + 1
+
+    async def _runner() -> int:
+        return await _call_in_executor(_work, 41)
+
+    result = asyncio.run(_runner())
+
+    assert result == 42
+    assert calls == [41]
 
 
 def test_multi_entry_buffers_prevent_global_cache_access(

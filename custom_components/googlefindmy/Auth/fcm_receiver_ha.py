@@ -64,6 +64,7 @@ import random
 import time
 from typing import TYPE_CHECKING, Any, TypeVar
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -119,7 +120,9 @@ async def _call_in_executor(func: Callable[..., _T], /, *args: Any) -> _T:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        loop = asyncio.get_event_loop_policy().get_event_loop()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func, *args)
+            return future.result()
 
     return await loop.run_in_executor(None, func, *args)
 
