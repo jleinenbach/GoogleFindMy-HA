@@ -222,7 +222,7 @@ def _stub_homeassistant() -> None:
     sys.modules["homeassistant.helpers.entity"] = entity_module
     setattr(helpers_pkg, "entity", entity_module)
 
-    from typing import Callable, Iterable
+    from collections.abc import Callable, Iterable
 
     entity_platform_module = ModuleType("homeassistant.helpers.entity_platform")
     entity_platform_module.AddEntitiesCallback = Callable[[Iterable], None]

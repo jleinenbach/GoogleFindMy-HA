@@ -54,7 +54,17 @@ jobs:
           python -m pip install -r requirements-dev.txt
 
       - name: Run pre-commit (still required locally; pre-commit.ci auto-fixes PRs)
-        run: pre-commit run --all-files
+        run: |
+          set -eo pipefail
+          pre-commit run --all-files --show-diff-on-failure --color=always || (
+            echo "::group::pre-commit status"
+            git status --short
+            echo "::endgroup::"
+            echo "::group::pre-commit diff"
+            git diff
+            echo "::endgroup::"
+            exit 1
+          )
 
       - name: Run pytest (quiet) and capture
         run: |

@@ -324,3 +324,24 @@ def test_push_updated_keeps_known_name_for_blank_snapshots(
     entity._handle_coordinator_update()
 
     assert entity._attr_name == "Pixel 9"
+
+
+def test_poll_snapshot_reuses_cached_name_for_blank_payload(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """Poll snapshots should reuse cached names when payload omits them."""
+
+    loop = coordinator.hass.loop
+    coordinator._async_build_device_snapshot_with_fallbacks = AsyncMock(
+        side_effect=lambda devices: devices,
+    )
+
+    dummy_api.device_list = [{"id": "dev-1", "name": "Pixel 9"}]
+    initial_snapshot = loop.run_until_complete(coordinator._async_update_data())
+    assert initial_snapshot[0]["name"] == "Pixel 9"
+
+    dummy_api.device_list = [{"id": "dev-1", "name": ""}]
+    follow_up_snapshot = loop.run_until_complete(coordinator._async_update_data())
+
+    assert follow_up_snapshot[0]["name"] == "Pixel 9"
