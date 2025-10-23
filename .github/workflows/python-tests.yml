@@ -1,0 +1,56 @@
+name: Python tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements-dev.txt
+            custom_components/googlefindmy/requirements.txt
+            pyproject.toml
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run pytest (quiet) and capture
+        run: |
+          set -o pipefail
+          pytest -q 2>&1 | tee pytest_output.log
+
+      - name: Write short summary to GitHub Step Summary
+        if: always()
+        run: |
+          {
+            echo "## Pytest summary"
+            echo
+            echo '```'
+            tail -n 200 pytest_output.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
