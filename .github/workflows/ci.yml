@@ -44,6 +44,7 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
+          ignore: topics issues
 
   quality:
     name: Lint and tests
