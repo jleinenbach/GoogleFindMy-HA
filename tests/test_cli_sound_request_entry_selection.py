@@ -63,14 +63,10 @@ def test_start_cli_uses_selected_entry(monkeypatch: pytest.MonkeyPatch) -> None:
 
     recorded: dict[str, Any] = {}
 
-    class _Receiver:
-        def __init__(self, *, entry_id: str, cache: _DummyCache) -> None:  # type: ignore[override]
-            recorded["receiver_entry"] = entry_id
-            recorded["receiver_cache"] = cache
-
-        def register_for_location_updates(self, callback: Any) -> str:
-            recorded["callback"] = callback
-            return "token-123"
+    async def _fake_fetch(cache: _DummyCache, entry_id: str | None) -> str:
+        recorded["fetch_entry"] = entry_id
+        recorded["fetch_cache"] = cache
+        return "token-123"
 
     async def _fake_submit(
         canonic_device_id: str,
@@ -87,7 +83,9 @@ def test_start_cli_uses_selected_entry(monkeypatch: pytest.MonkeyPatch) -> None:
         return "ok"
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.Auth.fcm_receiver.FcmReceiver", _Receiver
+        start_sound_request,
+        "async_fetch_cli_fcm_token",
+        _fake_fetch,
     )
     monkeypatch.setattr(
         start_sound_request,
@@ -102,8 +100,8 @@ def test_start_cli_uses_selected_entry(monkeypatch: pytest.MonkeyPatch) -> None:
 
     asyncio.run(start_sound_request._async_cli_main("entry-two"))
 
-    assert recorded["receiver_entry"] == "entry-two"
-    assert recorded["receiver_cache"] is caches["entry-two"]
+    assert recorded["fetch_entry"] == "entry-two"
+    assert recorded["fetch_cache"] is caches["entry-two"]
     assert recorded["submit_cache"] is caches["entry-two"]
     assert recorded["submit_namespace"] == "entry-two"
     assert recorded["token"] == "token-123"
@@ -136,14 +134,10 @@ def test_stop_cli_uses_selected_entry(monkeypatch: pytest.MonkeyPatch) -> None:
 
     recorded: dict[str, Any] = {}
 
-    class _Receiver:
-        def __init__(self, *, entry_id: str, cache: _DummyCache) -> None:  # type: ignore[override]
-            recorded["receiver_entry"] = entry_id
-            recorded["receiver_cache"] = cache
-
-        def register_for_location_updates(self, callback: Any) -> str:
-            recorded["callback"] = callback
-            return "token-456"
+    async def _fake_fetch(cache: _DummyCache, entry_id: str | None) -> str:
+        recorded["fetch_entry"] = entry_id
+        recorded["fetch_cache"] = cache
+        return "token-456"
 
     async def _fake_submit(
         canonic_device_id: str,
@@ -160,7 +154,9 @@ def test_stop_cli_uses_selected_entry(monkeypatch: pytest.MonkeyPatch) -> None:
         return "ok"
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.Auth.fcm_receiver.FcmReceiver", _Receiver
+        stop_sound_request,
+        "async_fetch_cli_fcm_token",
+        _fake_fetch,
     )
     monkeypatch.setattr(
         stop_sound_request,
@@ -175,8 +171,32 @@ def test_stop_cli_uses_selected_entry(monkeypatch: pytest.MonkeyPatch) -> None:
 
     asyncio.run(stop_sound_request._async_cli_main("entry-one"))
 
-    assert recorded["receiver_entry"] == "entry-one"
-    assert recorded["receiver_cache"] is caches["entry-one"]
+    assert recorded["fetch_entry"] == "entry-one"
+    assert recorded["fetch_cache"] is caches["entry-one"]
     assert recorded["submit_cache"] is caches["entry-one"]
     assert recorded["submit_namespace"] == "entry-one"
     assert recorded["token"] == "token-456"
+
+
+def test_cli_token_fetch_falls_back_to_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`async_fetch_cli_fcm_token` should read the cache when no provider is set."""
+
+    cache = _DummyCache("entry-cache")
+    asyncio.run(
+        cache.async_set_cached_value(
+            "fcm_credentials",
+            {"fcm": {"registration": {"token": "token-cache"}}},
+        )
+    )
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound._cli_helpers._resolve_receiver_provider",
+        lambda: None,
+    )
+
+    token = asyncio.run(
+        start_sound_request.async_fetch_cli_fcm_token(cache, "entry-cache")
+    )
+    assert token == "token-cache"

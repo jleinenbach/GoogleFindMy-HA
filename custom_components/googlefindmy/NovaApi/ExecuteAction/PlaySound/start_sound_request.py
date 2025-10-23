@@ -9,11 +9,14 @@ import asyncio
 import os
 import sys
 from typing import Any, cast
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
 import aiohttp
 from aiohttp import ClientSession
 
+from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound._cli_helpers import (
+    async_fetch_cli_fcm_token,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound.sound_request import (
     create_sound_request,
 )
@@ -25,11 +28,9 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 )
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
-from custom_components.googlefindmy.example_data_provider import get_example_data
-
-from custom_components.googlefindmy.exceptions import MissingTokenCacheError
-
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.example_data_provider import get_example_data
+from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 
 
 def start_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
@@ -157,7 +158,6 @@ async def async_submit_start_sound_request(
 async def _async_cli_main(entry_id_hint: str | None = None) -> None:
     """Execute the CLI helper, enforcing explicit ConfigEntry selection."""
 
-    from custom_components.googlefindmy.Auth.fcm_receiver import FcmReceiver
     from custom_components.googlefindmy.NovaApi.ListDevices import nbe_list_devices
 
     explicit_hint = entry_id_hint
@@ -168,10 +168,8 @@ async def _async_cli_main(entry_id_hint: str | None = None) -> None:
 
     cache, namespace = nbe_list_devices._resolve_cli_cache(explicit_hint)
 
-    receiver = FcmReceiver(entry_id=namespace, cache=cache)
-
     sample_canonic_device_id = get_example_data("sample_canonic_device_id")
-    fcm_token = receiver.register_for_location_updates(lambda x: None)
+    fcm_token = await async_fetch_cli_fcm_token(cache, namespace)
     if not isinstance(fcm_token, str) or not fcm_token:
         raise RuntimeError(
             "Unable to retrieve an FCM token for the selected entry. Ensure the "
