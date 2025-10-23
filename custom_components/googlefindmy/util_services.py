@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def register_entity_service(
@@ -36,4 +40,10 @@ def register_entity_service(
             # API mismatch (older HA backport); fall back to legacy variant below.
             pass
 
-    entity_platform.async_register_entity_service(service, schema, func)
+    try:
+        entity_platform.async_register_entity_service(service, schema, func)
+    except ValueError:
+        LOGGER.debug(
+            "Entity service %s already registered; skipping duplicate registration",
+            service,
+        )

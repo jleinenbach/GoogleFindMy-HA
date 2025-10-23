@@ -66,6 +66,29 @@ def test_register_entity_service_legacy_only() -> None:
     assert platform.calls == [("svc", {"field": "value"}, "handler")]
 
 
+def test_register_entity_service_legacy_duplicate_registration() -> None:
+    """Duplicate legacy registrations should be ignored to support multiple entries."""
+
+    class LegacyDuplicatePlatform:
+        def __init__(self) -> None:
+            self.successful_calls: list[tuple[Any, ...]] = []
+            self.duplicate_attempts = 0
+
+        def async_register_entity_service(self, *args: Any) -> None:
+            if self.successful_calls:
+                self.duplicate_attempts += 1
+                raise ValueError("already registered")
+            self.successful_calls.append(args)
+
+    platform = LegacyDuplicatePlatform()
+
+    register_entity_service(platform, "svc", {"field": "value"}, "handler")
+    register_entity_service(platform, "svc", {"field": "value"}, "handler")
+
+    assert platform.successful_calls == [("svc", {"field": "value"}, "handler")]
+    assert platform.duplicate_attempts == 1
+
+
 @pytest.mark.parametrize(
     "needle",
     ["async_register_entity_service(", "async_register_platform_entity_service("],
