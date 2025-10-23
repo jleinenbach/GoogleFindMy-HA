@@ -14,8 +14,8 @@ import time
 # Core identifiers
 # --------------------------------------------------------------------------------------
 DOMAIN: str = "googlefindmy"
-# Keep the integration version aligned across the project
-INTEGRATION_VERSION: str = "1.6"
+# Keep the integration version aligned across the project (match manifest.json)
+INTEGRATION_VERSION: str = "1.6.0"
 
 # --------------------------------------------------------------------------------------
 # Service device metadata & helpers (to enforce consistent identifiers across platforms)
