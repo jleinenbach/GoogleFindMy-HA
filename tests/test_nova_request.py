@@ -439,7 +439,6 @@ def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:
                     raise AssertionError("Expected to mint a fresh ADM token")
                 token = minted_tokens.pop(0)
                 await cache.set(bare_token_key, token)
-                await cache.set(namespaced_token_key, token)
                 return token
 
             policy = AsyncTTLPolicy(
