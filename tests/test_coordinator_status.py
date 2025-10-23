@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -13,7 +13,14 @@ from custom_components.googlefindmy.coordinator import (
     FcmStatus,
     GoogleFindMyCoordinator,
 )
-from custom_components.googlefindmy.const import CONF_GOOGLE_EMAIL, DOMAIN
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    DOMAIN,
+    EVENT_AUTH_OK,
+    ISSUE_AUTH_EXPIRED_KEY,
+    issue_id_for,
+)
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 
@@ -116,7 +123,7 @@ def coordinator(
     )
     coord = GoogleFindMyCoordinator(hass, cache=_DummyCache())
     coord.config_entry = _DummyEntry()
-    coord.async_set_updated_data = lambda _data: None
+    coord.async_set_updated_data = Mock()
     coord._async_build_device_snapshot_with_fallbacks = AsyncMock(return_value=[])
     coord._async_start_poll_cycle = AsyncMock()
     coord._ensure_registry_for_devices = lambda *_args, **_kwargs: 0
@@ -180,3 +187,51 @@ def test_api_status_recovers_after_success(
     assert coordinator.api_status.reason is None
     assert coordinator.fcm_status.state == FcmStatus.CONNECTED
     assert coordinator.auth_error_active is False
+
+
+def test_successful_update_clears_lingering_repair_issue(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """A successful poll clears lingering Repairs issues after a restart."""
+
+    hass = coordinator.hass
+    entry = coordinator.config_entry
+    issue_id = issue_id_for(entry.entry_id)
+
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=True,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key=ISSUE_AUTH_EXPIRED_KEY,
+        translation_placeholders={"email": "user@example.com"},
+    )
+
+    registry = ir.async_get(hass)
+    assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+    loop = hass.loop
+    dummy_api.raise_auth = False
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._async_build_device_snapshot_with_fallbacks.return_value = []
+
+    coordinator.data = []
+    coordinator.async_set_updated_data.reset_mock()
+    called_flag = {"value": False}
+
+    def _mark_called(*_args, **_kwargs) -> None:
+        called_flag["value"] = True
+
+    coordinator.async_set_updated_data.side_effect = _mark_called
+    result = loop.run_until_complete(coordinator._async_update_data())
+
+    assert result == []
+    assert registry.async_get_issue(DOMAIN, issue_id) is None
+    ok_events = [event for event, _data in hass.bus.fired if event == EVENT_AUTH_OK]
+    assert ok_events == [EVENT_AUTH_OK]
+    assert coordinator.async_set_updated_data.called, (
+        "Listeners should be notified after clearing issue"
+    )
+    assert called_flag["value"]

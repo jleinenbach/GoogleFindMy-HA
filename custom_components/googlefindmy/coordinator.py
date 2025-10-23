@@ -1088,16 +1088,37 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         except Exception as err:
             _LOGGER.debug("Failed to create Repairs issue: %s", err)
 
-    def _dismiss_auth_issue(self) -> None:
-        """Dismiss (idempotently) the Repairs issue if present."""
+    def _dismiss_auth_issue(self) -> bool:
+        """Dismiss (idempotently) the Repairs issue if present.
+
+        Returns True when an issue existed and was removed, False otherwise.
+        """
+
         entry = getattr(self, "config_entry", None)
         if not entry:
-            return
+            return False
+
+        issue_id = issue_id_for(entry.entry_id)
+
+        issue_present = False
         try:
-            ir.async_delete_issue(self.hass, DOMAIN, issue_id_for(entry.entry_id))
+            registry = ir.async_get(self.hass)
+        except Exception:  # pragma: no cover - defensive fallback
+            registry = None
+
+        if registry and hasattr(registry, "async_get_issue"):
+            try:
+                issue_present = registry.async_get_issue(DOMAIN, issue_id) is not None
+            except Exception:  # pragma: no cover - defensive fallback
+                issue_present = False
+
+        try:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
         except Exception:
             # Deleting a non-existent issue is fine; keep silent.
-            pass
+            return False
+
+        return issue_present
 
     def _set_auth_state(self, *, failed: bool, reason: str | None = None) -> None:
         """State machine for authentication error transitions.
@@ -1134,23 +1155,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 self.async_set_updated_data(self.data)
             except Exception:
                 pass
-        elif not failed and self._auth_error_active:
-            self._auth_error_active = False
-            self._auth_error_message = None
-            self._dismiss_auth_issue()
-            self.hass.bus.async_fire(
-                EVENT_AUTH_OK,
-                {
-                    "entry_id": getattr(self, "config_entry", None)
-                    and getattr(self.config_entry, "entry_id", "")
-                    or "",
-                    "email": self._get_account_email(),
-                },
-            )
-            try:
-                self.async_set_updated_data(self.data)
-            except Exception:
-                pass
+        elif not failed:
+            issue_dismissed = self._dismiss_auth_issue()
+            state_changed = False
+
+            if self._auth_error_active:
+                self._auth_error_active = False
+                self._auth_error_message = None
+                state_changed = True
+
+            if issue_dismissed or state_changed:
+                self.hass.bus.async_fire(
+                    EVENT_AUTH_OK,
+                    {
+                        "entry_id": getattr(self, "config_entry", None)
+                        and getattr(self.config_entry, "entry_id", "")
+                        or "",
+                        "email": self._get_account_email(),
+                    },
+                )
+                try:
+                    self.async_set_updated_data(self.data)
+                except Exception:
+                    pass
 
     @property
     def auth_error_active(self) -> bool:
