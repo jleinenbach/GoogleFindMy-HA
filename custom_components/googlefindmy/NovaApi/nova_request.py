@@ -395,6 +395,13 @@ class TTLPolicy:
                     pass
         tok = self._refresh()
         if tok:
+            token_base = f"adm_token_{self.username}"
+            for key in self._key_variants(token_base):
+                try:
+                    self._set(key, tok)
+                except Exception:
+                    pass
+
             self._set_auth("Bearer " + tok)
             issued_base = f"adm_token_issued_at_{self.username}"
             for key in self._key_variants(issued_base):
@@ -532,6 +539,13 @@ class AsyncTTLPolicy(TTLPolicy):
                 pass
             raise NovaAuthError(401, "AAS token invalid during ADM refresh") from err
         if tok:
+            token_base = f"adm_token_{self.username}"
+            for key in self._key_variants(token_base):
+                try:
+                    await self._set(key, tok)
+                except Exception:
+                    pass
+
             self._set_auth("Bearer " + tok)
             issued_base = f"adm_token_issued_at_{self.username}"
             for key in self._key_variants(issued_base):
