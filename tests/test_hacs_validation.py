@@ -27,10 +27,17 @@ def test_hacs_metadata_matches_manifest(
 ) -> None:
     """Ensure HACS metadata mirrors manifest declarations and const values."""
 
+    allowed_keys = {
+        "name",
+        "content_in_root",
+        "render_readme",
+        "homeassistant",
+        "filename",
+        "zip_release",
+        "hide_default_branch",
+    }
+    assert set(hacs_metadata).issubset(allowed_keys)
     assert hacs_metadata["name"] == manifest["name"]
-    assert hacs_metadata["iot_class"] == manifest["iot_class"]
-    domains = hacs_metadata.get("domains", [])
-    assert "device_tracker" in domains
 
     const_text = (integration_root / "const.py").read_text(encoding="utf-8")
     match = re.search(r'INTEGRATION_VERSION: str = "([^"]+)"', const_text)
