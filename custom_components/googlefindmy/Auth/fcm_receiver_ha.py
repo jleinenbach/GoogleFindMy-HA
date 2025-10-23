@@ -66,7 +66,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
 if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 # Integration-level tunables (safe fallbacks if missing)
@@ -148,7 +151,7 @@ class FcmReceiverHA:
 
     def __init__(self) -> None:
         # Optional handle to Home Assistant (for owner-index fallback). Set via attach_hass().
-        self._hass = None
+        self._hass: HomeAssistant | None = None
 
         # Per-entry in-memory credentials and clients
         self.creds: dict[str, dict | None] = {}  # entry_id -> credentials dict
@@ -238,7 +241,7 @@ class FcmReceiverHA:
 
     # -------------------- Optional HA attach --------------------
 
-    def attach_hass(self, hass) -> None:
+    def attach_hass(self, hass: HomeAssistant) -> None:
         """Optionally attach Home Assistant for owner-index fallback routing."""
         self._hass = hass
 
@@ -324,6 +327,10 @@ class FcmReceiverHA:
             def _on_creds_updated_entry(updated: Any, eid: str = entry_id) -> None:
                 self._on_credentials_updated_for_entry(eid, updated)
 
+            http_client_session = None
+            if self._hass is not None:
+                http_client_session = async_get_clientsession(self._hass)
+
             try:
                 pc = FcmPushClient(
                     lambda obj, n, dm, eid=entry_id: self._on_notification(
@@ -332,6 +339,7 @@ class FcmReceiverHA:
                     fcm_config,
                     creds,
                     _on_creds_updated_entry,
+                    http_client_session=http_client_session,
                     config=self._client_cfg,
                 )
             except Exception as err:  # noqa: BLE001

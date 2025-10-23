@@ -304,3 +304,56 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
         loop.run_until_complete(asyncio.sleep(0))
         loop.close()
         asyncio.set_event_loop(None)
+
+
+def test_receiver_reuses_hass_managed_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The receiver provides Home Assistant's shared session to FcmPushClient."""
+
+    hass = SimpleNamespace()
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(hass)
+
+    sentinel_session = object()
+    recorded: dict[str, object] = {}
+
+    def fake_async_get_clientsession(hass_arg: object) -> object:
+        recorded["hass"] = hass_arg
+        return sentinel_session
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.Auth.fcm_receiver_ha.async_get_clientsession",
+        fake_async_get_clientsession,
+    )
+
+    class DummyPushClient:
+        def __init__(
+            self,
+            _callback,
+            _config,
+            _creds,
+            _creds_cb,
+            *,
+            config=None,
+            http_client_session=None,
+        ) -> None:
+            recorded["session"] = http_client_session
+            recorded["config"] = config
+            self.run_state = None
+            self.do_listen = False
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.Auth.fcm_receiver_ha.FcmPushClient",
+        DummyPushClient,
+    )
+
+    async def _exercise() -> DummyPushClient | None:
+        await receiver.async_initialize()
+        return await receiver._ensure_client_for_entry("entry-id", None)
+
+    created = asyncio.run(_exercise())
+
+    assert isinstance(created, DummyPushClient)
+    assert recorded["hass"] is hass
+    assert recorded["session"] is sentinel_session
