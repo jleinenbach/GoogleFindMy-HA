@@ -29,11 +29,16 @@ from homeassistant.components.button import ButtonEntity, ButtonEntityDescriptio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import (
+    device_registry as dr,
+    entity_registry as er,
+    entity_platform,
+)
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+import voluptuous as vol
 
 from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -45,6 +50,7 @@ from .const import (
     service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator
+from .util_services import register_entity_service
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -117,6 +123,16 @@ async def async_setup_entry(
     if not isinstance(coordinator, GoogleFindMyCoordinator):
         raise HomeAssistantError("googlefindmy coordinator not ready")
 
+    platform_getter = getattr(entity_platform, "async_get_current_platform", None)
+    if callable(platform_getter):
+        platform = platform_getter()
+        register_entity_service(
+            platform,
+            "trigger_device_refresh",
+            vol.Schema({}),
+            "async_trigger_coordinator_refresh",
+        )
+
     known_ids: set[str] = set()
     entities: list[ButtonEntity] = []
 
@@ -176,6 +192,11 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
     ) -> None:
         super().__init__(coordinator)
         self._device = device
+
+    async def async_trigger_coordinator_refresh(self) -> None:
+        """Request a coordinator refresh via the entity service placeholder."""
+
+        await self.coordinator.async_request_refresh()
 
     # --------------- Common name refresh on coordinator update ---------------
     @callback

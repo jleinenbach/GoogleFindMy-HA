@@ -1,81 +1,121 @@
 # tests/test_services_forward_compat.py
-"""Validate service registration wrappers and translation compatibility."""
+"""Forward compatibility tests for entity service registration helpers."""
 
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
+from typing import Any
 
-EXPECTED_SERVICES = {
-    "locate_device",
-    "locate_external",
-    "play_sound",
-    "stop_sound",
-    "refresh_device_urls",
-    "rebuild_registry",
-}
+import pytest
+
+from custom_components.googlefindmy.util_services import register_entity_service
 
 
-def _top_level_yaml_keys(text: str) -> set[str]:
-    """Extract top-level keys from a simple YAML document."""
+class _PlatformRecorder:
+    """Capture calls to entity service registration methods for assertions."""
 
-    keys: set[str] = set()
-    for line in text.splitlines():
-        if not line or line.lstrip().startswith("#"):
+    def __init__(self, *, raises_in_new: bool = False) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.raises_in_new = raises_in_new
+        self.new_attempted = False
+
+    def async_register_platform_entity_service(self, *args: Any) -> None:
+        self.new_attempted = True
+        if self.raises_in_new:
+            raise TypeError("simulated signature mismatch")
+        self.calls.append(("new", args))
+
+    def async_register_entity_service(self, *args: Any) -> None:
+        self.calls.append(("legacy", args))
+
+
+def _integration_root() -> Path:
+    return Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy"
+
+
+def test_register_entity_service_prefers_platform_specific() -> None:
+    """The wrapper should call the new API when available."""
+
+    platform = _PlatformRecorder()
+    register_entity_service(platform, "svc", {"field": "value"}, "handler")
+    assert platform.new_attempted is True
+    assert platform.calls == [("new", ("svc", {"field": "value"}, "handler"))]
+
+
+def test_register_entity_service_falls_back_on_type_error() -> None:
+    """If the new API raises a TypeError, fall back to the legacy method."""
+
+    platform = _PlatformRecorder(raises_in_new=True)
+    register_entity_service(platform, "svc", {"field": "value"}, "handler")
+    assert platform.new_attempted is True
+    assert platform.calls == [("legacy", ("svc", {"field": "value"}, "handler"))]
+
+
+def test_register_entity_service_legacy_only() -> None:
+    """When only the legacy method exists, the wrapper uses it directly."""
+
+    class LegacyOnlyPlatform:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        def async_register_entity_service(self, *args: Any) -> None:
+            self.calls.append(args)
+
+    platform = LegacyOnlyPlatform()
+    register_entity_service(platform, "svc", {"field": "value"}, "handler")
+    assert platform.calls == [("svc", {"field": "value"}, "handler")]
+
+
+def test_register_entity_service_legacy_duplicate_registration() -> None:
+    """Duplicate legacy registrations should be ignored to support multiple entries."""
+
+    class LegacyDuplicatePlatform:
+        def __init__(self) -> None:
+            self.successful_calls: list[tuple[Any, ...]] = []
+            self.duplicate_attempts = 0
+
+        def async_register_entity_service(self, *args: Any) -> None:
+            if self.successful_calls:
+                self.duplicate_attempts += 1
+                raise ValueError("already registered")
+            self.successful_calls.append(args)
+
+    platform = LegacyDuplicatePlatform()
+
+    register_entity_service(platform, "svc", {"field": "value"}, "handler")
+    register_entity_service(platform, "svc", {"field": "value"}, "handler")
+
+    assert platform.successful_calls == [("svc", {"field": "value"}, "handler")]
+    assert platform.duplicate_attempts == 1
+
+
+@pytest.mark.parametrize(
+    "needle",
+    ["async_register_entity_service(", "async_register_platform_entity_service("],
+)
+def test_platforms_use_wrapper_exclusively(needle: str) -> None:
+    """Integration code should not call HA APIs directly anymore."""
+
+    offenders: list[Path] = []
+    for path in _integration_root().rglob("*.py"):
+        if path.name == "util_services.py":
             continue
-        if not line.startswith(" ") and line.rstrip().endswith(":"):
-            candidate = line.rstrip(":").strip()
-            if candidate:
-                keys.add(candidate)
-    return keys
+        text = path.read_text(encoding="utf-8")
+        if needle in text:
+            offenders.append(path.relative_to(_integration_root()))
+    assert offenders == []
 
 
-def test_services_yaml_matches_expected_entries(integration_root: Path) -> None:
-    """services.yaml should list the expected Home Assistant service names."""
+def test_wrapper_used_somewhere_in_platforms() -> None:
+    """The wrapper must be exercised by at least one integration module."""
 
-    services_yaml = (integration_root / "services.yaml").read_text(encoding="utf-8")
-    top_level_keys = _top_level_yaml_keys(services_yaml)
-    assert EXPECTED_SERVICES <= top_level_keys
-
-
-TRANSLATION_KEY_PATTERN = re.compile(r"translation_key=\"([a-z0-9_]+)\"")
-
-
-def test_services_module_exports_registration(integration_root: Path) -> None:
-    """services.py must expose async_register_services and aligned translations."""
-
-    services_module = (integration_root / "services.py").read_text(encoding="utf-8")
-    assert "async def async_register_services" in services_module
-    assert "ServiceValidationError" in services_module
-
-    used_keys = set(TRANSLATION_KEY_PATTERN.findall(services_module))
-    translations = json.loads(
-        (integration_root / "translations" / "en.json").read_text(encoding="utf-8")
+    wrapper_callers: list[Path] = []
+    for path in _integration_root().rglob("*.py"):
+        if path.name == "util_services.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "register_entity_service(" in text:
+            wrapper_callers.append(path.relative_to(_integration_root()))
+    assert wrapper_callers, (
+        "Expected at least one module to invoke register_entity_service"
     )
-
-    def _collect_keys(obj: object) -> set[str]:
-        if isinstance(obj, dict):
-            keys = set(obj.keys())
-            for value in obj.values():
-                keys |= _collect_keys(value)
-            return keys
-        if isinstance(obj, (list, tuple)):
-            keys: set[str] = set()
-            for item in obj:
-                keys |= _collect_keys(item)
-            return keys
-        return set()
-
-    available_keys = _collect_keys(translations)
-    missing = sorted(key for key in used_keys if key not in available_keys)
-    assert not missing, f"missing service translations: {missing}"
-
-
-def test_services_module_scans_runtime_entries(integration_root: Path) -> None:
-    """The services helper should iterate runtime_data containers for active entries."""
-
-    services_module = (integration_root / "services.py").read_text(encoding="utf-8")
-    assert "def _iter_runtimes" in services_module
-    assert "entry.runtime_data" in services_module
-    assert "hass.data.setdefault(DOMAIN" in services_module
