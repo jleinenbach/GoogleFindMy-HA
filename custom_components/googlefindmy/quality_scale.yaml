@@ -32,16 +32,20 @@ rules:
       evidence: []
     - id: docs-actions
       status: done
-      evidence: []
+      evidence:
+        - "README.md#services-actions"
     - id: docs-high-level-description
       status: done
-      evidence: []
+      evidence:
+        - "README.md#google-findmy-device-find-hub---home-assistant-integration"
     - id: docs-installation-instructions
       status: done
-      evidence: []
+      evidence:
+        - "README.md#installation"
     - id: docs-removal-instructions
       status: done
-      evidence: []
+      evidence:
+        - "README.md#deinstallation--removal"
     - id: entity-event-setup
       status: done
       evidence: []
@@ -73,10 +77,12 @@ rules:
       evidence: []
     - id: docs-configuration-parameters
       status: done
-      evidence: []
+      evidence:
+        - "README.md#configuration-options"
     - id: docs-installation-parameters
       status: done
-      evidence: []
+      evidence:
+        - "README.md#configuration-options"
     - id: entity-unavailable
       status: done
       evidence: []
@@ -111,25 +117,32 @@ rules:
       evidence: []
     - id: docs-data-update
       status: done
-      evidence: []
+      evidence:
+        - "README.md#data-updates-and-background-behavior"
     - id: docs-examples
       status: done
-      evidence: []
+      evidence:
+        - "README.md#concrete-use-cases"
     - id: docs-known-limitations
       status: done
-      evidence: []
+      evidence:
+        - "README.md#known-limitations"
     - id: docs-supported-devices
       status: done
-      evidence: []
+      evidence:
+        - "README.md#supported-devices-and-functions"
     - id: docs-supported-functions
       status: done
-      evidence: []
+      evidence:
+        - "README.md#supported-devices-and-functions"
     - id: docs-troubleshooting
       status: done
-      evidence: []
+      evidence:
+        - "README.md#troubleshooting"
     - id: docs-use-cases
       status: done
-      evidence: []
+      evidence:
+        - "README.md#concrete-use-cases"
     - id: dynamic-devices
       status: done
       evidence: []
