@@ -77,11 +77,15 @@ from .const import (
     OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_IGNORED_DEVICES,
+    OPT_CONTRIBUTOR_MODE,
     # Defaults
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_MIN_ACCURACY_THRESHOLD,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_CONTRIBUTOR_MODE,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
     OPT_OPTIONS_SCHEMA_VERSION,
     coerce_ignored_mapping,
 )
@@ -1163,6 +1167,7 @@ class OptionsFlowHandler(OptionsFlowBase):
             OPT_MAP_VIEW_TOKEN_EXPIRATION: _get(
                 OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             ),
+            OPT_CONTRIBUTOR_MODE: _get(OPT_CONTRIBUTOR_MODE, DEFAULT_CONTRIBUTOR_MODE),
         }
         if (
             OPT_MOVEMENT_THRESHOLD is not None
@@ -1215,6 +1220,9 @@ class OptionsFlowHandler(OptionsFlowBase):
             fields[vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS)] = str
         if OPT_ENABLE_STATS_ENTITIES is not None:
             fields[vol.Optional(OPT_ENABLE_STATS_ENTITIES)] = bool
+        fields[vol.Optional(OPT_CONTRIBUTOR_MODE)] = vol.In(
+            [CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS]
+        )
 
         base_schema = vol.Schema(fields)
 

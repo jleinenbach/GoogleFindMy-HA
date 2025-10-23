@@ -41,7 +41,8 @@
     "step": {
       "init": {
         "data": {
-          "map_view_token_expiration": "Enable map view token expiration"
+          "map_view_token_expiration": "Enable map view token expiration",
+          "contributor_mode": "Location contributor mode"
         },
         "data_description": {
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire."

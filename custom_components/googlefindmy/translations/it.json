@@ -101,10 +101,12 @@
           "google_home_filter_enabled": "Filtra dispositivi Google Home",
           "google_home_filter_keywords": "Parole chiave del filtro (separate da virgole)",
           "enable_stats_entities": "Crea entità statistiche",
-          "map_view_token_expiration": "Abilita scadenza dei token della vista mappa"
+          "map_view_token_expiration": "Abilita scadenza dei token della vista mappa",
+          "contributor_mode": "Modalità di contributo posizione"
         },
         "data_description": {
-          "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono."
+          "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono.",
+          "contributor_mode": "\"high_traffic\" mantiene la modalità aggregata predefinita di Google. \"in_all_areas\" abilita segnalazioni partecipative più rapide."
         }
       },
       "visibility": {

@@ -108,6 +108,11 @@ from .const import (
     EVENT_AUTH_OK,
     ISSUE_AUTH_EXPIRED_KEY,
     issue_id_for,
+    DEFAULT_CONTRIBUTOR_MODE,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
+    CACHE_KEY_CONTRIBUTOR_MODE,
+    CACHE_KEY_LAST_MODE_SWITCH,
 )
 
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
@@ -493,6 +498,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         min_accuracy_threshold: int = 100,
         movement_threshold: int = 50,
         allow_history_fallback: bool = False,
+        contributor_mode: str = DEFAULT_CONTRIBUTOR_MODE,
+        contributor_mode_switch_epoch: int | None = None,
     ) -> None:
         """Initialize the coordinator.
 
@@ -512,6 +519,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             min_accuracy_threshold: The minimum GPS accuracy in meters to accept a location.
             movement_threshold: Movement delta in meters for significance gating (default 50 m).
             allow_history_fallback: Whether to fall back to Recorder history for location.
+            contributor_mode: Preferred Nova contributor mode ("high_traffic" or "in_all_areas").
+            contributor_mode_switch_epoch: Epoch timestamp when the contributor mode last changed.
         """
         self.hass = hass
         self._cache = cache
@@ -528,7 +537,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         # Get the singleton aiohttp.ClientSession from Home Assistant and reuse it.
         self._session = async_get_clientsession(hass)
-        self.api = GoogleFindMyAPI(cache=self._cache, session=self._session)
+
+        normalized_mode = self._sanitize_contributor_mode(contributor_mode)
+        if contributor_mode_switch_epoch is None or contributor_mode_switch_epoch <= 0:
+            contributor_mode_switch_epoch = int(time.time())
+        self._contributor_mode = normalized_mode
+        self._contributor_mode_switch_epoch = int(contributor_mode_switch_epoch)
+
+        self.api = GoogleFindMyAPI(
+            cache=self._cache,
+            session=self._session,
+            contributor_mode=self._contributor_mode,
+            contributor_mode_switch_epoch=self._contributor_mode_switch_epoch,
+        )
 
         # Configuration (user options; updated via update_settings())
         self.location_poll_interval = int(location_poll_interval)
@@ -653,6 +674,38 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             _LOGGER,
             name=DOMAIN,
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
+        )
+
+    @staticmethod
+    def _sanitize_contributor_mode(mode: str | None) -> str:
+        """Normalize the contributor mode to a supported value."""
+
+        if isinstance(mode, str):
+            normalized = mode.strip().lower()
+            if normalized in (
+                CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+                CONTRIBUTOR_MODE_IN_ALL_AREAS,
+            ):
+                return normalized
+        return DEFAULT_CONTRIBUTOR_MODE
+
+    def _async_persist_contributor_mode(self) -> None:
+        """Persist the contributor mode preferences asynchronously."""
+
+        async def _persist() -> None:
+            try:
+                await self._cache.async_set_cached_value(
+                    CACHE_KEY_CONTRIBUTOR_MODE, self._contributor_mode
+                )
+                await self._cache.async_set_cached_value(
+                    CACHE_KEY_LAST_MODE_SWITCH,
+                    self._contributor_mode_switch_epoch,
+                )
+            except Exception as err:  # pragma: no cover - defensive persistence
+                _LOGGER.debug("Failed to persist contributor mode state: %s", err)
+
+        self.hass.async_create_task(
+            _persist(), name=f"{DOMAIN}.persist_contributor_mode"
         )
 
     async def async_setup(self) -> None:
@@ -3016,6 +3069,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         min_accuracy_threshold: int | None = None,
         movement_threshold: int | None = None,
         allow_history_fallback: bool | None = None,
+        contributor_mode: str | None = None,
+        contributor_mode_switch_epoch: int | None = None,
     ) -> None:
         """Apply updated user settings provided by the config entry (options-first).
 
@@ -3030,6 +3085,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             min_accuracy_threshold: The minimum accuracy in meters.
             movement_threshold: The spatial delta (meters) required to treat updates as significant.
             allow_history_fallback: Whether to allow falling back to Recorder history.
+            contributor_mode: Updated contributor mode ("high_traffic" or "in_all_areas").
+            contributor_mode_switch_epoch: Epoch timestamp when the mode last changed.
         """
         if ignored_devices is not None:
             # This attribute is only used as a fallback when config_entry is not available.
@@ -3077,6 +3134,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         if allow_history_fallback is not None:
             self.allow_history_fallback = bool(allow_history_fallback)
+
+        if contributor_mode is not None:
+            normalized_mode = self._sanitize_contributor_mode(contributor_mode)
+            if (
+                contributor_mode_switch_epoch is None
+                or contributor_mode_switch_epoch <= 0
+            ):
+                contributor_mode_switch_epoch = int(time.time())
+            epoch = int(contributor_mode_switch_epoch)
+            if (
+                normalized_mode != self._contributor_mode
+                or epoch != self._contributor_mode_switch_epoch
+            ):
+                self._contributor_mode = normalized_mode
+                self._contributor_mode_switch_epoch = epoch
+                self.api.set_contributor_mode(
+                    normalized_mode, switch_epoch=self._contributor_mode_switch_epoch
+                )
+                self._async_persist_contributor_mode()
 
     def force_poll_due(self) -> None:
         """Force the next poll to be due immediately (no private access required externally)."""

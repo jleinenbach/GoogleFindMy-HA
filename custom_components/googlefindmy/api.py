@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import (
     Any,
     Protocol,
@@ -54,7 +55,12 @@ from .ProtoDecoders.decoder import (
     get_devices_with_location,
     parse_device_list_protobuf,
 )
-from .const import CONF_OAUTH_TOKEN  # used by the ephemeral flow cache
+from .const import (
+    CONF_OAUTH_TOKEN,  # used by the ephemeral flow cache
+    DEFAULT_CONTRIBUTOR_MODE,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -331,6 +337,8 @@ class GoogleFindMyAPI:
         oauth_token: str | None = None,
         google_email: str | None = None,
         secrets_bundle: dict[str, Any] | None = None,
+        contributor_mode: str | None = None,
+        contributor_mode_switch_epoch: int | None = None,
     ) -> None:
         """Initialize the API wrapper.
 
@@ -347,6 +355,8 @@ class GoogleFindMyAPI:
             session: HA-managed aiohttp ClientSession to reuse for network calls.
             oauth_token: Optional OAuth token (flow validation only).
             google_email: Optional Google account e-mail (flow validation only).
+            contributor_mode: Preferred contributor mode ("high_traffic" or "in_all_areas").
+            contributor_mode_switch_epoch: Epoch timestamp when the contributor mode last changed.
         """
         if cache is None and (oauth_token or google_email):
             cache = _EphemeralCache(
@@ -366,9 +376,37 @@ class GoogleFindMyAPI:
         self._session = session
         self._sync_loop: asyncio.AbstractEventLoop | None = None
 
+        self._contributor_mode = self._normalize_contributor_mode(contributor_mode)
+        if contributor_mode_switch_epoch is None or contributor_mode_switch_epoch <= 0:
+            contributor_mode_switch_epoch = int(time.time())
+        self._contributor_mode_switch_epoch = int(contributor_mode_switch_epoch)
+
         # Capability cache to avoid repeated network calls in capability checks.
         # Key: canonical device id, Value: can_ring (bool)
         self._device_capabilities: dict[str, bool] = {}
+
+    @staticmethod
+    def _normalize_contributor_mode(mode: str | None) -> str:
+        """Normalize a contributor mode value."""
+
+        if isinstance(mode, str):
+            normalized = mode.strip().lower()
+            if normalized in (
+                CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+                CONTRIBUTOR_MODE_IN_ALL_AREAS,
+            ):
+                return normalized
+        return DEFAULT_CONTRIBUTOR_MODE
+
+    def set_contributor_mode(
+        self, mode: str | None, *, switch_epoch: int | None = None
+    ) -> None:
+        """Update the contributor mode used for Nova requests."""
+
+        self._contributor_mode = self._normalize_contributor_mode(mode)
+        if switch_epoch is None or switch_epoch <= 0:
+            switch_epoch = int(time.time())
+        self._contributor_mode_switch_epoch = int(switch_epoch)
 
     def _sync_call_guard(self, log_message: str) -> bool:
         """Return True if a sync wrapper should abort due to an active loop."""
@@ -859,6 +897,8 @@ class GoogleFindMyAPI:
                     session=self._session,
                     namespace=self._namespace(),
                     cache=self._cache,
+                    contributor_mode=self._contributor_mode,
+                    last_mode_switch=self._contributor_mode_switch_epoch,
                 )
             except TypeError:
                 try:
@@ -867,11 +907,21 @@ class GoogleFindMyAPI:
                         device_name,
                         session=self._session,
                         cache=self._cache,
+                        contributor_mode=self._contributor_mode,
+                        last_mode_switch=self._contributor_mode_switch_epoch,
                     )
                 except TypeError:
-                    records = await get_location_data_for_device(
-                        device_id, device_name, session=self._session
-                    )
+                    try:
+                        records = await get_location_data_for_device(
+                            device_id,
+                            device_name,
+                            session=self._session,
+                            cache=self._cache,
+                        )
+                    except TypeError:
+                        records = await get_location_data_for_device(
+                            device_id, device_name, session=self._session
+                        )
             best = self._select_best_location(records)
             if best:
                 _LOGGER.info(

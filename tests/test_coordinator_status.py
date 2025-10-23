@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, Mock
+from typing import Any
 
 import pytest
 
@@ -86,10 +87,25 @@ class _DummyAPI:
 
 
 class _DummyCache:
-    """Entry-scoped cache stub (unused but satisfies constructor)."""
+    """Entry-scoped cache stub providing async get/set helpers."""
 
-    async def get(self, _key: str) -> None:  # pragma: no cover - compatibility
-        return None
+    def __init__(self) -> None:
+        self._store: dict[str, Any] = {}
+
+    async def async_get_cached_value(self, key: str) -> Any:
+        """Return a stored value or None when absent."""
+
+        return self._store.get(key)
+
+    async def async_set_cached_value(self, key: str, value: Any) -> None:
+        """Persist a value in the in-memory store."""
+
+        self._store[key] = value
+
+    async def get(self, key: str) -> Any:  # pragma: no cover - legacy compatibility
+        """Compatibility alias for older tests still awaiting get()."""
+
+        return await self.async_get_cached_value(key)
 
 
 @pytest.fixture

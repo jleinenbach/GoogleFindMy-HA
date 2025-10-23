@@ -67,6 +67,7 @@ OPT_ENABLE_STATS_ENTITIES: str = "enable_stats_entities"
 OPT_GOOGLE_HOME_FILTER_ENABLED: str = "google_home_filter_enabled"
 OPT_GOOGLE_HOME_FILTER_KEYWORDS: str = "google_home_filter_keywords"
 OPT_MAP_VIEW_TOKEN_EXPIRATION: str = "map_view_token_expiration"
+OPT_CONTRIBUTOR_MODE: str = "contributor_mode"
 OPT_IGNORED_DEVICES: str = "ignored_devices"
 
 # Canonical list of option keys supported by the integration (without tracked_devices)
@@ -82,6 +83,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_CONTRIBUTOR_MODE,
 )
 
 # Keys which may exist historically in entry.data and should be soft-copied to entry.options
@@ -123,6 +125,13 @@ GOOGLE_HOME_SPAM_THRESHOLD_MINUTES: int = 15  # debounce for repeated detections
 # Default remains "no expiration" for backwards compatibility.
 DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
 
+CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"
+CONTRIBUTOR_MODE_IN_ALL_AREAS: str = "in_all_areas"
+DEFAULT_CONTRIBUTOR_MODE: str = CONTRIBUTOR_MODE_IN_ALL_AREAS
+
+CACHE_KEY_CONTRIBUTOR_MODE: str = "nova_contributor_mode"
+CACHE_KEY_LAST_MODE_SWITCH: str = "nova_last_network_mode_switch"
+
 # Aggregate defaults dictionary for option-first reading patterns
 DEFAULT_OPTIONS: dict[str, object] = {
     # Store ignored devices as mapping {device_id: {"name": str, "aliases": [str], "ignored_at": int, "source": str}}
@@ -138,6 +147,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_GOOGLE_HOME_FILTER_KEYWORDS: DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_CONTRIBUTOR_MODE: DEFAULT_CONTRIBUTOR_MODE,
 }
 
 # -------------------- Options schema versioning (lightweight) --------------------

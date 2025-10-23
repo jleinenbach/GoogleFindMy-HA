@@ -101,10 +101,12 @@
           "google_home_filter_enabled": "Filtruj urządzenia Google Home",
           "google_home_filter_keywords": "Słowa kluczowe filtra (oddzielone przecinkami)",
           "enable_stats_entities": "Twórz encje statystyczne",
-          "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy"
+          "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy",
+          "contributor_mode": "Tryb raportowania lokalizacji"
         },
         "data_description": {
-          "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają."
+          "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
+          "contributor_mode": "\"high_traffic\" utrzymuje domyślny tryb agregacji Google. \"in_all_areas\" włącza szybsze zgłoszenia crowdsourcingowe."
         }
       },
       "visibility": {

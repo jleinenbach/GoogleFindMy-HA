@@ -93,6 +93,7 @@ from .const import (
     DEFAULT_OPTIONS,
     DOMAIN,
     OPTION_KEYS,
+    OPT_CONTRIBUTOR_MODE,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_DEVICE_POLL_DELAY,
     OPT_IGNORED_DEVICES,
@@ -101,6 +102,11 @@ from .const import (
     OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
+    DEFAULT_CONTRIBUTOR_MODE,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
+    CACHE_KEY_CONTRIBUTOR_MODE,
+    CACHE_KEY_LAST_MODE_SWITCH,
     coerce_ignored_mapping,
 )
 from .coordinator import GoogleFindMyCoordinator
@@ -340,6 +346,19 @@ def _opt(entry: ConfigEntry, key: str, default: Any) -> Any:
 def _effective_config(entry: ConfigEntry) -> dict[str, Any]:
     """Assemble a dict of non-secret runtime settings (options-first)."""
     return {k: _opt(entry, k, None) for k in OPTION_KEYS}
+
+
+def _normalize_contributor_mode(value: Any) -> str:
+    """Return a sanitized contributor mode string."""
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in (
+            CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+            CONTRIBUTOR_MODE_IN_ALL_AREAS,
+        ):
+            return normalized
+    return DEFAULT_CONTRIBUTOR_MODE
 
 
 async def _async_soft_migrate_data_to_options(
@@ -939,6 +958,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("Early TokenCache seeding from entry.data failed: %s", err)
 
+    raw_mode = _opt(entry, OPT_CONTRIBUTOR_MODE, DEFAULT_CONTRIBUTOR_MODE)
+    contributor_mode = _normalize_contributor_mode(raw_mode)
+    now_epoch = int(time.time())
+
+    cached_mode = None
+    try:
+        cached_raw = await cache.async_get_cached_value(CACHE_KEY_CONTRIBUTOR_MODE)
+    except Exception as err:
+        _LOGGER.debug("Failed to read cached contributor mode: %s", err)
+        cached_raw = None
+    if isinstance(cached_raw, str):
+        cached_mode = _normalize_contributor_mode(cached_raw)
+
+    last_mode_switch_epoch: int | None = None
+    try:
+        cached_switch = await cache.async_get_cached_value(CACHE_KEY_LAST_MODE_SWITCH)
+    except Exception as err:
+        _LOGGER.debug("Failed to read cached network mode switch timestamp: %s", err)
+        cached_switch = None
+    if isinstance(cached_switch, (int, float)):
+        last_mode_switch_epoch = int(cached_switch)
+
+    if contributor_mode != cached_mode:
+        last_mode_switch_epoch = now_epoch
+        try:
+            await cache.async_set_cached_value(
+                CACHE_KEY_CONTRIBUTOR_MODE, contributor_mode
+            )
+            await cache.async_set_cached_value(
+                CACHE_KEY_LAST_MODE_SWITCH, last_mode_switch_epoch
+            )
+        except Exception as err:
+            _LOGGER.debug("Failed to persist contributor mode preference: %s", err)
+    elif last_mode_switch_epoch is None:
+        last_mode_switch_epoch = now_epoch
+        try:
+            await cache.async_set_cached_value(
+                CACHE_KEY_LAST_MODE_SWITCH, last_mode_switch_epoch
+            )
+        except Exception as err:
+            _LOGGER.debug("Failed to initialize contributor mode timestamp: %s", err)
+
     # Optional: register HA-managed aiohttp session for Nova API (defer import)
     try:
         from .NovaApi import nova_request as nova
@@ -1052,6 +1113,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             OPT_ALLOW_HISTORY_FALLBACK,
             DEFAULT_OPTIONS.get(OPT_ALLOW_HISTORY_FALLBACK, False),
         ),
+        contributor_mode=contributor_mode,
+        contributor_mode_switch_epoch=last_mode_switch_epoch,
     )
     coordinator.config_entry = entry  # convenience for platforms
 
