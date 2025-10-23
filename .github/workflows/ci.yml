@@ -78,7 +78,9 @@ jobs:
         run: ruff check .
 
       - name: Run mypy (strict)
-        run: mypy --strict custom_components/googlefindmy tests
+        run: |
+          mypy --strict -p custom_components.googlefindmy
+          mypy --strict -p tests
 
       - name: Run pytest with coverage
         run: |
