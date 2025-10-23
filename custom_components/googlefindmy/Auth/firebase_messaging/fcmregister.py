@@ -319,6 +319,14 @@ class FcmRegister:
         Returns:
             Dict with token/app_id/android_id/security_token on success, otherwise
             ``None``.
+
+        Notes:
+            Legacy upstream clients always used the legacy server key sender, which
+            still succeeds instantly for most accounts. We keep that behaviour as
+            the first attempt and only fall back to the configured numeric sender
+            when Google rejects the legacy key (HTML/404 or explicit error). This
+            matches observed production success rates while retaining support for
+            modern projects that require the numeric sender.
         """
         gcm_app_id = f"wp:{self.config.bundle_id}#{uuid.uuid4()}"
         android_id = options["androidId"]
@@ -330,17 +338,17 @@ class FcmRegister:
         }
 
         sender_candidates: list[str] = []
+
+        # Prefer the legacy server key because it consistently succeeds without
+        # additional retries for existing deployments.
+        sender_candidates.append(GCM_SERVER_KEY_B64)
+
         if (
             isinstance(self.config.messaging_sender_id, str)
             and self.config.messaging_sender_id
+            and self.config.messaging_sender_id != GCM_SERVER_KEY_B64
         ):
             sender_candidates.append(self.config.messaging_sender_id)
-
-        if GCM_SERVER_KEY_B64 not in sender_candidates:
-            sender_candidates.append(GCM_SERVER_KEY_B64)
-
-        if not sender_candidates:
-            sender_candidates = [GCM_SERVER_KEY_B64]
 
         body = {
             "app": self.config.chrome_id,
@@ -444,11 +452,37 @@ class FcmRegister:
             if status == 404 or html_like:
                 snippet = response_text[:200]
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                fallback_triggered = False
+                if sender_index + 1 < len(sender_candidates):
+                    # Treat persistent HTML/404 responses as a signal to advance to the
+                    # next sender candidate so we do not waste the entire retry budget
+                    # on an endpoint that is not provisioned for the numeric sender.
+                    previous_sender = body["sender"]
+                    sender_index += 1
+                    body["sender"] = sender_candidates[sender_index]
+                    endpoint_index = 0
+                    fallback_triggered = True
+                    _logger.warning(
+                        "GCM register received HTML/404 via %s; switching sender from %s (%s) to %s (%s)",
+                        indicator,
+                        previous_sender,
+                        sender_mode(previous_sender),
+                        body["sender"],
+                        sender_mode(body["sender"]),
+                    )
                 if attempt < retries:
-                    next_index = (endpoint_index + 1) % len(endpoints)
-                    log_endpoint_switch(f"HTTP {status}", endpoint_index, next_index)
-                    endpoint_index = next_index
-                    await asyncio.sleep(0.5)
+                    if not fallback_triggered:
+                        next_index = (endpoint_index + 1) % len(endpoints)
+                        log_endpoint_switch(
+                            f"HTTP {status}", endpoint_index, next_index
+                        )
+                        endpoint_index = next_index
+                    else:
+                        if self._log_debug_verbose:
+                            _logger.debug(
+                                "GCM register resetting endpoint rotation after HTML/404 sender fallback"
+                            )
+                    await asyncio.sleep(1 if fallback_triggered else 0.5)
                 else:
                     _logger.warning(
                         "GCM register 404/HTML via %s (status=%s); no retries left.",
