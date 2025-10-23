@@ -445,6 +445,74 @@ class GoogleFindMyMapView(HomeAssistantView):
                     window.location.href = nextUrl;
                 }}
 
+                function safeDecodeComponent(value) {{
+                    if (!value) {{
+                        return "";
+                    }}
+                    try {{
+                        return decodeURIComponent(value);
+                    }} catch (err) {{
+                        return value;
+                    }}
+                }}
+
+                function extractLocalInput(value) {{
+                    if (!value) {{
+                        return "";
+                    }}
+                    const match = value.match(/^(\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}})/);
+                    if (match) {{
+                        return match[1];
+                    }}
+                    const parsed = new Date(value);
+                    if (!Number.isNaN(parsed.getTime())) {{
+                        return formatDateTime(parsed);
+                    }}
+                    if (value.length >= 16) {{
+                        return value.slice(0, 16);
+                    }}
+                    return "";
+                }}
+
+                function registerInitialField(field, encoded) {{
+                    if (!field) {{
+                        return;
+                    }}
+                    const decoded = safeDecodeComponent(encoded);
+                    if (!field.dataset.initialIso) {{
+                        field.dataset.initialIso = decoded;
+                    }}
+                    if (!field.dataset.initialLocal) {{
+                        if (!field.value && decoded) {{
+                            const normalized = extractLocalInput(decoded);
+                            if (normalized) {{
+                                field.value = normalized;
+                            }}
+                        }}
+                        field.dataset.initialLocal = field.value || "";
+                    }}
+                }}
+
+                function convertFieldToIso(field, currentValue) {{
+                    if (!field) {{
+                        return null;
+                    }}
+                    const initialLocal = field.dataset.initialLocal;
+                    const initialIso = field.dataset.initialIso;
+                    if (
+                        initialLocal !== undefined &&
+                        initialIso &&
+                        currentValue === initialLocal
+                    ) {{
+                        return initialIso;
+                    }}
+                    const parsed = new Date(currentValue);
+                    if (Number.isNaN(parsed.getTime())) {{
+                        return null;
+                    }}
+                    return parsed.toISOString();
+                }}
+
                 function setQuickRange(days) {{
                     const end = new Date();
                     const start = new Date(end.getTime() - (days * 24 * 60 * 60 * 1000));
@@ -473,17 +541,17 @@ class GoogleFindMyMapView(HomeAssistantView):
                         return;
                     }}
 
-                    const startDate = new Date(startValue);
-                    const endDate = new Date(endValue);
+                    const startIso = convertFieldToIso(startField, startValue);
+                    const endIso = convertFieldToIso(endField, endValue);
 
-                    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {{
+                    if (!startIso || !endIso) {{
                         alert('Please provide valid start and end times');
                         return;
                     }}
 
                     updateLocationWithParams({{
-                        start: startDate.toISOString(),
-                        end: endDate.toISOString(),
+                        start: startIso,
+                        end: endIso,
                     }});
                 }}
 
@@ -492,28 +560,8 @@ class GoogleFindMyMapView(HomeAssistantView):
                     if (controls) {{
                         const startField = document.getElementById('startTime');
                         const endField = document.getElementById('endTime');
-                        const startAttr = controls.dataset.initialStart;
-                        const endAttr = controls.dataset.initialEnd;
-
-                        if (startAttr && startField && !startField.value) {{
-                            const decodedStart = decodeURIComponent(startAttr);
-                            const parsedStart = new Date(decodedStart);
-                            if (!Number.isNaN(parsedStart.getTime())) {{
-                                startField.value = formatDateTime(parsedStart);
-                            }} else {{
-                                startField.value = decodedStart.slice(0, 16);
-                            }}
-                        }}
-
-                        if (endAttr && endField && !endField.value) {{
-                            const decodedEnd = decodeURIComponent(endAttr);
-                            const parsedEnd = new Date(decodedEnd);
-                            if (!Number.isNaN(parsedEnd.getTime())) {{
-                                endField.value = formatDateTime(parsedEnd);
-                            }} else {{
-                                endField.value = decodedEnd.slice(0, 16);
-                            }}
-                        }}
+                        registerInitialField(startField, controls.dataset.initialStart);
+                        registerInitialField(endField, controls.dataset.initialEnd);
                     }}
                 }});
                 </script>
@@ -825,6 +873,74 @@ class GoogleFindMyMapView(HomeAssistantView):
                     if (infoElement) {{ infoElement.textContent = visibleCount + ' locations shown'; }}
                 }}
 
+                function safeDecodeComponent(value) {{
+                    if (!value) {{
+                        return "";
+                    }}
+                    try {{
+                        return decodeURIComponent(value);
+                    }} catch (err) {{
+                        return value;
+                    }}
+                }}
+
+                function extractLocalInput(value) {{
+                    if (!value) {{
+                        return "";
+                    }}
+                    const match = value.match(/^(\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}})/);
+                    if (match) {{
+                        return match[1];
+                    }}
+                    const parsed = new Date(value);
+                    if (!Number.isNaN(parsed.getTime())) {{
+                        return formatDateTime(parsed);
+                    }}
+                    if (value.length >= 16) {{
+                        return value.slice(0, 16);
+                    }}
+                    return "";
+                }}
+
+                function registerInitialField(field, encoded) {{
+                    if (!field) {{
+                        return;
+                    }}
+                    const decoded = safeDecodeComponent(encoded);
+                    if (!field.dataset.initialIso) {{
+                        field.dataset.initialIso = decoded;
+                    }}
+                    if (!field.dataset.initialLocal) {{
+                        if (!field.value && decoded) {{
+                            const normalized = extractLocalInput(decoded);
+                            if (normalized) {{
+                                field.value = normalized;
+                            }}
+                        }}
+                        field.dataset.initialLocal = field.value || "";
+                    }}
+                }}
+
+                function convertFieldToIso(field, currentValue) {{
+                    if (!field) {{
+                        return null;
+                    }}
+                    const initialLocal = field.dataset.initialLocal;
+                    const initialIso = field.dataset.initialIso;
+                    if (
+                        initialLocal !== undefined &&
+                        initialIso &&
+                        currentValue === initialLocal
+                    ) {{
+                        return initialIso;
+                    }}
+                    const parsed = new Date(currentValue);
+                    if (Number.isNaN(parsed.getTime())) {{
+                        return null;
+                    }}
+                    return parsed.toISOString();
+                }}
+
                 function setQuickRange(days) {{
                     const end = new Date();
                     const start = new Date(end.getTime() - (days * 24 * 60 * 60 * 1000));
@@ -854,17 +970,17 @@ class GoogleFindMyMapView(HomeAssistantView):
                         return;
                     }}
 
-                    const startDate = new Date(startValue);
-                    const endDate = new Date(endValue);
+                    const startIso = convertFieldToIso(startField, startValue);
+                    const endIso = convertFieldToIso(endField, endValue);
 
-                    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {{
+                    if (!startIso || !endIso) {{
                         alert('Please provide valid start and end times');
                         return;
                     }}
 
                     const updates = {{
-                        start: startDate.toISOString(),
-                        end: endDate.toISOString(),
+                        start: startIso,
+                        end: endIso,
                     }};
                     if (parseInt(accuracyFilter, 10) > 0) {{
                         updates.accuracy = accuracyFilter;
@@ -884,24 +1000,8 @@ class GoogleFindMyMapView(HomeAssistantView):
                         const endAttr = filterPanel.dataset.initialEnd;
                         const accuracyAttr = filterPanel.dataset.initialAccuracy;
 
-                        if (startAttr && startField && !startField.value) {{
-                            const decodedStart = decodeURIComponent(startAttr);
-                            const parsedStart = new Date(decodedStart);
-                            if (!Number.isNaN(parsedStart.getTime())) {{
-                                startField.value = formatDateTime(parsedStart);
-                            }} else {{
-                                startField.value = decodedStart.slice(0, 16);
-                            }}
-                        }}
-                        if (endAttr && endField && !endField.value) {{
-                            const decodedEnd = decodeURIComponent(endAttr);
-                            const parsedEnd = new Date(decodedEnd);
-                            if (!Number.isNaN(parsedEnd.getTime())) {{
-                                endField.value = formatDateTime(parsedEnd);
-                            }} else {{
-                                endField.value = decodedEnd.slice(0, 16);
-                            }}
-                        }}
+                        registerInitialField(startField, startAttr);
+                        registerInitialField(endField, endAttr);
                         if (accuracyAttr) {{
                             const decodedAccuracy = decodeURIComponent(accuracyAttr);
                             const slider = document.getElementById('accuracySlider');

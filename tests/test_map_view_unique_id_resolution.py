@@ -413,7 +413,7 @@ def test_map_view_html_uses_iso_conversion(monkeypatch: pytest.MonkeyPatch) -> N
     )
     html_empty = view._generate_map_html("Device", [], "device-1", start, end, 0)
 
-    assert "startDate.toISOString()" in html_with_locations
-    assert "startDate.toISOString()" in html_empty
+    assert "parsed.toISOString()" in html_with_locations
+    assert "parsed.toISOString()" in html_empty
     assert "getFullYear()" in html_with_locations
     assert "getFullYear()" in html_empty
