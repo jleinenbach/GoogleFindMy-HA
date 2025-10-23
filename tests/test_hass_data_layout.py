@@ -445,7 +445,11 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             assert entry.entry_id in runtime_bucket
 
             runtime_data = runtime_bucket[entry.entry_id]
-            assert getattr(runtime_data, "coordinator", None) is entry.runtime_data
+            assert runtime_data is entry.runtime_data
+            assert isinstance(runtime_data, integration.RuntimeData)
+            assert runtime_data.coordinator is entry.runtime_data.coordinator
+            assert runtime_data.token_cache is cache
+            assert runtime_data.cache is cache
 
             added_entities: list[Any] = []
 

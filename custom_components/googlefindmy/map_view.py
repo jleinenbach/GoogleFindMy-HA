@@ -146,10 +146,8 @@ class GoogleFindMyMapView(HomeAssistantView):
         coordinator: GoogleFindMyCoordinator | None = None
         if isinstance(runtime, GoogleFindMyCoordinator):
             coordinator = runtime
-        else:
-            runtime_bucket = self.hass.data.get(DOMAIN, {}).get("entries", {})
-            runtime_entry = runtime_bucket.get(entry.entry_id)
-            coordinator = getattr(runtime_entry, "coordinator", None)
+        elif runtime is not None:
+            coordinator = getattr(runtime, "coordinator", None)
 
         if not isinstance(coordinator, GoogleFindMyCoordinator):
             _LOGGER.debug("Coordinator not found for entry_id=%s", entry.entry_id)

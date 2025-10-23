@@ -1063,7 +1063,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         rd = getattr(entry, "runtime_data", None)
         if rd is not None:
-            for attr in ("_cache", "cache"):
+            for attr in ("token_cache", "cache", "_cache"):
                 if hasattr(rd, attr):
                     try:
                         return getattr(rd, attr)

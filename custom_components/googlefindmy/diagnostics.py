@@ -394,20 +394,13 @@ async def async_get_config_entry_diagnostics(
         # Stay resilient if loader fails in custom environments
         integration_meta = {}
 
-    # --- Coordinator / runtime_data (preferred) or hass.data fallback ---
+    # --- Coordinator / runtime_data (typed container) ---
     coordinator: GoogleFindMyCoordinator | None = None
     runtime = getattr(entry, "runtime_data", None)
     if isinstance(runtime, GoogleFindMyCoordinator):
         coordinator = runtime
     elif runtime is not None and hasattr(runtime, "coordinator"):
         candidate = getattr(runtime, "coordinator")
-        if isinstance(candidate, GoogleFindMyCoordinator):
-            coordinator = candidate
-
-    if coordinator is None:
-        runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
-        runtime_entry = runtime_bucket.get(entry.entry_id)
-        candidate = getattr(runtime_entry, "coordinator", None)
         if isinstance(candidate, GoogleFindMyCoordinator):
             coordinator = candidate
 

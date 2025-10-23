@@ -72,11 +72,52 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
     # ---- Small local helpers (no circular imports) ---------------------------
 
     def _iter_runtimes(hass: HomeAssistant) -> Iterable[Any]:
-        """Yield all active runtime containers (RuntimeData) for this integration."""
+        """Yield active runtime containers, preferring entry.runtime_data."""
+
+        seen: set[int] = set()
+        manager = getattr(hass, "config_entries", None)
+        async_entries = getattr(manager, "async_entries", None)
+        if callable(async_entries):
+            try:
+                for entry in async_entries(DOMAIN):
+                    runtime = getattr(entry, "runtime_data", None)
+                    if runtime is None:
+                        continue
+                    seen.add(id(runtime))
+                    yield runtime
+            except Exception:  # pragma: no cover - defensive guard
+                pass
+
         entries: dict[str, Any] = hass.data.setdefault(DOMAIN, {}).setdefault(
             "entries", {}
         )
-        return entries.values()
+        for runtime in entries.values():
+            if id(runtime) not in seen:
+                yield runtime
+
+    def _entry_for_id(hass: HomeAssistant, entry_id: str) -> Any | None:
+        """Return the config entry with the given id, if available."""
+
+        manager = getattr(hass, "config_entries", None)
+        if manager is None:
+            return None
+
+        getter = getattr(manager, "async_get_entry", None)
+        if callable(getter):
+            try:
+                return getter(entry_id)
+            except Exception:  # pragma: no cover - defensive guard
+                return None
+
+        async_entries = getattr(manager, "async_entries", None)
+        if callable(async_entries):
+            try:
+                for entry in async_entries(DOMAIN):
+                    if entry.entry_id == entry_id:
+                        return entry
+            except Exception:  # pragma: no cover - defensive guard
+                return None
+        return None
 
     async def _resolve_runtime_for_device_id(device_id: str) -> tuple[Any, str]:
         """Return the runtime and canonical_id for a device_id or raise translated error.
@@ -140,7 +181,15 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         dev = dev_reg.async_get(device_id)
         if dev:
             for entry_id in dev.config_entries:
-                runtime = hass.data[DOMAIN]["entries"].get(entry_id)
+                entry = _entry_for_id(hass, entry_id)
+                runtime = getattr(entry, "runtime_data", None)
+                if runtime:
+                    return runtime, canonical_id
+                runtime = (
+                    hass.data.setdefault(DOMAIN, {})
+                    .setdefault("entries", {})
+                    .get(entry_id)
+                )
                 if runtime:
                     return runtime, canonical_id
 

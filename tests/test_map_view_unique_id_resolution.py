@@ -32,7 +32,7 @@ class _StubEntry:
         self.entry_id = entry_id
         self.data: dict[str, Any] = {}
         self.options: dict[str, Any] = {}
-        self.runtime_data = coordinator
+        self.runtime_data = SimpleNamespace(coordinator=coordinator)
 
 
 class _StubHass:

@@ -93,10 +93,8 @@ async def async_setup_entry(
     coordinator: GoogleFindMyCoordinator | None = None
     if isinstance(runtime, GoogleFindMyCoordinator):
         coordinator = runtime
-    else:
-        runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
-        runtime_entry = runtime_bucket.get(entry.entry_id)
-        coordinator = getattr(runtime_entry, "coordinator", None)
+    elif runtime is not None:
+        coordinator = getattr(runtime, "coordinator", None)
 
     if not isinstance(coordinator, GoogleFindMyCoordinator):
         raise HomeAssistantError("googlefindmy coordinator not ready")

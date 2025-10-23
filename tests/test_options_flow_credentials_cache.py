@@ -47,7 +47,11 @@ class _MemoryCache:
 class _RuntimeData:
     """Runtime data stub providing a cache attribute."""
 
-    cache: _MemoryCache
+    token_cache: _MemoryCache
+
+    @property
+    def cache(self) -> _MemoryCache:
+        return self.token_cache
 
 
 class _DummyEntry:
@@ -89,7 +93,9 @@ class _DummyHass:
 
     def __init__(self, entry: _DummyEntry, cache: _MemoryCache) -> None:
         self.config_entries = _DummyConfigEntries(entry)
-        self.data: dict[str, Any] = {DOMAIN: {entry.entry_id: _RuntimeData(cache)}}
+        self.data: dict[str, Any] = {
+            DOMAIN: {"entries": {entry.entry_id: _RuntimeData(cache)}}
+        }
         self._tasks: list[asyncio.Task[Any]] = []
 
     def async_create_task(self, coro: Awaitable[Any]) -> asyncio.Task[Any]:

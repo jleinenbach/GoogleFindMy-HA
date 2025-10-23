@@ -37,6 +37,7 @@ import logging
 import os
 import socket
 import time
+from dataclasses import dataclass
 from typing import Any
 from collections.abc import Collection
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -153,15 +154,22 @@ CONFIG_ENTRY_VERSION: int = 2
 
 
 # ---- Runtime typing helpers -------------------------------------------------
+
+
+@dataclass(slots=True)
 class RuntimeData:
-    """Container for per-entry runtime structures.
+    """Container for per-entry runtime structures shared across platforms."""
 
-    Attributes:
-        coordinator: The entry's GoogleFindMyCoordinator instance.
-    """
+    coordinator: GoogleFindMyCoordinator
+    token_cache: TokenCache
+    fcm_receiver: FcmReceiverHA | None = None
+    google_home_filter: GoogleHomeFilter | None = None
 
-    def __init__(self, coordinator: GoogleFindMyCoordinator) -> None:
-        self.coordinator = coordinator
+    @property
+    def cache(self) -> TokenCache:
+        """Legacy alias for the entry-scoped token cache."""
+
+        return self.token_cache
 
 
 MyConfigEntry = ConfigEntry
@@ -1144,11 +1152,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
         )
 
-    # Expose runtime object and keep classic pointer for legacy modules
-    entry.runtime_data = coordinator
-    hass.data[DOMAIN].setdefault("entries", {})[entry.entry_id] = RuntimeData(
-        coordinator=coordinator
+    # Expose runtime object via the typed container (preferred access pattern)
+    runtime_data = RuntimeData(
+        coordinator=coordinator,
+        token_cache=cache,
+        fcm_receiver=fcm,
     )
+    entry.runtime_data = runtime_data
+    hass.data[DOMAIN].setdefault("entries", {})[entry.entry_id] = runtime_data
 
     # Owner-index scaffold (E2.5): coordinator will eventually claim canonical_ids
     hass.data[DOMAIN].setdefault("device_owner_index", {})
@@ -1159,6 +1170,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             coordinator.google_home_filter = GoogleHomeFilter(
                 hass, _effective_config(entry)
             )  # type: ignore[call-arg]
+            runtime_data.google_home_filter = coordinator.google_home_filter
             _LOGGER.debug("Initialized Google Home filter (options-first)")
         except Exception as err:
             _LOGGER.debug("GoogleHomeFilter attach skipped due to: %s", err)
@@ -1332,16 +1344,17 @@ async def async_remove_config_entry_device(
         return False
 
     try:
-        runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
-        runtime_entry = runtime_bucket.get(entry.entry_id)
-        coordinator: GoogleFindMyCoordinator | None = getattr(
-            runtime_entry, "coordinator", None
-        )
+        runtime = getattr(entry, "runtime_data", None)
+        coordinator: GoogleFindMyCoordinator | None = None
+        if isinstance(runtime, GoogleFindMyCoordinator):
+            coordinator = runtime
+        elif runtime is not None:
+            coordinator = getattr(runtime, "coordinator", None)
         if not isinstance(coordinator, GoogleFindMyCoordinator):
-            coordinator = getattr(entry, "runtime_data", None)
-            if not isinstance(coordinator, GoogleFindMyCoordinator):
-                coordinator = None
-        if coordinator is not None:
+            runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
+            runtime_entry = runtime_bucket.get(entry.entry_id)
+            coordinator = getattr(runtime_entry, "coordinator", None)
+        if isinstance(coordinator, GoogleFindMyCoordinator):
             coordinator.purge_device(dev_id)
     except Exception as err:
         _LOGGER.debug("Coordinator purge failed for %s: %s", dev_id, err)
@@ -1423,29 +1436,46 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         - Device owner index cleanup: remove all canonical_id claims for this entry (E2.5).
     """
     try:
-        entries_bucket: dict[str, RuntimeData] | None = hass.data.get(DOMAIN, {}).get(
-            "entries"
-        )  # type: ignore[assignment]
-        runtime_data = (
-            None if entries_bucket is None else entries_bucket.get(entry.entry_id)
-        )
-        coordinator: GoogleFindMyCoordinator | None = getattr(
+        bucket = hass.data.setdefault(DOMAIN, {})
+        entries_bucket: dict[str, RuntimeData] = bucket.setdefault("entries", {})
+
+        runtime_data: RuntimeData | GoogleFindMyCoordinator | None = getattr(
             entry, "runtime_data", None
         )
-        if runtime_data and hasattr(runtime_data, "coordinator"):
+        stored_runtime = entries_bucket.get(entry.entry_id)
+        if not isinstance(runtime_data, RuntimeData) and isinstance(
+            stored_runtime, RuntimeData
+        ):
+            runtime_data = stored_runtime
+
+        coordinator: GoogleFindMyCoordinator | None = None
+        if isinstance(runtime_data, GoogleFindMyCoordinator):
+            coordinator = runtime_data
+        elif isinstance(runtime_data, RuntimeData):
             coordinator = runtime_data.coordinator
-        if coordinator:
+        if coordinator is not None:
             await coordinator.async_shutdown()
     except Exception as err:
         _LOGGER.debug("Coordinator async_shutdown raised during unload: %s", err)
 
     ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if ok:
-        hass.data.setdefault(DOMAIN, {}).setdefault("entries", {}).pop(
-            entry.entry_id, None
+        removed_runtime = (
+            hass.data.setdefault(DOMAIN, {})
+            .setdefault("entries", {})
+            .pop(entry.entry_id, None)
         )
 
-        cache = _unregister_instance(entry.entry_id)
+        cache = None
+        if isinstance(runtime_data, RuntimeData):
+            cache = runtime_data.token_cache
+        elif isinstance(removed_runtime, RuntimeData):
+            cache = removed_runtime.token_cache
+
+        fallback_cache = _unregister_instance(entry.entry_id)
+        if cache is None:
+            cache = fallback_cache
+
         if cache:
             try:
                 await cache.close()
@@ -1455,8 +1485,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 )
             except Exception as err:
                 _LOGGER.warning(
-                    "Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err
+                    "Closing TokenCache for entry '%s' failed: %s",
+                    entry.entry_id,
+                    err,
                 )
+
+        if fallback_cache and fallback_cache is not cache:
+            try:
+                await fallback_cache.close()
+            except Exception:
+                pass
 
     try:
         await _async_release_shared_fcm(hass)
