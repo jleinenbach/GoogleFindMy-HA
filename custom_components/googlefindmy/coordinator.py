@@ -676,6 +676,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
 
+    @property
+    def cache(self) -> CacheProtocol:
+        """Return the entry-scoped token cache backing this coordinator."""
+
+        return self._cache
+
     @staticmethod
     def _sanitize_contributor_mode(mode: str | None) -> str:
         """Normalize the contributor mode to a supported value."""
