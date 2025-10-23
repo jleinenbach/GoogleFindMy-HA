@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, Mock
+import time
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -14,6 +15,7 @@ from custom_components.googlefindmy.coordinator import (
     FcmStatus,
     GoogleFindMyCoordinator,
 )
+from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     DOMAIN,
@@ -251,3 +253,74 @@ def test_successful_update_clears_lingering_repair_issue(
         "Listeners should be notified after clearing issue"
     )
     assert called_flag["value"]
+
+
+def test_push_updated_keeps_known_name_for_blank_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """Ensure cached display names survive blank device snapshots and push updates."""
+
+    # Let the coordinator hand the raw device list through to the snapshot builder.
+    coordinator._async_build_device_snapshot_with_fallbacks = AsyncMock(
+        side_effect=lambda devices: devices
+    )
+
+    loop = coordinator.hass.loop
+    dummy_api.device_list = [{"id": "dev-1", "name": "Pixel 9"}]
+    loop.run_until_complete(coordinator._async_update_data())
+
+    # Simulate a follow-up list without a usable name; cache should preserve the old label.
+    dummy_api.device_list = [{"id": "dev-1", "name": ""}]
+    loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator._device_names["dev-1"] == "Pixel 9"
+
+    # Prepare cached location data to make push_updated build a rich snapshot.
+    now = time.time()
+    coordinator._device_location_data["dev-1"] = {
+        "device_id": "dev-1",
+        "name": "Pixel 9",
+        "latitude": 37.0,
+        "longitude": -122.0,
+        "accuracy": 5,
+        "last_updated": now,
+    }
+
+    captured: list[list[dict[str, Any]]] = []
+
+    def _capture(snapshot: list[dict[str, Any]]) -> None:
+        captured.append(snapshot)
+        coordinator.data = snapshot
+
+    coordinator.async_set_updated_data = _capture
+    coordinator._is_on_hass_loop = lambda: True
+
+    # Push a snapshot while the latest API payload still lacks a display name.
+    coordinator.push_updated(["dev-1"])
+
+    assert captured, "push_updated should publish a snapshot"
+    snapshot = captured[-1]
+    assert snapshot[0]["name"] == "Pixel 9"
+
+    # Entities should continue to expose the persisted display name.
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.device_tracker._maybe_update_device_registry_name",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy._opt",
+        lambda _entry, _key, default=None: default,
+        raising=False,
+    )
+
+    entity = GoogleFindMyDeviceTracker(
+        coordinator,
+        {"id": "dev-1", "name": "Pixel 9"},
+    )
+    entity.hass = coordinator.hass
+    entity.entity_id = "device_tracker.googlefindmy_dev_1"
+    entity._handle_coordinator_update()
+
+    assert entity._attr_name == "Pixel 9"

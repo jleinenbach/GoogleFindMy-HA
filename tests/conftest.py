@@ -136,6 +136,7 @@ def _stub_homeassistant() -> None:
     const_module.EVENT_HOMEASSISTANT_STOP = "stop"
     const_module.ATTR_LATITUDE = "latitude"
     const_module.ATTR_LONGITUDE = "longitude"
+    const_module.ATTR_GPS_ACCURACY = "gps_accuracy"
     const_module.Platform = Platform
     sys.modules["homeassistant.const"] = const_module
 
@@ -204,6 +205,39 @@ def _stub_homeassistant() -> None:
         module = ModuleType(module_name)
         sys.modules[module_name] = module
         setattr(helpers_pkg, sub, module)
+
+    entity_module = ModuleType("homeassistant.helpers.entity")
+
+    class DeviceInfo:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    entity_module.DeviceInfo = DeviceInfo
+
+    class EntityCategory:
+        CONFIG = "config"
+        DIAGNOSTIC = "diagnostic"
+
+    entity_module.EntityCategory = EntityCategory
+    sys.modules["homeassistant.helpers.entity"] = entity_module
+    setattr(helpers_pkg, "entity", entity_module)
+
+    from typing import Callable, Iterable
+
+    entity_platform_module = ModuleType("homeassistant.helpers.entity_platform")
+    entity_platform_module.AddEntitiesCallback = Callable[[Iterable], None]
+    sys.modules["homeassistant.helpers.entity_platform"] = entity_platform_module
+    setattr(helpers_pkg, "entity_platform", entity_platform_module)
+
+    restore_state_module = ModuleType("homeassistant.helpers.restore_state")
+
+    class RestoreEntity:
+        async def async_get_last_state(self):  # pragma: no cover - stub behaviour
+            return None
+
+    restore_state_module.RestoreEntity = RestoreEntity
+    sys.modules["homeassistant.helpers.restore_state"] = restore_state_module
+    setattr(helpers_pkg, "restore_state", restore_state_module)
 
     issue_registry_module = sys.modules["homeassistant.helpers.issue_registry"]
     issue_registry_module.IssueSeverity = SimpleNamespace(ERROR="error")
@@ -321,6 +355,19 @@ def _stub_homeassistant() -> None:
 
     update_coordinator_module.DataUpdateCoordinator = DataUpdateCoordinator
 
+    class CoordinatorEntity:
+        def __init__(self, coordinator) -> None:
+            self.coordinator = coordinator
+            self.hass = getattr(coordinator, "hass", None)
+
+        def async_write_ha_state(self) -> None:  # pragma: no cover - stub behaviour
+            return None
+
+        def __class_getitem__(cls, _item):  # pragma: no cover - typing compatibility
+            return cls
+
+    update_coordinator_module.CoordinatorEntity = CoordinatorEntity
+
     event_module = ModuleType("homeassistant.helpers.event")
 
     async def _async_call_later(
@@ -359,6 +406,22 @@ def _stub_homeassistant() -> None:
         "homeassistant.components", ModuleType("homeassistant.components")
     )
     components_pkg.__path__ = getattr(components_pkg, "__path__", [])
+
+    device_tracker_module = ModuleType("homeassistant.components.device_tracker")
+
+    class SourceType:
+        GPS = "gps"
+
+    class TrackerEntity:  # pragma: no cover - stub behaviour
+        _attr_has_entity_name = True
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    device_tracker_module.SourceType = SourceType
+    device_tracker_module.TrackerEntity = TrackerEntity
+    sys.modules["homeassistant.components.device_tracker"] = device_tracker_module
+    setattr(components_pkg, "device_tracker", device_tracker_module)
 
     http_module = ModuleType("homeassistant.components.http")
 
