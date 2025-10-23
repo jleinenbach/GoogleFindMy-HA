@@ -65,7 +65,7 @@ class _StubEntry:
         self.domain = DOMAIN
         self.data: dict[str, object] = {}
         self.options: dict[str, object] = {}
-        self.runtime_data = coordinator
+        self.runtime_data = SimpleNamespace(coordinator=coordinator)
 
 
 class _StubHass:

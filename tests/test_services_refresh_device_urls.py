@@ -65,11 +65,13 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(
         options={},
         data={},
     )
+    entry_one.runtime_data = SimpleNamespace(coordinator=SimpleNamespace())
     entry_two = SimpleNamespace(
         entry_id="entry-2",
         options={const.OPT_MAP_VIEW_TOKEN_EXPIRATION: True},
         data={},
     )
+    entry_two.runtime_data = SimpleNamespace(coordinator=SimpleNamespace())
     config_entries = _StubConfigEntries([entry_one, entry_two])
 
     hass = SimpleNamespace()
