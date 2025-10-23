@@ -1924,6 +1924,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             # 4) Build data snapshot for devices visible to the user (ignore-filter applied)
             visible_devices = [d for d in all_devices if d["id"] not in ignored]
+            for dev in visible_devices:
+                dev_id = dev["id"]
+                cached_name = self._device_names.get(dev_id)
+                name = dev.get("name")
+                if cached_name and (not isinstance(name, str) or not name.strip()):
+                    dev["name"] = cached_name
             snapshot = await self._async_build_device_snapshot_with_fallbacks(
                 visible_devices
             )
