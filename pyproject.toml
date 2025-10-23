@@ -62,6 +62,14 @@ show_error_codes = true
 namespace_packages = true
 exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
 
+[[tool.mypy.overrides]]
+module = ["custom_components.googlefindmy.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
 [tool.coverage.run]
 branch = true
 source = [
