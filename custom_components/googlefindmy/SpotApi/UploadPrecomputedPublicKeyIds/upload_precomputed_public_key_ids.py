@@ -43,7 +43,17 @@ def refresh_custom_trackers(device_list: DevicesList):
                 device.identifierInformation.canonicIds.canonicId[0].id
             )
 
-            identity_key = retrieve_identity_key(device.information.deviceRegistration)
+            try:
+                identity_key = retrieve_identity_key(
+                    device.information.deviceRegistration
+                )
+            except RuntimeError as exc:
+                print(
+                    "[UploadPrecomputedPublicKeyIds] Identity key refresh requires the async "
+                    "API. "
+                    f"{exc}"
+                )
+                return
             next_eids = get_next_eids(
                 identity_key,
                 new_truncated_ids.pairDate,

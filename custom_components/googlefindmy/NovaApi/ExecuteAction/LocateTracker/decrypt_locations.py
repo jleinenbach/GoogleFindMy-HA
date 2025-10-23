@@ -206,6 +206,19 @@ async def async_retrieve_identity_key(
         raise DecryptionError("Identity key decryption failed.") from e
 
 
+def retrieve_identity_key(
+    device_registration: DeviceRegistration,
+    *,
+    cache: TokenCache | None = None,
+) -> bytes:
+    """Legacy synchronous facade removed in favor of the async API."""
+
+    raise RuntimeError(
+        "Legacy sync retrieve_identity_key() has been removed. "
+        "Use await async_retrieve_identity_key(..., cache=...) instead."
+    )
+
+
 def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:
     """Robustly parse a Unix epoch timestamp (float) from various inputs.
 
