@@ -172,6 +172,11 @@ To contribute, please:
 7. Test thoroughly with your Find My devices
 8. Submit a pull request with detailed description
 
+### Release process
+
+- Update the version in both `custom_components/googlefindmy/manifest.json` and `custom_components/googlefindmy/const.py` (`INTEGRATION_VERSION`) at the same time so the manifest metadata and runtime constants remain in sync.
+- Run the full verification suite (`ruff format --check`, targeted pytest modules, and `pytest -q`) before tagging a release to confirm the version bump did not introduce regressions.
+
 ### Development Scripts
 
 Manifest validation (`hassfest`) now runs exclusively through the
