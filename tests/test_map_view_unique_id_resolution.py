@@ -112,6 +112,16 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
         sys.modules, "homeassistant.helpers.entity_registry", helpers_module
     )
 
+    helpers_pkg = ModuleType("homeassistant.helpers")
+    helpers_pkg.__path__ = []
+    helpers_pkg.entity_registry = helpers_module
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers_pkg)
+
+    homeassistant_pkg = ModuleType("homeassistant")
+    homeassistant_pkg.__path__ = []
+    homeassistant_pkg.helpers = helpers_pkg
+    monkeypatch.setitem(sys.modules, "homeassistant", homeassistant_pkg)
+
     dt_module = ModuleType("homeassistant.util.dt")
     dt_module.utcnow = lambda: datetime.now(timezone.utc)
     dt_module.as_local = lambda value: value
@@ -218,8 +228,8 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
         raising=False,
     )
     monkeypatch.setattr(
-        map_view,
-        "async_get_entity_registry",
+        map_view.er,
+        "async_get",
         lambda _hass: registry,
         raising=False,
     )
@@ -281,8 +291,8 @@ def test_map_view_uses_iso_last_seen_for_timeline(
         raising=False,
     )
     monkeypatch.setattr(
-        map_view,
-        "async_get_entity_registry",
+        map_view.er,
+        "async_get",
         lambda _hass: registry,
         raising=False,
     )
