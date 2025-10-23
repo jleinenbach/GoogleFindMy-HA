@@ -44,7 +44,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-dev.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-dev.txt', 'custom_components/googlefindmy/requirements.txt', 'pyproject.toml') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
@@ -56,5 +56,18 @@ jobs:
       - name: Run pre-commit (still required locally; pre-commit.ci auto-fixes PRs)
         run: pre-commit run --all-files
 
-      - name: Run pytest
-        run: pytest -q
+      - name: Run pytest (quiet) and capture
+        run: |
+          set -o pipefail
+          pytest -q 2>&1 | tee pytest_output.log
+
+      - name: Write short summary to GitHub Step Summary
+        if: always()
+        run: |
+          {
+            echo "## Pytest summary"
+            echo
+            echo '```'
+            tail -n 200 pytest_output.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
