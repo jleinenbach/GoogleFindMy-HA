@@ -1855,7 +1855,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # 2) Update internal name/capability caches for ALL devices
             for dev in all_devices:
                 dev_id = dev["id"]
-                self._device_names[dev_id] = dev.get("name", dev_id)
+                raw_name = dev.get("name")
+                if isinstance(raw_name, str) and raw_name.strip():
+                    self._device_names[dev_id] = raw_name
+                elif dev_id not in self._device_names:
+                    self._device_names[dev_id] = dev_id
 
                 # Normalize and cache the "can ring" capability
                 if "can_ring" in dev:
@@ -1920,6 +1924,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             # 4) Build data snapshot for devices visible to the user (ignore-filter applied)
             visible_devices = [d for d in all_devices if d["id"] not in ignored]
+            for dev in visible_devices:
+                dev_id = dev["id"]
+                cached_name = self._device_names.get(dev_id)
+                name = dev.get("name")
+                if cached_name and (not isinstance(name, str) or not name.strip()):
+                    dev["name"] = cached_name
             snapshot = await self._async_build_device_snapshot_with_fallbacks(
                 visible_devices
             )
@@ -2907,10 +2917,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._present_last_seen[dev_id] = now_mono
 
         # Build "devices" stubs from id->name mapping
-        devices_stub: list[dict[str, Any]] = [
-            {"id": dev_id, "name": self._device_names.get(dev_id, dev_id)}
-            for dev_id in ids
-        ]
+        devices_stub: list[dict[str, Any]] = []
+        for dev_id in ids:
+            cached_name = self._device_names.get(dev_id)
+            if isinstance(cached_name, str) and cached_name.strip():
+                name = cached_name if cached_name != dev_id else "Google Find My Device"
+            else:
+                name = "Google Find My Device"
+            devices_stub.append({"id": dev_id, "name": name})
 
         snapshot = self._build_snapshot_from_cache(devices_stub, wall_now=wall_now)
         self.async_set_updated_data(snapshot)
