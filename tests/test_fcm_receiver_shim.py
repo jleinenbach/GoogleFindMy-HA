@@ -53,7 +53,8 @@ def test_shim_prefers_explicit_entry_cache(
 ) -> None:
     """Entry-specific resolution avoids `_get_default_cache` ambiguity."""
 
-    receiver = fcm_receiver.FcmReceiver(entry_id="entry-two")
+    with pytest.deprecated_call():
+        receiver = fcm_receiver.FcmReceiver(entry_id="entry-two")
     assert receiver.get_fcm_token() == "token-two"
     assert receiver.get_android_id() == "0x2"
 
@@ -65,7 +66,8 @@ def test_shim_prefers_explicit_entry_cache(
     assert multi_cache_registry["entry-two"]._data["fcm_credentials"] == updated_creds
 
     # A fresh receiver should observe the newly written credentials from the same cache.
-    refreshed = fcm_receiver.FcmReceiver(entry_id="entry-two")
+    with pytest.deprecated_call():
+        refreshed = fcm_receiver.FcmReceiver(entry_id="entry-two")
     assert refreshed.get_fcm_token() == "token-two-updated"
 
 
@@ -75,7 +77,8 @@ def test_shim_rejects_unknown_entry_id(
     """Explicit entry lookups must not mutate arbitrary caches."""
 
     with pytest.raises(ValueError) as err:
-        fcm_receiver.FcmReceiver(entry_id="missing-entry")
+        with pytest.deprecated_call():
+            fcm_receiver.FcmReceiver(entry_id="missing-entry")
 
     assert "unknown entry_id" in str(err.value)
     # Caches should remain untouched when resolution fails.
@@ -99,6 +102,7 @@ def test_shim_requires_explicit_entry_when_multiple_caches(
     """Multiple caches require explicit entry selection to avoid ambiguity."""
 
     with pytest.raises(ValueError) as err:
-        fcm_receiver.FcmReceiver()
+        with pytest.deprecated_call():
+            fcm_receiver.FcmReceiver()
 
     assert "cannot auto-select" in str(err.value)

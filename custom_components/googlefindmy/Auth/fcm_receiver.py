@@ -22,6 +22,7 @@ If you still call into this file directly, please migrate to the shared receiver
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import TYPE_CHECKING, Any
 from collections.abc import Callable
 
@@ -56,6 +57,13 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         entry_id: str | None = None,
         cache: TokenCache | None = None,
     ) -> None:
+        warnings.warn(
+            "custom_components.googlefindmy.Auth.fcm_receiver.FcmReceiver is deprecated "
+            "and will be removed in the 2025.6 release. Import "
+            "FcmReceiverHA via the shared provider instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # Resolve the cache used for reads/writes in legacy contexts.
         self._cache: TokenCache | None = self._resolve_cache(
             entry_id=entry_id, cache=cache
