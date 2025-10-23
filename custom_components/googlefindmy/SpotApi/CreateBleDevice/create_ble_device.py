@@ -41,7 +41,7 @@ def register_esp32():
     register_request.fastPairModelId = mcu_fast_pair_model_id
 
     # Description
-    register_request.description.userDefinedName = "GoogleFindMyTools µC"
+    register_request.description.userDefinedName = "GoogleFindMyTools micro-controller"
     register_request.description.deviceType = SpotDeviceType.DEVICE_TYPE_BEACON
 
     # Device Components Information
@@ -93,7 +93,7 @@ def register_esp32():
 
     # General
     register_request.manufacturerName = "GoogleFindMyTools"
-    register_request.modelName = "µC"
+    register_request.modelName = "micro-controller"
 
     ownerKeys = FMDNOwnerOperations()
     ownerKeys.generate_keys(identity_key=eik)

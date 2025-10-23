@@ -7,11 +7,16 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from datetime import datetime, timezone
+import json
+
+import pytest
 
 # Ensure the package root is importable without installing the package.
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+INTEGRATION_ROOT = ROOT / "custom_components" / "googlefindmy"
 
 
 def _stub_homeassistant() -> None:
@@ -456,6 +461,31 @@ def _stub_homeassistant() -> None:
     sys.modules["homeassistant.components.recorder"] = recorder_module
     sys.modules["homeassistant.components.recorder.history"] = history_module
     setattr(components_pkg, "recorder", recorder_module)
+
+
+@pytest.fixture(scope="session", name="integration_root")
+def fixture_integration_root() -> Path:
+    """Return the root path of the googlefindmy integration package."""
+
+    assert INTEGRATION_ROOT.is_dir(), "integration package root must exist"
+    return INTEGRATION_ROOT
+
+
+@pytest.fixture(scope="session", name="integration_python_files")
+def fixture_integration_python_files(integration_root: Path) -> list[Path]:
+    """Return all Python files under the integration root (sorted)."""
+
+    return sorted(integration_root.rglob("*.py"))
+
+
+@pytest.fixture(scope="session", name="manifest")
+def fixture_manifest(integration_root: Path) -> dict[str, object]:
+    """Load and return the integration manifest."""
+
+    manifest_path = integration_root / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert isinstance(manifest_data, dict)
+    return manifest_data
 
 
 _stub_homeassistant()
