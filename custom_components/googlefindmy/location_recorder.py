@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from homeassistant.core import HomeAssistant
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
 from homeassistant.components.recorder import history, get_instance
+from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class LocationRecorder:
     ) -> list[dict[str, Any]]:
         """Get location history from recorder for the last N hours."""
         try:
-            end_time = datetime.now()
+            end_time = dt_util.utcnow()
             start_time = end_time - timedelta(hours=hours)
 
             # Use the proper recorder database executor API
