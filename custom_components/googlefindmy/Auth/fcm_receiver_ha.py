@@ -119,7 +119,24 @@ async def _call_in_executor(func: Callable[..., _T], /, *args: Any) -> _T:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        loop = asyncio.get_event_loop_policy().get_event_loop()
+        new_loop = asyncio.new_event_loop()
+        try:
+            future = new_loop.run_in_executor(None, func, *args)
+            try:
+                result = future.result()
+            finally:
+                shutdown_default_executor = getattr(
+                    new_loop, "shutdown_default_executor", None
+                )
+                if shutdown_default_executor is not None:
+                    new_loop.run_until_complete(shutdown_default_executor())
+                try:
+                    new_loop.run_until_complete(new_loop.shutdown_asyncgens())
+                except (RuntimeError, ValueError):
+                    pass
+        finally:
+            new_loop.close()
+        return result
 
     return await loop.run_in_executor(None, func, *args)
 
