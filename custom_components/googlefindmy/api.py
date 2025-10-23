@@ -364,10 +364,77 @@ class GoogleFindMyAPI:
 
         self._cache: CacheProtocol = cache
         self._session = session
+        self._sync_loop: asyncio.AbstractEventLoop | None = None
 
         # Capability cache to avoid repeated network calls in capability checks.
         # Key: canonical device id, Value: can_ring (bool)
         self._device_capabilities: dict[str, bool] = {}
+
+    def _sync_call_guard(self, log_message: str) -> bool:
+        """Return True if a sync wrapper should abort due to an active loop."""
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        _LOGGER.error(log_message)
+        return True
+
+    def _resolve_sync_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the event loop the sync helpers should execute on."""
+
+        if self._session is not None:
+            loop = getattr(self._session, "_loop", None) or getattr(
+                self._session, "loop", None
+            )
+            if loop is None:
+                raise RuntimeError(
+                    "Unable to determine the event loop for the provided session"
+                )
+            if loop.is_closed():
+                raise RuntimeError(
+                    "The event loop bound to the provided session is closed"
+                )
+            return loop
+
+        loop = self._sync_loop
+        if loop is None or loop.is_closed():
+            loop = asyncio.new_event_loop()
+            self._sync_loop = loop
+        return loop
+
+    def _run_sync_helper(
+        self,
+        coro_factory: Callable[[], Awaitable[Any]],
+        *,
+        guard_message: str,
+        context: str,
+        default: Any,
+    ) -> Any:
+        """Execute an async helper from sync context, respecting session loops."""
+
+        if self._sync_call_guard(guard_message):
+            return default
+
+        try:
+            loop = self._resolve_sync_loop()
+        except RuntimeError as err:
+            _LOGGER.error("Failed to %s (sync setup): %s", context, _short_err(err))
+            return default
+
+        if loop.is_running():
+            _LOGGER.error(
+                "Failed to %s (sync setup): target event loop is already running",
+                context,
+            )
+            return default
+
+        try:
+            return loop.run_until_complete(coro_factory())
+        except Exception as err:  # noqa: BLE001 - surface all sync failures uniformly
+            _LOGGER.error("Failed to %s (sync): %s", context, _short_err(err))
+            return default
 
     # ------------------------ Namespace helper (entry-scope) ------------------------
     def _namespace(self) -> str | None:
@@ -736,21 +803,14 @@ class GoogleFindMyAPI:
         Returns:
             A list of device dictionaries.
         """
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            _LOGGER.error(
+        return self._run_sync_helper(
+            self.async_get_basic_device_list,
+            guard_message=(
                 "get_basic_device_list() called inside an active event loop; use async_get_basic_device_list()."
-            )
-            return []
-
-        try:
-            return asyncio.run(self.async_get_basic_device_list())
-        except Exception as err:
-            _LOGGER.error("Failed to get basic device list (sync): %s", _short_err(err))
-            return []
+            ),
+            context="get basic device list",
+            default=[],
+        )
 
     def get_devices(self) -> list[dict[str, Any]]:
         """Return devices with basic info only; no up-front location fetch (sync wrapper).
@@ -908,26 +968,14 @@ class GoogleFindMyAPI:
         Returns:
             A dictionary containing location data, or an empty dictionary on failure.
         """
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            _LOGGER.error(
+        return self._run_sync_helper(
+            lambda: self.async_get_device_location(device_id, device_name),
+            guard_message=(
                 "get_device_location() called inside an active event loop; use async_get_device_location()."
-            )
-            return {}
-
-        try:
-            return asyncio.run(self.async_get_device_location(device_id, device_name))
-        except Exception as err:
-            _LOGGER.error(
-                "Failed to get location for %s (%s): %s",
-                device_name,
-                device_id,
-                _short_err(err),
-            )
-            return {}
+            ),
+            context=f"get location for {device_name} ({device_id})",
+            default={},
+        )
 
     def locate_device(self, device_id: str) -> dict[str, Any]:
         """Compatibility sync entrypoint for location (uses sync wrapper).
@@ -1016,21 +1064,14 @@ class GoogleFindMyAPI:
         Returns:
             True if the command was sent successfully, False otherwise.
         """
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            _LOGGER.error(
+        return self._run_sync_helper(
+            lambda: self.async_play_sound(device_id),
+            guard_message=(
                 "play_sound() called inside an active event loop; use async_play_sound()."
-            )
-            return False
-
-        try:
-            return asyncio.run(self.async_play_sound(device_id))
-        except Exception as err:
-            _LOGGER.error("Failed to play sound on %s: %s", device_id, _short_err(err))
-            return False
+            ),
+            context=f"play sound on {device_id}",
+            default=False,
+        )
 
     def stop_sound(self, device_id: str) -> bool:
         """Thin sync wrapper around async_stop_sound for non-HA contexts.
@@ -1041,21 +1082,14 @@ class GoogleFindMyAPI:
         Returns:
             True if the command was sent successfully, False otherwise.
         """
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            _LOGGER.error(
+        return self._run_sync_helper(
+            lambda: self.async_stop_sound(device_id),
+            guard_message=(
                 "stop_sound() called inside an active event loop; use async_stop_sound()."
-            )
-            return False
-
-        try:
-            return asyncio.run(self.async_stop_sound(device_id))
-        except Exception as err:
-            _LOGGER.error("Failed to stop sound on %s: %s", device_id, _short_err(err))
-            return False
+            ),
+            context=f"stop sound on {device_id}",
+            default=False,
+        )
 
     # ---------- Play/Stop Sound (async; HA-first) ----------
     async def async_play_sound(self, device_id: str) -> bool:
