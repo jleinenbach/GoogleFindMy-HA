@@ -208,11 +208,49 @@ def _stub_homeassistant() -> None:
     issue_registry_module = sys.modules["homeassistant.helpers.issue_registry"]
     issue_registry_module.IssueSeverity = SimpleNamespace(ERROR="error")
 
-    def _noop(*args, **kwargs) -> None:  # pragma: no cover - stubbed helper
-        return None
+    class _IssueRegistry:
+        """Minimal in-memory Repairs issue registry used by tests."""
 
-    issue_registry_module.async_delete_issue = _noop
-    issue_registry_module.async_create_issue = _noop
+        def __init__(self) -> None:
+            self._issues: dict[tuple[str, str], dict[str, object]] = {}
+
+        def async_get_issue(
+            self, domain: str, issue_id: str
+        ) -> dict[str, object] | None:
+            return self._issues.get((domain, issue_id))
+
+        def async_create_issue(
+            self,
+            domain: str,
+            issue_id: str,
+            **data: object,
+        ) -> None:
+            self._issues[(domain, issue_id)] = {
+                **data,
+                "domain": domain,
+                "issue_id": issue_id,
+            }
+
+        def async_delete_issue(self, domain: str, issue_id: str) -> None:
+            self._issues.pop((domain, issue_id), None)
+
+    def _issue_registry_for(hass) -> _IssueRegistry:
+        registry = getattr(hass, "_issue_registry", None)
+        if registry is None:
+            registry = _IssueRegistry()
+            setattr(hass, "_issue_registry", registry)
+        return registry
+
+    issue_registry_module.async_get = _issue_registry_for
+
+    def _async_create_issue(hass, domain, issue_id, **data) -> None:
+        _issue_registry_for(hass).async_create_issue(domain, issue_id, **data)
+
+    def _async_delete_issue(hass, domain, issue_id) -> None:
+        _issue_registry_for(hass).async_delete_issue(domain, issue_id)
+
+    issue_registry_module.async_create_issue = _async_create_issue
+    issue_registry_module.async_delete_issue = _async_delete_issue
 
     device_registry_module = sys.modules["homeassistant.helpers.device_registry"]
     device_registry_module.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
