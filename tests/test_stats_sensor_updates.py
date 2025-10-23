@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 import sys
 from contextlib import suppress
-from types import ModuleType
+from datetime import datetime, timezone
+from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
 
 import pytest
@@ -147,6 +148,7 @@ class _StubHass:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
         self.data: dict[str, dict] = {DOMAIN: {}}
+        self.states: SimpleNamespace = SimpleNamespace(get=lambda _eid: None)
 
     def async_create_task(self, coro, *, name: str | None = None):  # noqa: D401 - stub signature
         return self.loop.create_task(coro, name=name)
@@ -174,6 +176,21 @@ class _StubCache:
         event = getattr(self, "event", None)
         if event is not None:
             event.set()
+
+
+class _EntityRegistryStub:
+    """Minimal entity registry supporting async_get_entity_id lookups."""
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, str, str], str] = {}
+
+    def add(self, platform: str, domain: str, unique_id: str, entity_id: str) -> None:
+        self._entries[(platform, domain, unique_id)] = entity_id
+
+    def async_get_entity_id(
+        self, platform: str, domain: str, unique_id: str
+    ) -> str | None:
+        return self._entries.get((platform, domain, unique_id))
 
 
 def test_increment_stat_notifies_registered_stats_sensor(
@@ -261,6 +278,99 @@ def test_increment_stat_persists_stats(monkeypatch: pytest.MonkeyPatch) -> None:
             key, value = cache.saved_calls[-1]
             assert key == "integration_stats"
             assert value["background_updates"] == 1
+
+        loop.run_until_complete(_exercise())
+    finally:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+            with suppress(Exception):
+                loop.run_until_complete(task)
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_history_fallback_increments_history_stat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recorder fallback should increment the history counter and surface via sensors."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        hass = _StubHass(loop)
+        cache = _StubCache()
+        coordinator = GoogleFindMyCoordinator(
+            hass,
+            cache=cache,
+            allow_history_fallback=True,
+        )
+        coordinator.config_entry = _StubConfigEntry()
+
+        # Disable persistence side effects for deterministic assertions.
+        monkeypatch.setattr(coordinator, "_schedule_stats_persist", lambda: None)
+
+        registry = _EntityRegistryStub()
+        entry_id = coordinator.config_entry.entry_id
+        registry.add(
+            "device_tracker",
+            DOMAIN,
+            f"{entry_id}:device-1",
+            "device_tracker.googlefindmy_device_1",
+        )
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.coordinator.er.async_get",
+            lambda _hass: registry,
+        )
+
+        # No live state available -> force history fallback.
+        hass.states = SimpleNamespace(get=lambda _eid: None)
+
+        history_state = SimpleNamespace(
+            attributes={
+                "latitude": 48.137154,
+                "longitude": 11.576124,
+                "gps_accuracy": 25.0,
+                "last_seen": "2024-02-05T08:00:00Z",
+            },
+            last_updated=datetime(2024, 2, 6, tzinfo=timezone.utc),
+        )
+
+        def _fake_get_last_state_changes(_hass, _limit, entity_ids):
+            return {entity_ids[0]: [history_state]}
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.coordinator.recorder_history.get_last_state_changes",
+            _fake_get_last_state_changes,
+            raising=False,
+        )
+
+        class _RecorderStub:
+            async def async_add_executor_job(self, func, *args):
+                return func(*args)
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.coordinator.get_recorder",
+            lambda _hass: _RecorderStub(),
+            raising=False,
+        )
+
+        sensor = GoogleFindMyStatsSensor(
+            coordinator,
+            "history_fallback_used",
+            STATS_DESCRIPTIONS["history_fallback_used"],
+        )
+
+        async def _exercise() -> None:
+            result = await coordinator._async_build_device_snapshot_with_fallbacks(
+                [{"id": "device-1", "name": "Pixel"}]
+            )
+            assert result
+            assert result[0]["status"] == "Using historical data"
+            assert coordinator.stats["history_fallback_used"] == 1
+            assert sensor.native_value == 1
 
         loop.run_until_complete(_exercise())
     finally:
