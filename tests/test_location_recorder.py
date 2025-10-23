@@ -43,6 +43,14 @@ def test_get_location_history_prefers_last_seen() -> None:
     ):
         results = asyncio.run(recorder.get_location_history(entity_id, hours=1))
 
+    call_args = mock_instance.async_add_executor_job.call_args
+    assert call_args is not None
+    _, _, start_time, end_time, *_ = call_args.args
+    assert start_time.tzinfo is not None
+    assert end_time.tzinfo is not None
+    assert start_time.utcoffset() == timedelta(0)
+    assert end_time.utcoffset() == timedelta(0)
+
     assert len(results) == 1
     entry = results[0]
     expected_ts = datetime(2024, 1, 1, 0, 5, tzinfo=timezone.utc).timestamp()
