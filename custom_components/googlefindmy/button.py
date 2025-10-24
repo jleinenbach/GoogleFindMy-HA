@@ -22,34 +22,21 @@ Quality & design notes (HA Platinum guidelines)
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import (
-    device_registry as dr,
-    entity_registry as er,
-    entity_platform,
-)
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.network import get_url
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
 
 from .const import (
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
-    OPT_MAP_VIEW_TOKEN_EXPIRATION,  # <-- use the constant (C2)
     SERVICE_LOCATE_DEVICE,
-    map_token_hex_digest,
-    map_token_secret_seed,
-    service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator
+from .entity import GoogleFindMyDeviceEntity, resolve_coordinator
 from .util_services import register_entity_service
 
 _LOGGER = logging.getLogger(__name__)
@@ -95,52 +82,13 @@ LOCATE_DEVICE_DESCRIPTION = ButtonEntityDescription(
 )
 
 
-def _maybe_update_device_registry_name(
-    hass: HomeAssistant, entity_id: str, new_name: str
-) -> None:
-    """Update the device's name in the registry if the user hasn't overridden it.
-
-    Best practice:
-    - Do not touch user-defined names (name_by_user).
-    - Keep device registry name aligned with the upstream device label so that
-      entity names composed via has_entity_name=True stay current.
-    """
-    try:
-        ent_reg = er.async_get(hass)
-        ent = ent_reg.async_get(entity_id)
-        if not ent or not ent.device_id:
-            return
-        dev_reg = dr.async_get(hass)
-        dev = dev_reg.async_get(ent.device_id)
-        if not dev or dev.name_by_user:
-            return
-        if new_name and dev.name != new_name:
-            dev_reg.async_update_device(device_id=ent.device_id, name=new_name)
-            _LOGGER.debug(
-                "Device registry name updated for %s: '%s' -> '%s'",
-                entity_id,
-                dev.name,
-                new_name,
-            )
-    except Exception as e:  # Avoid noisy errors during boot/races
-        _LOGGER.debug("Device registry name update failed for %s: %s", entity_id, e)
-
-
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Google Find My Device button entities."""
-    runtime = getattr(config_entry, "runtime_data", None)
-    coordinator: GoogleFindMyCoordinator | None = None
-    if isinstance(runtime, GoogleFindMyCoordinator):
-        coordinator = runtime
-    elif runtime is not None:
-        coordinator = getattr(runtime, "coordinator", None)
-
-    if not isinstance(coordinator, GoogleFindMyCoordinator):
-        raise HomeAssistantError("googlefindmy coordinator not ready")
+    coordinator = resolve_coordinator(config_entry)
 
     platform_getter = getattr(entity_platform, "async_get_current_platform", None)
     if callable(platform_getter):
@@ -246,20 +194,13 @@ async def async_setup_entry(
 
 
 # ----------------------------- Base class -----------------------------------
-class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
-    """Common helpers for all per-device buttons.
+class GoogleFindMyButtonEntity(GoogleFindMyDeviceEntity, ButtonEntity):
+    """Common helpers for all per-device buttons."""
 
-    Centralizes:
-    - unique_id namespacing with config_entry.entry_id (multi-account safe),
-    - DeviceInfo construction with `via_device` linking to the per-entry service device,
-    - map token / url building,
-    - label refresh on coordinator updates.
-    """
-
-    # Entities are enabled by default; device-level disabling is handled elsewhere
     _attr_entity_registry_enabled_default = True
     _attr_has_entity_name = True
     _attr_should_poll = False
+    log_prefix = "Button"
 
     def __init__(
         self,
@@ -270,201 +211,33 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         subentry_key: str,
         subentry_identifier: str,
     ) -> None:
-        super().__init__(coordinator)
-        self._device = device
-        self._fallback_label = fallback_label
-        self._subentry_key = subentry_key
-        self._subentry_identifier = subentry_identifier
-
-    def _device_label(self) -> str:
-        """Return the best-available label for the device."""
-
-        try:
-            raw_name = self._device.get("name")
-        except AttributeError:
-            raw_name = None
-
-        if isinstance(raw_name, str):
-            stripped = raw_name.strip()
-            if stripped:
-                return stripped
-
-        if isinstance(self._fallback_label, str) and self._fallback_label:
-            return self._fallback_label
-
-        device_id = self._device.get("id") if isinstance(self._device, dict) else None
-        if isinstance(device_id, str) and device_id:
-            return device_id
-
-        fallback = (
-            self._device.get("device_id") if isinstance(self._device, dict) else None
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=fallback_label,
         )
-        if isinstance(fallback, str) and fallback:
-            return fallback
-
-        return "Google Find My Device"
 
     async def async_trigger_coordinator_refresh(self) -> None:
         """Request a coordinator refresh via the entity service placeholder."""
 
         await self.coordinator.async_request_refresh()
 
-    # --------------- Common name refresh on coordinator update ---------------
     @callback
-    def _refresh_label_from_coordinator(self, log_prefix: str) -> None:
-        """Sync raw device label from coordinator snapshot and update DR if needed."""
-        try:
-            data = self.coordinator.get_subentry_snapshot(self._subentry_key)
-            my_id = self._device["id"]
-            if not self.coordinator.is_device_visible_in_subentry(
-                self._subentry_key, my_id
-            ):
-                return
-            for dev in data:
-                if dev.get("id") == my_id:
-                    new_name = dev.get("name")
-                    if (
-                        new_name
-                        and new_name != "Google Find My Device"
-                        and new_name != self._device.get("name")
-                    ):
-                        old = self._device.get("name")
-                        self._device["name"] = new_name
-                        self._fallback_label = new_name
-                        _maybe_update_device_registry_name(
-                            self.hass, self.entity_id, new_name
-                        )
-                        _LOGGER.debug(
-                            "%s device label refreshed for %s: '%s' -> '%s'",
-                            log_prefix,
-                            my_id,
-                            old,
-                            new_name,
-                        )
-                    break
-        except (AttributeError, TypeError):
-            pass
+    def _handle_coordinator_update(self) -> None:
+        """Refresh device metadata and propagate state updates."""
 
-    # ---------------- Device Info + Map Link (shared) ----------------
-    @property
-    def _entry_id(self) -> str | None:
-        """Return entry_id if the entity is bound to a config entry."""
-        entry = getattr(self.coordinator, "config_entry", None)
-        return getattr(entry, "entry_id", None)
-
-    def _service_device_identifier(self) -> tuple[str, str] | None:
-        """Return the `(DOMAIN, f"integration_{entry_id}")` identifier for via_device."""
-        eid = self._entry_id
-        if not eid:
-            return None
-        return service_device_identifier(eid)
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Return DeviceInfo for the **end device**, linked via the service device.
-
-        Notes:
-        - `identifiers` uses the canonical per-device id, so entities group under that device.
-        - `via_device` links the end device to the single per-entry service device to prevent
-          duplicate "integration devices" and to keep topology clean.
-        - We avoid writing placeholder names on cold boot; only pass `name` when known.
-        """
-        try:
-            base_url = get_url(
-                self.hass,
-                prefer_external=True,
-                allow_cloud=True,
-                allow_external=True,
-                allow_internal=True,
-            )
-        except HomeAssistantError:
-            base_url = "http://homeassistant.local:8123"
-
-        auth_token = self._get_map_token()
-        path = self._build_map_path(self._device["id"], auth_token, redirect=False)
-
-        label = self._device_label()
-        use_name = label if label != "Google Find My Device" else None
-
-        info_kwargs: dict[str, Any] = {}
-        if use_name:
-            info_kwargs["name"] = use_name
-
-        via = self._service_device_identifier()
-        entry_id = self._entry_id
-        dev_id = self._device["id"]
-        entry_scoped_identifier = (
-            f"{entry_id}:{self._subentry_identifier}:{dev_id}"
-            if entry_id
-            else f"{self._subentry_identifier}:{dev_id}"
-        )
-        identifiers: set[tuple[str, str]] = {(DOMAIN, entry_scoped_identifier)}
-        if entry_id:
-            identifiers.add((DOMAIN, f"{entry_id}:{dev_id}"))
-        else:
-            identifiers.add((DOMAIN, dev_id))
-
-        return DeviceInfo(
-            identifiers=identifiers,
-            manufacturer="Google",
-            model="Find My Device",
-            configuration_url=f"{base_url}{path}",
-            serial_number=self._device["id"],
-            via_device=via,  # <-- link to the per-entry service device
-            **info_kwargs,
-        )
-
-    @staticmethod
-    def _build_map_path(device_id: str, token: str, *, redirect: bool = False) -> str:
-        """Return the map URL *path* (no scheme/host)."""
-        if redirect:
-            return f"/api/googlefindmy/redirect_map/{device_id}?token={token}"
-        return f"/api/googlefindmy/map/{device_id}?token={token}"
-
-    def _get_map_token(self) -> str:
-        """Generate a hardened map token (entry-scoped + weekly/static).
-
-        Token formula (kept consistent with other platforms & map_view):
-            secret = map_token_secret_seed(...)
-            token  = map_token_hex_digest(secret)
-        """
-        config_entry = getattr(self.coordinator, "config_entry", None)
-
-        # Prefer central options helper if available; fall back to direct reads.
-        try:
-            from . import _opt  # type: ignore
-
-            token_expiration_enabled = _opt(
-                config_entry,
-                OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-            )
-        except Exception:
-            if config_entry:
-                token_expiration_enabled = config_entry.options.get(
-                    OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                    config_entry.data.get(
-                        OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-                    ),
-                )
-            else:
-                token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-
-        entry_id = getattr(config_entry, "entry_id", "") if config_entry else ""
-        ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
-        if token_expiration_enabled:
-            seed = map_token_secret_seed(ha_uuid, entry_id, True, now=int(time.time()))
-        else:
-            seed = map_token_secret_seed(ha_uuid, entry_id, False)
-
-        return map_token_hex_digest(seed)
+        self.refresh_device_label_from_coordinator(log_prefix=self.log_prefix)
+        self.async_write_ha_state()
 
 
 # ----------------------------- Play Sound -----------------------------------
-class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
+class GoogleFindMyPlaySoundButton(GoogleFindMyButtonEntity):
     """Button to trigger 'Play Sound' on a Google Find My Device."""
 
     entity_description = PLAY_SOUND_DESCRIPTION
+    log_prefix = "PlaySound"
 
     def __init__(
         self,
@@ -482,15 +255,15 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
             subentry_key=subentry_key,
             subentry_identifier=subentry_identifier,
         )
-        dev_id = device["id"]
-        eid = self._entry_id
-        # Unique ID is namespaced by entry_id for multi-account safety
-        if eid:
-            self._attr_unique_id = (
-                f"{DOMAIN}_{eid}_{subentry_identifier}_{dev_id}_play_sound"
-            )
-        else:
-            self._attr_unique_id = f"{DOMAIN}_{subentry_identifier}_{dev_id}_play_sound"
+        dev_id = self.device_id
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            self.entry_id,
+            subentry_identifier,
+            dev_id,
+            "play_sound",
+            separator="_",
+        )
 
     @property
     def available(self) -> bool:
@@ -499,13 +272,11 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
         Presence has priority: if the device is absent from the latest Google list,
         the button is unavailable regardless of capability/push readiness.
         """
-        dev_id = self._device["id"]
-        device_label = self._device_label()
+        dev_id = self.device_id
+        device_label = self.device_label()
         try:
             # Presence gate
-            if not self.coordinator.is_device_visible_in_subentry(
-                self._subentry_key, dev_id
-            ):
+            if not self.coordinator_has_device():
                 return False
             if hasattr(
                 self.coordinator, "is_device_present"
@@ -522,16 +293,10 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
             )
             return True  # Optimistic fallback
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """React to coordinator updates (availability and device name may change)."""
-        self._refresh_label_from_coordinator("PlaySound")
-        self.async_write_ha_state()
-
     async def async_press(self) -> None:
         """Handle the button press."""
-        device_id = self._device["id"]
-        device_name = self._device_label()
+        device_id = self.device_id
+        device_name = self.device_label()
 
         if not self.available:
             _LOGGER.warning(
@@ -558,10 +323,11 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
 
 
 # ----------------------------- Stop Sound -----------------------------------
-class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
+class GoogleFindMyStopSoundButton(GoogleFindMyButtonEntity):
     """Button to trigger 'Stop Sound' on a Google Find My Device."""
 
     entity_description = STOP_SOUND_DESCRIPTION
+    log_prefix = "StopSound"
 
     def __init__(
         self,
@@ -579,14 +345,15 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
             subentry_key=subentry_key,
             subentry_identifier=subentry_identifier,
         )
-        dev_id = device["id"]
-        eid = self._entry_id
-        if eid:
-            self._attr_unique_id = (
-                f"{DOMAIN}_{eid}_{subentry_identifier}_{dev_id}_stop_sound"
-            )
-        else:
-            self._attr_unique_id = f"{DOMAIN}_{subentry_identifier}_{dev_id}_stop_sound"
+        dev_id = self.device_id
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            self.entry_id,
+            subentry_identifier,
+            dev_id,
+            "stop_sound",
+            separator="_",
+        )
 
     @property
     def available(self) -> bool:
@@ -600,12 +367,10 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
           2) prefer a dedicated `can_stop_sound()` if provided by the coordinator,
              otherwise assume stopping is allowed when the device is present.
         """
-        dev_id = self._device["id"]
-        device_label = self._device_label()
+        dev_id = self.device_id
+        device_label = self.device_label()
         try:
-            if not self.coordinator.is_device_visible_in_subentry(
-                self._subentry_key, dev_id
-            ):
+            if not self.coordinator_has_device():
                 return False
             if hasattr(
                 self.coordinator, "is_device_present"
@@ -625,16 +390,10 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
             )
             return True
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """React to coordinator updates (availability and device name may change)."""
-        self._refresh_label_from_coordinator("StopSound")
-        self.async_write_ha_state()
-
     async def async_press(self) -> None:
         """Handle the button press (stop sound)."""
-        device_id = self._device["id"]
-        device_name = self._device_label()
+        device_id = self.device_id
+        device_name = self.device_label()
 
         if not self.available:
             _LOGGER.warning(
@@ -661,10 +420,11 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
 
 
 # ----------------------------- Locate now -----------------------------------
-class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
+class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
     """Button to trigger an immediate 'Locate now' request (manual location update)."""
 
     entity_description = LOCATE_DEVICE_DESCRIPTION
+    log_prefix = "Locate"
 
     def __init__(
         self,
@@ -682,16 +442,15 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
             subentry_key=subentry_key,
             subentry_identifier=subentry_identifier,
         )
-        dev_id = device["id"]
-        eid = self._entry_id
-        if eid:
-            self._attr_unique_id = (
-                f"{DOMAIN}_{eid}_{subentry_identifier}_{dev_id}_locate_device"
-            )
-        else:
-            self._attr_unique_id = (
-                f"{DOMAIN}_{subentry_identifier}_{dev_id}_locate_device"
-            )
+        dev_id = self.device_id
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            self.entry_id,
+            subentry_identifier,
+            dev_id,
+            "locate_device",
+            separator="_",
+        )
 
     @property
     def available(self) -> bool:
@@ -699,13 +458,11 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
 
         Presence has priority: if absent from Google's list, the button is unavailable.
         """
-        dev_id = self._device["id"]
-        device_label = self._device_label()
+        dev_id = self.device_id
+        device_label = self.device_label()
         try:
             # Presence gate
-            if not self.coordinator.is_device_visible_in_subentry(
-                self._subentry_key, dev_id
-            ):
+            if not self.coordinator_has_device():
                 return False
             if hasattr(
                 self.coordinator, "is_device_present"
@@ -722,20 +479,14 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
             )
             return True  # Optimistic fallback
 
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """React to coordinator updates (availability and device name may change)."""
-        self._refresh_label_from_coordinator("Locate")
-        self.async_write_ha_state()
-
     async def async_press(self) -> None:
         """Invoke the `googlefindmy.locate_device` service for this device.
 
         The service path keeps UI and logic decoupled and ensures that all
         manual triggers (buttons, automations, scripts) share the same code path.
         """
-        device_id = self._device["id"]
-        device_name = self._device_label()
+        device_id = self.device_id
+        device_name = self.device_label()
 
         if not self.available:
             _LOGGER.warning(

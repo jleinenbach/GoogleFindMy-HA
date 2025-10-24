@@ -1,5 +1,4 @@
 # custom_components/googlefindmy/sensor.py
-# custom_components/googlefindmy/sensor.py
 """Sensor entities for Google Find My Device integration.
 
 Exposes:
@@ -16,7 +15,6 @@ Best practices:
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,27 +27,16 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.network import get_url
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_ENABLE_STATS_ENTITIES,
     DEFAULT_ENABLE_STATS_ENTITIES,
-    OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    SERVICE_DEVICE_NAME,
-    SERVICE_DEVICE_MODEL,
-    SERVICE_DEVICE_MANUFACTURER,
-    map_token_hex_digest,
-    map_token_secret_seed,
-    service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
+from .entity import GoogleFindMyDeviceEntity, GoogleFindMyEntity, resolve_coordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -117,37 +104,6 @@ STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
 }
 
 
-def _maybe_update_device_registry_name(
-    hass: HomeAssistant, entity_id: str, new_name: str
-) -> None:
-    """Write the real Google device label into the device registry once known.
-
-    Never touch if the user renamed the device (name_by_user is set). Defensive behavior:
-    - Only update if a valid device is attached to the entity and name is non-empty.
-    - Avoid churn by skipping when the current registry name already matches.
-    """
-    try:
-        ent_reg = er.async_get(hass)
-        ent = ent_reg.async_get(entity_id)
-        if not ent or not ent.device_id:
-            return
-        dev_reg = dr.async_get(hass)
-        dev = dev_reg.async_get(ent.device_id)
-        # Respect user overrides
-        if not dev or dev.name_by_user:
-            return
-        if new_name and dev.name != new_name:
-            dev_reg.async_update_device(device_id=ent.device_id, name=new_name)
-            _LOGGER.debug(
-                "Device registry name updated for %s: '%s' -> '%s'",
-                entity_id,
-                dev.name,
-                new_name,
-            )
-    except Exception as e:  # noqa: BLE001
-        _LOGGER.debug("Device registry name update failed for %s: %s", entity_id, e)
-
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -160,15 +116,7 @@ async def async_setup_entry(
     - Optionally create diagnostic stat sensors when enabled via options.
     - Dynamically add per-device sensors when new devices appear.
     """
-    runtime = getattr(entry, "runtime_data", None)
-    coordinator: GoogleFindMyCoordinator | None = None
-    if isinstance(runtime, GoogleFindMyCoordinator):
-        coordinator = runtime
-    elif runtime is not None:
-        coordinator = getattr(runtime, "coordinator", None)
-
-    if not isinstance(coordinator, GoogleFindMyCoordinator):
-        raise HomeAssistantError("googlefindmy coordinator not ready")
+    coordinator = resolve_coordinator(entry)
 
     subentry_key = coordinator.get_subentry_key_for_feature("sensor")
     subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
@@ -266,7 +214,7 @@ async def async_setup_entry(
 # ------------------------------- Stats Sensor ---------------------------------
 
 
-class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
+class GoogleFindMyStatsSensor(GoogleFindMyEntity, SensorEntity):
     """Diagnostic counters for the integration (entry-scoped).
 
     Naming policy (HA Quality Scale – Platinum):
@@ -293,14 +241,18 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
             stat_key: Name of the counter in coordinator.stats.
             description: Home Assistant entity description (icon, translation_key, etc.).
         """
-        super().__init__(coordinator)
+        super().__init__(coordinator, subentry_identifier=subentry_identifier)
         self._stat_key = stat_key
         self.entity_description = description
-        entry_id = getattr(
-            getattr(coordinator, "config_entry", None), "entry_id", "default"
-        )
+        entry_id = self.entry_id or "default"
         # Entry-scoped unique_id avoids collisions in multi-account setups.
-        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{subentry_identifier}_{stat_key}"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            stat_key,
+            separator="_",
+        )
         # Plain unit label; TOTAL_INCREASING counters represent event counts.
         self._attr_native_unit_of_measurement = "updates"
 
@@ -330,24 +282,13 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
 
         All counters live on the per-entry SERVICE device to keep the UI tidy.
         """
-        entry_id = getattr(
-            getattr(self.coordinator, "config_entry", None), "entry_id", "default"
-        )
-        ident = service_device_identifier(entry_id)
-        return DeviceInfo(
-            identifiers={ident},
-            name=SERVICE_DEVICE_NAME,
-            manufacturer=SERVICE_DEVICE_MANUFACTURER,
-            model=SERVICE_DEVICE_MODEL,
-            configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
-            entry_type=dr.DeviceEntryType.SERVICE,
-        )
+        return self.service_device_info()
 
 
 # ----------------------------- Per-Device Last Seen ---------------------------
 
 
-class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
+class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
     """Per-device sensor exposing the last_seen timestamp.
 
     Behavior:
@@ -371,18 +312,23 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         subentry_identifier: str,
     ) -> None:
         """Initialize the sensor."""
-        super().__init__(coordinator)
-        self._device = device
-        self._device_id: str | None = device.get("id")
-        self._subentry_key = subentry_key
-        self._subentry_identifier = subentry_identifier
-        safe_id = self._device_id if self._device_id is not None else "unknown"
-        entry_id = getattr(
-            getattr(coordinator, "config_entry", None), "entry_id", "default"
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
         )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        entry_id = self.entry_id or "default"
         # Namespace unique_id by entry for safety (keeps multi-entry setups clean).
-        self._attr_unique_id = (
-            f"{DOMAIN}_{entry_id}_{subentry_identifier}_{safe_id}_last_seen"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            f"{safe_id}_last_seen",
+            separator="_",
         )
         self._attr_native_value: datetime | None = None
 
@@ -399,7 +345,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         if not dev_id:
             return None
         row = self.coordinator.get_device_location_data_for_subentry(
-            self._subentry_key, dev_id
+            self.subentry_key, dev_id
         )
         return _as_ha_attributes(row) if row else None
 
@@ -413,9 +359,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         dev_id = self._device_id
         if not dev_id:
             return False
-        if not self.coordinator.is_device_visible_in_subentry(
-            self._subentry_key, dev_id
-        ):
+        if not self.coordinator_has_device():
             return False
         is_fcm_connected = getattr(self.coordinator, "is_fcm_connected", None)
         if is_fcm_connected is False:
@@ -437,26 +381,15 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         - Keep the existing last_seen when no fresh value is available to avoid churn.
         """
         # 1) Keep the raw device name synchronized with the coordinator snapshot.
-        try:
-            my_id = self._device_id or ""
-            data = self.coordinator.get_subentry_snapshot(self._subentry_key)
-            if not self.coordinator.is_device_visible_in_subentry(
-                self._subentry_key, my_id
-            ):
-                self._attr_native_value = None
-                self.async_write_ha_state()
-                return
-            for dev in data:
-                if dev.get("id") == my_id:
-                    new_name = dev.get("name")
-                    if new_name and new_name != self._device.get("name"):
-                        self._device["name"] = new_name
-                        _maybe_update_device_registry_name(
-                            self.hass, self.entity_id, new_name
-                        )
-                    break
-        except (AttributeError, TypeError) as e:  # noqa: BLE001
-            _LOGGER.debug("Name refresh failed for %s: %s", self._device_id, e)
+        if not self.coordinator_has_device():
+            self._attr_native_value = None
+            self.async_write_ha_state()
+            return
+
+        self.refresh_device_label_from_coordinator(log_prefix="LastSeen")
+        current_name = self._device.get("name")
+        if isinstance(current_name, str):
+            self.maybe_update_device_registry_name(current_name)
 
         # 2) Update last_seen when a valid value is available; otherwise keep the previous value.
         previous = self._attr_native_value
@@ -566,106 +499,7 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         self.async_write_ha_state()
 
     @property
-    def device_info(self) -> DeviceInfo:
-        """Return per-device info linked via the per-entry service device.
+    def device_info(self):  # type: ignore[override]
+        """Expose DeviceInfo using the shared entity helper."""
 
-        Notes:
-            - Only provide `name` when we have a real Google label; otherwise omit it.
-            - Include a stable configuration_url pointing to the per-device map.
-            - Link to the service device using entry-scoped `service_device_identifier`.
-        """
-        auth_token = self._get_map_token()
-        path = self._build_map_path(self._device["id"], auth_token, redirect=False)
-
-        try:
-            base_url = get_url(
-                self.hass,
-                prefer_external=True,
-                allow_cloud=True,
-                allow_external=True,
-                allow_internal=True,
-            )
-        except (HomeAssistantError, RuntimeError) as e:
-            _LOGGER.debug(
-                "Could not determine Home Assistant URL, using fallback: %s", e
-            )
-            base_url = "http://homeassistant.local:8123"
-
-        # Only provide a name if we have a real device label (no bootstrap placeholder)
-        raw_name = (self._device.get("name") or "").strip()
-        use_name = (
-            raw_name if raw_name and raw_name != "Google Find My Device" else None
-        )
-
-        # Link this end device to the single per-entry service device
-        entry_id = getattr(
-            getattr(self.coordinator, "config_entry", None), "entry_id", None
-        )
-        via = service_device_identifier(entry_id) if entry_id else None
-        dev_id = self._device["id"]
-        entry_scoped_identifier = (
-            f"{entry_id}:{self._subentry_identifier}:{dev_id}"
-            if entry_id
-            else f"{self._subentry_identifier}:{dev_id}"
-        )
-        identifiers: set[tuple[str, str]] = {(DOMAIN, entry_scoped_identifier)}
-        if entry_id:
-            identifiers.add((DOMAIN, f"{entry_id}:{dev_id}"))
-        else:
-            identifiers.add((DOMAIN, dev_id))
-
-        return DeviceInfo(
-            identifiers=identifiers,
-            name=use_name,  # may be None; that's OK when identifiers are provided
-            manufacturer="Google",
-            model="Find My Device",
-            configuration_url=f"{base_url}{path}",
-            serial_number=self._device["id"],
-            via_device=via,
-        )
-
-    @staticmethod
-    def _build_map_path(device_id: str, token: str, *, redirect: bool = False) -> str:
-        """Return the map URL *path* (no scheme/host)."""
-        if redirect:
-            return f"/api/googlefindmy/redirect_map/{device_id}?token={token}"
-        return f"/api/googlefindmy/map/{device_id}?token={token}"
-
-    def _get_map_token(self) -> str:
-        """Generate a hardened token for map authentication (entry-scoped + weekly/static).
-
-        Token formula (kept consistent with buttons, tracker and map_view):
-            secret = map_token_secret_seed(...)
-            token  = map_token_hex_digest(secret)
-        """
-        config_entry = getattr(self.coordinator, "config_entry", None)
-
-        # Prefer the central _opt helper; fall back to direct options/data reads for safety.
-        try:
-            from . import _opt  # type: ignore
-
-            token_expiration_enabled = _opt(
-                config_entry,
-                OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-            )
-        except Exception:
-            if config_entry:
-                token_expiration_enabled = config_entry.options.get(
-                    OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                    config_entry.data.get(
-                        OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-                    ),
-                )
-            else:
-                token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-
-        entry_id = getattr(config_entry, "entry_id", "") if config_entry else ""
-        ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
-
-        if token_expiration_enabled:
-            seed = map_token_secret_seed(ha_uuid, entry_id, True, now=int(time.time()))
-        else:
-            seed = map_token_secret_seed(ha_uuid, entry_id, False)
-
-        return map_token_hex_digest(seed)
+        return super().device_info

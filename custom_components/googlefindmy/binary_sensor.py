@@ -27,8 +27,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from homeassistant.exceptions import HomeAssistantError
-
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
@@ -36,25 +34,19 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr  # DeviceEntryType enum
-from homeassistant.helpers.entity import DeviceInfo, EntityCategory
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers import issue_registry as ir
 
 from .const import (
     DOMAIN,
-    INTEGRATION_VERSION,
-    SERVICE_DEVICE_MODEL,
-    SERVICE_DEVICE_NAME,
-    SERVICE_DEVICE_MANUFACTURER,
     TRANSLATION_KEY_AUTH_STATUS,
     EVENT_AUTH_ERROR,
     EVENT_AUTH_OK,
     issue_id_for,
-    service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator, format_epoch_utc
+from .entity import GoogleFindMyEntity, resolve_coordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,15 +81,7 @@ async def async_setup_entry(
 
     Registers both diagnostic sensors under the per-entry service device.
     """
-    runtime = getattr(entry, "runtime_data", None)
-    coordinator: GoogleFindMyCoordinator | None = None
-    if isinstance(runtime, GoogleFindMyCoordinator):
-        coordinator = runtime
-    elif runtime is not None:
-        coordinator = getattr(runtime, "coordinator", None)
-
-    if not isinstance(coordinator, GoogleFindMyCoordinator):
-        raise HomeAssistantError("googlefindmy coordinator not ready")
+    coordinator = resolve_coordinator(entry)
     subentry_identifier = coordinator.stable_subentry_identifier(
         feature="binary_sensor"
     )
@@ -115,9 +99,7 @@ async def async_setup_entry(
 # --------------------------------------------------------------------------------------
 # Polling sensor
 # --------------------------------------------------------------------------------------
-class GoogleFindMyPollingSensor(
-    CoordinatorEntity[GoogleFindMyCoordinator], BinarySensorEntity
-):
+class GoogleFindMyPollingSensor(GoogleFindMyEntity, BinarySensorEntity):
     """Binary sensor indicating whether a background sequential polling cycle is active.
 
     Semantics:
@@ -137,11 +119,15 @@ class GoogleFindMyPollingSensor(
         subentry_identifier: str,
     ) -> None:
         """Initialize the polling sensor."""
-        super().__init__(coordinator)
+        super().__init__(coordinator, subentry_identifier=subentry_identifier)
         self._entry_id = entry.entry_id
+        entry_id = self.entry_id
         # Entry-scoped unique_id: "<entry_id>:<subentry_identifier>:polling"
-        self._attr_unique_id = f"{self._entry_id}:{subentry_identifier}:polling"
-        self._subentry_identifier = subentry_identifier
+        self._attr_unique_id = self.build_unique_id(
+            entry_id,
+            subentry_identifier,
+            "polling",
+        )
 
     @property
     def is_on(self) -> bool:
@@ -168,26 +154,13 @@ class GoogleFindMyPollingSensor(
         """Attach the sensor to the per-entry service device."""
         # Single service device per config entry:
         # identifiers -> (DOMAIN, f"integration_<entry_id>")
-        return DeviceInfo(
-            identifiers={
-                service_device_identifier(self._entry_id),
-                (DOMAIN, f"{self._entry_id}:{self._subentry_identifier}:service"),
-            },
-            name=SERVICE_DEVICE_NAME,
-            manufacturer=SERVICE_DEVICE_MANUFACTURER,
-            model=SERVICE_DEVICE_MODEL,
-            sw_version=INTEGRATION_VERSION,
-            configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
-            entry_type=dr.DeviceEntryType.SERVICE,
-        )
+        return self.service_device_info(include_subentry_identifier=True)
 
 
 # --------------------------------------------------------------------------------------
 # Authentication status sensor
 # --------------------------------------------------------------------------------------
-class GoogleFindMyAuthStatusSensor(
-    CoordinatorEntity[GoogleFindMyCoordinator], BinarySensorEntity
-):
+class GoogleFindMyAuthStatusSensor(GoogleFindMyEntity, BinarySensorEntity):
     """Binary sensor indicating whether user action is required to re-authenticate.
 
     Semantics (device_class=problem):
@@ -213,11 +186,15 @@ class GoogleFindMyAuthStatusSensor(
         subentry_identifier: str,
     ) -> None:
         """Initialize the authentication status sensor."""
-        super().__init__(coordinator)
+        super().__init__(coordinator, subentry_identifier=subentry_identifier)
         self._entry_id = entry.entry_id
-        self._subentry_identifier = subentry_identifier
+        entry_id = self.entry_id
         # Entry-scoped unique_id: "<entry_id>:<subentry_identifier>:auth_status"
-        self._attr_unique_id = f"{self._entry_id}:{subentry_identifier}:auth_status"
+        self._attr_unique_id = self.build_unique_id(
+            entry_id,
+            subentry_identifier,
+            "auth_status",
+        )
         self._event_state = None
         self._unsub_err = None
         self._unsub_ok = None
@@ -330,15 +307,4 @@ class GoogleFindMyAuthStatusSensor(
     @property
     def device_info(self) -> DeviceInfo:
         """Attach the sensor to the per-entry service device."""
-        return DeviceInfo(
-            identifiers={
-                service_device_identifier(self._entry_id),
-                (DOMAIN, f"{self._entry_id}:{self._subentry_identifier}:service"),
-            },
-            name=SERVICE_DEVICE_NAME,
-            manufacturer=SERVICE_DEVICE_MANUFACTURER,
-            model=SERVICE_DEVICE_MODEL,
-            sw_version=INTEGRATION_VERSION,
-            configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
-            entry_type=dr.DeviceEntryType.SERVICE,
-        )
+        return self.service_device_info(include_subentry_identifier=True)
