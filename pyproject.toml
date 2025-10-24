@@ -67,6 +67,11 @@ module = ["custom_components.googlefindmy.*"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
+module = ["custom_components.googlefindmy", "custom_components.googlefindmy.__init__"]
+follow_imports = "skip"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
 module = ["tests.*"]
 ignore_errors = true
 

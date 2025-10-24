@@ -37,7 +37,8 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 import voluptuous as vol
 
