@@ -651,22 +651,22 @@ def test_setup_entry_reactivates_disabled_button_entities(
         registry_entries = [
             SimpleNamespace(
                 entity_id="button.googlefindmy_disabled",
-                platform="button",
-                domain=DOMAIN,
+                platform=DOMAIN,
+                domain="button",
                 disabled_by=disabled_marker,
                 config_entry_id=entry.entry_id,
             ),
             SimpleNamespace(
                 entity_id="button.googlefindmy_enabled",
-                platform="button",
-                domain=DOMAIN,
+                platform=DOMAIN,
+                domain="button",
                 disabled_by=None,
                 config_entry_id=entry.entry_id,
             ),
             SimpleNamespace(
                 entity_id="button.other_integration",
-                platform="button",
-                domain="other",
+                platform="other",
+                domain="button",
                 disabled_by=disabled_marker,
                 config_entry_id="other-entry",
             ),

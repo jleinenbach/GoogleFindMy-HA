@@ -1341,8 +1341,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     reactivated = 0
     for entity_entry in registry_entries_iterable:
         if (
-            entity_entry.platform == "button"
-            and entity_entry.domain == DOMAIN
+            entity_entry.domain == "button"
+            and entity_entry.platform == DOMAIN
             and entity_entry.disabled_by == RegistryEntryDisabler.INTEGRATION
         ):
             entity_registry.async_update_entity(
