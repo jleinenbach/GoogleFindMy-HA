@@ -1,4 +1,5 @@
 # custom_components/googlefindmy/sensor.py
+# custom_components/googlefindmy/sensor.py
 """Sensor entities for Google Find My Device integration.
 
 Exposes:
@@ -169,6 +170,8 @@ async def async_setup_entry(
     if not isinstance(coordinator, GoogleFindMyCoordinator):
         raise HomeAssistantError("googlefindmy coordinator not ready")
 
+    subentry_key = coordinator.get_subentry_key_for_feature("sensor")
+    subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
     entities: list[SensorEntity] = []
     known_ids: set[str] = set()
 
@@ -190,7 +193,14 @@ async def async_setup_entry(
         for stat_key, desc in STATS_DESCRIPTIONS.items():
             # Only create sensors for counters that actually exist in the coordinator
             if hasattr(coordinator, "stats") and stat_key in coordinator.stats:
-                entities.append(GoogleFindMyStatsSensor(coordinator, stat_key, desc))
+                entities.append(
+                    GoogleFindMyStatsSensor(
+                        coordinator,
+                        stat_key,
+                        desc,
+                        subentry_identifier=subentry_identifier,
+                    )
+                )
                 created_stats.append(stat_key)
         if created_stats:
             _LOGGER.debug("Stats sensors created: %s", ", ".join(created_stats))
@@ -200,15 +210,22 @@ async def async_setup_entry(
             )
 
     # Per-device last_seen sensors from current snapshot
-    if coordinator.data:
-        for device in coordinator.data:
-            dev_id = device.get("id")
-            dev_name = device.get("name")
-            if dev_id and dev_name:
-                entities.append(GoogleFindMyLastSeenSensor(coordinator, device))
-                known_ids.add(dev_id)
-            else:
-                _LOGGER.debug("Skipping device without id/name: %s", device)
+    snapshot = coordinator.get_subentry_snapshot(subentry_key)
+    for device in snapshot:
+        dev_id = device.get("id")
+        dev_name = device.get("name")
+        if dev_id and dev_name:
+            entities.append(
+                GoogleFindMyLastSeenSensor(
+                    coordinator,
+                    device,
+                    subentry_key=subentry_key,
+                    subentry_identifier=subentry_identifier,
+                )
+            )
+            known_ids.add(dev_id)
+        else:
+            _LOGGER.debug("Skipping device without id/name: %s", device)
 
     if entities:
         async_add_entities(entities, True)
@@ -218,12 +235,19 @@ async def async_setup_entry(
     def _add_new_sensors_on_update() -> None:
         try:
             new_entities: list[SensorEntity] = []
-            for device in getattr(coordinator, "data", None) or []:
+            for device in coordinator.get_subentry_snapshot(subentry_key):
                 dev_id = device.get("id")
                 dev_name = device.get("name")
                 if not dev_id or not dev_name or dev_id in known_ids:
                     continue
-                new_entities.append(GoogleFindMyLastSeenSensor(coordinator, device))
+                new_entities.append(
+                    GoogleFindMyLastSeenSensor(
+                        coordinator,
+                        device,
+                        subentry_key=subentry_key,
+                        subentry_identifier=subentry_identifier,
+                    )
+                )
                 known_ids.add(dev_id)
 
             if new_entities:
@@ -259,6 +283,8 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         coordinator: GoogleFindMyCoordinator,
         stat_key: str,
         description: SensorEntityDescription,
+        *,
+        subentry_identifier: str,
     ) -> None:
         """Initialize the stats sensor.
 
@@ -274,7 +300,7 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
             getattr(coordinator, "config_entry", None), "entry_id", "default"
         )
         # Entry-scoped unique_id avoids collisions in multi-account setups.
-        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{stat_key}"
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{subentry_identifier}_{stat_key}"
         # Plain unit label; TOTAL_INCREASING counters represent event counts.
         self._attr_native_unit_of_measurement = "updates"
 
@@ -337,18 +363,27 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
     entity_description = LAST_SEEN_DESCRIPTION
 
     def __init__(
-        self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._device = device
         self._device_id: str | None = device.get("id")
+        self._subentry_key = subentry_key
+        self._subentry_identifier = subentry_identifier
         safe_id = self._device_id if self._device_id is not None else "unknown"
         entry_id = getattr(
             getattr(coordinator, "config_entry", None), "entry_id", "default"
         )
         # Namespace unique_id by entry for safety (keeps multi-entry setups clean).
-        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{safe_id}_last_seen"
+        self._attr_unique_id = (
+            f"{DOMAIN}_{entry_id}_{subentry_identifier}_{safe_id}_last_seen"
+        )
         self._attr_native_value: datetime | None = None
 
     @property
@@ -363,7 +398,9 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         dev_id = self._device_id
         if not dev_id:
             return None
-        row = self.coordinator.get_device_location_data(dev_id)
+        row = self.coordinator.get_device_location_data_for_subentry(
+            self._subentry_key, dev_id
+        )
         return _as_ha_attributes(row) if row else None
 
     @property
@@ -375,6 +412,10 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         """
         dev_id = self._device_id
         if not dev_id:
+            return False
+        if not self.coordinator.is_device_visible_in_subentry(
+            self._subentry_key, dev_id
+        ):
             return False
         is_fcm_connected = getattr(self.coordinator, "is_fcm_connected", None)
         if is_fcm_connected is False:
@@ -398,7 +439,14 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         # 1) Keep the raw device name synchronized with the coordinator snapshot.
         try:
             my_id = self._device_id or ""
-            for dev in getattr(self.coordinator, "data", None) or []:
+            data = self.coordinator.get_subentry_snapshot(self._subentry_key)
+            if not self.coordinator.is_device_visible_in_subentry(
+                self._subentry_key, my_id
+            ):
+                self._attr_native_value = None
+                self.async_write_ha_state()
+                return
+            for dev in data:
                 if dev.get("id") == my_id:
                     new_name = dev.get("name")
                     if new_name and new_name != self._device.get("name"):
@@ -415,7 +463,9 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         new_dt: datetime | None = None
         try:
             value = (
-                self.coordinator.get_device_last_seen(self._device_id)
+                self.coordinator.get_device_last_seen_for_subentry(
+                    self._subentry_key, self._device_id
+                )
                 if self._device_id
                 else None
             )
@@ -553,10 +603,19 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         )
         via = service_device_identifier(entry_id) if entry_id else None
         dev_id = self._device["id"]
-        entry_scoped_identifier = f"{entry_id}:{dev_id}" if entry_id else dev_id
+        entry_scoped_identifier = (
+            f"{entry_id}:{self._subentry_identifier}:{dev_id}"
+            if entry_id
+            else f"{self._subentry_identifier}:{dev_id}"
+        )
+        identifiers: set[tuple[str, str]] = {(DOMAIN, entry_scoped_identifier)}
+        if entry_id:
+            identifiers.add((DOMAIN, f"{entry_id}:{dev_id}"))
+        else:
+            identifiers.add((DOMAIN, dev_id))
 
         return DeviceInfo(
-            identifiers={(DOMAIN, entry_scoped_identifier)},
+            identifiers=identifiers,
             name=use_name,  # may be None; that's OK when identifiers are provided
             manufacturer="Google",
             model="Find My Device",

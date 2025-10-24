@@ -37,7 +37,7 @@ import logging
 import os
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from types import MappingProxyType
@@ -637,21 +637,89 @@ async def _async_create_uid_collision_issue(
 
 
 async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """One-time migration to namespace entity unique_ids by config entry id."""
-    if entry.options.get("unique_id_migrated") is True:
-        return
+    """Migrate entity unique_ids to the latest entry/subentry-aware schemas."""
 
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
 
+    current_options = dict(entry.options)
+    options_changed = False
+    collisions: list[str] = []
+
+    legacy_result: _LegacyUniqueIdMigrationResult | None = None
+    if current_options.get("unique_id_migrated") is not True:
+        legacy_result = _migrate_legacy_unique_ids(ent_reg, dev_reg, entry)
+        if legacy_result.collisions:
+            collisions.extend(legacy_result.collisions)
+            _LOGGER.warning(
+                "Unique-ID migration incomplete for '%s': migrated=%d / total_needed=%d, collisions=%d",
+                entry.title,
+                legacy_result.migrated,
+                legacy_result.total_candidates,
+                len(legacy_result.collisions),
+            )
+        else:
+            current_options["unique_id_migrated"] = True
+            options_changed = True
+            if legacy_result.total_candidates or legacy_result.migrated:
+                _LOGGER.info(
+                    "Unique-ID migration complete for '%s': migrated=%d, already_scoped=%d, nonprefix=%d",
+                    entry.title,
+                    legacy_result.migrated,
+                    legacy_result.skipped_already_scoped,
+                    legacy_result.skipped_nonprefix,
+                )
+
+    subentry_result: _SubentryUniqueIdMigrationResult | None = None
+    if current_options.get("unique_id_subentry_migrated") is not True:
+        subentry_result = _migrate_unique_ids_to_subentry(ent_reg, entry)
+        if subentry_result.collisions:
+            collisions.extend(subentry_result.collisions)
+            _LOGGER.warning(
+                "Subentry unique-ID migration incomplete for '%s': updated=%d, already_current=%d, skipped=%d, collisions=%d",
+                entry.title,
+                subentry_result.updated,
+                subentry_result.already_current,
+                subentry_result.skipped,
+                len(subentry_result.collisions),
+            )
+        else:
+            current_options["unique_id_subentry_migrated"] = True
+            options_changed = True
+            if subentry_result.updated or subentry_result.already_current:
+                _LOGGER.info(
+                    "Subentry unique-ID migration complete for '%s': updated=%d, already_current=%d, skipped=%d",
+                    entry.title,
+                    subentry_result.updated,
+                    subentry_result.already_current,
+                    subentry_result.skipped,
+                )
+
+    if collisions:
+        await _async_create_uid_collision_issue(hass, entry, collisions)
+
+    if options_changed and current_options != dict(entry.options):
+        hass.config_entries.async_update_entry(entry, options=current_options)
+
+
+@dataclass(slots=True)
+class _LegacyUniqueIdMigrationResult:
+    total_candidates: int = 0
+    migrated: int = 0
+    skipped_already_scoped: int = 0
+    skipped_nonprefix: int = 0
+    collisions: list[str] = field(default_factory=list)
+
+
+def _migrate_legacy_unique_ids(
+    ent_reg: er.EntityRegistry, dev_reg: dr.DeviceRegistry, entry: ConfigEntry
+) -> _LegacyUniqueIdMigrationResult:
+    """Namespace legacy unique_ids by entry id and update service device identifiers."""
+
     prefix = f"{DOMAIN}_"
     namespaced_prefix = f"{DOMAIN}_{entry.entry_id}_"
 
-    total_candidates = 0
-    migrated = 0
-    skipped_already_scoped = 0
-    skipped_nonprefix = 0
-    collisions: list[str] = []
+    result = _LegacyUniqueIdMigrationResult()
 
     for ent in list(ent_reg.entities.values()):
         try:
@@ -659,13 +727,13 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
                 continue
             uid = ent.unique_id or ""
             if uid.startswith(namespaced_prefix):
-                skipped_already_scoped += 1
+                result.skipped_already_scoped += 1
                 continue
             if not uid.startswith(prefix):
-                skipped_nonprefix += 1
+                result.skipped_nonprefix += 1
                 continue
 
-            total_candidates += 1
+            result.total_candidates += 1
             new_uid = namespaced_prefix + uid[len(prefix) :]
 
             existing_eid = ent_reg.async_get_entity_id(
@@ -678,15 +746,14 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
                     new_uid,
                     existing_eid,
                 )
-                collisions.append(ent.entity_id)
+                result.collisions.append(ent.entity_id)
                 continue
 
             ent_reg.async_update_entity(ent.entity_id, new_unique_id=new_uid)
-            migrated += 1
-        except Exception as err:
+            result.migrated += 1
+        except Exception as err:  # noqa: BLE001 - defensive guard
             _LOGGER.debug("Unique ID migration failed for %s: %s", ent.entity_id, err)
 
-    # Service device identifier (integration → integration_<entry_id>)
     try:
         for device in list(dev_reg.devices.values()):
             if entry.entry_id not in device.config_entries:
@@ -702,31 +769,218 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
                     "Migrated integration service device identifier for entry '%s'",
                     entry.entry_id,
                 )
-    except Exception as err:
+    except Exception as err:  # pragma: no cover - defensive
         _LOGGER.debug("Service device identifier migration skipped: %s", err)
 
-    if collisions:
-        await _async_create_uid_collision_issue(hass, entry, collisions)
-        _LOGGER.warning(
-            "Unique-ID migration incomplete for '%s': migrated=%d / total_needed=%d, collisions=%d",
-            entry.title,
-            migrated,
-            total_candidates,
-            len(collisions),
-        )
-    else:
-        new_opts = dict(entry.options)
-        new_opts["unique_id_migrated"] = True
-        if new_opts != entry.options:
-            hass.config_entries.async_update_entry(entry, options=new_opts)
-        if total_candidates or migrated:
-            _LOGGER.info(
-                "Unique-ID migration complete for '%s': migrated=%d, already_scoped=%d, nonprefix=%d",
-                entry.title,
-                migrated,
-                skipped_already_scoped,
-                skipped_nonprefix,
+    return result
+
+
+_DEFAULT_SUBENTRY_IDENTIFIER = "core_tracking"
+_DEFAULT_SUBENTRY_FEATURES: tuple[str, ...] = (
+    "binary_sensor",
+    "button",
+    "device_tracker",
+    "sensor",
+)
+
+
+@dataclass(slots=True)
+class _SubentryUniqueIdMigrationResult:
+    updated: int = 0
+    already_current: int = 0
+    skipped: int = 0
+    collisions: list[str] = field(default_factory=list)
+
+
+def _migrate_unique_ids_to_subentry(
+    ent_reg: er.EntityRegistry, entry: ConfigEntry
+) -> _SubentryUniqueIdMigrationResult:
+    """Update unique_ids to include the stable subentry identifier."""
+
+    entry_id = getattr(entry, "entry_id", "") or ""
+    if not entry_id:
+        return _SubentryUniqueIdMigrationResult()
+
+    subentry_map = _resolve_subentry_identifier_map(entry)
+    result = _SubentryUniqueIdMigrationResult()
+
+    for ent in list(ent_reg.entities.values()):
+        try:
+            if ent.platform != DOMAIN or ent.config_entry_id != entry.entry_id:
+                continue
+            decision = _determine_subentry_unique_id(entry_id, subentry_map, ent)
+            if decision is None:
+                result.skipped += 1
+                continue
+            if decision == ent.unique_id:
+                result.already_current += 1
+                continue
+
+            existing_eid = ent_reg.async_get_entity_id(
+                ent.domain, ent.platform, decision
             )
+            if existing_eid and existing_eid != ent.entity_id:
+                result.collisions.append(ent.entity_id)
+                continue
+
+            ent_reg.async_update_entity(ent.entity_id, new_unique_id=decision)
+            result.updated += 1
+        except Exception as err:  # noqa: BLE001 - defensive guard
+            _LOGGER.debug(
+                "Subentry unique ID migration failed for %s: %s", ent.entity_id, err
+            )
+
+    return result
+
+
+def _resolve_subentry_identifier_map(entry: ConfigEntry) -> dict[str, str]:
+    """Return the stable identifier for each feature for the given entry."""
+
+    mapping: dict[str, str] = {}
+    default_identifier: str | None = None
+
+    subentries = getattr(entry, "subentries", None)
+    if isinstance(subentries, Mapping):
+        for subentry in subentries.values():
+            data = getattr(subentry, "data", {}) or {}
+            raw_features = data.get("features")
+            features: tuple[str, ...]
+            if isinstance(raw_features, (list, tuple, set)):
+                normalized = [
+                    str(item).strip()
+                    for item in raw_features
+                    if isinstance(item, str) and item.strip()
+                ]
+                features = (
+                    tuple(normalized) if normalized else _DEFAULT_SUBENTRY_FEATURES
+                )
+            else:
+                features = _DEFAULT_SUBENTRY_FEATURES
+
+            identifier = getattr(subentry, "subentry_id", None)
+            if not isinstance(identifier, str) or not identifier:
+                group_key = data.get("group_key")
+                identifier = (
+                    str(group_key).strip() if isinstance(group_key, str) else ""
+                )
+            if not identifier:
+                identifier = _DEFAULT_SUBENTRY_IDENTIFIER
+
+            for feature in features:
+                mapping.setdefault(feature, identifier)
+
+            if default_identifier is None:
+                default_identifier = identifier
+
+    if default_identifier is None:
+        default_identifier = _DEFAULT_SUBENTRY_IDENTIFIER
+
+    for feature in _DEFAULT_SUBENTRY_FEATURES:
+        mapping.setdefault(feature, default_identifier)
+
+    return mapping
+
+
+def _determine_subentry_unique_id(
+    entry_id: str, subentry_map: Mapping[str, str], ent: er.RegistryEntry
+) -> str | None:
+    """Return the desired unique_id for an entity (or None to skip)."""
+
+    uid = ent.unique_id or ""
+    if not uid:
+        return None
+
+    feature = ent.domain
+    identifier = subentry_map.get(feature, _DEFAULT_SUBENTRY_IDENTIFIER)
+
+    if feature == "device_tracker":
+        if uid.count(":") >= 2 and uid.startswith(f"{entry_id}:{identifier}:"):
+            return uid
+        if uid.startswith(f"{entry_id}:{identifier}:"):
+            return uid
+        if uid.startswith(f"{entry_id}:"):
+            remainder = uid[len(entry_id) + 1 :]
+            if remainder:
+                return f"{entry_id}:{identifier}:{remainder}"
+            return None
+        scoped_prefix = f"{DOMAIN}_{entry_id}_"
+        if uid.startswith(scoped_prefix):
+            remainder = uid[len(scoped_prefix) :]
+            if remainder.startswith(f"{identifier}_"):
+                return uid
+            return f"{entry_id}:{identifier}:{remainder}"
+        legacy_prefix = f"{DOMAIN}_"
+        if uid.startswith(legacy_prefix):
+            remainder = uid[len(legacy_prefix) :]
+            return f"{entry_id}:{identifier}:{remainder}"
+        return None
+
+    if feature == "binary_sensor":
+        valid_suffixes = {"polling", "auth_status"}
+        if uid.count(":") >= 2:
+            parts = uid.split(":")
+            if len(parts) >= 3 and parts[0] == entry_id and parts[1] == identifier:
+                if parts[2] in valid_suffixes:
+                    return uid
+            if len(parts) == 2 and parts[0] == entry_id and parts[1] in valid_suffixes:
+                return f"{entry_id}:{identifier}:{parts[1]}"
+            return None
+        if uid.startswith(f"{entry_id}:"):
+            suffix = uid[len(entry_id) + 1 :]
+            if suffix in valid_suffixes:
+                return f"{entry_id}:{identifier}:{suffix}"
+            return None
+        scoped_prefix = f"{DOMAIN}_{entry_id}_"
+        if uid.startswith(scoped_prefix):
+            suffix = uid[len(scoped_prefix) :]
+            if suffix in valid_suffixes:
+                return f"{entry_id}:{identifier}:{suffix}"
+        legacy_prefix = f"{DOMAIN}_"
+        if uid.startswith(legacy_prefix):
+            suffix = uid[len(legacy_prefix) :]
+            if suffix in valid_suffixes:
+                return f"{entry_id}:{identifier}:{suffix}"
+        return None
+
+    if feature == "sensor":
+        scoped_prefix = f"{DOMAIN}_{entry_id}_"
+        if uid.startswith(scoped_prefix):
+            remainder = uid[len(scoped_prefix) :]
+            if remainder.startswith(f"{identifier}_"):
+                return uid
+            return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+        legacy_prefix = f"{DOMAIN}_"
+        if uid.startswith(legacy_prefix):
+            remainder = uid[len(legacy_prefix) :]
+            if remainder.startswith(f"{entry_id}_"):
+                remainder = remainder[len(entry_id) + 1 :]
+            if remainder.startswith(f"{identifier}_"):
+                return uid
+            return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+        return None
+
+    if feature == "button":
+        valid_suffixes = ("_play_sound", "_stop_sound", "_locate_device")
+        scoped_prefix = f"{DOMAIN}_{entry_id}_"
+        if uid.startswith(scoped_prefix):
+            remainder = uid[len(scoped_prefix) :]
+            if remainder.startswith(f"{identifier}_"):
+                return uid
+            if any(remainder.endswith(suffix) for suffix in valid_suffixes):
+                return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+            return None
+        legacy_prefix = f"{DOMAIN}_"
+        if uid.startswith(legacy_prefix):
+            remainder = uid[len(legacy_prefix) :]
+            if remainder.startswith(f"{entry_id}_"):
+                remainder = remainder[len(entry_id) + 1 :]
+            if remainder.startswith(f"{identifier}_"):
+                return uid
+            if any(remainder.endswith(suffix) for suffix in valid_suffixes):
+                return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+        return None
+
+    return None
 
 
 async def _async_migrate_device_identifiers_to_entry_scope(

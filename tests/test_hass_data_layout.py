@@ -210,6 +210,7 @@ class _StubCoordinator:
         self.last_update_success = True
         self.config_entry: _StubConfigEntry | None = None
         self._purged: list[str] = []
+        self._subentry_key = "core_tracking"
 
     def async_add_listener(self, _listener: Callable[[], None]) -> Callable[[], None]:
         return lambda: None
@@ -228,6 +229,22 @@ class _StubCoordinator:
 
     def purge_device(self, device_id: str) -> None:
         self._purged.append(device_id)
+
+    def get_subentry_key_for_feature(self, feature: str) -> str:
+        return self._subentry_key
+
+    def stable_subentry_identifier(
+        self, *, key: str | None = None, feature: str | None = None
+    ) -> str:
+        return "core_tracking"
+
+    def get_subentry_snapshot(
+        self, key: str | None = None, *, feature: str | None = None
+    ) -> list[dict[str, Any]]:
+        return list(self.data)
+
+    def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
+        return True
 
 
 def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 from collections.abc import Awaitable
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 import pytest
 
@@ -67,6 +68,7 @@ def test_button_setup_skips_service_registration_when_platform_missing(
             self.config_entry = config_entry
             self.data = devices
             self._listeners: list[Callable[[], None]] = []
+            self._subentry_key = "core_tracking"
 
         def async_add_listener(
             self, listener: Callable[[], None]
@@ -78,6 +80,24 @@ def test_button_setup_skips_service_registration_when_platform_missing(
             self,
         ) -> None:  # pragma: no cover - compatibility hook
             return None
+
+        def get_subentry_key_for_feature(self, feature: str) -> str:
+            return self._subentry_key
+
+        def stable_subentry_identifier(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> str:
+            return "core_tracking"
+
+        def get_subentry_snapshot(
+            self, key: str | None = None, *, feature: str | None = None
+        ) -> list[dict[str, Any]]:
+            return list(self.data)
+
+        def is_device_visible_in_subentry(
+            self, subentry_key: str, device_id: str
+        ) -> bool:
+            return True
 
     try:
         original_loop = asyncio.get_event_loop()
