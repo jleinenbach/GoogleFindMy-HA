@@ -2,7 +2,7 @@
 # The rule IDs below match the official Developer Docs:
 # https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/
 
-tier: platinum
+tier: silver
 
 # Replace with the upstream maintainer handle from which your fork originated.
 owner: "@BSkando"
@@ -187,7 +187,7 @@ rules:
       status: done
       evidence: []
     - id: strict-typing
-      status: done
+      status: todo  # Mypy currently runs with ignore_errors
       evidence: []
 
 # Optional: documented exemptions (only if truly necessary)
