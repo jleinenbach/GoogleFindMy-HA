@@ -225,7 +225,8 @@ def test_blank_device_name_populates_buttons() -> None:
     assert len(added) == 1
     assert len(added[0]) == 3
     for entity in added[0]:
-        assert entity._device["name"] == "device-1"
+        assert entity._device["name"] == ""
+        assert entity._device_label() == "device-1"
 
     new_device = {"id": "device-2", "name": None}
     coordinator.data.append(new_device)
@@ -234,4 +235,5 @@ def test_blank_device_name_populates_buttons() -> None:
     assert len(added) == 2
     assert len(added[1]) == 3
     for entity in added[1]:
-        assert entity._device["name"] == "device-2"
+        assert entity._device["name"] is None
+        assert entity._device_label() == "device-2"
