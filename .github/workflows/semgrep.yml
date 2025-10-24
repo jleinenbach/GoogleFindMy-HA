@@ -59,11 +59,20 @@ jobs:
           fi
 
       - name: Run Semgrep scan (SARIF)
+        id: semgrep_sarif
         run: |
           semgrep scan --config auto --metrics=off --sarif --output=semgrep.sarif || true
-          if [ ! -s semgrep.sarif ]; then
-            echo '{"version": "2.1.0", "runs": []}' > semgrep.sarif
+
+          has_results=false
+          if [ -s semgrep.sarif ] && jq -e '(.runs // []) | map(select((.results // []) | length > 0)) | length > 0' semgrep.sarif >/dev/null 2>&1; then
+            has_results=true
           fi
+
+          if [ "$has_results" != "true" ]; then
+            rm -f semgrep.sarif
+          fi
+
+          echo "has_results=$has_results" >> "$GITHUB_OUTPUT"
 
       - name: Fail on high or critical findings
         run: |
@@ -74,6 +83,7 @@ jobs:
           fi
 
       - name: Upload Semgrep SARIF results
+        if: steps.semgrep_sarif.outputs.has_results == 'true'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
