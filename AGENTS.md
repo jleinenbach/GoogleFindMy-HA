@@ -396,6 +396,18 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 See also: [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md) for additional, curated reference URLs.
 
+## pip-audit workflow guidance (CORRECTION — April 2025)
+
+**pip-audit reality check (v2.9.0)**
+
+1. `--dry-run` **is supported**. In report-only mode (`--dry-run` without `--fix`), pip-audit skips the security audit and therefore emits no vulnerability JSON. In fix mode (`--fix --dry-run`), pip-audit performs the audit, prints the planned remediation, and makes no changes. Use the flag only when you intentionally want that behavior.
+2. **PR audit step:** run a normal JSON audit (`pip-audit -r <file> -f json -o audit.json`) so downstream tooling (e.g., `jq`) receives real vulnerability data. Keep PR checks green by tolerating the `pip-audit` exit code `1` (vulnerabilities found) via the action’s `internal-be-careful-allow-failure` input or equivalent shell handling/`continue-on-error`.
+3. **Scheduled/Manual autofix:** first generate a JSON report (no `--dry-run`) to classify fixable vs. unfixable findings, then invoke `pip-audit --fix` to apply upgrades. If you need a no-change preview, add an optional `pip-audit -r <file> --fix --dry-run` run before applying fixes.
+4. **Exit codes:** pip-audit returns `0` when no vulnerabilities are present and `1` when vulnerabilities remain. Other failures return `>1`; keep these non-vulnerability errors fatal so the workflow surfaces real issues.
+5. **Tooling note:** install `jq` with the runner package manager (for example, `sudo apt-get install -y jq`) so the CLI is available in the shell environment.
+
+Sources: [pip-audit · PyPI](https://pypi.org/project/pip-audit/), [gh-action-pip-audit · GitHub](https://github.com/pypa/gh-action-pip-audit).
+
 ### 7) Type checking (mypy)
 
 * mypy — Command line reference: [https://mypy.readthedocs.io/en/stable/command_line.html](https://mypy.readthedocs.io/en/stable/command_line.html)
