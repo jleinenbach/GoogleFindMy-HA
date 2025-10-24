@@ -199,6 +199,24 @@ def test_blank_device_name_populates_buttons() -> None:
             self._listeners.append(listener)
             return lambda: None
 
+        def get_subentry_key_for_feature(self, feature: str) -> str:
+            return "core_tracking"
+
+        def stable_subentry_identifier(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> str:
+            return "core_tracking"
+
+        def get_subentry_snapshot(
+            self, key: str | None = None, *, feature: str | None = None
+        ) -> list[dict[str, Any]]:
+            return list(self.data)
+
+        def is_device_visible_in_subentry(
+            self, subentry_key: str, device_id: str
+        ) -> bool:
+            return any(dev.get("id") == device_id for dev in self.data)
+
     class _StubConfigEntry:
         def __init__(self, coordinator: button_module.GoogleFindMyCoordinator) -> None:
             self.runtime_data = coordinator

@@ -98,9 +98,16 @@ async def async_setup_entry(
 
     if not isinstance(coordinator, GoogleFindMyCoordinator):
         raise HomeAssistantError("googlefindmy coordinator not ready")
+    subentry_identifier = coordinator.stable_subentry_identifier(
+        feature="binary_sensor"
+    )
     entities: list[BinarySensorEntity] = [
-        GoogleFindMyPollingSensor(coordinator, entry),
-        GoogleFindMyAuthStatusSensor(coordinator, entry),
+        GoogleFindMyPollingSensor(
+            coordinator, entry, subentry_identifier=subentry_identifier
+        ),
+        GoogleFindMyAuthStatusSensor(
+            coordinator, entry, subentry_identifier=subentry_identifier
+        ),
     ]
     async_add_entities(entities, True)
 
@@ -123,13 +130,18 @@ class GoogleFindMyPollingSensor(
     entity_description = POLLING_DESC
 
     def __init__(
-        self, coordinator: GoogleFindMyCoordinator, entry: ConfigEntry
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        entry: ConfigEntry,
+        *,
+        subentry_identifier: str,
     ) -> None:
         """Initialize the polling sensor."""
         super().__init__(coordinator)
         self._entry_id = entry.entry_id
-        # Entry-scoped unique_id: "<entry_id>:polling"
-        self._attr_unique_id = f"{self._entry_id}:polling"
+        # Entry-scoped unique_id: "<entry_id>:<subentry_identifier>:polling"
+        self._attr_unique_id = f"{self._entry_id}:{subentry_identifier}:polling"
+        self._subentry_identifier = subentry_identifier
 
     @property
     def is_on(self) -> bool:
@@ -157,7 +169,10 @@ class GoogleFindMyPollingSensor(
         # Single service device per config entry:
         # identifiers -> (DOMAIN, f"integration_<entry_id>")
         return DeviceInfo(
-            identifiers={service_device_identifier(self._entry_id)},
+            identifiers={
+                service_device_identifier(self._entry_id),
+                (DOMAIN, f"{self._entry_id}:{self._subentry_identifier}:service"),
+            },
             name=SERVICE_DEVICE_NAME,
             manufacturer=SERVICE_DEVICE_MANUFACTURER,
             model=SERVICE_DEVICE_MODEL,
@@ -191,13 +206,18 @@ class GoogleFindMyAuthStatusSensor(
     _unsub_ok: Callable[[], None] | None
 
     def __init__(
-        self, coordinator: GoogleFindMyCoordinator, entry: ConfigEntry
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        entry: ConfigEntry,
+        *,
+        subentry_identifier: str,
     ) -> None:
         """Initialize the authentication status sensor."""
         super().__init__(coordinator)
         self._entry_id = entry.entry_id
-        # Entry-scoped unique_id: "<entry_id>:auth_status"
-        self._attr_unique_id = f"{self._entry_id}:auth_status"
+        self._subentry_identifier = subentry_identifier
+        # Entry-scoped unique_id: "<entry_id>:<subentry_identifier>:auth_status"
+        self._attr_unique_id = f"{self._entry_id}:{subentry_identifier}:auth_status"
         self._event_state = None
         self._unsub_err = None
         self._unsub_ok = None
@@ -311,7 +331,10 @@ class GoogleFindMyAuthStatusSensor(
     def device_info(self) -> DeviceInfo:
         """Attach the sensor to the per-entry service device."""
         return DeviceInfo(
-            identifiers={service_device_identifier(self._entry_id)},
+            identifiers={
+                service_device_identifier(self._entry_id),
+                (DOMAIN, f"{self._entry_id}:{self._subentry_identifier}:service"),
+            },
             name=SERVICE_DEVICE_NAME,
             manufacturer=SERVICE_DEVICE_MANUFACTURER,
             model=SERVICE_DEVICE_MODEL,

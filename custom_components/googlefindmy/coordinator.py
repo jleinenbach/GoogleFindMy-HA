@@ -63,7 +63,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from types import MappingProxyType
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -120,6 +121,14 @@ from .const import (
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2  # type: ignore
 
 _LOGGER = logging.getLogger(__name__)
+
+
+_DEFAULT_SUBENTRY_FEATURES: tuple[str, ...] = (
+    "binary_sensor",
+    "button",
+    "device_tracker",
+    "sensor",
+)
 
 
 # --- Lightweight cache protocol for entry-scoped persistence -----------------
@@ -204,6 +213,27 @@ class DiagnosticsBuffer:
             "warnings": list(self.warnings.values()),
             "errors": list(self.errors.values()),
         }
+
+
+# --- Subentry metadata ---------------------------------------------------------
+@dataclass(slots=True, frozen=True)
+class SubentryMetadata:
+    """Lightweight view of a config-entry subentry relevant to platforms."""
+
+    key: str
+    subentry_id: str | None
+    features: tuple[str, ...]
+    title: str | None
+    poll_intervals: Mapping[str, int]
+    filters: Mapping[str, Any]
+    feature_flags: Mapping[str, Any]
+    visible_device_ids: tuple[str, ...]
+    enabled_device_ids: tuple[str, ...]
+
+    def stable_identifier(self) -> str:
+        """Return the identifier to use when namespacing entities."""
+
+        return self.subentry_id or self.key
 
 
 # --- Epoch normalization (ms→s tolerant) -----------------------------------
@@ -623,6 +653,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._devices_with_entry: set[str] = set()
         self._dr_unsub: Callable | None = None
 
+        # Subentry awareness (feature groups / platform scoping)
+        self._subentry_metadata: dict[str, SubentryMetadata] = {}
+        self._subentry_snapshots: dict[str, tuple[dict[str, Any], ...]] = {}
+        self._feature_to_subentry: dict[str, str] = {}
+        self._default_subentry_key_value: str = "core_tracking"
+
         # Statistics (extend as needed)
         self.stats: dict[str, int] = {
             "background_updates": 0,  # FCM/push-driven updates + manual commits
@@ -681,6 +717,297 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Return the entry-scoped token cache backing this coordinator."""
 
         return self._cache
+
+    def _default_subentry_key(self) -> str:
+        """Return the default subentry key used when no explicit mapping exists."""
+
+        return self._default_subentry_key_value or "core_tracking"
+
+    def _refresh_subentry_index(
+        self, visible_devices: Sequence[Mapping[str, Any]] | None = None
+    ) -> None:
+        """Refresh internal subentry metadata caches."""
+
+        entry = getattr(self, "config_entry", None)
+
+        raw_entries: list[tuple[str, str | None, Mapping[str, Any], str | None]] = []
+        if entry and getattr(entry, "subentries", None):
+            for subentry in entry.subentries.values():
+                data = dict(getattr(subentry, "data", {}) or {})
+                group_key = str(
+                    data.get("group_key")
+                    or getattr(subentry, "subentry_id", None)
+                    or "core_tracking"
+                )
+                raw_entries.append(
+                    (
+                        group_key,
+                        getattr(subentry, "subentry_id", None),
+                        data,
+                        getattr(subentry, "title", None),
+                    )
+                )
+
+        if not raw_entries:
+            raw_entries.append(
+                (
+                    "core_tracking",
+                    None,
+                    {
+                        "features": _DEFAULT_SUBENTRY_FEATURES,
+                        "feature_flags": {},
+                    },
+                    getattr(entry, "title", None),
+                )
+            )
+
+        ignored = self._get_ignored_set()
+        device_index: dict[str, dict[str, Any]] = {}
+
+        def _register_device(candidate: Mapping[str, Any]) -> None:
+            dev_id: str | None
+            if "id" in candidate:
+                dev_id = candidate.get("id")  # type: ignore[assignment]
+            else:
+                dev_id = candidate.get("device_id")  # type: ignore[assignment]
+            if not isinstance(dev_id, str) or not dev_id or dev_id in ignored:
+                return
+            name = (
+                candidate.get("name")
+                if isinstance(candidate.get("name"), str)
+                else None
+            )
+            device_index.setdefault(dev_id, {"id": dev_id, "name": name})
+
+        if visible_devices is not None:
+            for dev in visible_devices:
+                if isinstance(dev, Mapping):
+                    _register_device(dev)
+        else:
+            for dev in self.data or []:
+                if isinstance(dev, Mapping):
+                    _register_device(dev)
+
+        previous_visible: dict[str, tuple[str, ...]] = {
+            key: meta.visible_device_ids
+            for key, meta in self._subentry_metadata.items()
+        }
+
+        metadata: dict[str, SubentryMetadata] = {}
+        feature_map: dict[str, str] = {}
+        default_key: str | None = None
+
+        for group_key, subentry_id, data, title in raw_entries:
+            raw_features = data.get("features")
+            if isinstance(raw_features, (list, tuple, set)):
+                features = tuple(
+                    sorted(
+                        {
+                            str(feature)
+                            for feature in raw_features
+                            if isinstance(feature, str)
+                        }
+                    )
+                )
+            else:
+                features = _DEFAULT_SUBENTRY_FEATURES
+
+            if not features:
+                features = _DEFAULT_SUBENTRY_FEATURES
+
+            raw_flags = data.get("feature_flags")
+            if isinstance(raw_flags, Mapping):
+                feature_flags = {str(key): raw_flags[key] for key in raw_flags}
+            else:
+                feature_flags = {}
+
+            raw_allowed = data.get("visible_device_ids")
+            allowed_ids: set[str] | None = None
+            if isinstance(raw_allowed, (list, tuple, set)):
+                allowed_ids = {
+                    str(item) for item in raw_allowed if isinstance(item, str) and item
+                }
+
+            if device_index:
+                base_ids = [
+                    dev_id
+                    for dev_id in device_index
+                    if allowed_ids is None or dev_id in allowed_ids
+                ]
+            else:
+                base_ids = [
+                    dev_id
+                    for dev_id in previous_visible.get(group_key, ())
+                    if allowed_ids is None or dev_id in allowed_ids
+                ]
+
+            visible_ids = tuple(sorted(dict.fromkeys(base_ids)))
+            enabled_ids = tuple(
+                sorted(
+                    dev_id
+                    for dev_id in visible_ids
+                    if dev_id in self._enabled_poll_device_ids
+                )
+            )
+
+            poll_intervals = MappingProxyType(
+                {
+                    "location": int(self.location_poll_interval),
+                    "minimum": int(self.min_poll_interval),
+                    "device": int(self.device_poll_delay),
+                    "min_accuracy": int(self._min_accuracy_threshold),
+                    "movement": int(self._movement_threshold),
+                }
+            )
+
+            filters = MappingProxyType(
+                {
+                    "ignored_device_ids": tuple(sorted(ignored)),
+                    "allow_history_fallback": bool(self.allow_history_fallback),
+                }
+            )
+
+            metadata[group_key] = SubentryMetadata(
+                key=group_key,
+                subentry_id=subentry_id,
+                features=features,
+                title=title,
+                poll_intervals=poll_intervals,
+                filters=filters,
+                feature_flags=MappingProxyType(dict(feature_flags)),
+                visible_device_ids=visible_ids,
+                enabled_device_ids=enabled_ids,
+            )
+
+            for feature in features:
+                feature_map[feature] = group_key
+
+            if default_key is None:
+                default_key = group_key
+
+        self._subentry_metadata = metadata
+        self._feature_to_subentry = feature_map
+        if default_key:
+            self._default_subentry_key_value = default_key
+
+        # Ensure snapshot container has entries for all known keys
+        for key in list(self._subentry_snapshots):
+            if key not in metadata:
+                self._subentry_snapshots.pop(key, None)
+        for key in metadata:
+            self._subentry_snapshots.setdefault(key, ())
+
+    def _group_snapshot_by_subentry(
+        self, snapshot: Sequence[Mapping[str, Any]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Return snapshot entries grouped by subentry key."""
+
+        grouped: dict[str, list[dict[str, Any]]] = {
+            key: [] for key in self._subentry_metadata
+        }
+        fallback_key = self._default_subentry_key()
+
+        device_to_key: dict[str, str] = {}
+        for key, meta in self._subentry_metadata.items():
+            for dev_id in meta.visible_device_ids:
+                device_to_key.setdefault(dev_id, key)
+
+        for row in snapshot:
+            if not isinstance(row, Mapping):
+                continue
+            dev_id = row.get("device_id") or row.get("id")
+            if not isinstance(dev_id, str):
+                continue
+            key = device_to_key.get(dev_id)
+            if key is None:
+                key = fallback_key
+                grouped.setdefault(key, [])
+            grouped.setdefault(key, []).append(dict(row))
+
+        for key in self._subentry_metadata:
+            grouped.setdefault(key, [])
+
+        return grouped
+
+    def _store_subentry_snapshots(self, snapshot: Sequence[Mapping[str, Any]]) -> None:
+        """Persist grouped snapshots for subentry-aware consumers."""
+
+        grouped = self._group_snapshot_by_subentry(snapshot)
+        self._subentry_snapshots = {
+            key: tuple(entries) for key, entries in grouped.items()
+        }
+
+    def get_subentry_key_for_feature(self, feature: str) -> str:
+        """Return the subentry key responsible for a platform feature."""
+
+        return self._feature_to_subentry.get(feature, self._default_subentry_key())
+
+    def get_subentry_metadata(
+        self, *, key: str | None = None, feature: str | None = None
+    ) -> SubentryMetadata | None:
+        """Return metadata for a given subentry key or feature."""
+
+        lookup_key = key
+        if lookup_key is None and feature is not None:
+            lookup_key = self.get_subentry_key_for_feature(feature)
+        if lookup_key is None:
+            return None
+        return self._subentry_metadata.get(lookup_key)
+
+    def stable_subentry_identifier(
+        self, *, key: str | None = None, feature: str | None = None
+    ) -> str:
+        """Return the stable identifier string for a subentry."""
+
+        meta = self.get_subentry_metadata(key=key, feature=feature)
+        if meta is not None:
+            return meta.stable_identifier()
+        if key:
+            return key
+        if feature:
+            return feature
+        return self._default_subentry_key()
+
+    def get_subentry_snapshot(
+        self, key: str | None = None, *, feature: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return a copy of the current snapshot for a subentry."""
+
+        lookup_key = key
+        if lookup_key is None and feature is not None:
+            lookup_key = self.get_subentry_key_for_feature(feature)
+        if lookup_key is None:
+            lookup_key = self._default_subentry_key()
+        entries = self._subentry_snapshots.get(lookup_key)
+        if not entries:
+            return []
+        return [dict(row) for row in entries]
+
+    def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
+        """Return True if a device is visible within the subentry scope."""
+
+        meta = self._subentry_metadata.get(subentry_key)
+        if meta is None:
+            return False
+        return device_id in meta.visible_device_ids
+
+    def get_device_location_data_for_subentry(
+        self, subentry_key: str, device_id: str
+    ) -> dict[str, Any] | None:
+        """Return location data for a device if it belongs to the subentry."""
+
+        if not self.is_device_visible_in_subentry(subentry_key, device_id):
+            return None
+        return self.get_device_location_data(device_id)
+
+    def get_device_last_seen_for_subentry(
+        self, subentry_key: str, device_id: str
+    ) -> datetime | None:
+        """Return last_seen for a device within the given subentry."""
+
+        if not self.is_device_visible_in_subentry(subentry_key, device_id):
+            return None
+        return self.get_device_last_seen(device_id)
 
     @staticmethod
     def _sanitize_contributor_mode(mode: str | None) -> str:
@@ -1016,6 +1343,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         self._devices_with_entry = present
         self._enabled_poll_device_ids = enabled
+
+        # Update subentry metadata since enabled/present sets may affect visibility
+        self._refresh_subentry_index()
 
         _LOGGER.debug(
             "Reindexed targets for entry %s: %d present / %d enabled (entities-driven)",
@@ -1930,9 +2260,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 name = dev.get("name")
                 if cached_name and (not isinstance(name, str) or not name.strip()):
                     dev["name"] = cached_name
+            self._refresh_subentry_index(visible_devices)
             snapshot = await self._async_build_device_snapshot_with_fallbacks(
                 visible_devices
             )
+            self._store_subentry_snapshots(snapshot)
 
             # 4.5) Close the initial discovery window once we have a non-empty full list
             if not self._initial_discovery_done and all_devices:
@@ -2864,8 +3196,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
         self._present_last_seen.pop(device_id, None)
-        # Push a minimal update so listeners can refresh availability quickly
-        self.async_set_updated_data(self.data)
+        # Rebuild the cached snapshot without the purged device
+        current_snapshot: list[dict[str, Any]] = []
+        for row in list(self.data or []):
+            if not isinstance(row, dict):
+                continue
+            if row.get("device_id") == device_id or row.get("id") == device_id:
+                continue
+            current_snapshot.append(dict(row))
+
+        devices_stub = [
+            {"id": entry.get("device_id") or entry.get("id"), "name": entry.get("name")}
+            for entry in current_snapshot
+            if isinstance(entry.get("device_id") or entry.get("id"), str)
+        ]
+        self._refresh_subentry_index(devices_stub)
+        self._store_subentry_snapshots(current_snapshot)
+        self.async_set_updated_data(current_snapshot)
 
     # ---------------------------- Push updates ------------------------------
     def push_updated(
@@ -2927,6 +3274,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             devices_stub.append({"id": dev_id, "name": name})
 
         snapshot = self._build_snapshot_from_cache(devices_stub, wall_now=wall_now)
+        self._refresh_subentry_index(devices_stub)
+        self._store_subentry_snapshots(snapshot)
         self.async_set_updated_data(snapshot)
         _LOGGER.debug(
             "Pushed snapshot for %d device(s) via push_updated()", len(snapshot)
@@ -3173,6 +3522,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     normalized_mode, switch_epoch=self._contributor_mode_switch_epoch
                 )
                 self._async_persist_contributor_mode()
+
+        # Settings adjustments may change per-subentry views
+        self._refresh_subentry_index()
 
     def force_poll_due(self) -> None:
         """Force the next poll to be due immediately (no private access required externally)."""

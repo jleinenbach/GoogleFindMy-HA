@@ -178,8 +178,17 @@ class GoogleFindMyMapView(HomeAssistantView):
             entry_unique_id_candidates: list[str] = []
 
             entry_id = entry.entry_id
+            subentry_identifier = coordinator.stable_subentry_identifier(
+                feature="device_tracker"
+            )
             if entry_id:
                 entry_unique_id_candidates.append(f"{entry_id}:{device_id}")
+                entry_unique_id_candidates.append(
+                    f"{entry_id}:{subentry_identifier}:{device_id}"
+                )
+                entry_unique_id_candidates.append(
+                    f"{DOMAIN}_{entry_id}_{subentry_identifier}_{device_id}"
+                )
                 entry_unique_id_candidates.append(f"{DOMAIN}_{entry_id}_{device_id}")
             entry_unique_id_candidates.append(f"{DOMAIN}_{device_id}")
 

@@ -217,6 +217,9 @@ def test_increment_stat_notifies_registered_stats_sensor(
             coordinator,
             "background_updates",
             STATS_DESCRIPTIONS["background_updates"],
+            subentry_identifier=coordinator.stable_subentry_identifier(
+                feature="sensor"
+            ),
         )
 
         async def _exercise() -> None:
@@ -243,7 +246,7 @@ def test_increment_stat_notifies_registered_stats_sensor(
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
         for task in pending:
             task.cancel()
-            with suppress(Exception):
+            with suppress(asyncio.CancelledError, Exception):
                 loop.run_until_complete(task)
         loop.run_until_complete(asyncio.sleep(0))
         loop.close()
@@ -284,7 +287,7 @@ def test_increment_stat_persists_stats(monkeypatch: pytest.MonkeyPatch) -> None:
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
         for task in pending:
             task.cancel()
-            with suppress(Exception):
+            with suppress(asyncio.CancelledError, Exception):
                 loop.run_until_complete(task)
         loop.run_until_complete(asyncio.sleep(0))
         loop.close()
@@ -361,6 +364,9 @@ def test_history_fallback_increments_history_stat(
             coordinator,
             "history_fallback_used",
             STATS_DESCRIPTIONS["history_fallback_used"],
+            subentry_identifier=coordinator.stable_subentry_identifier(
+                feature="sensor"
+            ),
         )
 
         async def _exercise() -> None:
@@ -377,7 +383,7 @@ def test_history_fallback_increments_history_stat(
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
         for task in pending:
             task.cancel()
-            with suppress(Exception):
+            with suppress(asyncio.CancelledError, Exception):
                 loop.run_until_complete(task)
         loop.run_until_complete(asyncio.sleep(0))
         loop.close()

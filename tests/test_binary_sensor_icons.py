@@ -108,7 +108,9 @@ def test_auth_status_sensor_icon(event_state: bool, expected_icon: str) -> None:
 
     coordinator = SimpleNamespace(api_status=None)
     entry = SimpleNamespace(entry_id="entry-id")
-    sensor = GoogleFindMyAuthStatusSensor(coordinator, entry)
+    sensor = GoogleFindMyAuthStatusSensor(
+        coordinator, entry, subentry_identifier="core_tracking"
+    )
 
     # Force the fast-path state without requiring Home Assistant event bus.
     sensor._event_state = event_state
@@ -132,7 +134,9 @@ def test_auth_status_sensor_attributes_include_nova_snapshots() -> None:
         ),
     )
     entry = SimpleNamespace(entry_id="entry-id")
-    sensor = GoogleFindMyAuthStatusSensor(coordinator, entry)
+    sensor = GoogleFindMyAuthStatusSensor(
+        coordinator, entry, subentry_identifier="core_tracking"
+    )
 
     attrs = sensor.extra_state_attributes
 
@@ -150,6 +154,8 @@ def test_auth_status_sensor_attributes_return_none_when_unavailable() -> None:
 
     coordinator = SimpleNamespace(api_status=None, fcm_status=None)
     entry = SimpleNamespace(entry_id="entry-id")
-    sensor = GoogleFindMyAuthStatusSensor(coordinator, entry)
+    sensor = GoogleFindMyAuthStatusSensor(
+        coordinator, entry, subentry_identifier="core_tracking"
+    )
 
     assert sensor.extra_state_attributes is None

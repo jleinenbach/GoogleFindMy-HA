@@ -153,19 +153,45 @@ async def async_setup_entry(
                 "async_trigger_coordinator_refresh",
             )
 
+    subentry_key = coordinator.get_subentry_key_for_feature("button")
+    subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
     known_ids: set[str] = set()
     entities: list[ButtonEntity] = []
 
     # Initial population from coordinator.data (if already available)
-    for device in coordinator.data or []:
+    for device in coordinator.get_subentry_snapshot(subentry_key):
         dev_id = device.get("id")
         if not dev_id or dev_id in known_ids:
             continue
 
         label = _derive_device_label(device)
-        entities.append(GoogleFindMyPlaySoundButton(coordinator, device, label))
-        entities.append(GoogleFindMyStopSoundButton(coordinator, device, label))
-        entities.append(GoogleFindMyLocateButton(coordinator, device, label))
+        entities.append(
+            GoogleFindMyPlaySoundButton(
+                coordinator,
+                device,
+                label,
+                subentry_key=subentry_key,
+                subentry_identifier=subentry_identifier,
+            )
+        )
+        entities.append(
+            GoogleFindMyStopSoundButton(
+                coordinator,
+                device,
+                label,
+                subentry_key=subentry_key,
+                subentry_identifier=subentry_identifier,
+            )
+        )
+        entities.append(
+            GoogleFindMyLocateButton(
+                coordinator,
+                device,
+                label,
+                subentry_key=subentry_key,
+                subentry_identifier=subentry_identifier,
+            )
+        )
         known_ids.add(dev_id)
 
     if entities:
@@ -176,15 +202,39 @@ async def async_setup_entry(
     @callback
     def _add_new_devices() -> None:
         new_entities: list[ButtonEntity] = []
-        for device in coordinator.data or []:
+        for device in coordinator.get_subentry_snapshot(subentry_key):
             dev_id = device.get("id")
             if not dev_id or dev_id in known_ids:
                 continue
 
             label = _derive_device_label(device)
-            new_entities.append(GoogleFindMyPlaySoundButton(coordinator, device, label))
-            new_entities.append(GoogleFindMyStopSoundButton(coordinator, device, label))
-            new_entities.append(GoogleFindMyLocateButton(coordinator, device, label))
+            new_entities.append(
+                GoogleFindMyPlaySoundButton(
+                    coordinator,
+                    device,
+                    label,
+                    subentry_key=subentry_key,
+                    subentry_identifier=subentry_identifier,
+                )
+            )
+            new_entities.append(
+                GoogleFindMyStopSoundButton(
+                    coordinator,
+                    device,
+                    label,
+                    subentry_key=subentry_key,
+                    subentry_identifier=subentry_identifier,
+                )
+            )
+            new_entities.append(
+                GoogleFindMyLocateButton(
+                    coordinator,
+                    device,
+                    label,
+                    subentry_key=subentry_key,
+                    subentry_identifier=subentry_identifier,
+                )
+            )
             known_ids.add(dev_id)
 
         if new_entities:
@@ -216,10 +266,15 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         coordinator: GoogleFindMyCoordinator,
         device: dict[str, Any],
         fallback_label: str | None,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
     ) -> None:
         super().__init__(coordinator)
         self._device = device
         self._fallback_label = fallback_label
+        self._subentry_key = subentry_key
+        self._subentry_identifier = subentry_identifier
 
     def _device_label(self) -> str:
         """Return the best-available label for the device."""
@@ -259,8 +314,12 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
     def _refresh_label_from_coordinator(self, log_prefix: str) -> None:
         """Sync raw device label from coordinator snapshot and update DR if needed."""
         try:
-            data = getattr(self.coordinator, "data", None) or []
+            data = self.coordinator.get_subentry_snapshot(self._subentry_key)
             my_id = self._device["id"]
+            if not self.coordinator.is_device_visible_in_subentry(
+                self._subentry_key, my_id
+            ):
+                return
             for dev in data:
                 if dev.get("id") == my_id:
                     new_name = dev.get("name")
@@ -334,10 +393,19 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         via = self._service_device_identifier()
         entry_id = self._entry_id
         dev_id = self._device["id"]
-        entry_scoped_identifier = f"{entry_id}:{dev_id}" if entry_id else dev_id
+        entry_scoped_identifier = (
+            f"{entry_id}:{self._subentry_identifier}:{dev_id}"
+            if entry_id
+            else f"{self._subentry_identifier}:{dev_id}"
+        )
+        identifiers: set[tuple[str, str]] = {(DOMAIN, entry_scoped_identifier)}
+        if entry_id:
+            identifiers.add((DOMAIN, f"{entry_id}:{dev_id}"))
+        else:
+            identifiers.add((DOMAIN, dev_id))
 
         return DeviceInfo(
-            identifiers={(DOMAIN, entry_scoped_identifier)},
+            identifiers=identifiers,
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
@@ -403,15 +471,26 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
         coordinator: GoogleFindMyCoordinator,
         device: dict[str, Any],
         fallback_label: str | None,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
     ) -> None:
-        super().__init__(coordinator, device, fallback_label)
+        super().__init__(
+            coordinator,
+            device,
+            fallback_label,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
         dev_id = device["id"]
         eid = self._entry_id
         # Unique ID is namespaced by entry_id for multi-account safety
         if eid:
-            self._attr_unique_id = f"{DOMAIN}_{eid}_{dev_id}_play_sound"
+            self._attr_unique_id = (
+                f"{DOMAIN}_{eid}_{subentry_identifier}_{dev_id}_play_sound"
+            )
         else:
-            self._attr_unique_id = f"{DOMAIN}_{dev_id}_play_sound"
+            self._attr_unique_id = f"{DOMAIN}_{subentry_identifier}_{dev_id}_play_sound"
 
     @property
     def available(self) -> bool:
@@ -424,6 +503,10 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
         device_label = self._device_label()
         try:
             # Presence gate
+            if not self.coordinator.is_device_visible_in_subentry(
+                self._subentry_key, dev_id
+            ):
+                return False
             if hasattr(
                 self.coordinator, "is_device_present"
             ) and not self.coordinator.is_device_present(dev_id):
@@ -485,14 +568,25 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
         coordinator: GoogleFindMyCoordinator,
         device: dict[str, Any],
         fallback_label: str | None,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
     ) -> None:
-        super().__init__(coordinator, device, fallback_label)
+        super().__init__(
+            coordinator,
+            device,
+            fallback_label,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
         dev_id = device["id"]
         eid = self._entry_id
         if eid:
-            self._attr_unique_id = f"{DOMAIN}_{eid}_{dev_id}_stop_sound"
+            self._attr_unique_id = (
+                f"{DOMAIN}_{eid}_{subentry_identifier}_{dev_id}_stop_sound"
+            )
         else:
-            self._attr_unique_id = f"{DOMAIN}_{dev_id}_stop_sound"
+            self._attr_unique_id = f"{DOMAIN}_{subentry_identifier}_{dev_id}_stop_sound"
 
     @property
     def available(self) -> bool:
@@ -509,6 +603,10 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
         dev_id = self._device["id"]
         device_label = self._device_label()
         try:
+            if not self.coordinator.is_device_visible_in_subentry(
+                self._subentry_key, dev_id
+            ):
+                return False
             if hasattr(
                 self.coordinator, "is_device_present"
             ) and not self.coordinator.is_device_present(dev_id):
@@ -573,14 +671,27 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
         coordinator: GoogleFindMyCoordinator,
         device: dict[str, Any],
         fallback_label: str | None,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
     ) -> None:
-        super().__init__(coordinator, device, fallback_label)
+        super().__init__(
+            coordinator,
+            device,
+            fallback_label,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
         dev_id = device["id"]
         eid = self._entry_id
         if eid:
-            self._attr_unique_id = f"{DOMAIN}_{eid}_{dev_id}_locate_device"
+            self._attr_unique_id = (
+                f"{DOMAIN}_{eid}_{subentry_identifier}_{dev_id}_locate_device"
+            )
         else:
-            self._attr_unique_id = f"{DOMAIN}_{dev_id}_locate_device"
+            self._attr_unique_id = (
+                f"{DOMAIN}_{subentry_identifier}_{dev_id}_locate_device"
+            )
 
     @property
     def available(self) -> bool:
@@ -592,6 +703,10 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
         device_label = self._device_label()
         try:
             # Presence gate
+            if not self.coordinator.is_device_visible_in_subentry(
+                self._subentry_key, dev_id
+            ):
+                return False
             if hasattr(
                 self.coordinator, "is_device_present"
             ) and not self.coordinator.is_device_present(dev_id):

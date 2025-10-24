@@ -315,9 +315,13 @@ def test_push_updated_keeps_known_name_for_blank_snapshots(
         raising=False,
     )
 
+    subentry_key = coordinator.get_subentry_key_for_feature("device_tracker")
+    subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
     entity = GoogleFindMyDeviceTracker(
         coordinator,
         {"id": "dev-1", "name": "Pixel 9"},
+        subentry_key=subentry_key,
+        subentry_identifier=subentry_identifier,
     )
     entity.hass = coordinator.hass
     entity.entity_id = "device_tracker.googlefindmy_dev_1"

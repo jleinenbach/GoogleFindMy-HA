@@ -24,6 +24,22 @@ class _StubCoordinator:
     def __init__(self, devices: list[dict[str, Any]]) -> None:
         self.data = devices
 
+    def get_subentry_key_for_feature(self, feature: str) -> str:
+        return "core_tracking"
+
+    def stable_subentry_identifier(
+        self, *, key: str | None = None, feature: str | None = None
+    ) -> str:
+        return "core_tracking"
+
+    def get_subentry_snapshot(
+        self, key: str | None = None, *, feature: str | None = None
+    ) -> list[dict[str, Any]]:
+        return list(self.data)
+
+    def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
+        return True
+
 
 class _StubEntry:
     """Config entry stub carrying runtime data."""
@@ -200,8 +216,9 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
     )
     entry = _StubEntry("entry-123", coordinator)
 
-    target_unique_id = f"{entry.entry_id}:{device_id}"
-    overlapping_unique_id = f"{entry.entry_id}:{device_id}-shadow"
+    identifier = coordinator.stable_subentry_identifier(feature="device_tracker")
+    target_unique_id = f"{entry.entry_id}:{identifier}:{device_id}"
+    overlapping_unique_id = f"{entry.entry_id}:{identifier}:{device_id}-shadow"
 
     registry = _StubEntityRegistry(
         [
@@ -271,11 +288,12 @@ def test_map_view_uses_iso_last_seen_for_timeline(
     coordinator = _StubCoordinator(devices=[{"id": device_id, "name": "ISO Device"}])
     entry = _StubEntry("entry-iso", coordinator)
 
+    identifier = coordinator.stable_subentry_identifier(feature="device_tracker")
     registry = _StubEntityRegistry(
         [
             _StubEntityEntry(
                 entity_id="device_tracker.googlefindmy_primary",
-                unique_id=f"{entry.entry_id}:{device_id}",
+                unique_id=f"{entry.entry_id}:{identifier}:{device_id}",
                 config_entry_id=entry.entry_id,
             )
         ]

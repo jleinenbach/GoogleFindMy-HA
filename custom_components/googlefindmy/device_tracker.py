@@ -11,7 +11,9 @@ Notes on design and consistency with the coordinator:
 - End devices link to the per-entry SERVICE device via `via_device=(DOMAIN, f"integration_{entry_id}")`.
 
 Entry-scope guarantees (C2):
-- Unique IDs are entry-scoped using the new schema: "<entry_id>:<device_id>".
+- Unique IDs are entry-scoped using the subentry-aware schema:
+  "<entry_id>:<subentry_identifier>:<device_id>" (or "<subentry_identifier>:<device_id>"
+  during bootstrap before the entry ID attaches).
 - Device Registry identifiers are also entry-scoped to avoid cross-account merges.
 """
 
@@ -119,19 +121,28 @@ async def async_setup_entry(
     if not isinstance(coordinator, GoogleFindMyCoordinator):
         raise HomeAssistantError("googlefindmy coordinator not ready")
 
+    subentry_key = coordinator.get_subentry_key_for_feature("device_tracker")
+    subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
     entities: list[GoogleFindMyDeviceTracker] = []
     known_ids: set[str] = set()
 
     # Startup population from coordinator snapshot (if already present)
-    if coordinator.data:
-        for device in coordinator.data:
-            dev_id = device.get("id")
-            name = device.get("name")
-            if dev_id and name:
-                known_ids.add(dev_id)
-                entities.append(GoogleFindMyDeviceTracker(coordinator, device))
-            else:
-                _LOGGER.debug("Skipping device without id/name: %s", device)
+    initial_snapshot = coordinator.get_subentry_snapshot(subentry_key)
+    for device in initial_snapshot:
+        dev_id = device.get("id")
+        name = device.get("name")
+        if dev_id and name:
+            known_ids.add(dev_id)
+            entities.append(
+                GoogleFindMyDeviceTracker(
+                    coordinator,
+                    device,
+                    subentry_key=subentry_key,
+                    subentry_identifier=subentry_identifier,
+                )
+            )
+        else:
+            _LOGGER.debug("Skipping device without id/name: %s", device)
 
     if entities:
         async_add_entities(entities, True)
@@ -139,11 +150,12 @@ async def async_setup_entry(
     # Dynamically add new trackers when the coordinator learns about more devices
     @callback
     def _sync_entities_from_coordinator() -> None:
-        if not coordinator.data:
+        snapshot = coordinator.get_subentry_snapshot(subentry_key)
+        if not snapshot:
             return
 
         to_add: list[GoogleFindMyDeviceTracker] = []
-        for device in coordinator.data:
+        for device in snapshot:
             dev_id = device.get("id")
             name = device.get("name")
             if not dev_id or not name:
@@ -151,7 +163,14 @@ async def async_setup_entry(
             if dev_id in known_ids:
                 continue
             known_ids.add(dev_id)
-            to_add.append(GoogleFindMyDeviceTracker(coordinator, device))
+            to_add.append(
+                GoogleFindMyDeviceTracker(
+                    coordinator,
+                    device,
+                    subentry_key=subentry_key,
+                    subentry_identifier=subentry_identifier,
+                )
+            )
 
         if to_add:
             _LOGGER.info("Adding %d newly discovered Find My tracker(s)", len(to_add))
@@ -192,16 +211,23 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         self,
         coordinator: GoogleFindMyCoordinator,
         device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
     ) -> None:
         """Initialize the tracker entity."""
         super().__init__(coordinator)
         self._device = device
+        self._subentry_key = subentry_key
+        self._subentry_identifier = subentry_identifier
 
         entry_id = _entry_id_of(coordinator)
         dev_id = device["id"]
 
-        # New unique_id schema: "<entry_id>:<device_id>" (entry-scoped).
-        self._attr_unique_id = f"{entry_id}:{dev_id}"
+        if entry_id:
+            self._attr_unique_id = f"{entry_id}:{subentry_identifier}:{dev_id}"
+        else:
+            self._attr_unique_id = f"{subentry_identifier}:{dev_id}"
 
         # With has_entity_name=False we must set the entity's name ourselves.
         # If name is missing during cold boot, HA will show the entity_id; that's fine.
@@ -305,11 +331,22 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         # Link against the per-entry service device
         via = service_device_identifier(entry_id) if entry_id else None
 
-        # Entry-scoped device identifier to avoid merges across accounts.
-        entry_scoped_identifier = f"{entry_id}:{dev_id}" if entry_id else dev_id
+        # Entry-scoped device identifiers to avoid merges across accounts.
+        identifiers: set[tuple[str, str]] = {
+            (
+                DOMAIN,
+                f"{entry_id}:{self._subentry_identifier}:{dev_id}"
+                if entry_id
+                else f"{self._subentry_identifier}:{dev_id}",
+            )
+        }
+        if entry_id:
+            identifiers.add((DOMAIN, f"{entry_id}:{dev_id}"))
+        else:
+            identifiers.add((DOMAIN, dev_id))
 
         return DeviceInfo(
-            identifiers={(DOMAIN, entry_scoped_identifier)},
+            identifiers=identifiers,
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}" if base_url else None,
@@ -372,7 +409,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         """Get current device data from the coordinator's public cache API."""
         dev_id = self._device["id"]
         try:
-            return self.coordinator.get_device_location_data(dev_id)
+            return self.coordinator.get_device_location_data_for_subentry(
+                self._subentry_key, dev_id
+            )
         except (AttributeError, TypeError):
             return None
 
@@ -385,6 +424,10 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         the entity becomes unavailable and the user may delete it via HA UI.
         """
         dev_id = self._device["id"]
+        if not self.coordinator.is_device_visible_in_subentry(
+            self._subentry_key, dev_id
+        ):
+            return False
         # Prefer coordinator presence; fall back to previous behavior if API is missing.
         try:
             if hasattr(self.coordinator, "is_device_present"):
@@ -483,8 +526,14 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         """
         # Sync the raw device name from the coordinator and keep the entity display name in sync (no prefixes).
         try:
-            data = getattr(self.coordinator, "data", None) or []
             my_id = self._device["id"]
+            data = self.coordinator.get_subentry_snapshot(self._subentry_key)
+            if not self.coordinator.is_device_visible_in_subentry(
+                self._subentry_key, my_id
+            ):
+                self._last_good_accuracy_data = None
+                self.async_write_ha_state()
+                return
             for dev in data:
                 if dev.get("id") == my_id:
                     new_name = dev.get("name")
