@@ -145,12 +145,13 @@ async def async_setup_entry(
     platform_getter = getattr(entity_platform, "async_get_current_platform", None)
     if callable(platform_getter):
         platform = platform_getter()
-        register_entity_service(
-            platform,
-            "trigger_device_refresh",
-            vol.Schema({}),
-            "async_trigger_coordinator_refresh",
-        )
+        if platform is not None:
+            register_entity_service(
+                platform,
+                "trigger_device_refresh",
+                vol.Schema({}),
+                "async_trigger_coordinator_refresh",
+            )
 
     known_ids: set[str] = set()
     entities: list[ButtonEntity] = []
