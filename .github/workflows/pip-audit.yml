@@ -56,7 +56,7 @@ jobs:
             fi
             fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
             unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
-            printf "- %s: fixable=%s, unfixable=%s\n" "$f" "$fixable" "$unfixable" >> "$summary_tmp"
+            printf " - %s: fixable=%s, unfixable=%s\n" "$f" "$fixable" "$unfixable" >> "$summary_tmp"
             if [ "$unfixable" -gt 0 ]; then
               echo "::warning title=pip-audit (no fix available)::$f: ${unfixable} vulnerability/vulnerabilities without a fix."
             fi
