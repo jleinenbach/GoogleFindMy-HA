@@ -398,5 +398,14 @@
     "missing_namespace": {
       "message": "Namespace missing. Pass the entry-specific namespace or ConfigEntry ID to keep cached metadata isolated."
     }
+  },
+  "system_health": {
+    "info": {
+      "integration_version": "Integration version",
+      "loaded_entries": "Loaded entries",
+      "entries": "Config entries",
+      "fcm": "FCM receiver",
+      "fcm_lock_contention_count": "FCM lock contention count"
+    }
   }
 }
