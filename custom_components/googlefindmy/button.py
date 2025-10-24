@@ -54,6 +54,25 @@ from .util_services import register_entity_service
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _derive_device_label(device: dict[str, Any]) -> str | None:
+    """Return a stable device label without mutating the coordinator snapshot."""
+
+    name = device.get("name")
+    if isinstance(name, str):
+        stripped = name.strip()
+        if stripped:
+            return stripped
+
+    fallback = device.get("device_id") or device.get("id")
+    if isinstance(fallback, str):
+        stripped = fallback.strip()
+        if stripped:
+            return stripped
+
+    return None
+
+
 # Reusable entity description with translations in en.json
 PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
     key="play_sound",
@@ -139,12 +158,14 @@ async def async_setup_entry(
     # Initial population from coordinator.data (if already available)
     for device in coordinator.data or []:
         dev_id = device.get("id")
-        name = device.get("name")
-        if dev_id and name and dev_id not in known_ids:
-            entities.append(GoogleFindMyPlaySoundButton(coordinator, device))
-            entities.append(GoogleFindMyStopSoundButton(coordinator, device))
-            entities.append(GoogleFindMyLocateButton(coordinator, device))
-            known_ids.add(dev_id)
+        if not dev_id or dev_id in known_ids:
+            continue
+
+        label = _derive_device_label(device)
+        entities.append(GoogleFindMyPlaySoundButton(coordinator, device, label))
+        entities.append(GoogleFindMyStopSoundButton(coordinator, device, label))
+        entities.append(GoogleFindMyLocateButton(coordinator, device, label))
+        known_ids.add(dev_id)
 
     if entities:
         _LOGGER.debug("Adding %d initial button entity(ies)", len(entities))
@@ -156,12 +177,14 @@ async def async_setup_entry(
         new_entities: list[ButtonEntity] = []
         for device in coordinator.data or []:
             dev_id = device.get("id")
-            name = device.get("name")
-            if dev_id and name and dev_id not in known_ids:
-                new_entities.append(GoogleFindMyPlaySoundButton(coordinator, device))
-                new_entities.append(GoogleFindMyStopSoundButton(coordinator, device))
-                new_entities.append(GoogleFindMyLocateButton(coordinator, device))
-                known_ids.add(dev_id)
+            if not dev_id or dev_id in known_ids:
+                continue
+
+            label = _derive_device_label(device)
+            new_entities.append(GoogleFindMyPlaySoundButton(coordinator, device, label))
+            new_entities.append(GoogleFindMyStopSoundButton(coordinator, device, label))
+            new_entities.append(GoogleFindMyLocateButton(coordinator, device, label))
+            known_ids.add(dev_id)
 
         if new_entities:
             _LOGGER.debug("Dynamically adding %d button entity(ies)", len(new_entities))
@@ -188,10 +211,42 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
     _attr_should_poll = False
 
     def __init__(
-        self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        fallback_label: str | None,
     ) -> None:
         super().__init__(coordinator)
         self._device = device
+        self._fallback_label = fallback_label
+
+    def _device_label(self) -> str:
+        """Return the best-available label for the device."""
+
+        try:
+            raw_name = self._device.get("name")
+        except AttributeError:
+            raw_name = None
+
+        if isinstance(raw_name, str):
+            stripped = raw_name.strip()
+            if stripped:
+                return stripped
+
+        if isinstance(self._fallback_label, str) and self._fallback_label:
+            return self._fallback_label
+
+        device_id = self._device.get("id") if isinstance(self._device, dict) else None
+        if isinstance(device_id, str) and device_id:
+            return device_id
+
+        fallback = (
+            self._device.get("device_id") if isinstance(self._device, dict) else None
+        )
+        if isinstance(fallback, str) and fallback:
+            return fallback
+
+        return "Google Find My Device"
 
     async def async_trigger_coordinator_refresh(self) -> None:
         """Request a coordinator refresh via the entity service placeholder."""
@@ -215,6 +270,7 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
                     ):
                         old = self._device.get("name")
                         self._device["name"] = new_name
+                        self._fallback_label = new_name
                         _maybe_update_device_registry_name(
                             self.hass, self.entity_id, new_name
                         )
@@ -267,10 +323,8 @@ class _BaseGoogleFindMyButton(CoordinatorEntity, ButtonEntity):
         auth_token = self._get_map_token()
         path = self._build_map_path(self._device["id"], auth_token, redirect=False)
 
-        raw_name = (self._device.get("name") or "").strip()
-        use_name = (
-            raw_name if raw_name and raw_name != "Google Find My Device" else None
-        )
+        label = self._device_label()
+        use_name = label if label != "Google Find My Device" else None
 
         info_kwargs: dict[str, Any] = {}
         if use_name:
@@ -344,9 +398,12 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
     entity_description = PLAY_SOUND_DESCRIPTION
 
     def __init__(
-        self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        fallback_label: str | None,
     ) -> None:
-        super().__init__(coordinator, device)
+        super().__init__(coordinator, device, fallback_label)
         dev_id = device["id"]
         eid = self._entry_id
         # Unique ID is namespaced by entry_id for multi-account safety
@@ -363,6 +420,7 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
         the button is unavailable regardless of capability/push readiness.
         """
         dev_id = self._device["id"]
+        device_label = self._device_label()
         try:
             # Presence gate
             if hasattr(
@@ -374,7 +432,7 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
         except (AttributeError, TypeError) as err:
             _LOGGER.debug(
                 "PlaySound availability check for %s (%s) raised %s; defaulting to True",
-                self._device.get("name", dev_id),
+                device_label,
                 dev_id,
                 err,
             )
@@ -389,7 +447,7 @@ class GoogleFindMyPlaySoundButton(_BaseGoogleFindMyButton):
     async def async_press(self) -> None:
         """Handle the button press."""
         device_id = self._device["id"]
-        device_name = self._device.get("name", device_id)
+        device_name = self._device_label()
 
         if not self.available:
             _LOGGER.warning(
@@ -422,9 +480,12 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
     entity_description = STOP_SOUND_DESCRIPTION
 
     def __init__(
-        self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        fallback_label: str | None,
     ) -> None:
-        super().__init__(coordinator, device)
+        super().__init__(coordinator, device, fallback_label)
         dev_id = device["id"]
         eid = self._entry_id
         if eid:
@@ -445,6 +506,7 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
              otherwise assume stopping is allowed when the device is present.
         """
         dev_id = self._device["id"]
+        device_label = self._device_label()
         try:
             if hasattr(
                 self.coordinator, "is_device_present"
@@ -458,7 +520,7 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
         except (AttributeError, TypeError) as err:
             _LOGGER.debug(
                 "StopSound availability check for %s (%s) raised %s; defaulting to True",
-                self._device.get("name", dev_id),
+                device_label,
                 dev_id,
                 err,
             )
@@ -473,7 +535,7 @@ class GoogleFindMyStopSoundButton(_BaseGoogleFindMyButton):
     async def async_press(self) -> None:
         """Handle the button press (stop sound)."""
         device_id = self._device["id"]
-        device_name = self._device.get("name", device_id)
+        device_name = self._device_label()
 
         if not self.available:
             _LOGGER.warning(
@@ -506,9 +568,12 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
     entity_description = LOCATE_DEVICE_DESCRIPTION
 
     def __init__(
-        self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        fallback_label: str | None,
     ) -> None:
-        super().__init__(coordinator, device)
+        super().__init__(coordinator, device, fallback_label)
         dev_id = device["id"]
         eid = self._entry_id
         if eid:
@@ -523,6 +588,7 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
         Presence has priority: if absent from Google's list, the button is unavailable.
         """
         dev_id = self._device["id"]
+        device_label = self._device_label()
         try:
             # Presence gate
             if hasattr(
@@ -534,7 +600,7 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
         except (AttributeError, TypeError) as err:
             _LOGGER.debug(
                 "Locate availability check for %s (%s) raised %s; defaulting to True",
-                self._device.get("name", dev_id),
+                device_label,
                 dev_id,
                 err,
             )
@@ -553,7 +619,7 @@ class GoogleFindMyLocateButton(_BaseGoogleFindMyButton):
         manual triggers (buttons, automations, scripts) share the same code path.
         """
         device_id = self._device["id"]
-        device_name = self._device.get("name", device_id)
+        device_name = self._device_label()
 
         if not self.available:
             _LOGGER.warning(
