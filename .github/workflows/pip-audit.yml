@@ -1,0 +1,35 @@
+name: pip-audit
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: pip-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
+
+      - name: Run pip-audit
+        run: |
+          pip-audit -r requirements-dev.txt -r custom_components/googlefindmy/requirements.txt
