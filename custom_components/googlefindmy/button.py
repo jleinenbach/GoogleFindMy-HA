@@ -54,6 +54,26 @@ from .util_services import register_entity_service
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _ensure_device_name(device: dict[str, Any]) -> str | None:
+    """Return a non-empty device name, storing fallbacks locally when needed."""
+
+    name = device.get("name")
+    if isinstance(name, str):
+        stripped = name.strip()
+        if stripped:
+            if stripped != name:
+                device["name"] = stripped
+            return stripped
+
+    fallback = device.get("device_id") or device.get("id")
+    if isinstance(fallback, str) and fallback:
+        device["name"] = fallback
+        return fallback
+
+    return name
+
+
 # Reusable entity description with translations in en.json
 PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
     key="play_sound",
@@ -139,12 +159,14 @@ async def async_setup_entry(
     # Initial population from coordinator.data (if already available)
     for device in coordinator.data or []:
         dev_id = device.get("id")
-        name = device.get("name")
-        if dev_id and name and dev_id not in known_ids:
-            entities.append(GoogleFindMyPlaySoundButton(coordinator, device))
-            entities.append(GoogleFindMyStopSoundButton(coordinator, device))
-            entities.append(GoogleFindMyLocateButton(coordinator, device))
-            known_ids.add(dev_id)
+        if not dev_id or dev_id in known_ids:
+            continue
+
+        _ensure_device_name(device)
+        entities.append(GoogleFindMyPlaySoundButton(coordinator, device))
+        entities.append(GoogleFindMyStopSoundButton(coordinator, device))
+        entities.append(GoogleFindMyLocateButton(coordinator, device))
+        known_ids.add(dev_id)
 
     if entities:
         _LOGGER.debug("Adding %d initial button entity(ies)", len(entities))
@@ -156,12 +178,14 @@ async def async_setup_entry(
         new_entities: list[ButtonEntity] = []
         for device in coordinator.data or []:
             dev_id = device.get("id")
-            name = device.get("name")
-            if dev_id and name and dev_id not in known_ids:
-                new_entities.append(GoogleFindMyPlaySoundButton(coordinator, device))
-                new_entities.append(GoogleFindMyStopSoundButton(coordinator, device))
-                new_entities.append(GoogleFindMyLocateButton(coordinator, device))
-                known_ids.add(dev_id)
+            if not dev_id or dev_id in known_ids:
+                continue
+
+            _ensure_device_name(device)
+            new_entities.append(GoogleFindMyPlaySoundButton(coordinator, device))
+            new_entities.append(GoogleFindMyStopSoundButton(coordinator, device))
+            new_entities.append(GoogleFindMyLocateButton(coordinator, device))
+            known_ids.add(dev_id)
 
         if new_entities:
             _LOGGER.debug("Dynamically adding %d button entity(ies)", len(new_entities))
