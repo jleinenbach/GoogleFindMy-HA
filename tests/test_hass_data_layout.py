@@ -10,8 +10,8 @@ import sys
 from contextlib import suppress
 from pathlib import Path
 from types import MappingProxyType, ModuleType, SimpleNamespace
-from typing import Any
-from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock, call
 
 import pytest
@@ -25,7 +25,11 @@ from custom_components.googlefindmy.const import (
     SERVICE_LOCATE_DEVICE,
     SERVICE_REBUILD_REGISTRY,
 )
+from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.exceptions import ServiceValidationError
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy import RuntimeData
 
 
 class _StubCache:
@@ -49,19 +53,17 @@ class _StubConfigEntry:
     """Minimal ConfigEntry-like stub capturing unload callbacks."""
 
     def __init__(self) -> None:
-        self.entry_id = "entry-test"
-        self.data = {
+        self.entry_id: str = "entry-test"
+        self.data: dict[str, Any] = {
             DATA_SECRET_BUNDLE: {"username": "user@example.com"},
             CONF_GOOGLE_EMAIL: "user@example.com",
         }
         self.options: dict[str, Any] = {}
-        self.title = "Test Entry"
-        self.runtime_data: Any = None
-        self.subentries: dict[str, Any] = {}
-        from homeassistant.config_entries import ConfigEntryState
-
-        self.state = ConfigEntryState.LOADED
-        self.disabled_by = None
+        self.title: str = "Test Entry"
+        self.runtime_data: RuntimeData | None = None
+        self.subentries: dict[str, ConfigSubentry] = {}
+        self.state: ConfigEntryState = ConfigEntryState.LOADED
+        self.disabled_by: str | None = None
         self._unload_callbacks: list[Callable[[], None]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
@@ -91,11 +93,11 @@ class _StubConfigEntries:
     """Minimal config_entries manager stub."""
 
     def __init__(self, entry: _StubConfigEntry) -> None:
-        self._entries = [entry]
+        self._entries: list[_StubConfigEntry] = [entry]
         self.forward_calls: list[tuple[_StubConfigEntry, tuple[str, ...]]] = []
         self.reload_calls: list[str] = []
-        self.added_subentries: list[tuple[_StubConfigEntry, Any]] = []
-        self.updated_subentries: list[tuple[_StubConfigEntry, Any]] = []
+        self.added_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
+        self.updated_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
         self.removed_subentries: list[tuple[_StubConfigEntry, str]] = []
 
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
@@ -111,7 +113,9 @@ class _StubConfigEntries:
     ) -> bool:
         return True
 
-    def async_add_subentry(self, entry: _StubConfigEntry, subentry: Any) -> bool:
+    def async_add_subentry(
+        self, entry: _StubConfigEntry, subentry: ConfigSubentry
+    ) -> bool:
         entry.subentries[subentry.subentry_id] = subentry
         self.added_subentries.append((entry, subentry))
         return True
@@ -119,7 +123,7 @@ class _StubConfigEntries:
     def async_update_subentry(
         self,
         entry: _StubConfigEntry,
-        subentry: Any,
+        subentry: ConfigSubentry,
         *,
         data: dict[str, Any] | None = None,
         title: str | None = None,
@@ -183,7 +187,7 @@ class _StubHass:
         self.services = _StubServices()
 
     def async_create_task(
-        self, coro: Any, *, name: str | None = None
+        self, coro: Awaitable[Any], *, name: str | None = None
     ) -> asyncio.Task[Any]:
         task = self.loop.create_task(coro, name=name)
         self._tasks.append(task)

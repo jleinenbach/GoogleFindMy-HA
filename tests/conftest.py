@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from collections.abc import Mapping
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from datetime import datetime, timezone
 import json
@@ -107,11 +108,11 @@ def _stub_homeassistant() -> None:
             unique_id: str | None = None,
             subentry_id: str | None = None,
         ) -> None:
-            self.data = MappingProxyType(dict(data))
-            self.subentry_type = subentry_type
-            self.title = title
-            self.unique_id = unique_id
-            self.subentry_id = subentry_id or _next_subentry_id()
+            self.data: Mapping[str, object] = MappingProxyType(dict(data))
+            self.subentry_type: str = subentry_type
+            self.title: str = title
+            self.unique_id: str | None = unique_id
+            self.subentry_id: str = subentry_id or _next_subentry_id()
 
         def as_dict(self) -> dict[str, object]:  # pragma: no cover - helper parity
             return {
