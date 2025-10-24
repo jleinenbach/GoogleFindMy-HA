@@ -30,6 +30,7 @@ from homeassistant.const import (
     ATTR_LONGITUDE,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -241,7 +242,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
     # ---------------- Device Info + Map Link ----------------
     @property
-    def device_info(self):  # type: ignore[override]
+    def device_info(self) -> DeviceInfo:
         """Expose DeviceInfo using the shared entity helper."""
 
         return super().device_info
