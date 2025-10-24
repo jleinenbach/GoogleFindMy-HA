@@ -83,9 +83,7 @@ def _stub_homeassistant() -> None:
     class OptionsFlow:
         """Minimal OptionsFlow stub for imports."""
 
-        def async_show_form(
-            self, *args, **kwargs
-        ):  # pragma: no cover - defensive
+        def async_show_form(self, *args, **kwargs):  # pragma: no cover - defensive
             return {"type": "form"}
 
         def async_create_entry(

@@ -1931,6 +1931,9 @@ class OptionsFlowHandler(OptionsFlowBase):
                     description_placeholders=placeholders,
                 )
 
+            self.hass.async_create_task(
+                self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            )
             return self.async_abort(
                 reason="subentry_move_success", description_placeholders=placeholders
             )
@@ -1994,6 +1997,9 @@ class OptionsFlowHandler(OptionsFlowBase):
                 "count": str(len(devices)),
             }
 
+            self.hass.async_create_task(
+                self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            )
             return self.async_abort(
                 reason="subentry_delete_success",
                 description_placeholders=placeholders,

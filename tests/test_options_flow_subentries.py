@@ -28,6 +28,7 @@ class _ManagerStub:
     def __post_init__(self) -> None:
         self.updated: list[tuple[str, dict[str, Any]]] = []
         self.removed: list[str] = []
+        self.reloads: list[str] = []
 
     def async_update_entry(self, entry: "_EntryStub", *, data: dict[str, Any]) -> None:
         assert entry is self.entry
@@ -55,6 +56,9 @@ class _ManagerStub:
         entry.subentries.pop(subentry_id, None)
         self.removed.append(subentry_id)
         return True
+
+    async def async_reload(self, entry_id: str) -> None:
+        self.reloads.append(entry_id)
 
 
 class _EntryStub:
@@ -170,11 +174,15 @@ def test_repairs_move_assigns_devices_to_selected_subentry() -> None:
     ]
 
     flow = _build_flow(entry)
-    result = asyncio.run(
-        flow.async_step_repairs_move(
+
+    async def _invoke() -> dict[str, Any]:
+        result = await flow.async_step_repairs_move(
             {"target_subentry": "target", "device_ids": ["dev-1", "dev-2"]}
         )
-    )
+        await asyncio.sleep(0)
+        return result
+
+    result = asyncio.run(_invoke())
 
     assert result["type"] == "abort"
     manager = flow.hass.config_entries  # type: ignore[assignment]
@@ -185,6 +193,7 @@ def test_repairs_move_assigns_devices_to_selected_subentry() -> None:
         "dev-2",
     )
     assert tuple(updated[other.subentry_id]["visible_device_ids"]) == ()
+    assert manager.reloads == [entry.entry_id]
 
 
 def test_repairs_delete_moves_devices_and_removes_subentry() -> None:
@@ -197,11 +206,15 @@ def test_repairs_delete_moves_devices_and_removes_subentry() -> None:
     fallback = entry.add_subentry(key="keep", title="Keep", visible_device_ids=[])
 
     flow = _build_flow(entry)
-    result = asyncio.run(
-        flow.async_step_repairs_delete(
+
+    async def _invoke_delete() -> dict[str, Any]:
+        result = await flow.async_step_repairs_delete(
             {"delete_subentry": "remove", "fallback_subentry": "keep"}
         )
-    )
+        await asyncio.sleep(0)
+        return result
+
+    result = asyncio.run(_invoke_delete())
 
     assert result["type"] == "abort"
     manager = flow.hass.config_entries  # type: ignore[assignment]
@@ -211,3 +224,4 @@ def test_repairs_delete_moves_devices_and_removes_subentry() -> None:
         "dev-1",
         "dev-2",
     )
+    assert manager.reloads == [entry.entry_id]
