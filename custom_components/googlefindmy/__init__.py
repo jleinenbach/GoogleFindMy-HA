@@ -61,6 +61,17 @@ from homeassistant.helpers import (
     issue_registry as ir,
 )
 
+try:  # pragma: no cover - compatibility shim for stripped test envs
+    from homeassistant.helpers.entity_registry import RegistryEntryDisabler
+except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
+    from enum import StrEnum
+
+    class RegistryEntryDisabler(StrEnum):
+        """Minimal fallback matching the Home Assistant enum interface."""
+
+        INTEGRATION = "integration"
+
+
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
 from .Auth.token_cache import (
     TokenCache,
@@ -1307,6 +1318,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     )
     entry.runtime_data = runtime_data
     hass.data[DOMAIN].setdefault("entries", {})[entry.entry_id] = runtime_data
+
+    entity_registry = er.async_get(hass)
+    helper = getattr(er, "async_entries_for_config_entry", None)
+    if helper is not None:
+        registry_entries_iterable: Iterable[Any] = helper(
+            entity_registry, entry.entry_id
+        )
+    else:
+        registry_helper = getattr(
+            entity_registry, "async_entries_for_config_entry", None
+        )
+        if callable(registry_helper):
+            registry_entries_iterable = registry_helper(entry.entry_id)
+        else:
+            registry_entries_iterable = [
+                entity_entry
+                for entity_entry in getattr(entity_registry, "entities", {}).values()
+                if getattr(entity_entry, "config_entry_id", None) == entry.entry_id
+            ]
+
+    reactivated = 0
+    for entity_entry in registry_entries_iterable:
+        if (
+            entity_entry.domain == "button"
+            and entity_entry.platform == DOMAIN
+            and entity_entry.disabled_by == RegistryEntryDisabler.INTEGRATION
+        ):
+            entity_registry.async_update_entity(
+                entity_entry.entity_id, disabled_by=None
+            )
+            reactivated += 1
+
+    if reactivated:
+        _LOGGER.debug(
+            "Re-enabled %s button entities disabled by integration", reactivated
+        )
 
     # Owner-index scaffold (E2.5): coordinator will eventually claim canonical_ids
     hass.data[DOMAIN].setdefault("device_owner_index", {})

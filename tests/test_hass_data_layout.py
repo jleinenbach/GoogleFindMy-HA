@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+
 import importlib
 import json
 import sys
@@ -563,6 +564,146 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             assert hass.config_entries.removed_subentries
 
         loop.run_until_complete(_exercise())
+    finally:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+            with suppress(Exception):
+                loop.run_until_complete(task)
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_setup_entry_reactivates_disabled_button_entities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabled button entities are re-enabled during setup."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy.__init__")
+
+        entry = _StubConfigEntry()
+        hass = _StubHass(entry, loop)
+
+        dummy_cache = _StubCache()
+
+        async def _fake_create(cls, hass_obj, entry_id, legacy_path=None) -> _StubCache:  # type: ignore[override]
+            assert hass_obj is hass
+            assert entry_id == entry.entry_id
+            return dummy_cache
+
+        monkeypatch.setattr(
+            integration.TokenCache,
+            "create",
+            classmethod(_fake_create),
+        )
+        monkeypatch.setattr(
+            integration,
+            "_async_soft_migrate_data_to_options",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            integration,
+            "_async_migrate_unique_ids",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            integration,
+            "_register_instance",
+            lambda *_: None,
+        )
+        monkeypatch.setattr(
+            integration,
+            "_unregister_instance",
+            lambda *_: None,
+        )
+
+        dummy_fcm = SimpleNamespace(
+            register_coordinator=lambda *_: None,
+            unregister_coordinator=lambda *_: None,
+            _start_listening=AsyncMock(return_value=None),
+            request_stop=lambda: None,
+        )
+
+        monkeypatch.setattr(
+            integration,
+            "_async_acquire_shared_fcm",
+            AsyncMock(return_value=dummy_fcm),
+        )
+
+        class _RegisterViewStub:
+            def __init__(self, hass_obj: Any) -> None:
+                self.hass = hass_obj
+
+        monkeypatch.setattr(integration, "GoogleFindMyMapView", _RegisterViewStub)
+        monkeypatch.setattr(
+            integration, "GoogleFindMyMapRedirectView", _RegisterViewStub
+        )
+
+        monkeypatch.setattr(integration, "GoogleFindMyCoordinator", _StubCoordinator)
+
+        disabled_marker = integration.RegistryEntryDisabler.INTEGRATION
+
+        registry_entries = [
+            SimpleNamespace(
+                entity_id="button.googlefindmy_disabled",
+                platform=DOMAIN,
+                domain="button",
+                disabled_by=disabled_marker,
+                config_entry_id=entry.entry_id,
+            ),
+            SimpleNamespace(
+                entity_id="button.googlefindmy_enabled",
+                platform=DOMAIN,
+                domain="button",
+                disabled_by=None,
+                config_entry_id=entry.entry_id,
+            ),
+            SimpleNamespace(
+                entity_id="button.other_integration",
+                platform="other",
+                domain="button",
+                disabled_by=disabled_marker,
+                config_entry_id="other-entry",
+            ),
+        ]
+
+        class _RegistryStub:
+            def __init__(self) -> None:
+                self.updated: list[str] = []
+
+            def async_update_entity(self, entity_id: str, **changes: Any) -> None:
+                self.updated.append(entity_id)
+                for entry_obj in registry_entries:
+                    if entry_obj.entity_id == entity_id and "disabled_by" in changes:
+                        entry_obj.disabled_by = changes["disabled_by"]
+
+        registry = _RegistryStub()
+
+        def _entries_for_config_entry(
+            _registry: Any, config_entry_id: str
+        ) -> list[SimpleNamespace]:
+            assert _registry is registry
+            if config_entry_id != entry.entry_id:
+                return []
+            return list(registry_entries)
+
+        monkeypatch.setattr(integration.er, "async_get", lambda _hass: registry)
+        monkeypatch.setattr(
+            integration.er,
+            "async_entries_for_config_entry",
+            _entries_for_config_entry,
+            raising=False,
+        )
+
+        loop.run_until_complete(integration.async_setup_entry(hass, entry))
+
+        assert registry_entries[0].disabled_by is None
+        assert registry.updated == ["button.googlefindmy_disabled"]
     finally:
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
         for task in pending:
