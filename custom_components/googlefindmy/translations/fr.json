@@ -403,21 +403,11 @@
   },
   "system_health": {
     "info": {
-      "integration_version": {
-        "name": "Version de l'intégration"
-      },
-      "loaded_entries": {
-        "name": "Entrées chargées"
-      },
-      "entries": {
-        "name": "Entrées de configuration"
-      },
-      "fcm": {
-        "name": "Récepteur FCM"
-      },
-      "fcm_lock_contention_count": {
-        "name": "Nombre de contentions du verrou FCM"
-      }
+      "integration_version": "Version de l'intégration",
+      "loaded_entries": "Entrées chargées",
+      "entries": "Entrées de configuration",
+      "fcm": "Récepteur FCM",
+      "fcm_lock_contention_count": "Nombre de contentions du verrou FCM"
     }
   }
 }

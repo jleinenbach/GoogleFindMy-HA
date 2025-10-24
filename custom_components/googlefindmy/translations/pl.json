@@ -403,21 +403,11 @@
   },
   "system_health": {
     "info": {
-      "integration_version": {
-        "name": "Wersja integracji"
-      },
-      "loaded_entries": {
-        "name": "Załadowane wpisy"
-      },
-      "entries": {
-        "name": "Wpisy konfiguracji"
-      },
-      "fcm": {
-        "name": "Odbiornik FCM"
-      },
-      "fcm_lock_contention_count": {
-        "name": "Liczba konfliktów blokady FCM"
-      }
+      "integration_version": "Wersja integracji",
+      "loaded_entries": "Załadowane wpisy",
+      "entries": "Wpisy konfiguracji",
+      "fcm": "Odbiornik FCM",
+      "fcm_lock_contention_count": "Liczba konfliktów blokady FCM"
     }
   }
 }

@@ -401,21 +401,11 @@
   },
   "system_health": {
     "info": {
-      "integration_version": {
-        "name": "Integration version"
-      },
-      "loaded_entries": {
-        "name": "Loaded entries"
-      },
-      "entries": {
-        "name": "Config entries"
-      },
-      "fcm": {
-        "name": "FCM receiver"
-      },
-      "fcm_lock_contention_count": {
-        "name": "FCM lock contention count"
-      }
+      "integration_version": "Integration version",
+      "loaded_entries": "Loaded entries",
+      "entries": "Config entries",
+      "fcm": "FCM receiver",
+      "fcm_lock_contention_count": "FCM lock contention count"
     }
   }
 }

@@ -403,21 +403,11 @@
   },
   "system_health": {
     "info": {
-      "integration_version": {
-        "name": "Versión de la integración"
-      },
-      "loaded_entries": {
-        "name": "Entradas cargadas"
-      },
-      "entries": {
-        "name": "Entradas de configuración"
-      },
-      "fcm": {
-        "name": "Receptor FCM"
-      },
-      "fcm_lock_contention_count": {
-        "name": "Conteo de contención de bloqueo FCM"
-      }
+      "integration_version": "Versión de la integración",
+      "loaded_entries": "Entradas cargadas",
+      "entries": "Entradas de configuración",
+      "fcm": "Receptor FCM",
+      "fcm_lock_contention_count": "Conteo de contención de bloqueo FCM"
     }
   }
 }

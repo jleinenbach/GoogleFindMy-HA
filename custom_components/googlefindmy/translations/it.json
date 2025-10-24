@@ -403,21 +403,11 @@
   },
   "system_health": {
     "info": {
-      "integration_version": {
-        "name": "Versione dell'integrazione"
-      },
-      "loaded_entries": {
-        "name": "Voci caricate"
-      },
-      "entries": {
-        "name": "Voci di configurazione"
-      },
-      "fcm": {
-        "name": "Ricevitore FCM"
-      },
-      "fcm_lock_contention_count": {
-        "name": "Conteggio conflitti di lock FCM"
-      }
+      "integration_version": "Versione dell'integrazione",
+      "loaded_entries": "Voci caricate",
+      "entries": "Voci di configurazione",
+      "fcm": "Ricevitore FCM",
+      "fcm_lock_contention_count": "Conteggio conflitti di lock FCM"
     }
   }
 }

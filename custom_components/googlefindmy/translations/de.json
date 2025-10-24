@@ -403,21 +403,11 @@
   },
   "system_health": {
     "info": {
-      "integration_version": {
-        "name": "Integrationsversion"
-      },
-      "loaded_entries": {
-        "name": "Geladene Einträge"
-      },
-      "entries": {
-        "name": "Konfigurationseinträge"
-      },
-      "fcm": {
-        "name": "FCM-Empfänger"
-      },
-      "fcm_lock_contention_count": {
-        "name": "FCM-Sperrkonflikte"
-      }
+      "integration_version": "Integrationsversion",
+      "loaded_entries": "Geladene Einträge",
+      "entries": "Konfigurationseinträge",
+      "fcm": "FCM-Empfänger",
+      "fcm_lock_contention_count": "FCM-Sperrkonflikte"
     }
   }
 }
