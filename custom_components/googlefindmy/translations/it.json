@@ -127,27 +127,27 @@
         }
       },
       "repairs": {
-        "title": "Subentry Repairs",
-        "description": "Choose a repair action for your feature groups.",
+        "title": "Riparazioni dei gruppi di funzionalità",
+        "description": "Scegli un'azione di riparazione per i tuoi gruppi di funzionalità.",
         "menu_options": {
-          "repairs_move": "Move devices",
-          "repairs_delete": "Delete subentry"
+          "repairs_move": "Sposta dispositivi",
+          "repairs_delete": "Elimina gruppo di funzionalità"
         }
       },
       "repairs_move": {
-        "title": "Move devices between subentries",
-        "description": "Move devices into a selected feature group. Devices removed from other groups will continue to appear under the chosen group.",
+        "title": "Sposta i dispositivi tra i gruppi di funzionalità",
+        "description": "Sposta i dispositivi nel gruppo di funzionalità selezionato. I dispositivi rimossi da altri gruppi continueranno a comparire sotto il gruppo scelto.",
         "data": {
-          "target_subentry": "Target feature group",
-          "device_ids": "Devices to assign"
+          "target_subentry": "Gruppo di funzionalità di destinazione",
+          "device_ids": "Dispositivi da assegnare"
         }
       },
       "repairs_delete": {
-        "title": "Delete a subentry",
-        "description": "Delete a feature group and move its devices into another group.",
+        "title": "Elimina un gruppo di funzionalità",
+        "description": "Elimina un gruppo di funzionalità e sposta i suoi dispositivi in un altro gruppo.",
         "data": {
-          "delete_subentry": "Subentry to delete",
-          "fallback_subentry": "Fallback feature group"
+          "delete_subentry": "Gruppo di funzionalità da eliminare",
+          "fallback_subentry": "Gruppo di funzionalità di fallback"
         }
       }
     },
@@ -160,17 +160,17 @@
       "required": "Questo campo è obbligatorio.",
       "invalid_token": "Credenziali non valide (token/e-mail). Verifica formato e contenuto.",
       "unknown": "Errore imprevisto.",
-      "invalid_subentry": "Choose a valid feature group."
+      "invalid_subentry": "Scegli un gruppo di funzionalità valido."
     },
     "abort": {
       "reconfigure_successful": "Riconfigurazione riuscita.",
       "no_ignored_devices": "Non ci sono dispositivi ignorati da ripristinare.",
-      "repairs_no_subentries": "There are no subentries to repair.",
-      "repair_no_devices": "Select at least one device to move.",
-      "subentry_move_success": "Devices assigned to **{subentry}** ({count} updated).",
-      "subentry_delete_success": "Deleted **{subentry}** and moved {count} devices to **{fallback}**.",
-      "subentry_delete_invalid": "A second feature group is required before deleting one.",
-      "subentry_remove_failed": "Deleting the selected feature group failed. Please try again."
+      "repairs_no_subentries": "Non ci sono gruppi di funzionalità da riparare.",
+      "repair_no_devices": "Seleziona almeno un dispositivo da spostare.",
+      "subentry_move_success": "Dispositivi assegnati a **{subentry}** ({count} aggiornati).",
+      "subentry_delete_success": "**{subentry}** eliminato e {count} dispositivi spostati in **{fallback}**.",
+      "subentry_delete_invalid": "È necessario un secondo gruppo di funzionalità prima di eliminarne uno.",
+      "subentry_remove_failed": "Eliminazione del gruppo di funzionalità selezionato non riuscita. Riprova."
     }
   },
   "services": {
