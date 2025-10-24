@@ -46,8 +46,8 @@ jobs:
           python -m pip install pip-audit jq >/dev/null
           for f in $REQ_FILES; do
             [ -f "$f" ] || continue
-            # Dry-run JSON to see which vulns are fixable vs. unfixable
-            pip-audit -r "$f" --dry-run -f json -o audit.json || true
+            # Generate JSON to see which vulns are fixable vs. unfixable
+            pip-audit -r "$f" -f json -o audit.json || true
             fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
             unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
             if [ "$unfixable" -gt 0 ]; then
@@ -87,7 +87,7 @@ jobs:
           for f in $REQ_FILES; do
             [ -f "$f" ] || continue
             # Preview what can be fixed
-            pip-audit -r "$f" --dry-run -f json -o audit.json || true
+            pip-audit -r "$f" -f json -o audit.json || true
             fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
             unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
 
