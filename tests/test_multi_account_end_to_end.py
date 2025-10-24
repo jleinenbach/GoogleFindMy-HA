@@ -109,6 +109,9 @@ class _StubCoordinator:
     async def async_refresh(self) -> None:
         self.refresh_calls += 1
 
+    def attach_subentry_manager(self, manager: Any) -> None:
+        self.subentry_manager = manager
+
 
 class _StubFcm:
     """Shared FCM receiver stub tracking coordinator registrations."""

@@ -39,7 +39,7 @@ import socket
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from types import MappingProxyType
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -230,6 +230,50 @@ class ConfigEntrySubEntryManager:
         """Return the managed subentry for a key when present."""
 
         return self._managed.get(key)
+
+    def update_visible_device_ids(
+        self, key: str, visible_device_ids: Sequence[str]
+    ) -> None:
+        """Update the visible device identifiers stored in a subentry."""
+
+        subentry = self._managed.get(key)
+        if subentry is None:
+            return
+
+        normalized = tuple(
+            dict.fromkeys(
+                str(device_id)
+                for device_id in visible_device_ids
+                if isinstance(device_id, str) and device_id
+            )
+        )
+
+        existing_raw = subentry.data.get("visible_device_ids")
+        if isinstance(existing_raw, (list, tuple)):
+            existing = tuple(
+                str(device_id)
+                for device_id in existing_raw
+                if isinstance(device_id, str) and device_id
+            )
+        else:
+            existing = ()
+
+        if normalized == existing:
+            return
+
+        payload = dict(subentry.data)
+        payload[self._key_field] = key
+        payload["visible_device_ids"] = list(normalized)
+
+        self._hass.config_entries.async_update_subentry(
+            self._entry,
+            subentry,
+            data=payload,
+        )
+
+        refreshed = self._entry.subentries.get(subentry.subentry_id, subentry)
+        # Ensure local view reflects Home Assistant's stored subentry.
+        self._managed[key] = refreshed
 
     async def async_sync(
         self, definitions: Iterable[ConfigEntrySubentryDefinition]
@@ -1562,6 +1606,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
 
     subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+    coordinator.attach_subentry_manager(subentry_manager)
 
     # Expose runtime object via the typed container (preferred access pattern)
     runtime_data = RuntimeData(

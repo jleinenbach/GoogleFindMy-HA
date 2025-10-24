@@ -246,6 +246,9 @@ class _StubCoordinator:
     def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
         return True
 
+    def attach_subentry_manager(self, manager: Any) -> None:
+        self.subentry_manager = manager
+
 
 def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
     """The integration stores runtime state only under hass.data[DOMAIN]["entries"]."""

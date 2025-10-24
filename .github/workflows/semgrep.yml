@@ -80,7 +80,7 @@ jobs:
                 }
               ]
             }
-SARIF
+            SARIF
           fi
 
       - name: Fail on high or critical findings
