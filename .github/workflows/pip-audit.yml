@@ -10,7 +10,6 @@ concurrency:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   pip-audit:
@@ -25,11 +24,20 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pip-audit
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pip-audit
+      # Audit requirements-Dateien
+      - name: pip-audit (requirements)
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: |
+            requirements-dev.txt
+            custom_components/googlefindmy/requirements.txt
+          # Optional:
+          # no-deps: true                 # falls vollständig gepinnt
+          # vulnerability-service: osv    # OSV statt PyPI verwenden
 
-      - name: Run pip-audit
-        run: |
-          pip-audit -r requirements-dev.txt -r custom_components/googlefindmy/requirements.txt
+      # Optional: zusätzlich ein Projekt mit pyproject.toml prüfen
+      - name: pip-audit (pyproject)
+        if: ${{ hashFiles('pyproject.toml') != '' }}
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: .
