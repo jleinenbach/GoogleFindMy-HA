@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
 from types import MappingProxyType, SimpleNamespace
+from typing import Any
 
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import (
@@ -21,20 +21,20 @@ from homeassistant.config_entries import ConfigSubentry
 class _ManagerStub:
     """Minimal config_entries manager capturing subentry operations."""
 
-    entry: "_EntryStub"
+    entry: _EntryStub
 
     def __post_init__(self) -> None:
         self.updated: list[tuple[str, dict[str, Any]]] = []
         self.removed: list[str] = []
         self.reloads: list[str] = []
 
-    def async_update_entry(self, entry: "_EntryStub", *, data: dict[str, Any]) -> None:
+    def async_update_entry(self, entry: _EntryStub, *, data: dict[str, Any]) -> None:
         assert entry is self.entry
         entry.data = data
 
     def async_update_subentry(
         self,
-        entry: "_EntryStub",
+        entry: _EntryStub,
         subentry: ConfigSubentry,
         *,
         data: dict[str, Any],
@@ -49,7 +49,7 @@ class _ManagerStub:
             subentry.unique_id = unique_id
         self.updated.append((subentry.subentry_id, dict(subentry.data)))
 
-    def async_remove_subentry(self, entry: "_EntryStub", subentry_id: str) -> bool:  # noqa: FBT001
+    def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
         assert entry is self.entry
         entry.subentries.pop(subentry_id, None)
         self.removed.append(subentry_id)
