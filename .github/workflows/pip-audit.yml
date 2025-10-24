@@ -32,24 +32,31 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: pip-audit (report-only; keep CI green)
-        uses: pypa/gh-action-pip-audit@v1.1.0
-        with:
-          inputs: ${{ env.REQ_FILES }}
-          summary: true
-          internal-be-careful-allow-failure: true  # action-defined "allow-failure"
+      - name: Install pip-audit tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
+          sudo apt-get update
+          sudo apt-get install -y jq
 
-      - name: Emit warnings for unfixable vulnerabilities
+      - name: Audit requirements (report-only; keep CI green)
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip >/dev/null
-          python -m pip install pip-audit jq >/dev/null
+          summary_tmp="$(mktemp)"
+          echo "### pip-audit (report-only)" > "$summary_tmp"
           for f in $REQ_FILES; do
             [ -f "$f" ] || continue
-            # Generate JSON to see which vulns are fixable vs. unfixable
-            pip-audit -r "$f" -f json -o audit.json || true
+            set +e
+            pip-audit -r "$f" -f json -o audit.json
+            status=$?
+            set -e
+            if [ "$status" -gt 1 ]; then
+              echo "pip-audit failed for $f with exit code $status" >&2
+              exit "$status"
+            fi
             fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
             unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
+            printf "- %s: fixable=%s, unfixable=%s\n" "$f" "$fixable" "$unfixable" >> "$summary_tmp"
             if [ "$unfixable" -gt 0 ]; then
               echo "::warning title=pip-audit (no fix available)::$f: ${unfixable} vulnerability/vulnerabilities without a fix."
             fi
@@ -57,6 +64,8 @@ jobs:
               echo "::notice title=pip-audit (fix available)::$f: ${fixable} vulnerability/vulnerabilities have fixes. They will be auto-fixed by the scheduled job."
             fi
           done
+          cat "$summary_tmp" >> "$GITHUB_STEP_SUMMARY"
+          rm "$summary_tmp"
 
   # 2) On schedule or manual runs: autofix and open a PR with the changes.
   autofix:
@@ -76,7 +85,9 @@ jobs:
       - name: Install tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pip-audit jq
+          python -m pip install pip-audit
+          sudo apt-get update
+          sudo apt-get install -y jq
 
       - name: Audit and fix (where possible)
         id: fixrun
@@ -86,14 +97,37 @@ jobs:
           echo "### pip-audit auto-fix report" > "$GITHUB_STEP_SUMMARY"
           for f in $REQ_FILES; do
             [ -f "$f" ] || continue
-            # Preview what can be fixed
-            pip-audit -r "$f" -f json -o audit.json || true
+            # Preview what can be fixed (full audit so JSON contains vulnerability data)
+            set +e
+            pip-audit -r "$f" -f json -o audit.json
+            status=$?
+            set -e
+            if [ "$status" -gt 1 ]; then
+              echo "pip-audit failed for $f with exit code $status" >&2
+              exit "$status"
+            fi
             fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
             unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
 
             if [ "$fixable" -gt 0 ]; then
               echo "Fixing $f (${fixable} fixable vulns)..."
-              pip-audit -r "$f" --fix || true
+              echo "Previewing fixes (no changes)"
+              set +e
+              pip-audit -r "$f" --fix --dry-run
+              preview_status=$?
+              set -e
+              if [ "$preview_status" -gt 1 ]; then
+                echo "pip-audit --fix --dry-run failed for $f with exit code $preview_status" >&2
+                exit "$preview_status"
+              fi
+              set +e
+              pip-audit -r "$f" --fix
+              fix_status=$?
+              set -e
+              if [ "$fix_status" -gt 1 ]; then
+                echo "pip-audit --fix failed for $f with exit code $fix_status" >&2
+                exit "$fix_status"
+              fi
               if ! git diff --quiet -- "$f"; then
                 changed=1
               fi
