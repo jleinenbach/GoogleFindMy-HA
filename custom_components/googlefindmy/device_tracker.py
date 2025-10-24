@@ -33,7 +33,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
 from .entity import GoogleFindMyDeviceEntity, resolve_coordinator
 
