@@ -53,14 +53,14 @@ jobs:
 
       - name: Run Semgrep scan (JSON)
         run: |
-          semgrep scan --config auto --metrics=off --json --output=semgrep.json || true
+          semgrep scan --config auto --json --output=semgrep.json || true
           if [ ! -s semgrep.json ]; then
             echo '{"results": []}' > semgrep.json
           fi
 
       - name: Run Semgrep scan (SARIF)
         run: |
-          semgrep scan --config auto --metrics=off --sarif --output=semgrep.sarif || true
+          semgrep scan --config auto --sarif --output=semgrep.sarif || true
 
           if ! jq -e '(.runs // []) | map(select((.results // []) | length > 0)) | length > 0' semgrep.sarif >/dev/null 2>&1; then
             cat <<'SARIF' > semgrep.sarif
