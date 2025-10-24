@@ -85,6 +85,17 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | enable_stats_entities | true | toggle | Enables/disables "Google Find My Integration" statistics entity, which displays various useful statistics, including when polling is active |
 | map_vew_token_expiration | false | toggle | Enables/disables expiration of generated API token for accessing recorder history, used in Map View location data queries |
 
+## Subentries and feature groups
+
+Home Assistant's config-entry **subentries** let the integration organize devices and helper entities into feature groups. During setup, the config flow seeds a `Core tracking` group that powers the device tracker, sensors, binary sensors, and helper buttons exposed by the integration. The group metadata includes the Home Assistant platforms that should load, whether Firebase Cloud Messaging (FCM) push is enabled, and which devices are currently visible in that group.
+
+- **Initial setup:** The device-selection step creates or updates the `Core tracking` feature group automatically. No manual action is required unless you later add additional Google accounts or feature groups.
+- **Options workflow:** Every options step that exposes a **Feature group** selector applies its changes only to the chosen subentry. For example, when you modify polling thresholds or enable the statistics helpers, the integration persists those toggles on the selected feature group and keeps its registry of visible devices in sync.
+- **Device visibility:** Restoring ignored devices assigns them to the feature group you pick in the options flow so they reappear under the correct collection of entities.
+- **Repairs menu:** The **Subentry repairs** workflow provides bulk management tools. Use **Move devices** to reassign trackers between groups, or **Delete subentry** to retire a group after selecting a fallback destination for its devices. The integration enforces that at least one feature group remains so core tracking continues to function.
+
+Advanced installations that use push notifications or future feature packs may surface additional groups. Each group is fully independent: credentials, options, and repair actions all respect the feature group that you select in the UI.
+
 ## Services (Actions)
 
 The integration provides a couple of Home Assistant Actions for use with automations.  Note that Device ID is different than Entity ID.  Device ID is a long, alpha-numeric value that can be obtained from the Device info pages.

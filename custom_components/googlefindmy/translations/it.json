@@ -89,6 +89,9 @@
           "new_oauth_token": "Nuovo token OAuth",
           "new_google_email": "Email Google",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Applica gli aggiornamenti delle credenziali al gruppo di funzionalità selezionato. Consulta la sezione [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per conoscere i flussi disponibili."
         }
       },
       "settings": {
@@ -108,7 +111,8 @@
         },
         "data_description": {
           "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono.",
-          "contributor_mode": "\"high_traffic\" mantiene la modalità aggregata predefinita di Google. \"in_all_areas\" abilita segnalazioni partecipative più rapide."
+          "contributor_mode": "\"high_traffic\" mantiene la modalità aggregata predefinita di Google. \"in_all_areas\" abilita segnalazioni partecipative più rapide.",
+          "subentry": "Salva queste opzioni nel gruppo di funzionalità selezionato. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per esempi pratici."
         }
       },
       "visibility": {
@@ -117,6 +121,9 @@
         "data": {
           "unignore_devices": "Ripristina dispositivi",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "I dispositivi ripristinati vengono assegnati al gruppo di funzionalità scelto. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per ulteriori indicazioni."
         }
       },
       "repairs": {
