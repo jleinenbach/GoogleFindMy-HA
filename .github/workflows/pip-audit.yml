@@ -36,7 +36,7 @@ jobs:
           SARIF
 
           if [ -f pyproject.toml ]; then
-            pip-audit . --format sarif -o pip-audit.sarif || true
+            pip-audit -r pyproject.toml --format sarif -o pip-audit.sarif || true
           elif [ -f poetry.lock ]; then
             requirements_file="pip-audit-requirements.txt"
             poetry export --with dev --format requirements.txt --output "${requirements_file}" \
