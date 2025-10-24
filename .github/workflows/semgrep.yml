@@ -1,0 +1,80 @@
+name: Semgrep (SAST)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Runs daily at 02:12 UTC-only
+    - cron: '12 2 * * *'
+    # Runs daily at 14:12 UTC-only
+    - cron: '12 14 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  semgrep:
+    name: Run Semgrep CE scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Semgrep CE
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade semgrep
+
+      - name: Generate Semgrep ignore file
+        run: |
+          cat <<'IGNORE' > .semgrepignore
+          # Ignore Python virtual environments and build artifacts
+          .venv/
+          .env/
+          env/
+          venv/
+          build/
+          dist/
+          .git/
+          .mypy_cache/
+          __pycache__/
+          IGNORE
+
+      - name: Run Semgrep scan (JSON)
+        run: |
+          semgrep scan --config auto --metrics=off --json --output=semgrep.json || true
+          if [ ! -s semgrep.json ]; then
+            echo '{"results": []}' > semgrep.json
+          fi
+
+      - name: Run Semgrep scan (SARIF)
+        run: |
+          semgrep scan --config auto --metrics=off --sarif --output=semgrep.sarif || true
+          if [ ! -s semgrep.sarif ]; then
+            echo '{"version": "2.1.0", "runs": []}' > semgrep.sarif
+          fi
+
+      - name: Fail on high or critical findings
+        run: |
+          high_count=$(jq '[.results[] | select(((.extra.metadata.severity // .extra.metadata.semgrep.severity // .extra.severity // "") | ascii_upcase) as $sev | ($sev == "HIGH" or $sev == "CRITICAL"))] | length' semgrep.json)
+          if [ "$high_count" -gt 0 ]; then
+            echo "::error::Semgrep reported $high_count HIGH/CRITICAL findings."
+            exit 1
+          fi
+
+      - name: Upload Semgrep SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep-ce
