@@ -9,9 +9,9 @@ import json
 import sys
 from contextlib import suppress
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import Any
-from collections.abc import Callable
+from types import MappingProxyType, ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock, call
 
 import pytest
@@ -25,7 +25,11 @@ from custom_components.googlefindmy.const import (
     SERVICE_LOCATE_DEVICE,
     SERVICE_REBUILD_REGISTRY,
 )
+from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.exceptions import ServiceValidationError
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy import RuntimeData
 
 
 class _StubCache:
@@ -49,18 +53,17 @@ class _StubConfigEntry:
     """Minimal ConfigEntry-like stub capturing unload callbacks."""
 
     def __init__(self) -> None:
-        self.entry_id = "entry-test"
-        self.data = {
+        self.entry_id: str = "entry-test"
+        self.data: dict[str, Any] = {
             DATA_SECRET_BUNDLE: {"username": "user@example.com"},
             CONF_GOOGLE_EMAIL: "user@example.com",
         }
         self.options: dict[str, Any] = {}
-        self.title = "Test Entry"
-        self.runtime_data: Any = None
-        from homeassistant.config_entries import ConfigEntryState
-
-        self.state = ConfigEntryState.LOADED
-        self.disabled_by = None
+        self.title: str = "Test Entry"
+        self.runtime_data: RuntimeData | None = None
+        self.subentries: dict[str, ConfigSubentry] = {}
+        self.state: ConfigEntryState = ConfigEntryState.LOADED
+        self.disabled_by: str | None = None
         self._unload_callbacks: list[Callable[[], None]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
@@ -90,9 +93,12 @@ class _StubConfigEntries:
     """Minimal config_entries manager stub."""
 
     def __init__(self, entry: _StubConfigEntry) -> None:
-        self._entries = [entry]
+        self._entries: list[_StubConfigEntry] = [entry]
         self.forward_calls: list[tuple[_StubConfigEntry, tuple[str, ...]]] = []
         self.reload_calls: list[str] = []
+        self.added_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
+        self.updated_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
+        self.removed_subentries: list[tuple[_StubConfigEntry, str]] = []
 
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
         return list(self._entries)
@@ -105,6 +111,41 @@ class _StubConfigEntries:
     async def async_unload_platforms(
         self, entry: _StubConfigEntry, _platforms: list[str]
     ) -> bool:
+        return True
+
+    def async_add_subentry(
+        self, entry: _StubConfigEntry, subentry: ConfigSubentry
+    ) -> bool:
+        entry.subentries[subentry.subentry_id] = subentry
+        self.added_subentries.append((entry, subentry))
+        return True
+
+    def async_update_subentry(
+        self,
+        entry: _StubConfigEntry,
+        subentry: ConfigSubentry,
+        *,
+        data: dict[str, Any] | None = None,
+        title: str | None = None,
+        unique_id: str | None = None,
+    ) -> bool:
+        changed = False
+        if data is not None:
+            subentry.data = MappingProxyType(dict(data))
+            changed = True
+        if title is not None and subentry.title != title:
+            subentry.title = title
+            changed = True
+        if unique_id is not None and subentry.unique_id != unique_id:
+            subentry.unique_id = unique_id
+            changed = True
+        entry.subentries[subentry.subentry_id] = subentry
+        self.updated_subentries.append((entry, subentry))
+        return changed
+
+    def async_remove_subentry(self, entry: _StubConfigEntry, subentry_id: str) -> bool:
+        entry.subentries.pop(subentry_id, None)
+        self.removed_subentries.append((entry, subentry_id))
         return True
 
     def async_update_entry(
@@ -146,7 +187,7 @@ class _StubHass:
         self.services = _StubServices()
 
     def async_create_task(
-        self, coro: Any, *, name: str | None = None
+        self, coro: Awaitable[Any], *, name: str | None = None
     ) -> asyncio.Task[Any]:
         task = self.loop.create_task(coro, name=name)
         self._tasks.append(task)
@@ -388,6 +429,9 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(integration, "_async_save_secrets_data", AsyncMock())
         monkeypatch.setattr(integration, "_async_seed_manual_credentials", AsyncMock())
         monkeypatch.setattr(integration, "_async_normalize_device_names", AsyncMock())
+        monkeypatch.setattr(
+            integration, "_async_release_shared_fcm", AsyncMock(return_value=None)
+        )
 
         class _RegisterViewStub:
             def __init__(self, hass: Any) -> None:
@@ -450,6 +494,22 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             assert runtime_data.coordinator is entry.runtime_data.coordinator
             assert runtime_data.token_cache is cache
             assert runtime_data.cache is cache
+            assert runtime_data.subentry_manager is not None
+
+            subentry_manager = runtime_data.subentry_manager
+            managed = subentry_manager.managed_subentries
+            assert "core_tracking" in managed
+            core_subentry = managed["core_tracking"]
+            assert core_subentry.data["group_key"] == "core_tracking"
+            assert core_subentry.data["features"] == [
+                "binary_sensor",
+                "button",
+                "device_tracker",
+                "sensor",
+            ]
+            assert core_subentry.data["fcm_push_enabled"] is True
+            assert core_subentry.data["has_google_home_filter"] is False
+            assert core_subentry.unique_id.endswith("core_tracking")
 
             added_entities: list[Any] = []
 
@@ -496,6 +556,11 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
                 -1
             ] == call(hass, entry)
             assert hass.config_entries.reload_calls == [entry.entry_id]
+
+            assert await integration.async_unload_entry(hass, entry) is True
+            assert not entry.subentries
+            assert not subentry_manager.managed_subentries
+            assert hass.config_entries.removed_subentries
 
         loop.run_until_complete(_exercise())
     finally:

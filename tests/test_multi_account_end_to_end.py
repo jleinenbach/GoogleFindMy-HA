@@ -8,9 +8,9 @@ import importlib
 import sys
 from contextlib import suppress
 from dataclasses import dataclass, field
-from types import ModuleType, SimpleNamespace
-from typing import Any
-from collections.abc import Callable
+from types import MappingProxyType, ModuleType, SimpleNamespace
+from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -22,6 +22,10 @@ from custom_components.googlefindmy.const import (
     SERVICE_PLAY_SOUND,
 )
 from homeassistant.core import ServiceCall
+from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy import RuntimeData
 
 
 @dataclass
@@ -156,18 +160,17 @@ class _StubServices:
 
 class _StubConfigEntry:
     def __init__(self, entry_id: str, email: str) -> None:
-        self.entry_id = entry_id
-        self.data = {
+        self.entry_id: str = entry_id
+        self.data: dict[str, Any] = {
             DATA_SECRET_BUNDLE: {"username": email, "oauth_token": f"oauth-{entry_id}"},
             CONF_GOOGLE_EMAIL: email,
         }
         self.options: dict[str, Any] = {}
-        self.title = f"Account {email}"
-        self.runtime_data: Any | None = None
-        from homeassistant.config_entries import ConfigEntryState
-
-        self.state = ConfigEntryState.LOADED
-        self.disabled_by = None
+        self.title: str = f"Account {email}"
+        self.runtime_data: RuntimeData | None = None
+        self.subentries: dict[str, ConfigSubentry] = {}
+        self.state: ConfigEntryState = ConfigEntryState.LOADED
+        self.disabled_by: str | None = None
         self._unload_callbacks: list[Callable[[], None]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
@@ -176,8 +179,11 @@ class _StubConfigEntry:
 
 class _StubConfigEntries:
     def __init__(self, entries: list[_StubConfigEntry]) -> None:
-        self._entries = entries
+        self._entries: list[_StubConfigEntry] = entries
         self.forward_calls: list[tuple[str, tuple[str, ...]]] = []
+        self.added_subentries: list[tuple[str, ConfigSubentry]] = []
+        self.updated_subentries: list[tuple[str, ConfigSubentry]] = []
+        self.removed_subentries: list[tuple[str, str]] = []
 
     def async_entries(self, domain: str) -> list[_StubConfigEntry]:
         if domain != DOMAIN:
@@ -192,6 +198,41 @@ class _StubConfigEntries:
     async def async_unload_platforms(
         self, _entry: _StubConfigEntry, _platforms: list[str]
     ) -> bool:
+        return True
+
+    def async_add_subentry(
+        self, entry: _StubConfigEntry, subentry: ConfigSubentry
+    ) -> bool:
+        entry.subentries[subentry.subentry_id] = subentry
+        self.added_subentries.append((entry.entry_id, subentry))
+        return True
+
+    def async_update_subentry(
+        self,
+        entry: _StubConfigEntry,
+        subentry: ConfigSubentry,
+        *,
+        data: dict[str, Any] | None = None,
+        title: str | None = None,
+        unique_id: str | None = None,
+    ) -> bool:
+        changed = False
+        if data is not None:
+            subentry.data = MappingProxyType(dict(data))
+            changed = True
+        if title is not None and subentry.title != title:
+            subentry.title = title
+            changed = True
+        if unique_id is not None and subentry.unique_id != unique_id:
+            subentry.unique_id = unique_id
+            changed = True
+        entry.subentries[subentry.subentry_id] = subentry
+        self.updated_subentries.append((entry.entry_id, subentry))
+        return changed
+
+    def async_remove_subentry(self, entry: _StubConfigEntry, subentry_id: str) -> bool:
+        entry.subentries.pop(subentry_id, None)
+        self.removed_subentries.append((entry.entry_id, subentry_id))
         return True
 
     def async_update_entry(
@@ -217,11 +258,11 @@ class _StubHass:
         self.bus = _StubBus()
         self.http = _StubHttp()
         self.services = _StubServices()
-        self.config_entries = _StubConfigEntries(entries)
+        self.config_entries: _StubConfigEntries = _StubConfigEntries(entries)
         self._tasks: list[asyncio.Task[Any]] = []
 
     def async_create_task(
-        self, coro: Any, *, name: str | None = None
+        self, coro: Awaitable[Any], *, name: str | None = None
     ) -> asyncio.Task[Any]:
         task = self.loop.create_task(coro, name=name)
         self._tasks.append(task)

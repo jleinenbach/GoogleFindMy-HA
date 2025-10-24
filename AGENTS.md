@@ -34,6 +34,7 @@
 > **bash commands:**
 > – pre-commit run --all-files *(required even though pre-commit.ci auto-applies hook fixes on PR branches)*
 > – ruff format --check *(run against the repository root and include the command/output in the final "Testing" section — treat it as mandatory alongside `pytest -q` so both always appear in local verification and status reporting)*
+> – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(run this exact command whenever Python files are edited so both the integration and its tests remain strict-typing clean; include the invocation/output in the final "Testing" section)*
 > – pytest -q *(inspect the output for any `DeprecationWarning`s and resolve each one before proceeding; report the command in the final "Testing" section just like `ruff format --check`)*
 > *(The helper `python script/local_verify.py` runs the Ruff check and `pytest -q` back-to-back; use it to avoid skipping either requirement, while still surfacing both commands in your final report.)*
 > *Hassfest validation now runs in CI via `.github/workflows/hassfest-auto-fix.yml`; rely on that workflow and re-run it from the PR UI whenever you need a fresh manifest check.*
@@ -53,6 +54,7 @@
 * Inject the session via `async_get_clientsession(hass)`; never create raw `ClientSession`.
 * Entities: stable `unique_id`, `_attr_has_entity_name = True`, correct `device_info` (identifiers/model), proper device classes & categories; noisy defaults disabled.
 * **Docstrings & typing.** English docstrings for public classes/functions; full type hints; track the **current HA core baseline** for Python/typing strictness.
+* **Strict typing for touched modules.** Run the repository mypy command (see "Local run") and resolve all `--strict` findings for every modified Python file, including tests, before finalizing a PR.
 
 ### 2.2 Reviewer (maintainer/agent) — **accountable for correctness**
 

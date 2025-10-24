@@ -39,10 +39,11 @@ import socket
 import time
 from dataclasses import dataclass
 from typing import Any
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+from types import MappingProxyType
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STARTED,
     EVENT_HOMEASSISTANT_STOP,
@@ -156,12 +157,155 @@ CONFIG_ENTRY_VERSION: int = 2
 # ---- Runtime typing helpers -------------------------------------------------
 
 
+CleanupCallback = Callable[[], Awaitable[None] | None]
+
+
+@dataclass(slots=True)
+class ConfigEntrySubentryDefinition:
+    """Desired state for a managed configuration subentry."""
+
+    key: str
+    title: str
+    data: Mapping[str, Any]
+    subentry_type: str = "googlefindmy_feature_group"
+    unique_id: str | None = None
+    unload: CleanupCallback | None = None
+
+
+class ConfigEntrySubEntryManager:
+    """Helper for managing config entry subentries for this integration."""
+
+    __slots__ = (
+        "_cleanup",
+        "_default_subentry_type",
+        "_entry",
+        "_hass",
+        "_key_field",
+        "_managed",
+    )
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        *,
+        key_field: str = "group_key",
+        default_subentry_type: str = "googlefindmy_feature_group",
+    ) -> None:
+        self._hass = hass
+        self._entry = entry
+        self._key_field = key_field
+        self._default_subentry_type = default_subentry_type
+        self._managed: dict[str, ConfigSubentry] = {}
+        self._cleanup: dict[str, CleanupCallback | None] = {}
+        self._refresh_from_entry()
+
+    def _refresh_from_entry(self) -> None:
+        """Populate managed mapping from the config entry."""
+
+        self._managed.clear()
+        for subentry in self._entry.subentries.values():
+            key = subentry.data.get(self._key_field)
+            if isinstance(key, str):
+                self._managed[key] = subentry
+
+    @property
+    def managed_subentries(self) -> dict[str, ConfigSubentry]:
+        """Return a copy of the managed subentry mapping."""
+
+        return dict(self._managed)
+
+    def get(self, key: str) -> ConfigSubentry | None:
+        """Return the managed subentry for a key when present."""
+
+        return self._managed.get(key)
+
+    async def async_sync(
+        self, definitions: Iterable[ConfigEntrySubentryDefinition]
+    ) -> None:
+        """Ensure subentries match the provided definitions."""
+
+        desired: dict[str, ConfigEntrySubentryDefinition] = {}
+        for definition in definitions:
+            desired[definition.key] = definition
+
+        for key, definition in desired.items():
+            payload = dict(definition.data)
+            payload[self._key_field] = key
+            unique_id = definition.unique_id or f"{self._entry.entry_id}-{key}"
+            subentry_type = definition.subentry_type or self._default_subentry_type
+            cleanup = definition.unload
+
+            existing = self._managed.get(key)
+            if existing is None:
+                new_subentry = ConfigSubentry(
+                    data=MappingProxyType(payload),
+                    subentry_type=subentry_type,
+                    title=definition.title,
+                    unique_id=unique_id,
+                )
+                self._hass.config_entries.async_add_subentry(self._entry, new_subentry)
+                stored = self._entry.subentries.get(
+                    new_subentry.subentry_id, new_subentry
+                )
+                self._managed[key] = stored
+            else:
+                changed = self._hass.config_entries.async_update_subentry(
+                    self._entry,
+                    existing,
+                    data=payload,
+                    title=definition.title,
+                    unique_id=unique_id,
+                )
+                if changed:
+                    refreshed = self._entry.subentries.get(
+                        existing.subentry_id, existing
+                    )
+                    self._managed[key] = refreshed
+
+            self._cleanup[key] = cleanup
+
+        stale_keys = [key for key in list(self._managed) if key not in desired]
+        for key in stale_keys:
+            await self.async_remove(key)
+
+    async def async_remove(self, key: str) -> None:
+        """Remove a managed subentry and run its cleanup callback."""
+
+        subentry = self._managed.pop(key, None)
+        cleanup = self._cleanup.pop(key, None)
+        if cleanup is not None:
+            try:
+                result = cleanup()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as err:  # pragma: no cover - defensive logging
+                _LOGGER.debug("Subentry cleanup for '%s' raised: %s", key, err)
+
+        if subentry is None:
+            return
+
+        try:
+            self._hass.config_entries.async_remove_subentry(
+                self._entry, subentry.subentry_id
+            )
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug("Removing subentry '%s' failed: %s", key, err)
+
+    async def async_remove_all(self) -> None:
+        """Remove all managed subentries."""
+
+        for key in list(self._managed):
+            await self.async_remove(key)
+
+
 @dataclass(slots=True)
 class RuntimeData:
     """Container for per-entry runtime structures shared across platforms."""
 
     coordinator: GoogleFindMyCoordinator
     token_cache: TokenCache
+    subentry_manager: ConfigEntrySubEntryManager
     fcm_receiver: FcmReceiverHA | None = None
     google_home_filter: GoogleHomeFilter | None = None
 
@@ -1152,10 +1296,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
         )
 
+    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+
     # Expose runtime object via the typed container (preferred access pattern)
     runtime_data = RuntimeData(
         coordinator=coordinator,
         token_cache=cache,
+        subentry_manager=subentry_manager,
         fcm_receiver=fcm,
     )
     entry.runtime_data = runtime_data
@@ -1176,6 +1323,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             _LOGGER.debug("GoogleHomeFilter attach skipped due to: %s", err)
     else:
         _LOGGER.debug("GoogleHomeFilter not available; continuing without it")
+
+    features = sorted(str(platform) for platform in PLATFORMS)
+    await subentry_manager.async_sync(
+        [
+            ConfigEntrySubentryDefinition(
+                key="core_tracking",
+                title="Google Find My devices",
+                data={
+                    "features": features,
+                    "fcm_push_enabled": runtime_data.fcm_receiver is not None,
+                    "has_google_home_filter": runtime_data.google_home_filter
+                    is not None,
+                    "entry_title": entry.title,
+                },
+                unique_id=f"{entry.entry_id}-core_tracking",
+            )
+        ]
+    )
 
     bucket = hass.data.setdefault(DOMAIN, {})
 
@@ -1435,13 +1600,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         - TokenCache is explicitly closed here to flush and mark the cache closed.
         - Device owner index cleanup: remove all canonical_id claims for this entry (E2.5).
     """
+    runtime_data: RuntimeData | GoogleFindMyCoordinator | None = getattr(
+        entry, "runtime_data", None
+    )
+    subentry_manager: ConfigEntrySubEntryManager | None = None
+    entries_bucket: dict[str, RuntimeData] | None = None
+
     try:
         bucket = hass.data.setdefault(DOMAIN, {})
-        entries_bucket: dict[str, RuntimeData] = bucket.setdefault("entries", {})
+        entries_bucket = bucket.setdefault("entries", {})
 
-        runtime_data: RuntimeData | GoogleFindMyCoordinator | None = getattr(
-            entry, "runtime_data", None
-        )
         stored_runtime = entries_bucket.get(entry.entry_id)
         if not isinstance(runtime_data, RuntimeData) and isinstance(
             stored_runtime, RuntimeData
@@ -1453,6 +1621,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             coordinator = runtime_data
         elif isinstance(runtime_data, RuntimeData):
             coordinator = runtime_data.coordinator
+            subentry_manager = runtime_data.subentry_manager
         if coordinator is not None:
             await coordinator.async_shutdown()
     except Exception as err:
@@ -1460,11 +1629,21 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if ok:
-        removed_runtime = (
-            hass.data.setdefault(DOMAIN, {})
-            .setdefault("entries", {})
-            .pop(entry.entry_id, None)
-        )
+        if entries_bucket is None:
+            entries_bucket = hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})
+
+        if subentry_manager is None:
+            stored = entries_bucket.get(entry.entry_id)
+            if isinstance(stored, RuntimeData):
+                subentry_manager = stored.subentry_manager
+
+        if subentry_manager is not None:
+            try:
+                await subentry_manager.async_remove_all()
+            except Exception as err:
+                _LOGGER.debug("Subentry cleanup raised during unload: %s", err)
+
+        removed_runtime = entries_bucket.pop(entry.entry_id, None)
 
         cache = None
         if isinstance(runtime_data, RuntimeData):
