@@ -305,9 +305,9 @@ class RuntimeData:
 
     coordinator: GoogleFindMyCoordinator
     token_cache: TokenCache
+    subentry_manager: ConfigEntrySubEntryManager
     fcm_receiver: FcmReceiverHA | None = None
     google_home_filter: GoogleHomeFilter | None = None
-    subentry_manager: ConfigEntrySubEntryManager | None = None
 
     @property
     def cache(self) -> TokenCache:
@@ -1296,10 +1296,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
         )
 
+    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+
     # Expose runtime object via the typed container (preferred access pattern)
     runtime_data = RuntimeData(
         coordinator=coordinator,
         token_cache=cache,
+        subentry_manager=subentry_manager,
         fcm_receiver=fcm,
     )
     entry.runtime_data = runtime_data
@@ -1320,9 +1323,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             _LOGGER.debug("GoogleHomeFilter attach skipped due to: %s", err)
     else:
         _LOGGER.debug("GoogleHomeFilter not available; continuing without it")
-
-    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
-    runtime_data.subentry_manager = subentry_manager
 
     features = sorted(str(platform) for platform in PLATFORMS)
     await subentry_manager.async_sync(
