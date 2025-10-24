@@ -18,6 +18,9 @@ jobs:
   semgrep:
     name: Run Semgrep CE scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
       - name: Check out repository
