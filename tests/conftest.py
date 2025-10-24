@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from datetime import datetime, timezone
 import json
 
@@ -26,6 +26,20 @@ def _stub_homeassistant() -> None:
     ha_pkg.__path__ = getattr(ha_pkg, "__path__", [])  # mark as package
 
     config_entries = ModuleType("homeassistant.config_entries")
+
+    subentry_counter = {"value": 0}
+
+    class _UndefinedType:
+        """Sentinel mirroring Home Assistant's UNDEFINED."""
+
+        def __repr__(self) -> str:  # pragma: no cover - debugging helper
+            return "UNDEFINED"
+
+    UNDEFINED = _UndefinedType()
+
+    def _next_subentry_id() -> str:
+        subentry_counter["value"] += 1
+        return f"subentry-{subentry_counter['value']}"
 
     class ConfigEntry:  # minimal placeholder
         pass
@@ -81,12 +95,41 @@ def _stub_homeassistant() -> None:
     class OptionsFlowWithReload(OptionsFlow):
         """Placeholder inheriting OptionsFlow behaviour."""
 
+    class ConfigSubentry:
+        """Simple ConfigSubentry stand-in used by unit tests."""
+
+        def __init__(
+            self,
+            *,
+            data: dict[str, object],
+            subentry_type: str,
+            title: str,
+            unique_id: str | None = None,
+            subentry_id: str | None = None,
+        ) -> None:
+            self.data = MappingProxyType(dict(data))
+            self.subentry_type = subentry_type
+            self.title = title
+            self.unique_id = unique_id
+            self.subentry_id = subentry_id or _next_subentry_id()
+
+        def as_dict(self) -> dict[str, object]:  # pragma: no cover - helper parity
+            return {
+                "data": dict(self.data),
+                "subentry_id": self.subentry_id,
+                "subentry_type": self.subentry_type,
+                "title": self.title,
+                "unique_id": self.unique_id,
+            }
+
     config_entries.ConfigEntry = ConfigEntry
     config_entries.ConfigEntryState = ConfigEntryState
     config_entries.ConfigEntryAuthFailed = ConfigEntryAuthFailed
+    config_entries.ConfigSubentry = ConfigSubentry
     config_entries.ConfigFlow = ConfigFlow
     config_entries.OptionsFlow = OptionsFlow
     config_entries.OptionsFlowWithReload = OptionsFlowWithReload
+    config_entries.UNDEFINED = UNDEFINED
     sys.modules["homeassistant.config_entries"] = config_entries
 
     vol_module = ModuleType("voluptuous")

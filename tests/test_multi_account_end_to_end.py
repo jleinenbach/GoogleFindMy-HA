@@ -8,7 +8,7 @@ import importlib
 import sys
 from contextlib import suppress
 from dataclasses import dataclass, field
-from types import ModuleType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import Any
 from collections.abc import Callable
 
@@ -164,6 +164,7 @@ class _StubConfigEntry:
         self.options: dict[str, Any] = {}
         self.title = f"Account {email}"
         self.runtime_data: Any | None = None
+        self.subentries: dict[str, Any] = {}
         from homeassistant.config_entries import ConfigEntryState
 
         self.state = ConfigEntryState.LOADED
@@ -178,6 +179,9 @@ class _StubConfigEntries:
     def __init__(self, entries: list[_StubConfigEntry]) -> None:
         self._entries = entries
         self.forward_calls: list[tuple[str, tuple[str, ...]]] = []
+        self.added_subentries: list[tuple[str, Any]] = []
+        self.updated_subentries: list[tuple[str, Any]] = []
+        self.removed_subentries: list[tuple[str, str]] = []
 
     def async_entries(self, domain: str) -> list[_StubConfigEntry]:
         if domain != DOMAIN:
@@ -192,6 +196,39 @@ class _StubConfigEntries:
     async def async_unload_platforms(
         self, _entry: _StubConfigEntry, _platforms: list[str]
     ) -> bool:
+        return True
+
+    def async_add_subentry(self, entry: _StubConfigEntry, subentry: Any) -> bool:
+        entry.subentries[subentry.subentry_id] = subentry
+        self.added_subentries.append((entry.entry_id, subentry))
+        return True
+
+    def async_update_subentry(
+        self,
+        entry: _StubConfigEntry,
+        subentry: Any,
+        *,
+        data: dict[str, Any] | None = None,
+        title: str | None = None,
+        unique_id: str | None = None,
+    ) -> bool:
+        changed = False
+        if data is not None:
+            subentry.data = MappingProxyType(dict(data))
+            changed = True
+        if title is not None and subentry.title != title:
+            subentry.title = title
+            changed = True
+        if unique_id is not None and subentry.unique_id != unique_id:
+            subentry.unique_id = unique_id
+            changed = True
+        entry.subentries[subentry.subentry_id] = subentry
+        self.updated_subentries.append((entry.entry_id, subentry))
+        return changed
+
+    def async_remove_subentry(self, entry: _StubConfigEntry, subentry_id: str) -> bool:
+        entry.subentries.pop(subentry_id, None)
+        self.removed_subentries.append((entry.entry_id, subentry_id))
         return True
 
     def async_update_entry(
