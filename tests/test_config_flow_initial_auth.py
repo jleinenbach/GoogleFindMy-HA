@@ -7,19 +7,29 @@ import asyncio
 import inspect
 from typing import Any
 from collections.abc import Awaitable, Callable
+from types import MappingProxyType
 
 import pytest
 
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.api import GoogleFindMyAPI
 from custom_components.googlefindmy.const import (
+    DOMAIN,
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
+    OPT_CONTRIBUTOR_MODE,
+    OPT_DEVICE_POLL_DELAY,
+    OPT_ENABLE_STATS_ENTITIES,
+    OPT_GOOGLE_HOME_FILTER_ENABLED,
+    OPT_LOCATION_POLL_INTERVAL,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_MIN_ACCURACY_THRESHOLD,
 )
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from homeassistant.config_entries import ConfigSubentry
 
 
 def test_async_pick_working_token_accepts_guard(
@@ -283,6 +293,133 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
     assert data[CONF_OAUTH_TOKEN] == "aas_et/MANUAL_MASTER"
     assert data[DATA_AAS_TOKEN] == "aas_et/MANUAL_MASTER"
     assert data[DATA_AUTH_METHOD] == config_flow._AUTH_METHOD_SECRETS
+
+
+def test_device_selection_creates_and_updates_subentry() -> None:
+    """Device-selection step must manage feature subentries with stable IDs."""
+
+    class _StubEntry:
+        def __init__(self) -> None:
+            self.entry_id = "entry-1"
+            self.title = "Account One"
+            self.data: dict[str, Any] = {CONF_GOOGLE_EMAIL: "user@example.com"}
+            self.options: dict[str, Any] = {}
+            self.subentries: dict[str, ConfigSubentry] = {}
+            self.runtime_data = None
+
+    class _StubConfigEntries:
+        def __init__(self, entry: _StubEntry) -> None:
+            self._entry = entry
+            self.created: list[ConfigSubentry] = []
+            self.updated: list[ConfigSubentry] = []
+
+        def async_entries(self, domain: str) -> list[_StubEntry]:
+            if domain != DOMAIN:
+                return []
+            return [self._entry]
+
+        def async_get_entry(self, entry_id: str) -> _StubEntry | None:
+            if entry_id == self._entry.entry_id:
+                return self._entry
+            return None
+
+        def async_create_subentry(
+            self,
+            entry: _StubEntry,
+            *,
+            data: dict[str, Any],
+            title: str,
+            unique_id: str | None,
+            subentry_type: str,
+        ) -> ConfigSubentry:
+            subentry = ConfigSubentry(
+                data=MappingProxyType(dict(data)),
+                subentry_type=subentry_type,
+                title=title,
+                unique_id=unique_id,
+            )
+            entry.subentries[subentry.subentry_id] = subentry
+            self.created.append(subentry)
+            return subentry
+
+        def async_update_subentry(
+            self,
+            entry: _StubEntry,
+            subentry: ConfigSubentry,
+            *,
+            data: dict[str, Any] | None = None,
+            title: str | None = None,
+            unique_id: str | None = None,
+        ) -> bool:
+            if data is not None:
+                subentry.data = MappingProxyType(dict(data))
+            if title is not None:
+                subentry.title = title
+            if unique_id is not None:
+                subentry.unique_id = unique_id
+            entry.subentries[subentry.subentry_id] = subentry
+            self.updated.append(subentry)
+            return True
+
+    class _StubHass:
+        def __init__(self, entry: _StubEntry) -> None:
+            self.config_entries = _StubConfigEntries(entry)
+            self.data: dict[str, Any] = {DOMAIN: {"entries": {entry.entry_id: {}}}}
+
+    entry = _StubEntry()
+    hass = _StubHass(entry)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {"entry_id": entry.entry_id}
+    flow.unique_id = "existing"
+    flow._available_devices = [("Device", "device-1")]
+    flow._auth_data = {
+        DATA_AUTH_METHOD: config_flow._AUTH_METHOD_SECRETS,
+        CONF_OAUTH_TOKEN: "token",
+        CONF_GOOGLE_EMAIL: "user@example.com",
+    }
+
+    def _create_entry(**kwargs: Any) -> dict[str, Any]:
+        return {"type": "create_entry", **kwargs}
+
+    flow.async_create_entry = _create_entry  # type: ignore[assignment]
+
+    first_input: dict[str, Any] = {
+        OPT_LOCATION_POLL_INTERVAL: 300,
+        OPT_DEVICE_POLL_DELAY: 5,
+        OPT_MIN_ACCURACY_THRESHOLD: 100,
+        OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+        OPT_CONTRIBUTOR_MODE: config_flow.CONTRIBUTOR_MODE_IN_ALL_AREAS,
+    }
+    if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
+        first_input[OPT_GOOGLE_HOME_FILTER_ENABLED] = False
+    if OPT_ENABLE_STATS_ENTITIES is not None:
+        first_input[OPT_ENABLE_STATS_ENTITIES] = True
+
+    result = asyncio.run(flow.async_step_device_selection(first_input))
+    assert result["type"] == "create_entry"
+
+    manager = hass.config_entries
+    assert len(manager.created) == 1
+    created_subentry = manager.created[0]
+    assert created_subentry.data["group_key"] == "core_tracking"
+    assert flow.context["subentry_ids"]["core_tracking"] == created_subentry.subentry_id
+
+    second_input = dict(first_input)
+    second_input[OPT_MAP_VIEW_TOKEN_EXPIRATION] = False
+    if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
+        second_input[OPT_GOOGLE_HOME_FILTER_ENABLED] = True
+
+    previous_created = len(manager.created)
+    manager.updated.clear()
+    result2 = asyncio.run(flow.async_step_device_selection(second_input))
+    assert result2["type"] == "create_entry"
+    assert len(manager.created) == previous_created
+    assert manager.updated, "Expected subentry to be updated on second run"
+    updated_subentry = manager.updated[-1]
+    assert updated_subentry.subentry_id == created_subentry.subentry_id
+    assert flow.context["subentry_ids"]["core_tracking"] == created_subentry.subentry_id
 
 
 def test_ephemeral_probe_cache_allows_missing_namespace(

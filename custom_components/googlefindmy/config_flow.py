@@ -42,6 +42,11 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
+
+try:  # pragma: no cover - compatibility shim for stripped environments
+    from homeassistant.config_entries import ConfigSubentry
+except Exception:  # noqa: BLE001
+    ConfigSubentry = None  # type: ignore[assignment]
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
@@ -60,6 +65,7 @@ try:  # pragma: no cover - environment dependent
 except Exception:  # noqa: BLE001
     selector = None  # type: ignore[assignment]
 
+from types import MappingProxyType
 from .api import GoogleFindMyAPI
 from .Auth.adm_token_retrieval import _mask_email as _mask_email_for_logs
 
@@ -156,6 +162,14 @@ def _token_plausible(value: str) -> bool:
 def _looks_like_jwt(value: str) -> bool:
     """Lightweight detection for JWT-like blobs (Base64URL x3; often starts with 'eyJ')."""
     return value.count(".") >= 2 and value[:3] == "eyJ"
+
+
+_CORE_FEATURE_PLATFORMS: tuple[str, ...] = (
+    "binary_sensor",
+    "button",
+    "device_tracker",
+    "sensor",
+)
 
 
 def _disqualifies_for_persistence(value: str) -> str | None:
@@ -544,6 +558,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize transient flow state."""
         self._auth_data: dict[str, Any] = {}
         self._available_devices: list[tuple[str, str]] = []
+        self._subentry_key_core_tracking = "core_tracking"
 
     @staticmethod
     @callback
@@ -830,6 +845,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 2  # bump schema version at creation
             )
 
+            subentry_context = self._ensure_subentry_context()
+            entry_for_update: ConfigEntry | None = None
+            entry_id = self.context.get("entry_id")
+            if isinstance(entry_id, str):
+                entry_for_update = self.hass.config_entries.async_get_entry(entry_id)
+            if entry_for_update is not None:
+                await self._async_sync_feature_subentries(
+                    entry_for_update,
+                    options_payload=options_payload,
+                    defaults=defaults,
+                    context_map=subentry_context,
+                )
+            else:
+                subentry_context.setdefault(self._subentry_key_core_tracking, None)
+
             try:
                 return self.async_create_entry(
                     # **Change**: title is always the email for clear multi-account display
@@ -1083,6 +1113,201 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 cache = runtime_entry.get("cache") or runtime_entry.get("_cache")
                 if cache is not None:
                     return cache
+        return None
+
+    def _ensure_subentry_context(self) -> dict[str, str | None]:
+        """Return (and initialize) the flow-scoped subentry identifier mapping."""
+
+        current = self.context.get("subentry_ids")
+        if isinstance(current, dict):
+            return current
+        mapping: dict[str, str | None] = {}
+        self.context["subentry_ids"] = mapping
+        return mapping
+
+    async def _async_sync_feature_subentries(
+        self,
+        entry: ConfigEntry,
+        *,
+        options_payload: dict[str, Any],
+        defaults: dict[str, Any],
+        context_map: dict[str, str | None],
+    ) -> None:
+        """Ensure the core feature-group subentry reflects the latest toggles."""
+
+        key = self._subentry_key_core_tracking
+        title = entry.title or (
+            self._auth_data.get(CONF_GOOGLE_EMAIL) or "Google Find My Device"
+        )
+        unique_id = f"{entry.entry_id}-{key}"
+
+        default_filter_enabled = False
+        if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
+            if OPT_GOOGLE_HOME_FILTER_ENABLED in options_payload:
+                default_filter_enabled = bool(
+                    options_payload[OPT_GOOGLE_HOME_FILTER_ENABLED]
+                )
+            elif defaults.get(OPT_GOOGLE_HOME_FILTER_ENABLED) is not None:
+                default_filter_enabled = bool(
+                    defaults.get(OPT_GOOGLE_HOME_FILTER_ENABLED)
+                )
+            elif DEFAULT_GOOGLE_HOME_FILTER_ENABLED is not None:
+                default_filter_enabled = bool(DEFAULT_GOOGLE_HOME_FILTER_ENABLED)
+
+        has_filter = default_filter_enabled
+        if (
+            OPT_GOOGLE_HOME_FILTER_ENABLED is not None
+            and OPT_GOOGLE_HOME_FILTER_ENABLED in options_payload
+        ):
+            has_filter = bool(options_payload[OPT_GOOGLE_HOME_FILTER_ENABLED])
+
+        feature_flags: dict[str, Any] = {}
+        if OPT_ENABLE_STATS_ENTITIES is not None:
+            if OPT_ENABLE_STATS_ENTITIES in options_payload:
+                feature_flags[OPT_ENABLE_STATS_ENTITIES] = bool(
+                    options_payload[OPT_ENABLE_STATS_ENTITIES]
+                )
+            elif defaults.get(OPT_ENABLE_STATS_ENTITIES) is not None:
+                feature_flags[OPT_ENABLE_STATS_ENTITIES] = bool(
+                    defaults[OPT_ENABLE_STATS_ENTITIES]
+                )
+
+        if OPT_MAP_VIEW_TOKEN_EXPIRATION in options_payload:
+            feature_flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] = bool(
+                options_payload[OPT_MAP_VIEW_TOKEN_EXPIRATION]
+            )
+
+        if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
+            feature_flags[OPT_GOOGLE_HOME_FILTER_ENABLED] = has_filter
+
+        contributor_mode = options_payload.get(OPT_CONTRIBUTOR_MODE)
+        if contributor_mode is not None:
+            feature_flags[OPT_CONTRIBUTOR_MODE] = contributor_mode
+
+        payload = {
+            "group_key": key,
+            "features": sorted(_CORE_FEATURE_PLATFORMS),
+            "fcm_push_enabled": False,
+            "has_google_home_filter": has_filter,
+            "feature_flags": feature_flags,
+            "entry_title": title,
+        }
+
+        existing_id = context_map.get(key)
+        subentry: ConfigSubentry | None = None
+        if isinstance(existing_id, str):
+            subentry = entry.subentries.get(existing_id)
+        if subentry is None:
+            subentry = self._lookup_subentry(entry, key)
+
+        if subentry is None:
+            created = await self._async_create_subentry(
+                entry,
+                data=payload,
+                title="Google Find My devices",
+                unique_id=unique_id,
+                subentry_type="googlefindmy_feature_group",
+            )
+            if created is not None:
+                context_map[key] = created.subentry_id
+        else:
+            await self._async_update_subentry(
+                entry,
+                subentry,
+                data=payload,
+                title="Google Find My devices",
+                unique_id=unique_id,
+            )
+            context_map[key] = subentry.subentry_id
+
+    async def _async_create_subentry(
+        self,
+        entry: ConfigEntry,
+        *,
+        data: dict[str, Any],
+        title: str,
+        unique_id: str | None,
+        subentry_type: str,
+    ) -> ConfigSubentry | None:
+        """Create a config entry subentry using the best available API."""
+
+        manager = getattr(self.hass, "config_entries", None)
+        if manager is None:
+            return None
+
+        create_fn = getattr(manager, "async_create_subentry", None)
+        if callable(create_fn):
+            result = create_fn(
+                entry,
+                data=data,
+                title=title,
+                unique_id=unique_id,
+                subentry_type=subentry_type,
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, ConfigSubentry):
+                return result
+
+        add_fn = getattr(manager, "async_add_subentry", None)
+        if (
+            callable(add_fn) and ConfigSubentry is not None
+        ):  # pragma: no cover - legacy fallback
+            try:
+                subentry = ConfigSubentry(  # type: ignore[call-arg]
+                    data=MappingProxyType(dict(data)),
+                    subentry_type=subentry_type,
+                    title=title,
+                    unique_id=unique_id,
+                )
+            except TypeError:  # pragma: no cover - legacy signature
+                subentry = ConfigSubentry(  # type: ignore[call-arg]
+                    data=MappingProxyType(dict(data)),
+                    title=title,
+                    unique_id=unique_id,
+                )
+            add_fn(entry, subentry)
+            return subentry
+
+        return None
+
+    async def _async_update_subentry(
+        self,
+        entry: ConfigEntry,
+        subentry: ConfigSubentry,
+        *,
+        data: dict[str, Any],
+        title: str,
+        unique_id: str | None,
+    ) -> None:
+        """Update an existing subentry if the API supports it."""
+
+        manager = getattr(self.hass, "config_entries", None)
+        if manager is None:
+            return
+
+        update_fn = getattr(manager, "async_update_subentry", None)
+        if not callable(update_fn):
+            return
+
+        result = update_fn(
+            entry,
+            subentry,
+            data=data,
+            title=title,
+            unique_id=unique_id,
+        )
+        if inspect.isawaitable(result):
+            await result
+
+    def _lookup_subentry(
+        self, entry: ConfigEntry, group_key: str
+    ) -> ConfigSubentry | None:
+        """Return the first subentry matching the requested group key."""
+
+        for candidate in entry.subentries.values():
+            if candidate.data.get("group_key") == group_key:
+                return candidate
         return None
 
 
