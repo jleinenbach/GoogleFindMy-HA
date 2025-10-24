@@ -89,6 +89,9 @@
           "new_oauth_token": "Nouveau jeton OAuth",
           "new_google_email": "Adresse e-mail Google",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Appliquez les mises à jour d’identifiants au groupe de fonctionnalités sélectionné. Consultez la section [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour les différents parcours."
         }
       },
       "settings": {
@@ -108,7 +111,8 @@
         },
         "data_description": {
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas.",
-          "contributor_mode": "\"high_traffic\" conserve le mode agrégé par défaut de Google. \"in_all_areas\" active des signalements participatifs plus rapides."
+          "contributor_mode": "\"high_traffic\" conserve le mode agrégé par défaut de Google. \"in_all_areas\" active des signalements participatifs plus rapides.",
+          "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
         }
       },
       "visibility": {
@@ -117,6 +121,9 @@
         "data": {
           "unignore_devices": "Restaurer des appareils",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Les appareils restaurés sont associés au groupe de fonctionnalités choisi. Consultez [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour obtenir des conseils."
         }
       },
       "repairs": {

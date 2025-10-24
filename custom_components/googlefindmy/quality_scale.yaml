@@ -79,10 +79,12 @@ rules:
       status: done
       evidence:
         - "README.md#configuration-options"
+        - "README.md#subentries-and-feature-groups"
     - id: docs-installation-parameters
       status: done
       evidence:
         - "README.md#configuration-options"
+        - "README.md#subentries-and-feature-groups"
     - id: entity-unavailable
       status: done
       evidence: []
@@ -169,7 +171,10 @@ rules:
       evidence: []
     - id: repair-issues
       status: done
-      evidence: []
+      evidence:
+        - "README.md#subentries-and-feature-groups"
+        - "tests/test_options_flow_subentries.py::test_repairs_move_assigns_devices_to_selected_subentry"
+        - "tests/test_options_flow_subentries.py::test_repairs_delete_moves_devices_and_removes_subentry"
     - id: stale-devices
       status: done
       evidence: []

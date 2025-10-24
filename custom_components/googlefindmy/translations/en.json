@@ -87,6 +87,9 @@
           "new_oauth_token": "New OAuth token",
           "new_google_email": "Google email",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Apply credential updates to the selected feature group. Review the [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) guide for workflow details."
         }
       },
       "settings": {
@@ -106,7 +109,8 @@
         },
         "data_description": {
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire.",
-          "contributor_mode": "Choose \"high_traffic\" for aggregated network-only updates (Google's default) or \"in_all_areas\" to opt into crowdsourced reports for faster coverage."
+          "contributor_mode": "Choose \"high_traffic\" for aggregated network-only updates (Google's default) or \"in_all_areas\" to opt into crowdsourced reports for faster coverage.",
+          "subentry": "Store these options on the selected feature group. See [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) for examples."
         }
       },
       "visibility": {
@@ -115,6 +119,9 @@
         "data": {
           "unignore_devices": "Devices to restore",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Restored devices join the feature group you choose. See [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) for assignment guidance."
         }
       },
       "repairs": {

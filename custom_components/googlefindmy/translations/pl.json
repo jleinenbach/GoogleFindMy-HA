@@ -89,6 +89,9 @@
           "new_oauth_token": "Nowy token OAuth",
           "new_google_email": "Nowy adres e-mail Google",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Zastosuj aktualizacje poświadczeń do wybranej grupy funkcji. Zobacz sekcję [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups), aby poznać dostępne przebiegi."
         }
       },
       "settings": {
@@ -108,7 +111,8 @@
         },
         "data_description": {
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
-          "contributor_mode": "\"high_traffic\" utrzymuje domyślny tryb agregacji Google. \"in_all_areas\" włącza szybsze zgłoszenia crowdsourcingowe."
+          "contributor_mode": "\"high_traffic\" utrzymuje domyślny tryb agregacji Google. \"in_all_areas\" włącza szybsze zgłoszenia crowdsourcingowe.",
+          "subentry": "Zapisz te opcje w wybranej grupie funkcji. Zobacz [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups), aby poznać przykłady."
         }
       },
       "visibility": {
@@ -117,6 +121,9 @@
         "data": {
           "unignore_devices": "Przywróć urządzenia",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Przywrócone urządzenia zostaną przypisane do wybranej grupy funkcji. Wskazówki znajdziesz w sekcji [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
         }
       },
       "repairs": {

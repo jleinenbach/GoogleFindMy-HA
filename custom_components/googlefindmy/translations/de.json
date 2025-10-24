@@ -89,6 +89,9 @@
           "new_oauth_token": "Neuer OAuth-Token",
           "new_google_email": "Google-E-Mail",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
         }
       },
       "settings": {
@@ -108,7 +111,8 @@
         },
         "data_description": {
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab.",
-          "contributor_mode": "\"high_traffic\" entspricht dem standardmäßigen Aggregationsmodus von Google. \"in_all_areas\" aktiviert schnellere Crowdsource-Ortungen."
+          "contributor_mode": "\"high_traffic\" entspricht dem standardmäßigen Aggregationsmodus von Google. \"in_all_areas\" aktiviert schnellere Crowdsource-Ortungen.",
+          "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
         }
       },
       "visibility": {
@@ -117,6 +121,9 @@
         "data": {
           "unignore_devices": "Geräte wiederherstellen",
           "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Wiederhergestellte Geräte werden der gewählten Funktionsgruppe zugeordnet. Hinweise finden Sie im Abschnitt [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
         }
       },
       "repairs": {
