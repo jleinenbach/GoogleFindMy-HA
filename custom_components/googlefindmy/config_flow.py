@@ -36,7 +36,8 @@ import inspect
 import json
 import logging
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Iterable, Mapping
 
 import voluptuous as vol
 
@@ -131,6 +132,31 @@ except Exception:  # noqa: BLE001
 # -----------------------------------------------------------------------------------
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _SubentryOption:
+    """Lightweight representation of a selectable subentry."""
+
+    key: str
+    label: str
+    subentry: ConfigSubentry | None
+    visible_device_ids: tuple[str, ...]
+
+    @property
+    def subentry_id(self) -> str | None:
+        """Return the backing Home Assistant subentry identifier when available."""
+
+        if self.subentry is None:
+            return None
+        return getattr(self.subentry, "subentry_id", None)
+
+
+_FIELD_SUBENTRY = "subentry"
+_FIELD_REPAIR_TARGET = "target_subentry"
+_FIELD_REPAIR_DELETE = "delete_subentry"
+_FIELD_REPAIR_FALLBACK = "fallback_subentry"
+_FIELD_REPAIR_DEVICES = "device_ids"
 
 # ---------------------------------------------------------------------
 # Backcompat base for OptionsFlow: prefer OptionsFlowWithReload if present
@@ -1329,7 +1355,8 @@ class OptionsFlowHandler(OptionsFlowBase):
     ) -> FlowResult:
         """Display a small menu for settings, credentials refresh, or visibility."""
         return self.async_show_menu(
-            step_id="init", menu_options=["settings", "credentials", "visibility"]
+            step_id="init",
+            menu_options=["settings", "credentials", "visibility", "repairs"],
         )
 
     # ---------- Helpers for live API/cache access ----------
@@ -1364,6 +1391,278 @@ class OptionsFlowHandler(OptionsFlowBase):
         raise RuntimeError(
             "GoogleFindMyAPI requires either `cache=` or minimal flow credentials."
         )
+
+    # ---------- Shared subentry helpers ----------
+    def _gather_subentry_options(self) -> list[_SubentryOption]:
+        """Return ordered subentry options available for selection."""
+
+        entry = self.config_entry
+        options: list[_SubentryOption] = []
+        seen_keys: set[str] = set()
+
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, dict):
+            for subentry in subentries.values():
+                data = dict(getattr(subentry, "data", {}) or {})
+                raw_key = data.get("group_key")
+                if isinstance(raw_key, str) and raw_key.strip():
+                    key = raw_key.strip()
+                else:
+                    key = str(getattr(subentry, "subentry_id", "core_tracking"))
+                label = (
+                    getattr(subentry, "title", None)
+                    or data.get("entry_title")
+                    or key.replace("_", " ").title()
+                )
+                raw_visible = data.get("visible_device_ids")
+                if isinstance(raw_visible, Iterable) and not isinstance(
+                    raw_visible, (str, bytes)
+                ):
+                    visible = tuple(
+                        str(item)
+                        for item in raw_visible
+                        if isinstance(item, str) and item
+                    )
+                else:
+                    visible = ()
+                options.append(
+                    _SubentryOption(
+                        key=key,
+                        label=str(label),
+                        subentry=subentry,
+                        visible_device_ids=visible,
+                    )
+                )
+                seen_keys.add(key)
+
+        if not options:
+            title = getattr(entry, "title", None) or "Core tracking"
+            options.append(
+                _SubentryOption(
+                    key="core_tracking",
+                    label=str(title),
+                    subentry=None,
+                    visible_device_ids=(),
+                )
+            )
+
+        options.sort(key=lambda opt: opt.label.lower())
+        return options
+
+    def _subentry_choice_map(
+        self,
+    ) -> tuple[dict[str, str], dict[str, _SubentryOption]]:
+        """Return mapping of subentry keys to labels and option objects."""
+
+        options = self._gather_subentry_options()
+        label_map = {opt.key: opt.label for opt in options}
+        option_map = {opt.key: opt for opt in options}
+        return label_map, option_map
+
+    @staticmethod
+    def _default_subentry_key(choices: dict[str, str]) -> str:
+        """Return the default subentry key for UI defaults."""
+
+        if "core_tracking" in choices:
+            return "core_tracking"
+        return next(iter(choices), "core_tracking")
+
+    async def _async_update_feature_group_subentry(
+        self,
+        entry: ConfigEntry,
+        subentry_option: _SubentryOption,
+        options_payload: Mapping[str, Any],
+    ) -> None:
+        """Update feature group metadata on the selected subentry."""
+
+        subentry = subentry_option.subentry
+        if subentry is None:
+            return
+
+        data = dict(getattr(subentry, "data", {}) or {})
+        data.setdefault("group_key", subentry_option.key)
+
+        raw_flags = data.get("feature_flags")
+        if isinstance(raw_flags, Mapping):
+            feature_flags = {str(key): raw_flags[key] for key in raw_flags}
+        else:
+            feature_flags = {}
+
+        if OPT_ENABLE_STATS_ENTITIES is not None:
+            if OPT_ENABLE_STATS_ENTITIES in options_payload:
+                feature_flags[OPT_ENABLE_STATS_ENTITIES] = bool(
+                    options_payload[OPT_ENABLE_STATS_ENTITIES]
+                )
+        if OPT_MAP_VIEW_TOKEN_EXPIRATION in options_payload:
+            feature_flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] = bool(
+                options_payload[OPT_MAP_VIEW_TOKEN_EXPIRATION]
+            )
+        if OPT_GOOGLE_HOME_FILTER_ENABLED is not None and (
+            OPT_GOOGLE_HOME_FILTER_ENABLED in options_payload
+        ):
+            feature_flags[OPT_GOOGLE_HOME_FILTER_ENABLED] = bool(
+                options_payload[OPT_GOOGLE_HOME_FILTER_ENABLED]
+            )
+            data["has_google_home_filter"] = bool(
+                options_payload[OPT_GOOGLE_HOME_FILTER_ENABLED]
+            )
+        if OPT_CONTRIBUTOR_MODE in options_payload:
+            feature_flags[OPT_CONTRIBUTOR_MODE] = options_payload[OPT_CONTRIBUTOR_MODE]
+
+        if feature_flags:
+            data["feature_flags"] = feature_flags
+
+        if "entry_title" in data or getattr(entry, "title", None):
+            data["entry_title"] = getattr(entry, "title", None) or data.get(
+                "entry_title"
+            )
+
+        await ConfigFlow._async_update_subentry(  # type: ignore[misc]
+            self,
+            entry,
+            subentry,
+            data=data,
+            title=getattr(subentry, "title", None) or data.get("entry_title"),
+            unique_id=getattr(subentry, "unique_id", None),
+        )
+
+    async def _async_refresh_subentry_entry_title(
+        self, entry: ConfigEntry, subentry_option: _SubentryOption
+    ) -> None:
+        """Ensure the subentry reflects the current entry title."""
+
+        subentry = subentry_option.subentry
+        if subentry is None:
+            return
+
+        data = dict(getattr(subentry, "data", {}) or {})
+        new_title = getattr(entry, "title", None)
+        if not new_title:
+            return
+        if (
+            data.get("entry_title") == new_title
+            and getattr(subentry, "title", None) == new_title
+        ):
+            return
+        data["entry_title"] = new_title
+        await ConfigFlow._async_update_subentry(  # type: ignore[misc]
+            self,
+            entry,
+            subentry,
+            data=data,
+            title=new_title,
+            unique_id=getattr(subentry, "unique_id", None),
+        )
+
+    async def _async_assign_devices_to_subentry(
+        self, entry: ConfigEntry, target_key: str, device_ids: list[str]
+    ) -> set[str]:
+        """Assign devices to the target subentry while removing from others."""
+
+        if not device_ids:
+            return set()
+
+        changed: set[str] = set()
+        options = self._gather_subentry_options()
+
+        for option in options:
+            subentry = option.subentry
+            if subentry is None:
+                continue
+
+            data = dict(getattr(subentry, "data", {}) or {})
+            raw_visible = data.get("visible_device_ids")
+            if isinstance(raw_visible, Iterable) and not isinstance(
+                raw_visible, (str, bytes)
+            ):
+                visible = [
+                    str(item) for item in raw_visible if isinstance(item, str) and item
+                ]
+            else:
+                visible = list(option.visible_device_ids)
+
+            before = list(visible)
+            if option.key == target_key:
+                for dev_id in device_ids:
+                    if dev_id not in visible:
+                        visible.append(dev_id)
+            else:
+                visible = [dev for dev in visible if dev not in device_ids]
+
+            if visible == before:
+                continue
+
+            data["visible_device_ids"] = tuple(sorted(dict.fromkeys(visible)))
+            await ConfigFlow._async_update_subentry(  # type: ignore[misc]
+                self,
+                entry,
+                subentry,
+                data=data,
+                title=getattr(subentry, "title", None),
+                unique_id=getattr(subentry, "unique_id", None),
+            )
+            changed.add(option.key)
+
+        return changed
+
+    async def _async_remove_subentry(
+        self, entry: ConfigEntry, subentry_option: _SubentryOption
+    ) -> bool:
+        """Remove a subentry using the config entries API when available."""
+
+        subentry_id = subentry_option.subentry_id
+        if not subentry_id:
+            return False
+
+        manager = getattr(self.hass, "config_entries", None)
+        remove_fn = getattr(manager, "async_remove_subentry", None)
+        if not callable(remove_fn):
+            return False
+
+        result = remove_fn(entry, subentry_id)
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+
+    def _device_choice_map(self) -> dict[str, str]:
+        """Return mapping of device IDs to display labels for UI selectors."""
+
+        entry = self.config_entry
+        choices: dict[str, str] = {}
+
+        runtime = getattr(entry, "runtime_data", None)
+        coordinator = None
+        if runtime is not None:
+            coordinator = getattr(runtime, "coordinator", None) or getattr(
+                runtime, "data", None
+            )
+        if coordinator is None:
+            coordinator = getattr(entry, "runtime_data", None)
+
+        datasets: list[Iterable[Any]] = []
+        if coordinator is not None:
+            data_attr = getattr(coordinator, "data", None)
+            if isinstance(data_attr, Iterable):
+                datasets.append(data_attr)
+
+        for dataset in datasets:
+            for candidate in dataset:
+                if not isinstance(candidate, Mapping):
+                    continue
+                device_id = candidate.get("device_id") or candidate.get("id")
+                if not isinstance(device_id, str) or not device_id:
+                    continue
+                name = candidate.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    name = device_id
+                choices.setdefault(device_id, name)
+
+        if not choices:
+            for option in self._gather_subentry_options():
+                for device_id in option.visible_device_ids:
+                    choices.setdefault(device_id, device_id)
+
+        return dict(sorted(choices.items(), key=lambda item: item[1].lower()))
 
     # ---------- Settings (non-secret) ----------
     async def async_step_settings(
@@ -1423,45 +1722,74 @@ class OptionsFlowHandler(OptionsFlowBase):
                 OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES
             )
 
+        choices, option_map = self._subentry_choice_map()
+        default_subentry = self._default_subentry_key(choices)
+
         fields: dict[Any, Any] = {
-            vol.Optional(OPT_LOCATION_POLL_INTERVAL): vol.All(
-                vol.Coerce(int), vol.Range(min=60, max=3600)
-            ),
-            vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=60)
-            ),
-            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(
-                vol.Coerce(int), vol.Range(min=25, max=500)
-            ),
-            vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION): bool,
+            vol.Required(_FIELD_SUBENTRY, default=default_subentry): vol.In(choices)
         }
+        option_markers: list[Any] = []
+
+        def _register(marker: Any, validator: Any) -> None:
+            fields[marker] = validator
+            option_markers.append(marker)
+
+        _register(
+            vol.Optional(OPT_LOCATION_POLL_INTERVAL),
+            vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
+        )
+        _register(
+            vol.Optional(OPT_DEVICE_POLL_DELAY),
+            vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
+        )
+        _register(
+            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD),
+            vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
+        )
+        _register(vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION), bool)
         if OPT_MOVEMENT_THRESHOLD is not None:
-            fields[vol.Optional(OPT_MOVEMENT_THRESHOLD)] = vol.All(
-                vol.Coerce(int), vol.Range(min=10, max=200)
+            _register(
+                vol.Optional(OPT_MOVEMENT_THRESHOLD),
+                vol.All(vol.Coerce(int), vol.Range(min=10, max=200)),
             )
         if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
-            fields[vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED)] = bool
+            _register(vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED), bool)
         if OPT_GOOGLE_HOME_FILTER_KEYWORDS is not None:
-            fields[vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS)] = str
+            _register(vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS), str)
         if OPT_ENABLE_STATS_ENTITIES is not None:
-            fields[vol.Optional(OPT_ENABLE_STATS_ENTITIES)] = bool
-        fields[vol.Optional(OPT_CONTRIBUTOR_MODE)] = vol.In(
-            [CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS]
+            _register(vol.Optional(OPT_ENABLE_STATS_ENTITIES), bool)
+        _register(
+            vol.Optional(OPT_CONTRIBUTOR_MODE),
+            vol.In([CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS]),
         )
 
         base_schema = vol.Schema(fields)
+        schema_with_defaults = self.add_suggested_values_to_schema(base_schema, current)
 
         if user_input is not None:
-            new_options = dict(current)
-            for k in list(current.keys()):
-                if k in user_input:
-                    new_options[k] = user_input[k]
-            return self.async_create_entry(title="", data=new_options)
+            selected_key = str(user_input.get(_FIELD_SUBENTRY, default_subentry))
+            if selected_key not in choices:
+                errors[_FIELD_SUBENTRY] = "invalid_subentry"
+            else:
+                new_options = dict(entry.options)
+                for marker in option_markers:
+                    real_key = next(iter(getattr(marker, "schema", {marker})))
+                    if real_key in user_input:
+                        new_options[real_key] = user_input[real_key]
+                    else:
+                        new_options[real_key] = current.get(real_key)
+                new_options[OPT_OPTIONS_SCHEMA_VERSION] = 2
+
+                subentry_option = option_map.get(selected_key)
+                if subentry_option is not None:
+                    await self._async_update_feature_group_subentry(
+                        entry, subentry_option, new_options
+                    )
+
+                return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(
-            step_id="settings",
-            data_schema=self.add_suggested_values_to_schema(base_schema, current),
-            errors=errors,
+            step_id="settings", data_schema=schema_with_defaults, errors=errors
         )
 
     # ---------- Visibility (restore ignored devices) ----------
@@ -1489,23 +1817,189 @@ class OptionsFlowHandler(OptionsFlowBase):
                 for dev_id, meta in ignored_map.items()
             }
 
+        subentry_choices, _ = self._subentry_choice_map()
+        default_subentry = self._default_subentry_key(subentry_choices)
+
         schema = vol.Schema(
-            {vol.Optional("unignore_devices", default=[]): cv.multi_select(choices)}
+            {
+                vol.Required(_FIELD_SUBENTRY, default=default_subentry): vol.In(
+                    subentry_choices
+                ),
+                vol.Optional("unignore_devices", default=[]): cv.multi_select(choices),
+            }
         )
 
         if user_input is not None:
-            to_restore = user_input.get("unignore_devices") or []
-            if not isinstance(to_restore, list):
-                to_restore = list(to_restore)
+            selected_key = str(user_input.get(_FIELD_SUBENTRY, default_subentry))
+            if selected_key not in subentry_choices:
+                return self.async_show_form(
+                    step_id="visibility",
+                    data_schema=schema,
+                    errors={_FIELD_SUBENTRY: "invalid_subentry"},
+                )
+
+            raw_restore = user_input.get("unignore_devices") or []
+            if not isinstance(raw_restore, list):
+                raw_restore = list(raw_restore)
+            to_restore = [
+                str(dev_id) for dev_id in raw_restore if isinstance(dev_id, str)
+            ]
             for dev_id in to_restore:
                 ignored_map.pop(dev_id, None)
 
             new_options = dict(entry.options)
             new_options[OPT_IGNORED_DEVICES] = ignored_map
             new_options[OPT_OPTIONS_SCHEMA_VERSION] = 2
+
+            if to_restore:
+                await self._async_assign_devices_to_subentry(
+                    entry, selected_key, to_restore
+                )
+
             return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(step_id="visibility", data_schema=schema)
+
+    async def async_step_repairs(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Entry point for subentry repair operations."""
+
+        subentry_choices, _ = self._subentry_choice_map()
+        if not subentry_choices:
+            return self.async_abort(reason="repairs_no_subentries")
+
+        return self.async_show_menu(
+            step_id="repairs",
+            menu_options=["repairs_move", "repairs_delete"],
+        )
+
+    async def async_step_repairs_move(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Assign selected devices to a subentry, removing them from others."""
+
+        subentry_choices, _ = self._subentry_choice_map()
+        if not subentry_choices:
+            return self.async_abort(reason="repairs_no_subentries")
+
+        default_subentry = self._default_subentry_key(subentry_choices)
+        device_choices = self._device_choice_map()
+
+        schema = vol.Schema(
+            {
+                vol.Required(_FIELD_REPAIR_TARGET, default=default_subentry): vol.In(
+                    subentry_choices
+                ),
+                vol.Optional(_FIELD_REPAIR_DEVICES, default=[]): cv.multi_select(
+                    device_choices
+                ),
+            }
+        )
+
+        if user_input is not None:
+            target_key = str(user_input.get(_FIELD_REPAIR_TARGET, default_subentry))
+            if target_key not in subentry_choices:
+                return self.async_show_form(
+                    step_id="repairs_move",
+                    data_schema=schema,
+                    errors={_FIELD_REPAIR_TARGET: "invalid_subentry"},
+                )
+
+            raw_devices = user_input.get(_FIELD_REPAIR_DEVICES) or []
+            if not isinstance(raw_devices, list):
+                raw_devices = list(raw_devices)
+            device_ids = [
+                str(dev_id) for dev_id in raw_devices if isinstance(dev_id, str)
+            ]
+
+            if not device_ids:
+                return self.async_abort(reason="repair_no_devices")
+
+            changed = await self._async_assign_devices_to_subentry(
+                self.config_entry, target_key, device_ids
+            )
+
+            placeholders = {
+                "subentry": subentry_choices[target_key],
+                "count": str(len(device_ids)),
+            }
+
+            if not changed:
+                return self.async_abort(
+                    reason="subentry_move_success",
+                    description_placeholders=placeholders,
+                )
+
+            return self.async_abort(
+                reason="subentry_move_success", description_placeholders=placeholders
+            )
+
+        return self.async_show_form(step_id="repairs_move", data_schema=schema)
+
+    async def async_step_repairs_delete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Remove a subentry after optionally moving its devices to a fallback."""
+
+        subentry_choices, option_map = self._subentry_choice_map()
+        removable_choices = {
+            key: label
+            for key, label in subentry_choices.items()
+            if option_map[key].subentry
+        }
+        if not removable_choices or len(removable_choices) <= 1:
+            return self.async_abort(reason="subentry_delete_invalid")
+
+        schema = vol.Schema(
+            {
+                vol.Required(_FIELD_REPAIR_DELETE): vol.In(removable_choices),
+                vol.Required(
+                    _FIELD_REPAIR_FALLBACK,
+                    default=self._default_subentry_key(subentry_choices),
+                ): vol.In(subentry_choices),
+            }
+        )
+
+        if user_input is not None:
+            errors: dict[str, str] = {}
+            target_key = str(user_input.get(_FIELD_REPAIR_DELETE, ""))
+            fallback_key = str(user_input.get(_FIELD_REPAIR_FALLBACK, ""))
+
+            if target_key not in removable_choices:
+                errors[_FIELD_REPAIR_DELETE] = "invalid_subentry"
+            if fallback_key not in subentry_choices or fallback_key == target_key:
+                errors[_FIELD_REPAIR_FALLBACK] = "invalid_subentry"
+
+            if errors:
+                return self.async_show_form(
+                    step_id="repairs_delete", data_schema=schema, errors=errors
+                )
+
+            devices = list(option_map[target_key].visible_device_ids)
+            if devices:
+                await self._async_assign_devices_to_subentry(
+                    self.config_entry, fallback_key, devices
+                )
+
+            removed = await self._async_remove_subentry(
+                self.config_entry, option_map[target_key]
+            )
+            if not removed:
+                return self.async_abort(reason="subentry_remove_failed")
+
+            placeholders = {
+                "subentry": subentry_choices[target_key],
+                "fallback": subentry_choices[fallback_key],
+                "count": str(len(devices)),
+            }
+
+            return self.async_abort(
+                reason="subentry_delete_success",
+                description_placeholders=placeholders,
+            )
+
+        return self.async_show_form(step_id="repairs_delete", data_schema=schema)
 
     # ---------- Credentials refresh ----------
     async def async_step_credentials(
@@ -1520,9 +2014,15 @@ class OptionsFlowHandler(OptionsFlowBase):
         """
         errors: dict[str, str] = {}
 
+        subentry_choices, option_map = self._subentry_choice_map()
+        default_subentry = self._default_subentry_key(subentry_choices)
+
         if selector is not None:
             schema = vol.Schema(
                 {
+                    vol.Required(_FIELD_SUBENTRY, default=default_subentry): vol.In(
+                        subentry_choices
+                    ),
                     vol.Optional("new_secrets_json"): selector(
                         {"text": {"multiline": True}}
                     ),
@@ -1532,162 +2032,161 @@ class OptionsFlowHandler(OptionsFlowBase):
         else:
             schema = vol.Schema(
                 {
+                    vol.Required(_FIELD_SUBENTRY, default=default_subentry): vol.In(
+                        subentry_choices
+                    ),
                     vol.Optional("new_secrets_json"): str,
                     vol.Optional("new_oauth_token"): str,
                 }
             )
 
         if user_input is not None:
-            has_secrets = bool((user_input.get("new_secrets_json") or "").strip())
-            has_token = bool((user_input.get("new_oauth_token") or "").strip())
-            if (has_secrets and has_token) or (not has_secrets and not has_token):
-                errors["base"] = "choose_one"
+            selected_key = str(user_input.get(_FIELD_SUBENTRY, default_subentry))
+            if selected_key not in subentry_choices:
+                errors[_FIELD_SUBENTRY] = "invalid_subentry"
             else:
-                try:
-                    entry = self.config_entry
-                    email = entry.data.get(CONF_GOOGLE_EMAIL)
-                    if has_token:
-                        token = (user_input.get("new_oauth_token") or "").strip()
-                        if not (
-                            _token_plausible(token)
-                            and not _disqualifies_for_persistence(token)
-                        ):
-                            errors["base"] = "invalid_token"
-                        else:
-                            chosen = await async_pick_working_token(
-                                email, [("manual", token)]
-                            )
-                            if not chosen:
-                                _LOGGER.warning(
-                                    "Token validation failed for %s. No working token found among candidates (%s).",
-                                    _mask_email_for_logs(email),
-                                    _cand_labels([("manual", token)]),
-                                )
-                                errors["base"] = "cannot_connect"
-                            else:
-                                updated_data = {
-                                    **entry.data,
-                                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                    CONF_OAUTH_TOKEN: chosen,
-                                }
-                                updated_data.pop(DATA_SECRET_BUNDLE, None)
-                                if isinstance(chosen, str) and chosen.startswith(
-                                    "aas_et/"
-                                ):
-                                    updated_data[DATA_AAS_TOKEN] = chosen
-                                else:
-                                    updated_data.pop(DATA_AAS_TOKEN, None)
-                                await self._async_clear_cached_aas_token(entry)
-                                self.hass.config_entries.async_update_entry(
-                                    entry, data=updated_data
-                                )
-                                self.hass.async_create_task(
-                                    self.hass.config_entries.async_reload(
-                                        entry.entry_id
-                                    )
-                                )
-                                return self.async_abort(reason="reconfigure_successful")
+                has_secrets = bool((user_input.get("new_secrets_json") or "").strip())
+                has_token = bool((user_input.get("new_oauth_token") or "").strip())
+                if (has_secrets and has_token) or (not has_secrets and not has_token):
+                    errors["base"] = "choose_one"
+                else:
+                    try:
+                        entry = self.config_entry
+                        email = entry.data.get(CONF_GOOGLE_EMAIL)
+                        selected_option = option_map.get(selected_key)
 
-                    if has_secrets and "new_secrets_json" in user_input:
-                        try:
-                            parsed = json.loads(user_input["new_secrets_json"])
-                            if not isinstance(parsed, dict):
-                                raise TypeError()
-                        except Exception:
-                            errors["new_secrets_json"] = "invalid_json"
-                        else:
-                            cands = _extract_oauth_candidates_from_secrets(parsed)
-                            if not cands:
+                        async def _finalize_success(
+                            updated_data: dict[str, Any],
+                        ) -> FlowResult:
+                            await self._async_clear_cached_aas_token(entry)
+                            self.hass.config_entries.async_update_entry(
+                                entry, data=updated_data
+                            )
+                            if selected_option is not None:
+                                await self._async_refresh_subentry_entry_title(
+                                    entry, selected_option
+                                )
+                            self.hass.async_create_task(
+                                self.hass.config_entries.async_reload(entry.entry_id)
+                            )
+                            return self.async_abort(reason="reconfigure_successful")
+
+                        if has_token:
+                            token = (user_input.get("new_oauth_token") or "").strip()
+                            if not (
+                                _token_plausible(token)
+                                and not _disqualifies_for_persistence(token)
+                            ):
                                 errors["base"] = "invalid_token"
                             else:
                                 chosen = await async_pick_working_token(
-                                    email, cands, secrets_bundle=parsed
+                                    email, [("manual", token)]
                                 )
                                 if not chosen:
                                     _LOGGER.warning(
                                         "Token validation failed for %s. No working token found among candidates (%s).",
                                         _mask_email_for_logs(email),
-                                        _cand_labels(cands),
+                                        _cand_labels([("manual", token)]),
                                     )
                                     errors["base"] = "cannot_connect"
                                 else:
-                                    to_persist = chosen
-                                    if _disqualifies_for_persistence(to_persist):
-                                        alt = next(
-                                            (
-                                                v
-                                                for (_src, v) in cands
-                                                if not _disqualifies_for_persistence(v)
-                                            ),
-                                            None,
-                                        )
-                                        if alt:
-                                            to_persist = alt
                                     updated_data = {
                                         **entry.data,
-                                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                        CONF_OAUTH_TOKEN: to_persist,
-                                        DATA_SECRET_BUNDLE: parsed,
+                                        DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                        CONF_OAUTH_TOKEN: chosen,
                                     }
-                                    if isinstance(
-                                        to_persist, str
-                                    ) and to_persist.startswith("aas_et/"):
-                                        updated_data[DATA_AAS_TOKEN] = to_persist
+                                    updated_data.pop(DATA_SECRET_BUNDLE, None)
+                                    if isinstance(chosen, str) and chosen.startswith(
+                                        "aas_et/"
+                                    ):
+                                        updated_data[DATA_AAS_TOKEN] = chosen
                                     else:
                                         updated_data.pop(DATA_AAS_TOKEN, None)
-                                    await self._async_clear_cached_aas_token(entry)
-                                    self.hass.config_entries.async_update_entry(
-                                        entry, data=updated_data
+                                    return await _finalize_success(updated_data)
+
+                        if has_secrets and "new_secrets_json" in user_input:
+                            try:
+                                parsed = json.loads(user_input["new_secrets_json"])
+                                if not isinstance(parsed, dict):
+                                    raise TypeError()
+                            except Exception:
+                                errors["new_secrets_json"] = "invalid_json"
+                            else:
+                                cands = _extract_oauth_candidates_from_secrets(parsed)
+                                if not cands:
+                                    errors["base"] = "invalid_token"
+                                else:
+                                    chosen = await async_pick_working_token(
+                                        email, cands, secrets_bundle=parsed
                                     )
-                                    self.hass.async_create_task(
-                                        self.hass.config_entries.async_reload(
-                                            entry.entry_id
+                                    if not chosen:
+                                        _LOGGER.warning(
+                                            "Token validation failed for %s. No working token found among candidates (%s).",
+                                            _mask_email_for_logs(email),
+                                            _cand_labels(cands),
                                         )
-                                    )
-                                    return self.async_abort(
-                                        reason="reconfigure_successful"
-                                    )
-                except Exception as err2:  # noqa: BLE001
-                    if _is_multi_entry_guard_error(err2):
-                        # Defer: accept input and let setup validate with entry-scoped cache
-                        entry = self.config_entry
-                        if has_token:
-                            token_value = user_input["new_oauth_token"].strip()
-                            updated_data = {
-                                **entry.data,
-                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: token_value,
-                            }
-                            updated_data.pop(DATA_SECRET_BUNDLE, None)
-                            if token_value.startswith("aas_et/"):
-                                updated_data[DATA_AAS_TOKEN] = token_value
+                                        errors["base"] = "cannot_connect"
+                                    else:
+                                        to_persist = chosen
+                                        if _disqualifies_for_persistence(to_persist):
+                                            alt = next(
+                                                (
+                                                    v
+                                                    for (_src, v) in cands
+                                                    if not _disqualifies_for_persistence(
+                                                        v
+                                                    )
+                                                ),
+                                                None,
+                                            )
+                                            if alt:
+                                                to_persist = alt
+                                        updated_data = {
+                                            **entry.data,
+                                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                            CONF_OAUTH_TOKEN: to_persist,
+                                            DATA_SECRET_BUNDLE: parsed,
+                                        }
+                                        if isinstance(
+                                            to_persist, str
+                                        ) and to_persist.startswith("aas_et/"):
+                                            updated_data[DATA_AAS_TOKEN] = to_persist
+                                        else:
+                                            updated_data.pop(DATA_AAS_TOKEN, None)
+                                        return await _finalize_success(updated_data)
+                    except Exception as err2:  # noqa: BLE001
+                        if _is_multi_entry_guard_error(err2):
+                            entry = self.config_entry
+                            if has_token:
+                                token_value = user_input["new_oauth_token"].strip()
+                                updated_data = {
+                                    **entry.data,
+                                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                    CONF_OAUTH_TOKEN: token_value,
+                                }
+                                updated_data.pop(DATA_SECRET_BUNDLE, None)
+                                if token_value.startswith("aas_et/"):
+                                    updated_data[DATA_AAS_TOKEN] = token_value
+                                else:
+                                    updated_data.pop(DATA_AAS_TOKEN, None)
                             else:
-                                updated_data.pop(DATA_AAS_TOKEN, None)
-                        else:
-                            parsed = json.loads(user_input["new_secrets_json"])
-                            cands = _extract_oauth_candidates_from_secrets(parsed)
-                            token_first = cands[0][1] if cands else ""
-                            updated_data = {
-                                **entry.data,
-                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                CONF_OAUTH_TOKEN: token_first,
-                                DATA_SECRET_BUNDLE: parsed,
-                            }
-                            if isinstance(token_first, str) and token_first.startswith(
-                                "aas_et/"
-                            ):
-                                updated_data[DATA_AAS_TOKEN] = token_first
-                            else:
-                                updated_data.pop(DATA_AAS_TOKEN, None)
-                        await self._async_clear_cached_aas_token(entry)
-                        self.hass.config_entries.async_update_entry(
-                            entry, data=updated_data
-                        )
-                        self.hass.async_create_task(
-                            self.hass.config_entries.async_reload(entry.entry_id)
-                        )
-                        return self.async_abort(reason="reconfigure_successful")
-                    errors["base"] = _map_api_exc_to_error_key(err2)
+                                parsed = json.loads(user_input["new_secrets_json"])
+                                cands = _extract_oauth_candidates_from_secrets(parsed)
+                                token_first = cands[0][1] if cands else ""
+                                updated_data = {
+                                    **entry.data,
+                                    DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                    CONF_OAUTH_TOKEN: token_first,
+                                    DATA_SECRET_BUNDLE: parsed,
+                                }
+                                if isinstance(
+                                    token_first, str
+                                ) and token_first.startswith("aas_et/"):
+                                    updated_data[DATA_AAS_TOKEN] = token_first
+                                else:
+                                    updated_data.pop(DATA_AAS_TOKEN, None)
+                            return await _finalize_success(updated_data)
+                        errors["base"] = _map_api_exc_to_error_key(err2)
 
         return self.async_show_form(
             step_id="credentials", data_schema=schema, errors=errors

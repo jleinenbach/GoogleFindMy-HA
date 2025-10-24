@@ -83,15 +83,21 @@ def _stub_homeassistant() -> None:
     class OptionsFlow:
         """Minimal OptionsFlow stub for imports."""
 
-        async def async_show_form(
+        def async_show_form(
             self, *args, **kwargs
         ):  # pragma: no cover - defensive
             return {"type": "form"}
 
-        async def async_create_entry(
+        def async_create_entry(
             self, *, title: str, data
         ):  # pragma: no cover - defensive
             return {"type": "create_entry", "title": title, "data": data}
+
+        def async_abort(self, **kwargs):  # pragma: no cover - defensive
+            return {"type": "abort", **kwargs}
+
+        def add_suggested_values_to_schema(self, schema, suggested):  # noqa: D401 - stub
+            return schema
 
     class OptionsFlowWithReload(OptionsFlow):
         """Placeholder inheriting OptionsFlow behaviour."""
@@ -159,8 +165,15 @@ def _stub_homeassistant() -> None:
         return value
 
     vol_module.Schema = _Schema
-    vol_module.Optional = lambda key, default=None: _Marker(key)
-    vol_module.Required = lambda key, description=None: _Marker(key)
+
+    def _optional(key, default=None, **_: object) -> _Marker:
+        return _Marker(key)
+
+    def _required(key, description=None, default=None, **_: object) -> _Marker:
+        return _Marker(key)
+
+    vol_module.Optional = _optional
+    vol_module.Required = _required
     vol_module.Any = lambda *items, **kwargs: _identity
     vol_module.All = lambda *validators, **kwargs: _identity
     vol_module.In = lambda items: _identity

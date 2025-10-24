@@ -87,7 +87,8 @@
           "google_email": "Google-E-Mail",
           "new_secrets_json": "Neue secrets.json (vollständiger Inhalt)",
           "new_oauth_token": "Neuer OAuth-Token",
-          "new_google_email": "Google-E-Mail"
+          "new_google_email": "Google-E-Mail",
+          "subentry": "Feature group"
         }
       },
       "settings": {
@@ -102,7 +103,8 @@
           "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
           "enable_stats_entities": "Statistik-Entitäten erstellen",
           "map_view_token_expiration": "Ablauf von Kartenansicht-Tokens aktivieren",
-          "contributor_mode": "Modus für Standortmeldungen"
+          "contributor_mode": "Modus für Standortmeldungen",
+          "subentry": "Feature group"
         },
         "data_description": {
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab.",
@@ -113,7 +115,32 @@
         "title": "Gerätesichtbarkeit",
         "description": "Stelle zuvor ignorierte Geräte wieder her, damit sie erneut sichtbar sind. Wähle ein oder mehrere Geräte aus und speichere.",
         "data": {
-          "unignore_devices": "Geräte wiederherstellen"
+          "unignore_devices": "Geräte wiederherstellen",
+          "subentry": "Feature group"
+        }
+      },
+      "repairs": {
+        "title": "Subentry Repairs",
+        "description": "Choose a repair action for your feature groups.",
+        "menu_options": {
+          "repairs_move": "Move devices",
+          "repairs_delete": "Delete subentry"
+        }
+      },
+      "repairs_move": {
+        "title": "Move devices between subentries",
+        "description": "Move devices into a selected feature group. Devices removed from other groups will continue to appear under the chosen group.",
+        "data": {
+          "target_subentry": "Target feature group",
+          "device_ids": "Devices to assign"
+        }
+      },
+      "repairs_delete": {
+        "title": "Delete a subentry",
+        "description": "Delete a feature group and move its devices into another group.",
+        "data": {
+          "delete_subentry": "Subentry to delete",
+          "fallback_subentry": "Fallback feature group"
         }
       }
     },
@@ -125,11 +152,18 @@
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
       "invalid_token": "Ungültige Anmeldedaten (Token/E-Mail). Bitte prüfe Format und Inhalt.",
-      "unknown": "Unerwarteter Fehler."
+      "unknown": "Unerwarteter Fehler.",
+      "invalid_subentry": "Choose a valid feature group."
     },
     "abort": {
       "reconfigure_successful": "Neukonfiguration erfolgreich.",
-      "no_ignored_devices": "Es gibt keine ignorierten Geräte, die wiederhergestellt werden können."
+      "no_ignored_devices": "Es gibt keine ignorierten Geräte, die wiederhergestellt werden können.",
+      "repairs_no_subentries": "There are no subentries to repair.",
+      "repair_no_devices": "Select at least one device to move.",
+      "subentry_move_success": "Devices assigned to **{subentry}** ({count} updated).",
+      "subentry_delete_success": "Deleted **{subentry}** and moved {count} devices to **{fallback}**.",
+      "subentry_delete_invalid": "A second feature group is required before deleting one.",
+      "subentry_remove_failed": "Deleting the selected feature group failed. Please try again."
     }
   },
   "services": {

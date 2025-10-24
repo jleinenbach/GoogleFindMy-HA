@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import inspect
 from typing import Any
 from collections.abc import Awaitable
+from types import MappingProxyType
 
 import pytest
 
@@ -19,6 +20,7 @@ from custom_components.googlefindmy.const import (
     DATA_AAS_TOKEN,
     DOMAIN,
 )
+from homeassistant.config_entries import ConfigSubentry
 
 
 class _MemoryCache:
@@ -64,6 +66,16 @@ class _DummyEntry:
         self.data = data
         self.options: dict[str, Any] = {}
         self.runtime_data = _RuntimeData(cache)
+        self.title = data.get(CONF_GOOGLE_EMAIL, "Google Find My Device")
+        self.subentries: dict[str, ConfigSubentry] = {}
+
+        core_subentry = ConfigSubentry(
+            data={"group_key": "core_tracking", "feature_flags": {}},
+            subentry_type="googlefindmy_feature_group",
+            title="Google Find My devices",
+            unique_id=f"{entry_id}-core_tracking",
+        )
+        self.subentries[core_subentry.subentry_id] = core_subentry
 
 
 class _DummyConfigEntries:
@@ -73,6 +85,8 @@ class _DummyConfigEntries:
         self._entry = entry
         self.updated_payloads: list[dict[str, Any]] = []
         self.reloaded: list[str] = []
+        self.updated_subentries: list[tuple[str, dict[str, Any]]] = []
+        self.removed_subentries: list[str] = []
 
     def async_get_entry(self, entry_id: str) -> _DummyEntry | None:
         return self._entry if entry_id == self._entry.entry_id else None
@@ -81,6 +95,29 @@ class _DummyConfigEntries:
         assert entry is self._entry
         entry.data = data
         self.updated_payloads.append(data)
+
+    def async_update_subentry(
+        self,
+        entry: _DummyEntry,
+        subentry: ConfigSubentry,
+        *,
+        data: dict[str, Any],
+        title: str | None = None,
+        unique_id: str | None = None,
+    ) -> None:
+        assert entry is self._entry
+        subentry.data = MappingProxyType(dict(data))
+        if title is not None:
+            subentry.title = title
+        if unique_id is not None:
+            subentry.unique_id = unique_id
+        self.updated_subentries.append((subentry.subentry_id, dict(subentry.data)))
+
+    def async_remove_subentry(self, entry: _DummyEntry, subentry_id: str) -> bool:
+        assert entry is self._entry
+        entry.subentries.pop(subentry_id, None)
+        self.removed_subentries.append(subentry_id)
+        return True
 
     async def async_reload(self, entry_id: str) -> None:
         assert DATA_AAS_TOKEN not in self._entry.data
@@ -144,7 +181,9 @@ def test_options_flow_rotating_token_clears_cached_aas(
         monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
 
         new_token = "oauth-token-rotate-123456"
-        result = await flow.async_step_credentials({"new_oauth_token": new_token})
+        result = await flow.async_step_credentials(
+            {"new_oauth_token": new_token, "subentry": "core_tracking"}
+        )
         if inspect.isawaitable(result):
             result = await result
 
@@ -158,6 +197,10 @@ def test_options_flow_rotating_token_clears_cached_aas(
         assert entry.data[CONF_OAUTH_TOKEN] == new_token
         assert DATA_AAS_TOKEN not in entry.data
         assert await cache.get(DATA_AAS_TOKEN) is None
+        assert hass.config_entries.updated_subentries
+        subentry_id, payload = hass.config_entries.updated_subentries[-1]
+        assert subentry_id in entry.subentries
+        assert payload.get("group_key") == "core_tracking"
 
         await hass.drain_tasks()
         assert hass.config_entries.reloaded == [entry.entry_id]
