@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from typing import Any
 from types import MappingProxyType, SimpleNamespace
 
-import pytest
-
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import (
     OPT_CONTRIBUTOR_MODE,
