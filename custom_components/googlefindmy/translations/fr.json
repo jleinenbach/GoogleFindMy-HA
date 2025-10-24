@@ -400,5 +400,24 @@
     "no_active_entry": {
       "message": "Aucune entrée Google Find My Device active n'est disponible. Entrées actives : {active_count}/{total_count}. Activez l'une des entrées configurées ({entries}) ou ajoutez un nouveau compte, puis réessayez."
     }
+  },
+  "system_health": {
+    "info": {
+      "integration_version": {
+        "name": "Version de l'intégration"
+      },
+      "loaded_entries": {
+        "name": "Entrées chargées"
+      },
+      "entries": {
+        "name": "Entrées de configuration"
+      },
+      "fcm": {
+        "name": "Récepteur FCM"
+      },
+      "fcm_lock_contention_count": {
+        "name": "Nombre de contentions du verrou FCM"
+      }
+    }
   }
 }

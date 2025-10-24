@@ -400,5 +400,24 @@
     "no_active_entry": {
       "message": "Nessuna voce attiva di Google Find My Device è disponibile. Voci attive: {active_count}/{total_count}. Attiva una delle voci configurate ({entries}) oppure aggiungi un nuovo account e riprova."
     }
+  },
+  "system_health": {
+    "info": {
+      "integration_version": {
+        "name": "Versione dell'integrazione"
+      },
+      "loaded_entries": {
+        "name": "Voci caricate"
+      },
+      "entries": {
+        "name": "Voci di configurazione"
+      },
+      "fcm": {
+        "name": "Ricevitore FCM"
+      },
+      "fcm_lock_contention_count": {
+        "name": "Conteggio conflitti di lock FCM"
+      }
+    }
   }
 }

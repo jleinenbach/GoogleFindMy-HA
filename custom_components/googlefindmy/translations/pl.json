@@ -400,5 +400,24 @@
     "no_active_entry": {
       "message": "Brak aktywnych wpisów Google Find My Device. Aktywne wpisy: {active_count}/{total_count}. Włącz jeden ze skonfigurowanych wpisów ({entries}) lub dodaj nowe konto i spróbuj ponownie."
     }
+  },
+  "system_health": {
+    "info": {
+      "integration_version": {
+        "name": "Wersja integracji"
+      },
+      "loaded_entries": {
+        "name": "Załadowane wpisy"
+      },
+      "entries": {
+        "name": "Wpisy konfiguracji"
+      },
+      "fcm": {
+        "name": "Odbiornik FCM"
+      },
+      "fcm_lock_contention_count": {
+        "name": "Liczba konfliktów blokady FCM"
+      }
+    }
   }
 }
