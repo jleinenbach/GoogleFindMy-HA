@@ -73,7 +73,8 @@
         "menu_options": {
           "credentials": "Update credentials",
           "settings": "Modify settings",
-          "visibility": "Device visibility"
+          "visibility": "Device visibility",
+          "repairs": "Subentry repairs"
         }
       },
       "credentials": {

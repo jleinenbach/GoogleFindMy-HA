@@ -75,7 +75,8 @@
         "menu_options": {
           "credentials": "Mettre à jour les identifiants",
           "settings": "Modifier les paramètres",
-          "visibility": "Visibilité des appareils"
+          "visibility": "Visibilité des appareils",
+          "repairs": "Réparations des groupes de fonctionnalités"
         }
       },
       "credentials": {
