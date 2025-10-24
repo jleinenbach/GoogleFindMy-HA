@@ -75,7 +75,8 @@
         "menu_options": {
           "credentials": "Aggiorna credenziali",
           "settings": "Modifica impostazioni",
-          "visibility": "Visibilità dei dispositivi"
+          "visibility": "Visibilità dei dispositivi",
+          "repairs": "Riparazioni dei gruppi di funzionalità"
         }
       },
       "credentials": {

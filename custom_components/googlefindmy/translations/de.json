@@ -75,7 +75,8 @@
         "menu_options": {
           "credentials": "Anmeldedaten aktualisieren",
           "settings": "Einstellungen ändern",
-          "visibility": "Gerätesichtbarkeit"
+          "visibility": "Gerätesichtbarkeit",
+          "repairs": "Reparaturen für Funktionsgruppen"
         }
       },
       "credentials": {

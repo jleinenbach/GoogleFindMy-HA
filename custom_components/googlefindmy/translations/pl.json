@@ -75,7 +75,8 @@
         "menu_options": {
           "credentials": "Zaktualizuj poświadczenia",
           "settings": "Zmień ustawienia",
-          "visibility": "Widoczność urządzeń"
+          "visibility": "Widoczność urządzeń",
+          "repairs": "Naprawy grup funkcji"
         }
       },
       "credentials": {
