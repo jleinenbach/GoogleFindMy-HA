@@ -306,7 +306,7 @@ def test_push_updated_keeps_known_name_for_blank_snapshots(
 
     # Entities should continue to expose the persisted display name.
     monkeypatch.setattr(
-        "custom_components.googlefindmy.device_tracker._maybe_update_device_registry_name",
+        "custom_components.googlefindmy.entity.GoogleFindMyEntity.maybe_update_device_registry_name",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(

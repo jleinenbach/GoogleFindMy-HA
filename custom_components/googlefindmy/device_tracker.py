@@ -20,7 +20,6 @@ Entry-scope guarantees (C2):
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
@@ -31,68 +30,18 @@ from homeassistant.const import (
     ATTR_LONGITUDE,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.network import get_url
 from homeassistant.helpers.restore_state import RestoreEntity
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import (
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    DOMAIN,
-    OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    map_token_hex_digest,
-    map_token_secret_seed,
-    service_device_identifier,
-)
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
+from .entity import GoogleFindMyDeviceEntity, resolve_coordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _maybe_update_device_registry_name(
-    hass: HomeAssistant, entity_id: str, new_name: str
-) -> None:
-    """Write the real Google device label into the Device Registry once known.
-
-    We never touch the registry if the user renamed the device (name_by_user set).
-    Defensive behavior:
-    - Only update if we have a device for the entity and a non-empty name.
-    - Avoid churn: skip if the current registry name already matches.
-
-    This function is best-effort and will silently no-op on errors.
-    """
-    try:
-        ent_reg = er.async_get(hass)
-        ent = ent_reg.async_get(entity_id)
-        if not ent or not ent.device_id:
-            return
-        dev_reg = dr.async_get(hass)
-        dev = dev_reg.async_get(ent.device_id)
-        # Respect user overrides
-        if not dev or dev.name_by_user:
-            return
-        if new_name and dev.name != new_name:
-            dev_reg.async_update_device(device_id=ent.device_id, name=new_name)
-            _LOGGER.debug(
-                "Device Registry name updated for %s: '%s' -> '%s'",
-                entity_id,
-                dev.name,
-                new_name,
-            )
-    except Exception as e:  # noqa: BLE001 - best-effort only
-        _LOGGER.debug("Device Registry name update failed for %s: %s", entity_id, e)
-
-
-def _entry_id_of(coordinator: GoogleFindMyCoordinator) -> str:
-    """Return the entry_id for namespacing (empty string if unavailable)."""
-    return getattr(getattr(coordinator, "config_entry", None), "entry_id", "") or ""
 
 
 # ---------------------------------------------------------------------------
@@ -111,15 +60,7 @@ async def async_setup_entry(
     - On setup, create entities for all devices in the coordinator snapshot (if any).
     - Listen for coordinator updates and add entities for newly discovered devices.
     """
-    runtime = getattr(config_entry, "runtime_data", None)
-    coordinator: GoogleFindMyCoordinator | None = None
-    if isinstance(runtime, GoogleFindMyCoordinator):
-        coordinator = runtime
-    elif runtime is not None:
-        coordinator = getattr(runtime, "coordinator", None)
-
-    if not isinstance(coordinator, GoogleFindMyCoordinator):
-        raise HomeAssistantError("googlefindmy coordinator not ready")
+    coordinator = resolve_coordinator(config_entry)
 
     subentry_key = coordinator.get_subentry_key_for_feature("device_tracker")
     subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
@@ -186,7 +127,7 @@ async def async_setup_entry(
 # ---------------------------------------------------------------------------
 
 
-class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity):
+class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, RestoreEntity):
     """Representation of a Google Find My Device tracker."""
 
     # Convention: trackers represent the device itself; the entity name
@@ -207,6 +148,11 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             name = name[10:].strip()
         return name or "Google Find My Device"
 
+    def device_label(self) -> str:
+        """Return the sanitized device label used for DeviceInfo."""
+
+        return self._display_name(super().device_label())
+
     def __init__(
         self,
         coordinator: GoogleFindMyCoordinator,
@@ -216,18 +162,22 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         subentry_identifier: str,
     ) -> None:
         """Initialize the tracker entity."""
-        super().__init__(coordinator)
-        self._device = device
-        self._subentry_key = subentry_key
-        self._subentry_identifier = subentry_identifier
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
 
-        entry_id = _entry_id_of(coordinator)
-        dev_id = device["id"]
+        entry_id = self.entry_id
+        dev_id = self.device_id
 
-        if entry_id:
-            self._attr_unique_id = f"{entry_id}:{subentry_identifier}:{dev_id}"
-        else:
-            self._attr_unique_id = f"{subentry_identifier}:{dev_id}"
+        self._attr_unique_id = self.build_unique_id(
+            entry_id,
+            subentry_identifier,
+            dev_id,
+        )
 
         # With has_entity_name=False we must set the entity's name ourselves.
         # If name is missing during cold boot, HA will show the entity_id; that's fine.
@@ -280,7 +230,7 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         if restored:
             self._last_good_accuracy_data = {**restored}
             # Prime coordinator cache using its public API (no private access).
-            dev_id = self._device["id"]
+            dev_id = self.device_id
             try:
                 self.coordinator.prime_device_location_cache(dev_id, restored)
             except (AttributeError, TypeError) as err:
@@ -293,124 +243,17 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     # ---------------- Device Info + Map Link ----------------
     @property
     def device_info(self) -> DeviceInfo:
-        """Return DeviceInfo with a stable configuration_url and safe naming.
+        """Expose DeviceInfo using the shared entity helper."""
 
-        Important:
-        - Identifiers are entry-scoped to keep devices distinct across accounts.
-        - Link this end device to the per-entry SERVICE device using `via_device`.
-        """
-        try:
-            base_url = get_url(
-                self.hass,
-                prefer_external=True,
-                allow_cloud=True,
-                allow_external=True,
-                allow_internal=True,
-            )
-        except HomeAssistantError as e:
-            _LOGGER.debug(
-                "Could not determine Home Assistant URL, using fallback: %s", e
-            )
-            base_url = "http://homeassistant.local:8123"
-
-        entry_id = _entry_id_of(self.coordinator)
-        dev_id = self._device["id"]
-
-        auth_token = self._get_map_token()
-        path = self._build_map_path(dev_id, auth_token, redirect=False)
-
-        # Avoid overwriting stored device names during cold boot
-        raw_name = self._device.get("name")
-        display_name = self._display_name(raw_name) if raw_name else None
-
-        name_kwargs: dict[str, Any] = {}
-        if display_name and display_name != "Google Find My Device":
-            # Only pass a real name; never pass default_name here.
-            name_kwargs["name"] = display_name
-
-        # Link against the per-entry service device
-        via = service_device_identifier(entry_id) if entry_id else None
-
-        # Entry-scoped device identifiers to avoid merges across accounts.
-        identifiers: set[tuple[str, str]] = {
-            (
-                DOMAIN,
-                f"{entry_id}:{self._subentry_identifier}:{dev_id}"
-                if entry_id
-                else f"{self._subentry_identifier}:{dev_id}",
-            )
-        }
-        if entry_id:
-            identifiers.add((DOMAIN, f"{entry_id}:{dev_id}"))
-        else:
-            identifiers.add((DOMAIN, dev_id))
-
-        return DeviceInfo(
-            identifiers=identifiers,
-            manufacturer="Google",
-            model="Find My Device",
-            configuration_url=f"{base_url}{path}" if base_url else None,
-            serial_number=dev_id,  # technical id in the proper field
-            via_device=via,
-            **name_kwargs,
-        )
-
-    @staticmethod
-    def _build_map_path(device_id: str, token: str, *, redirect: bool = False) -> str:
-        """Return the map URL *path* (no scheme/host)."""
-        if redirect:
-            return f"/api/googlefindmy/redirect_map/{device_id}?token={token}"
-        return f"/api/googlefindmy/map/{device_id}?token={token}"
-
-    def _get_map_token(self) -> str:
-        """Generate a hardened token for map authentication (entry-scoped + weekly/static).
-
-        Token formula:
-            secret = map_token_secret_seed(...)
-            token  = map_token_hex_digest(secret)
-        """
-        config_entry = getattr(self.coordinator, "config_entry", None)
-
-        # Prefer the central _opt helper; fall back to direct options/data reads.
-        try:
-            from . import _opt  # type: ignore
-
-            token_expiration_enabled = _opt(
-                config_entry,
-                OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-            )
-        except Exception:
-            if config_entry:
-                token_expiration_enabled = config_entry.options.get(
-                    OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                    config_entry.data.get(
-                        OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-                    ),
-                )
-            else:
-                token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-
-        entry_id = getattr(config_entry, "entry_id", "") if config_entry else ""
-        # Best-effort UUID; on very early startup it might be missing (safe fallback).
-        ha_uuid = str(self.hass.data.get("core.uuid", "ha"))
-
-        if token_expiration_enabled:
-            # Weekly-rolling token (7-day bucket).
-            seed = map_token_secret_seed(ha_uuid, entry_id, True, now=int(time.time()))
-        else:
-            # Static token (no rotation).
-            seed = map_token_secret_seed(ha_uuid, entry_id, False)
-
-        # Short SHA-256 digest slice is fine here; this token does not gate sensitive operations.
-        return map_token_hex_digest(seed)
+        return super().device_info
 
     def _current_row(self) -> dict[str, Any] | None:
         """Get current device data from the coordinator's public cache API."""
-        dev_id = self._device["id"]
+
+        dev_id = self.device_id
         try:
             return self.coordinator.get_device_location_data_for_subentry(
-                self._subentry_key, dev_id
+                self.subentry_key, dev_id
             )
         except (AttributeError, TypeError):
             return None
@@ -423,15 +266,12 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         longer present in the Google list (TTL-smoothed by the coordinator),
         the entity becomes unavailable and the user may delete it via HA UI.
         """
-        dev_id = self._device["id"]
-        if not self.coordinator.is_device_visible_in_subentry(
-            self._subentry_key, dev_id
-        ):
+        if not self.coordinator_has_device():
             return False
         # Prefer coordinator presence; fall back to previous behavior if API is missing.
         try:
             if hasattr(self.coordinator, "is_device_present"):
-                if not self.coordinator.is_device_present(dev_id):
+                if not self.coordinator.is_device_present(self.device_id):
                     return False
         except Exception:
             # Be tolerant in case of older coordinator builds
@@ -524,50 +364,21 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         - Keep the device's human-readable name in sync with the coordinator snapshot.
         - Maintain 'last good' accuracy data when current fixes are worse than the threshold.
         """
-        # Sync the raw device name from the coordinator and keep the entity display name in sync (no prefixes).
-        try:
-            my_id = self._device["id"]
-            data = self.coordinator.get_subentry_snapshot(self._subentry_key)
-            if not self.coordinator.is_device_visible_in_subentry(
-                self._subentry_key, my_id
-            ):
-                self._last_good_accuracy_data = None
-                self.async_write_ha_state()
-                return
-            for dev in data:
-                if dev.get("id") == my_id:
-                    new_name = dev.get("name")
-                    # Ignore bootstrap placeholder names
-                    if not new_name or new_name == "Google Find My Device":
-                        break
-                    if new_name != self._device.get("name"):
-                        old = self._device.get("name")
-                        _LOGGER.debug(
-                            "Coordinator provided Google name for %s: '%s' -> '%s'",
-                            my_id,
-                            old,
-                            new_name,
-                        )
-                        self._device["name"] = new_name
-                        # Sync Device Registry (no-op if user renamed)
-                        _maybe_update_device_registry_name(
-                            self.hass, self.entity_id, new_name
-                        )
-                        # Update entity display name (has_entity_name=False).
-                        desired_display = self._display_name(new_name)
-                        if self._attr_name != desired_display:
-                            _LOGGER.debug(
-                                "Updating entity name for %s (%s): '%s' -> '%s'",
-                                self.entity_id,
-                                my_id,
-                                self._attr_name,
-                                desired_display,
-                            )
-                            self._attr_name = desired_display
-                    break
-        except (AttributeError, TypeError):
-            # Non-critical update; ignore failures.
-            pass
+        if not self.coordinator_has_device():
+            self._last_good_accuracy_data = None
+            self.async_write_ha_state()
+            return
+
+        self.refresh_device_label_from_coordinator(log_prefix="DeviceTracker")
+        desired_display = self._display_name(self._device.get("name"))
+        if self._attr_name != desired_display:
+            _LOGGER.debug(
+                "Updating entity name for %s: '%s' -> '%s'",
+                self.entity_id,
+                self._attr_name,
+                desired_display,
+            )
+            self._attr_name = desired_display
 
         config_entry = getattr(self.coordinator, "config_entry", None)
         if config_entry:
