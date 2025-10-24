@@ -8,6 +8,11 @@ from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 from custom_components.googlefindmy import config_flow
+from custom_components.googlefindmy.__init__ import (
+    ConfigEntrySubEntryManager,
+    ConfigEntrySubentryDefinition,
+)
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from homeassistant.config_entries import ConfigSubentry
 
 
@@ -86,6 +91,13 @@ class _ManagerWithRegistries:
             subentry.unique_id = unique_id
         self.updated.append((subentry.subentry_id, dict(data)))
         visible = tuple(data.get("visible_device_ids", ()))
+        self.entity_registry.apply(subentry.subentry_id, visible)
+        self.device_registry.apply(subentry.subentry_id, visible)
+
+    def async_add_subentry(self, entry: _EntryStub, subentry: ConfigSubentry) -> None:
+        assert entry is self._entry
+        entry.subentries[subentry.subentry_id] = subentry
+        visible = tuple(subentry.data.get("visible_device_ids", ()))
         self.entity_registry.apply(subentry.subentry_id, visible)
         self.device_registry.apply(subentry.subentry_id, visible)
 
@@ -255,3 +267,84 @@ def test_repairs_delete_removes_registry_entries() -> None:
     )
     assert entity_registry.removals == [removable.subentry_id]
     assert device_registry.removals == [removable.subentry_id]
+
+
+def test_coordinator_propagates_visible_devices_to_registries() -> None:
+    """Coordinator updates must synchronize subentry visibility and registries."""
+
+    entry = _EntryStub()
+    entity_registry = _RegistryTracker()
+    device_registry = _RegistryTracker()
+    hass = _HassStub(entry, entity_registry, device_registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    coordinator.data = [
+        {"device_id": "dev-1", "name": "Device 1"},
+        {"device_id": "dev-2", "name": "Device 2"},
+    ]
+    coordinator._enabled_poll_device_ids = {"dev-1", "dev-2"}
+    coordinator.allow_history_fallback = False
+    coordinator._min_accuracy_threshold = 50
+    coordinator._movement_threshold = 10
+    coordinator.device_poll_delay = 30
+    coordinator.min_poll_interval = 60
+    coordinator.location_poll_interval = 120
+    coordinator._subentry_metadata = {}
+    coordinator._subentry_snapshots = {}
+    coordinator._feature_to_subentry = {}
+    coordinator._default_subentry_key_value = "core_tracking"
+
+    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+
+    core_definition = ConfigEntrySubentryDefinition(
+        key="core_tracking",
+        title="Core",
+        data={"features": ["device_tracker"]},
+    )
+    secondary_definition = ConfigEntrySubentryDefinition(
+        key="secondary",
+        title="Secondary",
+        data={
+            "features": ["sensor"],
+            "visible_device_ids": ["dev-2"],
+        },
+    )
+
+    asyncio.run(subentry_manager.async_sync([core_definition, secondary_definition]))
+
+    coordinator.attach_subentry_manager(subentry_manager)
+    coordinator._refresh_subentry_index(coordinator.data)
+
+    core_subentry = subentry_manager.get("core_tracking")
+    secondary_subentry = subentry_manager.get("secondary")
+    assert core_subentry is not None
+    assert secondary_subentry is not None
+
+    assert tuple(core_subentry.data.get("visible_device_ids", ())) == (
+        "dev-1",
+        "dev-2",
+    )
+    assert tuple(secondary_subentry.data.get("visible_device_ids", ())) == ("dev-2",)
+
+    assert entity_registry.by_subentry[core_subentry.subentry_id] == (
+        "dev-1",
+        "dev-2",
+    )
+    assert device_registry.by_subentry[core_subentry.subentry_id] == (
+        "dev-1",
+        "dev-2",
+    )
+    assert entity_registry.by_subentry[secondary_subentry.subentry_id] == ()
+    assert device_registry.by_subentry[secondary_subentry.subentry_id] == ()
+    assert entity_registry.by_device.get("dev-1") == core_subentry.subentry_id
+    assert device_registry.by_device.get("dev-1") == core_subentry.subentry_id
+    assert entity_registry.history[-1] == (
+        core_subentry.subentry_id,
+        ("dev-1", "dev-2"),
+    )
+    assert device_registry.history[-1] == (
+        core_subentry.subentry_id,
+        ("dev-1", "dev-2"),
+    )

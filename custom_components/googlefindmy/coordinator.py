@@ -62,9 +62,12 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
+
+if TYPE_CHECKING:
+    from . import ConfigEntrySubEntryManager
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -658,6 +661,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._subentry_snapshots: dict[str, tuple[dict[str, Any], ...]] = {}
         self._feature_to_subentry: dict[str, str] = {}
         self._default_subentry_key_value: str = "core_tracking"
+        self._subentry_manager: "ConfigEntrySubEntryManager | None" = None
 
         # Statistics (extend as needed)
         self.stats: dict[str, int] = {
@@ -717,6 +721,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Return the entry-scoped token cache backing this coordinator."""
 
         return self._cache
+
+    def attach_subentry_manager(self, manager: "ConfigEntrySubEntryManager") -> None:
+        """Attach the config entry subentry manager to the coordinator."""
+
+        self._subentry_manager = manager
 
     def _default_subentry_key(self) -> str:
         """Return the default subentry key used when no explicit mapping exists."""
@@ -796,6 +805,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         metadata: dict[str, SubentryMetadata] = {}
         feature_map: dict[str, str] = {}
         default_key: str | None = None
+        manager_updates: list[tuple[str, tuple[str, ...]]] = []
 
         for group_key, subentry_id, data, title in raw_entries:
             raw_features = data.get("features")
@@ -879,6 +889,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 enabled_device_ids=enabled_ids,
             )
 
+            manager_updates.append((group_key, visible_ids))
+
             for feature in features:
                 feature_map[feature] = group_key
 
@@ -889,6 +901,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._feature_to_subentry = feature_map
         if default_key:
             self._default_subentry_key_value = default_key
+
+        manager = self._subentry_manager
+        if manager and manager_updates:
+            for group_key, visible_ids in manager_updates:
+                manager.update_visible_device_ids(group_key, visible_ids)
 
         # Ensure snapshot container has entries for all known keys
         for key in list(self._subentry_snapshots):

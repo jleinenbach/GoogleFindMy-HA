@@ -159,6 +159,9 @@ class _StubCoordinator:
         self.calls: list[str] = []
         self._diag = SimpleNamespace(errors=[])
 
+    def attach_subentry_manager(self, manager: object) -> None:
+        self.subentry_manager = manager
+
     async def async_locate_device(self, canonical_id: str) -> None:
         self.calls.append(canonical_id)
 
