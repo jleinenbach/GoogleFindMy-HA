@@ -1,8 +1,12 @@
 name: Semgrep (SAST)
 
 on:
-  push: {}
-  pull_request: {}
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
   schedule:
     # Runs daily at 02:12 UTC-only
     - cron: '12 2 * * *'
