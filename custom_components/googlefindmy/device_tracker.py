@@ -72,18 +72,21 @@ async def async_setup_entry(
     for device in initial_snapshot:
         dev_id = device.get("id")
         name = device.get("name")
-        if dev_id and name:
-            known_ids.add(dev_id)
-            entities.append(
-                GoogleFindMyDeviceTracker(
-                    coordinator,
-                    device,
-                    subentry_key=subentry_key,
-                    subentry_identifier=subentry_identifier,
-                )
-            )
-        else:
+        if not dev_id or not name:
             _LOGGER.debug("Skipping device without id/name: %s", device)
+            continue
+        if dev_id in known_ids:
+            _LOGGER.debug("Ignoring duplicate device id %s in startup snapshot", dev_id)
+            continue
+        known_ids.add(dev_id)
+        entities.append(
+            GoogleFindMyDeviceTracker(
+                coordinator,
+                device,
+                subentry_key=subentry_key,
+                subentry_identifier=subentry_identifier,
+            )
+        )
 
     if entities:
         async_add_entities(entities, True)
