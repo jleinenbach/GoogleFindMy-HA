@@ -3,12 +3,17 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
-from types import ModuleType, SimpleNamespace
-from typing import Any
-
 import importlib
 import sys
+import textwrap
+import time
+from pathlib import Path
+from types import MethodType, ModuleType, SimpleNamespace
+from typing import Any
+
+from custom_components.googlefindmy.const import DEFAULT_MIN_POLL_INTERVAL
 
 
 def _ensure_button_dependencies() -> None:
@@ -182,6 +187,36 @@ def _ensure_button_dependencies() -> None:
         sys.modules["custom_components.googlefindmy.coordinator"] = coordinator_module
 
 
+def _load_can_request_location_impl() -> Any:
+    """Compile the coordinator's can_request_location method for isolated testing."""
+
+    source = Path("custom_components/googlefindmy/coordinator.py").read_text()
+    module_ast = ast.parse(source)
+    for node in module_ast.body:
+        if isinstance(node, ast.ClassDef) and node.name == "GoogleFindMyCoordinator":
+            for item in node.body:
+                if (
+                    isinstance(item, ast.FunctionDef)
+                    and item.name == "can_request_location"
+                ):
+                    snippet = ast.get_source_segment(source, item)
+                    if snippet is None:
+                        raise AssertionError(
+                            "Unable to extract can_request_location source"
+                        )
+                    namespace: dict[str, Any] = {}
+                    exec(
+                        textwrap.dedent(snippet),
+                        {
+                            "DEFAULT_MIN_POLL_INTERVAL": DEFAULT_MIN_POLL_INTERVAL,
+                            "time": time,
+                        },
+                        namespace,
+                    )
+                    return namespace["can_request_location"]
+    raise AssertionError("can_request_location definition not found")
+
+
 def test_blank_device_name_populates_buttons() -> None:
     """Buttons are added even when the device label is blank or missing."""
 
@@ -255,3 +290,56 @@ def test_blank_device_name_populates_buttons() -> None:
     for entity in added[1]:
         assert entity._device["name"] is None
         assert entity.device_label() == "device-2"
+
+
+def test_locate_button_available_when_push_unready() -> None:
+    """Locate button stays available even when push transport is not ready."""
+
+    _ensure_button_dependencies()
+    button_module = importlib.import_module("custom_components.googlefindmy.button")
+    can_request_location_impl = _load_can_request_location_impl()
+
+    class _CoordinatorStub:
+        def __init__(self) -> None:
+            self.hass = SimpleNamespace()
+            self.config_entry = SimpleNamespace(entry_id="entry-id")
+            self.data = [{"id": "device-1", "name": "Tracker"}]
+            self._listeners: list[Any] = []
+            self._is_polling = False
+            self._locate_inflight: set[str] = set()
+            self._locate_cooldown_until: dict[str, float] = {}
+            self._device_poll_cooldown_until: dict[str, float] = {}
+            self.can_request_location = MethodType(
+                can_request_location_impl,
+                self,
+            )
+
+        def async_add_listener(self, listener):  # type: ignore[override]
+            self._listeners.append(listener)
+            return lambda: None
+
+        def is_ignored(self, device_id: str) -> bool:
+            return False
+
+        def _api_push_ready(self) -> bool:
+            return False
+
+        def is_device_visible_in_subentry(
+            self, subentry_key: str, device_id: str
+        ) -> bool:
+            return True
+
+        def is_device_present(self, device_id: str) -> bool:
+            return True
+
+    coordinator = _CoordinatorStub()
+    device = coordinator.data[0]
+    locate_button = button_module.GoogleFindMyLocateButton(
+        coordinator,
+        device,
+        device.get("name"),
+        subentry_key="core_tracking",
+        subentry_identifier="core_tracking",
+    )
+
+    assert locate_button.available is True

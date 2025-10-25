@@ -3436,15 +3436,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Return True if a manual 'Locate now' request is currently allowed.
 
         Gate conditions:
-          - push transport ready,
+          - device not ignored,
           - no sequential polling in progress,
           - no in-flight locate for the device,
           - per-device cooldown (lower-bounded by DEFAULT_MIN_POLL_INTERVAL) not active.
+        Push readiness is checked lazily when submitting the request so the UI
+        can stay responsive while the transport recovers.
         """
         # Block manual locate for ignored devices.
         if self.is_ignored(device_id):
-            return False
-        if not self._api_push_ready():
             return False
         if self._is_polling:
             return False
@@ -3599,7 +3599,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         if not self.can_request_location(device_id):
             _LOGGER.warning(
-                "Manual locate for %s is currently disabled (in-flight, cooldown, push not ready, or polling).",
+                "Manual locate for %s is currently disabled (in-flight, cooldown, or polling).",
+                name,
+            )
+            return {}
+
+        if not self._api_push_ready():
+            _LOGGER.warning(
+                "Manual locate for %s is currently disabled (push transport not ready).",
                 name,
             )
             return {}
