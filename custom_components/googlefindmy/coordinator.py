@@ -655,7 +655,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._enabled_poll_device_ids: set[str] = set()
         self._devices_with_entry: set[str] = set()
         self._dr_unsub: Callable | None = None
-        # Deferred via_device linking for end devices awaiting the service anchor
+        # Deferred via_device_id linking for end devices awaiting the service anchor
         self._pending_via_updates: set[str] = set()
 
         # Subentry awareness (feature groups / platform scoping)
@@ -1077,7 +1077,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         except Exception:
             pass
 
-        # Make sure the service device exists early to anchor end-devices via `via_device`.
+        # Make sure the service device exists early to anchor end devices via `via_device_id`.
         self._ensure_service_device_exists()
 
         # Initial index (works even if config_entry is not yet bound; will re-run on DR event)
@@ -1315,10 +1315,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if device is None:
                 still_pending.add(device_id)
                 continue
-            if device.via_device == service_device_id:
+            if getattr(device, "via_device_id", None) == service_device_id:
                 continue
             dev_reg.async_update_device(
-                device_id=device_id, via_device=service_device_id
+                device_id=device_id, via_device_id=service_device_id
             )
             updated += 1
 
@@ -1514,7 +1514,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         needs_identifiers = new_idents != legacy_dev.identifiers
                         needs_via = (
                             service_device_id is not None
-                            and legacy_dev.via_device != service_device_id
+                            and getattr(legacy_dev, "via_device_id", None)
+                            != service_device_id
                         )
                         if needs_identifiers or needs_via:
                             update_kwargs: dict[str, Any] = {
@@ -1523,13 +1524,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             if needs_identifiers:
                                 update_kwargs["new_identifiers"] = new_idents
                             if needs_via:
-                                update_kwargs["via_device"] = service_device_id
+                                update_kwargs["via_device_id"] = service_device_id
                             if callable(update_device):
-                                update_device(**update_kwargs)
-                            if needs_identifiers:
+                                updated = update_device(**update_kwargs)
+                                if updated is not None:
+                                    legacy_dev = updated
+                            if (
+                                needs_identifiers
+                                and getattr(legacy_dev, "identifiers", None)
+                                != new_idents
+                            ):
                                 legacy_dev.identifiers = new_idents
-                            if needs_via:
-                                legacy_dev.via_device = service_device_id
+                            if (
+                                needs_via
+                                and getattr(legacy_dev, "via_device_id", None)
+                                != service_device_id
+                            ):
+                                legacy_dev.via_device_id = service_device_id
                             created_or_updated += 1
                         if service_device_id is None:
                             self._note_pending_via_update(legacy_dev.id)
@@ -1554,11 +1565,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     manufacturer="Google",
                     model="Find My Device",
                     name=use_name,
-                    via_device=getattr(self, "_service_device_id", None),
+                    via_device_id=getattr(self, "_service_device_id", None),
                 )
                 created_or_updated += 1
                 if service_device_id is None:
                     self._note_pending_via_update(getattr(dev, "id", None))
+                elif (
+                    callable(update_device)
+                    and getattr(dev, "id", None)
+                    and getattr(dev, "via_device_id", None) != service_device_id
+                ):
+                    updated = update_device(
+                        device_id=dev.id, via_device_id=service_device_id
+                    )
+                    if updated is not None:
+                        dev = updated
+                    elif getattr(dev, "via_device_id", None) != service_device_id:
+                        dev.via_device_id = service_device_id
             else:
                 # Keep name fresh if not user-overridden and a new upstream label is available
                 raw_name = (d.get("name") or "").strip()
@@ -1567,10 +1590,37 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     if raw_name and raw_name != "Google Find My Device"
                     else None
                 )
+
+                needs_update = False
+                device_id = getattr(dev, "id", "")
+                update_kwargs: dict[str, Any] = {"device_id": device_id}
                 if use_name and not dev.name_by_user and dev.name != use_name:
-                    if callable(update_device):
-                        update_device(device_id=dev.id, name=use_name)
-                        created_or_updated += 1  # count as an update for logging parity
+                    update_kwargs["name"] = use_name
+                    needs_update = True
+
+                needs_via_update = (
+                    service_device_id is not None
+                    and getattr(dev, "via_device_id", None) != service_device_id
+                )
+                if needs_via_update:
+                    update_kwargs["via_device_id"] = service_device_id
+                    needs_update = True
+
+                if needs_update and callable(update_device) and device_id:
+                    updated = update_device(**update_kwargs)
+                    if updated is not None:
+                        dev = updated
+                    if (
+                        "name" in update_kwargs
+                        and getattr(dev, "name", None) != update_kwargs["name"]
+                    ):
+                        dev.name = update_kwargs["name"]
+                    if (
+                        needs_via_update
+                        and getattr(dev, "via_device_id", None) != service_device_id
+                    ):
+                        dev.via_device_id = service_device_id
+                    created_or_updated += 1
 
                 if service_device_id is None and dev is not None:
                     self._note_pending_via_update(getattr(dev, "id", None))
