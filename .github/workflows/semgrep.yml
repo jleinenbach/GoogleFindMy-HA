@@ -18,6 +18,7 @@ jobs:
   semgrep:
     name: Run Semgrep CE scan
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
       security-events: write
@@ -25,6 +26,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Fetch pull request base branch
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          git fetch origin "${{ github.event.pull_request.base.ref }}":refs/remotes/origin/"${{ github.event.pull_request.base.ref }}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -53,14 +59,26 @@ jobs:
 
       - name: Run Semgrep scan (JSON)
         run: |
-          semgrep scan --config auto --json --output=semgrep.json || true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            baseline_ref="--baseline-ref origin/${{ github.event.pull_request.base.ref }}"
+          else
+            baseline_ref=""
+          fi
+
+          semgrep scan --config auto --json $baseline_ref --output=semgrep.json || true
           if [ ! -s semgrep.json ]; then
             echo '{"results": []}' > semgrep.json
           fi
 
       - name: Run Semgrep scan (SARIF)
         run: |
-          semgrep scan --config auto --sarif --output=semgrep.sarif || true
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            baseline_ref="--baseline-ref origin/${{ github.event.pull_request.base.ref }}"
+          else
+            baseline_ref=""
+          fi
+
+          semgrep scan --config auto --sarif $baseline_ref --output=semgrep.sarif || true
 
           if ! jq -e '(.runs // []) | map(select((.results // []) | length > 0)) | length > 0' semgrep.sarif >/dev/null 2>&1; then
             cat <<'SARIF' > semgrep.sarif
