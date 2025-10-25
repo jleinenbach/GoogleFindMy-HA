@@ -106,6 +106,9 @@ try:  # pragma: no cover - compatibility shim for stripped environments
     from homeassistant.config_entries import ConfigSubentry
 except Exception:  # noqa: BLE001
     ConfigSubentry = None  # type: ignore[assignment]
+
+# Standard discovery update info source exposed for helper-triggered updates.
+SOURCE_DISCOVERY_UPDATE_INFO = "discovery_update_info"
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError

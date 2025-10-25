@@ -137,7 +137,7 @@ def test_secrets_watcher_updates_existing_entry(
 
     assert len(triggered) == 1
     update = triggered[0]
-    assert update["source"] == config_flow.SOURCE_DISCOVERY_UPDATE
+    assert update["source"] == config_flow.SOURCE_DISCOVERY_UPDATE_INFO
     assert update["discovery_ns"] == "test.ns"
     assert update["email"] == "owner@example.com"
     assert update.get("title") == "Updated owner@example.com"

@@ -435,7 +435,7 @@ class SecretsJSONWatcher:
                 _LOGGER.debug("Failed to query existing entries for discovery: %s", err)
 
             source = (
-                cf.SOURCE_DISCOVERY_UPDATE
+                cf.SOURCE_DISCOVERY_UPDATE_INFO
                 if existing_entry is not None
                 else cf.SOURCE_DISCOVERY
             )
