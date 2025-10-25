@@ -1,12 +1,17 @@
 # tests/test_services_forward_compat.py
+
 """Forward compatibility tests for entity service registration helpers."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from custom_components.googlefindmy import services
+from custom_components.googlefindmy.const import DOMAIN, SERVICE_LOCATE_DEVICE
 
 from custom_components.googlefindmy.util_services import register_entity_service
 
@@ -87,6 +92,123 @@ def test_register_entity_service_legacy_duplicate_registration() -> None:
 
     assert platform.successful_calls == [("svc", {"field": "value"}, "handler")]
     assert platform.duplicate_attempts == 1
+
+
+@pytest.mark.parametrize(
+    ("display_value", "location_value", "expect_location_lookup"),
+    [("", None, False), (None, {"ok": True}, True)],
+)
+def test_locate_service_handles_falsy_display_names(
+    monkeypatch: pytest.MonkeyPatch,
+    display_value: str | None,
+    location_value: Any,
+    expect_location_lookup: bool,
+) -> None:
+    """Fallback runtime scan should accept coordinators with falsy display names."""
+
+    class _StubCoordinator:
+        def __init__(self) -> None:
+            self.display_queries: list[str] = []
+            self.location_queries: list[str] = []
+            self.locate_calls: list[str] = []
+
+        def get_device_display_name(self, canonical_id: str) -> Any:
+            self.display_queries.append(canonical_id)
+            return display_value
+
+        def get_device_location_data(self, canonical_id: str) -> Any:
+            self.location_queries.append(canonical_id)
+            return location_value
+
+        async def async_locate_device(self, canonical_id: str) -> None:
+            self.locate_calls.append(canonical_id)
+
+    class _StubRuntime:
+        def __init__(self, coordinator: _StubCoordinator) -> None:
+            self.coordinator = coordinator
+
+    class _StubConfigEntry:
+        def __init__(self, entry_id: str, runtime: _StubRuntime) -> None:
+            self.entry_id = entry_id
+            self.domain = DOMAIN
+            self.runtime_data = runtime
+            self.title = "stub"
+            self.options: dict[str, Any] = {}
+            self.data: dict[str, Any] = {}
+
+    class _StubConfigManager:
+        def __init__(self, entries: dict[str, _StubConfigEntry]) -> None:
+            self._entries = entries
+            self.reload_calls: list[str] = []
+
+        def async_entries(self, domain: str) -> list[_StubConfigEntry]:
+            if domain != DOMAIN:
+                return []
+            return list(self._entries.values())
+
+        def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
+            return self._entries.get(entry_id)
+
+        async def async_reload(self, entry_id: str) -> None:
+            self.reload_calls.append(entry_id)
+
+    class _StubServices:
+        def __init__(self) -> None:
+            self.registered: dict[tuple[str, str], Any] = {}
+
+        def async_register(self, domain: str, service: str, handler: Any) -> None:
+            self.registered[(domain, service)] = handler
+
+    class _StubHass:
+        def __init__(self, config_manager: _StubConfigManager) -> None:
+            self.config_entries = config_manager
+            self.services = _StubServices()
+            self.data: dict[str, Any] = {}
+
+    class _StubDeviceRegistry:
+        def __init__(self) -> None:
+            self.devices: dict[str, Any] = {}
+
+        def async_get(self, device_id: str) -> Any | None:
+            return None
+
+    class _StubServiceCall:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self.data = data
+
+    coordinator = _StubCoordinator()
+    runtime = _StubRuntime(coordinator)
+    entry_id = "entry-1"
+    config_entry = _StubConfigEntry(entry_id, runtime)
+    config_manager = _StubConfigManager({entry_id: config_entry})
+    hass = _StubHass(config_manager)
+    hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})[entry_id] = runtime
+
+    device_registry = _StubDeviceRegistry()
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+
+    canonical_id = "canonical-123"
+    ctx = {
+        "resolve_canonical": lambda _hass, raw_id: (canonical_id, "friendly"),
+        "is_active_entry": lambda entry: True,
+    }
+
+    async def _invoke() -> None:
+        await services.async_register_services(hass, ctx)
+        handler = hass.services.registered[(DOMAIN, SERVICE_LOCATE_DEVICE)]
+
+        service_call = _StubServiceCall({"device_id": "device-42"})
+
+        await handler(service_call)
+
+    asyncio.run(_invoke())
+
+    assert coordinator.locate_calls == [canonical_id]
+    assert coordinator.display_queries == [canonical_id]
+    if expect_location_lookup:
+        assert coordinator.location_queries == [canonical_id]
+    else:
+        assert coordinator.location_queries == []
 
 
 @pytest.mark.parametrize(

@@ -196,12 +196,26 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         # 2) Fallback: scan known coordinators for the canonical id
         for runtime in runtimes:
             coord = getattr(runtime, "coordinator", None)
-            if coord and hasattr(coord, "get_device_display_name"):
+            if not coord:
+                continue
+
+            display_lookup = getattr(coord, "get_device_display_name", None)
+            if callable(display_lookup):
                 try:
-                    if coord.get_device_display_name(canonical_id):
-                        return runtime, canonical_id
+                    display_name = display_lookup(canonical_id)
                 except Exception:
-                    pass
+                    display_name = None
+                if display_name is not None:
+                    return runtime, canonical_id
+
+            location_lookup = getattr(coord, "get_device_location_data", None)
+            if callable(location_lookup):
+                try:
+                    location_data = location_lookup(canonical_id)
+                except Exception:
+                    continue
+                if location_data is not None:
+                    return runtime, canonical_id
 
         # 3) Not found -> translated error
         raise ServiceValidationError(
