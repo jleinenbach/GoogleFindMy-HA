@@ -507,14 +507,20 @@ class GoogleFindMyAPI:
             self._device_capabilities.update(cap_index)
 
         devices: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
         for device_name, canonic_id in get_canonic_ids(parsed):
+            canonical_id = str(canonic_id)
+            if canonical_id in seen_ids:
+                continue
+            seen_ids.add(canonical_id)
+
             item = {
                 "name": device_name,
-                "id": canonic_id,
-                "device_id": canonic_id,
+                "id": canonical_id,
+                "device_id": canonical_id,
             }
-            if canonic_id in self._device_capabilities:
-                item["can_ring"] = bool(self._device_capabilities[canonic_id])
+            if canonical_id in self._device_capabilities:
+                item["can_ring"] = bool(self._device_capabilities[canonical_id])
             devices.append(item)
         return devices
 

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from aiohttp import ClientSession
 
+import custom_components.googlefindmy.api as api_module
 from custom_components.googlefindmy.api import GoogleFindMyAPI
 
 
@@ -188,6 +189,47 @@ def test_sync_wrappers_use_provided_session_loop() -> None:
     finally:
         loop.run_until_complete(session.close())
         loop.close()
+
+
+def test_process_device_list_response_deduplicates_canonic_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Device list processing emits a single entry per canonical ID."""
+
+    api = _make_api()
+
+    parsed = object()
+    monkeypatch.setattr(
+        api_module, "parse_device_list_protobuf", lambda hex_str: parsed
+    )
+    monkeypatch.setattr(
+        api_module, "_build_can_ring_index", lambda msg: {"device-1": True}
+    )
+    monkeypatch.setattr(
+        api_module,
+        "get_canonic_ids",
+        lambda msg: [
+            ("Primary", "device-1"),
+            ("Alias", "device-1"),
+            ("Secondary", "device-2"),
+        ],
+    )
+
+    devices = api._process_device_list_response("feedface")
+
+    assert devices == [
+        {
+            "name": "Primary",
+            "id": "device-1",
+            "device_id": "device-1",
+            "can_ring": True,
+        },
+        {
+            "name": "Secondary",
+            "id": "device-2",
+            "device_id": "device-2",
+        },
+    ]
 
 
 def test_api_forwards_contributor_mode(monkeypatch: pytest.MonkeyPatch) -> None:
