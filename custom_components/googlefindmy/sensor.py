@@ -162,18 +162,21 @@ async def async_setup_entry(
     for device in snapshot:
         dev_id = device.get("id")
         dev_name = device.get("name")
-        if dev_id and dev_name:
-            entities.append(
-                GoogleFindMyLastSeenSensor(
-                    coordinator,
-                    device,
-                    subentry_key=subentry_key,
-                    subentry_identifier=subentry_identifier,
-                )
-            )
-            known_ids.add(dev_id)
-        else:
+        if not dev_id or not dev_name:
             _LOGGER.debug("Skipping device without id/name: %s", device)
+            continue
+        if dev_id in known_ids:
+            _LOGGER.debug("Ignoring duplicate device id %s in startup snapshot", dev_id)
+            continue
+        entities.append(
+            GoogleFindMyLastSeenSensor(
+                coordinator,
+                device,
+                subentry_key=subentry_key,
+                subentry_identifier=subentry_identifier,
+            )
+        )
+        known_ids.add(dev_id)
 
     if entities:
         async_add_entities(entities, True)
