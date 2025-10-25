@@ -10,12 +10,14 @@ from collections.abc import Iterable
 import pytest
 
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import DOMAIN, service_device_identifier
 from homeassistant.helpers import device_registry as dr
 
 
 class _FakeDeviceEntry:
     """Minimal stand-in for Home Assistant's DeviceEntry."""
+
+    _counter = 0
 
     def __init__(
         self,
@@ -23,15 +25,26 @@ class _FakeDeviceEntry:
         identifiers: Iterable[tuple[str, str]],
         config_entry_id: str,
         name: str | None,
-        via_device: str | None,
+        via_device: str | None = None,
+        manufacturer: str | None = None,
+        model: str | None = None,
+        sw_version: str | None = None,
+        entry_type: Any | None = None,
+        configuration_url: str | None = None,
     ) -> None:
         self.identifiers: set[tuple[str, str]] = set(identifiers)
         self.config_entries = {config_entry_id}
-        self.id = f"device-{config_entry_id}-{len(self.identifiers)}"
+        type(self)._counter += 1
+        self.id = f"device-{config_entry_id}-{type(self)._counter}"
         self.name = name
         self.name_by_user = None
         self.disabled_by = None
         self.via_device = via_device
+        self.manufacturer = manufacturer
+        self.model = model
+        self.sw_version = sw_version
+        self.entry_type = entry_type
+        self.configuration_url = configuration_url
 
 
 class _FakeDeviceRegistry:
@@ -58,13 +71,19 @@ class _FakeDeviceRegistry:
         manufacturer: str,
         model: str,
         name: str | None,
-        via_device: str | None,
+        via_device: str | None = None,
+        **kwargs: Any,
     ) -> _FakeDeviceEntry:
         entry = _FakeDeviceEntry(
             identifiers=identifiers,
             config_entry_id=config_entry_id,
             name=name,
             via_device=via_device,
+            manufacturer=manufacturer,
+            model=model,
+            sw_version=kwargs.get("sw_version"),
+            entry_type=kwargs.get("entry_type"),
+            configuration_url=kwargs.get("configuration_url"),
         )
         self.devices.append(entry)
         self.created.append(
@@ -75,6 +94,9 @@ class _FakeDeviceRegistry:
                 "model": model,
                 "name": name,
                 "via_device": via_device,
+                "sw_version": kwargs.get("sw_version"),
+                "entry_type": kwargs.get("entry_type"),
+                "configuration_url": kwargs.get("configuration_url"),
             }
         )
         return entry
@@ -86,6 +108,7 @@ class _FakeDeviceRegistry:
         new_identifiers: Iterable[tuple[str, str]] | None = None,
         via_device: str | None = None,
         name: str | None = None,
+        **kwargs: Any,
     ) -> None:
         for device in self.devices:
             if device.id == device_id:
@@ -95,6 +118,16 @@ class _FakeDeviceRegistry:
                     device.via_device = via_device
                 if name is not None:
                     device.name = name
+                if "manufacturer" in kwargs:
+                    device.manufacturer = kwargs["manufacturer"]
+                if "model" in kwargs:
+                    device.model = kwargs["model"]
+                if "sw_version" in kwargs:
+                    device.sw_version = kwargs["sw_version"]
+                if "entry_type" in kwargs:
+                    device.entry_type = kwargs["entry_type"]
+                if "configuration_url" in kwargs:
+                    device.configuration_url = kwargs["configuration_url"]
                 self.updated.append(
                     {
                         "device_id": device_id,
@@ -103,16 +136,35 @@ class _FakeDeviceRegistry:
                         else set(new_identifiers),
                         "via_device": via_device,
                         "name": name,
+                        "manufacturer": kwargs.get("manufacturer"),
+                        "model": kwargs.get("model"),
+                        "sw_version": kwargs.get("sw_version"),
+                        "entry_type": kwargs.get("entry_type"),
+                        "configuration_url": kwargs.get("configuration_url"),
                     }
                 )
                 return
         raise AssertionError(f"Unknown device_id {device_id}")
+
+    def async_get(self, device_id: str) -> _FakeDeviceEntry | None:
+        for device in self.devices:
+            if device.id == device_id:
+                return device
+        return None
 
 
 @pytest.fixture
 def fake_registry(monkeypatch: pytest.MonkeyPatch) -> _FakeDeviceRegistry:
     """Patch Home Assistant's device registry helper with a lightweight stub."""
 
+    _FakeDeviceEntry._counter = 0
+    if not hasattr(dr, "DeviceEntryType"):
+        monkeypatch.setattr(
+            dr,
+            "DeviceEntryType",
+            SimpleNamespace(SERVICE="service"),
+            raising=False,
+        )
     registry = _FakeDeviceRegistry()
     monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
     return registry
@@ -164,3 +216,42 @@ def test_legacy_device_migrates_to_service_parent(
     assert legacy.identifiers == {(DOMAIN, "abc123"), (DOMAIN, "entry-42:abc123")}
     assert fake_registry.updated[0]["via_device"] == "svc-device-1"
     assert legacy.name == "Pixel"
+
+
+def test_service_device_backfills_via_links(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Devices created before the service device exists are relinked once available."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
+    coordinator.hass = object()
+    coordinator._service_device_ready = False
+    coordinator._service_device_id = None
+    coordinator._pending_via_updates = set()
+
+    devices = [
+        {"id": "abc123", "name": "Pixel"},
+        {"id": "def456", "name": "Tablet"},
+    ]
+
+    created = coordinator._ensure_registry_for_devices(devices, set())
+
+    assert created == 2
+    for entry in fake_registry.devices:
+        assert entry.via_device is None
+
+    pending = getattr(coordinator, "_pending_via_updates")
+    assert len(pending) == 2
+
+    coordinator._ensure_service_device_exists()
+
+    service_id = coordinator._service_device_id
+    assert service_id is not None
+    service_ident = service_device_identifier("entry-42")
+    for entry in fake_registry.devices:
+        if service_ident in entry.identifiers:
+            continue
+        assert entry.via_device == service_id
+
+    assert getattr(coordinator, "_pending_via_updates") == set()
