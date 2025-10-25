@@ -106,6 +106,9 @@ try:  # pragma: no cover - compatibility shim for stripped environments
     from homeassistant.config_entries import ConfigSubentry
 except Exception:  # noqa: BLE001
     ConfigSubentry = None  # type: ignore[assignment]
+
+# Standard discovery update info source exposed for helper-triggered updates.
+SOURCE_DISCOVERY_UPDATE_INFO = "discovery_update_info"
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
@@ -743,7 +746,7 @@ def _normalize_and_validate_discovery_payload(
 
 
 async def _ingest_discovery_credentials(
-    flow: "ConfigFlow",
+    flow: ConfigFlow,
     discovery: CloudDiscoveryData,
     *,
     existing_entry: ConfigEntry | None = None,
@@ -913,6 +916,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         self._abort_if_unique_id_configured(updates=updates)
         return await self.async_abort(reason="already_configured")
+
+    async def async_step_discovery_update(
+        self, discovery_info: Mapping[str, Any] | None
+    ) -> FlowResult:
+        """Provide legacy discovery-update entry point used by the helper."""
+
+        return await self.async_step_discovery_update_info(discovery_info)
 
     # ------------------ Step: choose authentication path ------------------
     async def async_step_user(

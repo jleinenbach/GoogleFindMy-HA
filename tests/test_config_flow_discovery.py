@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import types
 from typing import Any
 
 import pytest
@@ -177,6 +178,30 @@ def test_async_step_discovery_existing_entry_updates(
     result = asyncio.run(_exercise())
     assert result["type"] == "abort"
     assert result["reason"] == "already_configured"
+
+
+def test_async_step_discovery_update_alias() -> None:
+    """Legacy discovery update step should forward to the update-info handler."""
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = object()  # type: ignore[assignment]
+    captured: dict[str, Any] = {}
+
+    async def _fake_update_info(
+        self: config_flow.ConfigFlow, info: Any
+    ) -> dict[str, str]:
+        captured["info"] = info
+        return {"type": "form"}
+
+    flow.async_step_discovery_update_info = types.MethodType(  # type: ignore[assignment]
+        _fake_update_info,
+        flow,
+    )
+
+    result = asyncio.run(flow.async_step_discovery_update({"source": "alias"}))
+
+    assert captured["info"] == {"source": "alias"}
+    assert result == {"type": "form"}
 
 
 def test_async_step_user_confirm_only_submission() -> None:
