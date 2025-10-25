@@ -67,8 +67,10 @@ jobs:
             baseline_ref=""
           fi
 
+          set +e
           semgrep scan --config auto --json $baseline_ref --output=semgrep.json
           semgrep_exit=$?
+          set -e
 
           if [ "$semgrep_exit" -eq 2 ]; then
             echo "::notice::Semgrep returned exit code 2 for the JSON scan; uploading an empty fallback artifact."
@@ -92,8 +94,10 @@ jobs:
             baseline_ref=""
           fi
 
+          set +e
           semgrep scan --config auto --sarif $baseline_ref --output=semgrep.sarif
           semgrep_exit=$?
+          set -e
 
           if [ "$semgrep_exit" -eq 2 ]; then
             echo "::notice::Semgrep returned exit code 2 for the SARIF scan; uploading an empty fallback artifact."
