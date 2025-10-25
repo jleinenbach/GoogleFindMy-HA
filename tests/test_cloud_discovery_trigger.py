@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-# tests/test_cloud_discovery_trigger.py
-
 import asyncio
 import logging
 from types import SimpleNamespace
@@ -13,9 +11,10 @@ from unittest.mock import AsyncMock
 
 import importlib
 
-integration = importlib.import_module("custom_components.googlefindmy.__init__")
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import DOMAIN
+
+integration = importlib.import_module("custom_components.googlefindmy.__init__")
 
 if TYPE_CHECKING:
     import pytest
