@@ -39,6 +39,7 @@ class _FakeDeviceRegistry:
 
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
+        self.updated: list[dict[str, Any]] = []
         self.devices: list[_FakeDeviceEntry] = []
 
     def async_get_device(
@@ -79,9 +80,33 @@ class _FakeDeviceRegistry:
         return entry
 
     def async_update_device(
-        self, *args, **kwargs
-    ) -> None:  # pragma: no cover - not needed
-        raise AssertionError("Unexpected update call in this test")
+        self,
+        *,
+        device_id: str,
+        new_identifiers: Iterable[tuple[str, str]] | None = None,
+        via_device: str | None = None,
+        name: str | None = None,
+    ) -> None:
+        for device in self.devices:
+            if device.id == device_id:
+                if new_identifiers is not None:
+                    device.identifiers = set(new_identifiers)
+                if via_device is not None:
+                    device.via_device = via_device
+                if name is not None:
+                    device.name = name
+                self.updated.append(
+                    {
+                        "device_id": device_id,
+                        "new_identifiers": None
+                        if new_identifiers is None
+                        else set(new_identifiers),
+                        "via_device": via_device,
+                        "name": name,
+                    }
+                )
+                return
+        raise AssertionError(f"Unknown device_id {device_id}")
 
 
 @pytest.fixture
@@ -109,3 +134,33 @@ def test_devices_link_to_service_device(fake_registry: _FakeDeviceRegistry) -> N
     assert created == 1
     assert fake_registry.created[0]["identifiers"] == {(DOMAIN, "entry-42:abc123")}
     assert fake_registry.created[0]["via_device"] == "svc-device-1"
+
+
+def test_legacy_device_migrates_to_service_parent(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Legacy devices gain the service device parent during migration."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
+    coordinator.hass = object()
+    coordinator._service_device_id = "svc-device-1"
+
+    legacy = _FakeDeviceEntry(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id="entry-42",
+        name=None,
+        via_device=None,
+    )
+    fake_registry.devices.append(legacy)
+
+    created = coordinator._ensure_registry_for_devices(
+        devices=[{"id": "abc123", "name": "Pixel"}],
+        ignored=set(),
+    )
+
+    assert created == 2
+    assert legacy.via_device == "svc-device-1"
+    assert legacy.identifiers == {(DOMAIN, "abc123"), (DOMAIN, "entry-42:abc123")}
+    assert fake_registry.updated[0]["via_device"] == "svc-device-1"
+    assert legacy.name == "Pixel"
