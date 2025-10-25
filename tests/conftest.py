@@ -77,6 +77,9 @@ def _stub_homeassistant() -> None:
         async def async_abort(self, **kwargs):
             return {"type": "abort", **kwargs}
 
+        def _set_confirm_only(self) -> None:
+            self.context["confirm_only"] = True
+
         def add_suggested_values_to_schema(self, schema, suggested):  # noqa: D401 - stub
             return schema
 
