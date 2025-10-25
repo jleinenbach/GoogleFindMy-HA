@@ -28,6 +28,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Fetch pull request base branch
         if: ${{ github.event_name == 'pull_request' }}
@@ -62,13 +64,13 @@ jobs:
       - name: Run Semgrep scan (JSON)
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            baseline_ref="--baseline-ref origin/${{ github.event.pull_request.base.ref }}"
+            baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
           else
-            baseline_ref=""
+            baseline_commit=""
           fi
 
           set +e
-          semgrep scan --config auto --json $baseline_ref --output=semgrep.json
+          semgrep scan --config auto --json $baseline_commit --output=semgrep.json
           semgrep_exit=$?
           set -e
 
@@ -89,13 +91,13 @@ jobs:
       - name: Run Semgrep scan (SARIF)
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            baseline_ref="--baseline-ref origin/${{ github.event.pull_request.base.ref }}"
+            baseline_commit="--baseline-commit ${{ github.event.pull_request.base.sha }}"
           else
-            baseline_ref=""
+            baseline_commit=""
           fi
 
           set +e
-          semgrep scan --config auto --sarif $baseline_ref --output=semgrep.sarif
+          semgrep scan --config auto --sarif $baseline_commit --output=semgrep.sarif
           semgrep_exit=$?
           set -e
 
