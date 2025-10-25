@@ -64,6 +64,7 @@
     "abort": {
       "already_configured": "Google Find My Device ya está configurado.",
       "cannot_connect": "No se pudo conectar con Google Find My Device.",
+      "invalid_discovery_info": "La información de descubrimiento es inválida o está incompleta. Inicia la configuración desde la página de integraciones.",
       "reauth_successful": "Reautenticación correcta."
     }
   },

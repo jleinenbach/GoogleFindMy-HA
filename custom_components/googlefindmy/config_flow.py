@@ -46,6 +46,63 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 
 try:  # pragma: no cover - compatibility shim for stripped environments
+    from homeassistant.config_entries import (
+        SOURCE_DISCOVERY,
+        SOURCE_DISCOVERY_UPDATE,
+        DiscoveryKey,
+        async_create_discovery_flow,
+    )
+except Exception:  # noqa: BLE001
+    SOURCE_DISCOVERY = "discovery"  # type: ignore[assignment]
+    SOURCE_DISCOVERY_UPDATE = "discovery_update"  # type: ignore[assignment]
+
+    try:  # pragma: no cover - runtime optional dependency
+        from homeassistant.helpers.discovery_flow import DiscoveryKey as _DiscoveryKey
+    except Exception:  # noqa: BLE001
+
+        @dataclass(slots=True)
+        class DiscoveryKey:  # type: ignore[no-redef]
+            """Fallback DiscoveryKey representation for legacy cores."""
+
+            domain: str
+            key: str | tuple[str, ...]
+            version: int = 1
+
+    else:  # pragma: no cover - simple aliasing
+        DiscoveryKey = _DiscoveryKey  # type: ignore[assignment]
+
+    async def async_create_discovery_flow(  # type: ignore[no-redef]
+        hass,
+        domain,
+        context,
+        data,
+        *,
+        discovery_key=None,
+    ) -> None:
+        """Fallback helper mirroring modern discovery flow creation."""
+
+        try:
+            from homeassistant.helpers.discovery_flow import (
+                async_create_flow as _async_create_flow,
+            )
+        except Exception:  # noqa: BLE001
+            await hass.config_entries.flow.async_init(  # type: ignore[attr-defined]
+                domain,
+                context=context,
+                data=data,
+            )
+            return
+
+        await _async_create_flow(  # type: ignore[call-arg]
+            hass,
+            domain,
+            context,
+            data,
+            discovery_key=discovery_key,
+        )
+
+
+try:  # pragma: no cover - compatibility shim for stripped environments
     from homeassistant.config_entries import ConfigSubentry
 except Exception:  # noqa: BLE001
     ConfigSubentry = None  # type: ignore[assignment]
@@ -574,6 +631,185 @@ def _find_entry_by_email(hass, email: str) -> ConfigEntry | None:
 
 
 # ---------------------------
+# Discovery helpers
+# ---------------------------
+
+
+class DiscoveryFlowError(HomeAssistantError):
+    """Raised when a discovery payload cannot be processed."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(slots=True)
+class CloudDiscoveryData:
+    """Normalized discovery payload shared by cloud setup hooks."""
+
+    email: str
+    unique_id: str
+    candidates: tuple[tuple[str, str], ...]
+    secrets_bundle: Mapping[str, Any] | None
+    title: str | None = None
+
+
+def _normalize_and_validate_discovery_payload(
+    payload: Mapping[str, Any] | None,
+) -> CloudDiscoveryData:
+    """Normalize raw discovery metadata into a structured payload."""
+
+    if not isinstance(payload, Mapping):
+        raise DiscoveryFlowError("invalid_discovery_info")
+
+    payload_dict = dict(payload)
+    email_raw = payload_dict.get(CONF_GOOGLE_EMAIL) or payload_dict.get("email")
+    if isinstance(email_raw, str):
+        email_candidate = email_raw.strip()
+    else:
+        email_candidate = ""
+
+    secrets_bundle: Mapping[str, Any] | None = None
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add_candidate(label: str, token: Any) -> None:
+        if isinstance(token, str) and _token_plausible(token) and token not in seen:
+            candidates.append((label, token))
+            seen.add(token)
+
+    secrets_raw = (
+        payload_dict.get(DATA_SECRET_BUNDLE)
+        or payload_dict.get("secrets_json")
+        or payload_dict.get("secrets")
+    )
+    if isinstance(secrets_raw, str):
+        try:
+            secrets_raw = json.loads(secrets_raw)
+        except json.JSONDecodeError as err:
+            raise DiscoveryFlowError("invalid_discovery_info") from err
+
+    if isinstance(secrets_raw, Mapping):
+        secrets_dict = dict(secrets_raw)
+        secrets_bundle = MappingProxyType(secrets_dict)
+        email_from_secrets = _extract_email_from_secrets(secrets_dict)
+        if email_from_secrets:
+            email_candidate = email_candidate or email_from_secrets
+        for label, token in _extract_oauth_candidates_from_secrets(secrets_dict):
+            _add_candidate(label, token)
+
+    for key in (
+        "candidate_tokens",
+        "candidates",
+        "tokens",
+    ):
+        value = payload_dict.get(key)
+        if isinstance(value, str):
+            _add_candidate(key, value)
+        elif isinstance(value, Mapping):
+            for label, token in value.items():
+                _add_candidate(str(label), token)
+        elif isinstance(value, Iterable):
+            for idx, token in enumerate(value):
+                if isinstance(token, Mapping):
+                    label = str(token.get("label") or token.get("source") or key)
+                    _add_candidate(label, token.get("token"))
+                else:
+                    _add_candidate(f"{key}_{idx}", token)
+
+    for direct_key, label in (
+        (CONF_OAUTH_TOKEN, CONF_OAUTH_TOKEN),
+        ("oauth_token", "oauth_token"),
+        ("token", "token"),
+        ("aas_token", "aas_token"),
+    ):
+        _add_candidate(label, payload_dict.get(direct_key))
+
+    if not (_email_valid(email_candidate) and email_candidate):
+        raise DiscoveryFlowError("invalid_discovery_info")
+
+    if not candidates:
+        raise DiscoveryFlowError("cannot_connect")
+
+    normalized_email = _normalize_email(email_candidate)
+    title = payload_dict.get("title") or payload_dict.get("name")
+    return CloudDiscoveryData(
+        email=email_candidate,
+        unique_id=normalized_email,
+        candidates=tuple(candidates),
+        secrets_bundle=secrets_bundle,
+        title=str(title) if isinstance(title, str) else None,
+    )
+
+
+async def _ingest_discovery_credentials(
+    flow: "ConfigFlow",
+    discovery: CloudDiscoveryData,
+    *,
+    existing_entry: ConfigEntry | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Validate discovery credentials and prepare flow + entry payloads."""
+
+    candidates = list(discovery.candidates)
+    secrets_bundle = (
+        dict(discovery.secrets_bundle) if discovery.secrets_bundle is not None else None
+    )
+
+    try:
+        chosen = await async_pick_working_token(
+            discovery.email,
+            candidates,
+            secrets_bundle=secrets_bundle,
+        )
+    except Exception as err:  # noqa: BLE001
+        raise DiscoveryFlowError(_map_api_exc_to_error_key(err)) from err
+
+    if not chosen:
+        raise DiscoveryFlowError("cannot_connect")
+
+    to_persist = chosen
+    alt_candidate = next(
+        (
+            token
+            for _label, token in candidates
+            if not _disqualifies_for_persistence(token)
+        ),
+        None,
+    )
+    if _disqualifies_for_persistence(to_persist) and alt_candidate:
+        to_persist = alt_candidate
+
+    auth_method = _AUTH_METHOD_SECRETS if secrets_bundle else _AUTH_METHOD_INDIVIDUAL
+    auth_data: dict[str, Any] = {
+        DATA_AUTH_METHOD: auth_method,
+        CONF_GOOGLE_EMAIL: discovery.email,
+        CONF_OAUTH_TOKEN: to_persist,
+    }
+    if secrets_bundle:
+        auth_data[DATA_SECRET_BUNDLE] = secrets_bundle
+    elif DATA_SECRET_BUNDLE in auth_data:
+        auth_data.pop(DATA_SECRET_BUNDLE)
+
+    if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
+        auth_data[DATA_AAS_TOKEN] = to_persist
+    else:
+        auth_data.pop(DATA_AAS_TOKEN, None)
+
+    if existing_entry is not None:
+        updated = {**existing_entry.data, **auth_data}
+        if not secrets_bundle:
+            updated.pop(DATA_SECRET_BUNDLE, None)
+        if not (isinstance(to_persist, str) and to_persist.startswith("aas_et/")):
+            updated.pop(DATA_AAS_TOKEN, None)
+        updates: dict[str, Any] | None = {"data": updated}
+    else:
+        updates = None
+
+    flow._auth_data = auth_data  # type: ignore[attr-defined]
+    return auth_data, updates
+
+
+# ---------------------------
 # Config Flow
 # ---------------------------
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -592,6 +828,91 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry: ConfigEntry) -> config_entries.OptionsFlow:
         """Return the options flow for an existing config entry."""
         return OptionsFlowHandler()
+
+    async def async_step_discovery(
+        self, discovery_info: Mapping[str, Any] | None
+    ) -> FlowResult:
+        """Handle cloud-triggered discovery payloads."""
+
+        try:
+            normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
+        except DiscoveryFlowError as err:
+            _LOGGER.debug("Discovery ignored due to invalid payload: %s", err.reason)
+            return await self.async_abort(reason=err.reason)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Discovery ignored due to unexpected payload: %s", err)
+            return await self.async_abort(reason="invalid_discovery_info")
+
+        await self.async_set_unique_id(normalized.unique_id, raise_on_progress=False)
+
+        existing_entry = _find_entry_by_email(self.hass, normalized.email)
+        try:
+            _, updates = await _ingest_discovery_credentials(
+                self, normalized, existing_entry=existing_entry
+            )
+        except DiscoveryFlowError as err:
+            reason = err.reason
+            if reason not in {
+                "invalid_discovery_info",
+                "cannot_connect",
+                "invalid_auth",
+            }:
+                reason = (
+                    "cannot_connect" if reason != "invalid_discovery_info" else reason
+                )
+            return await self.async_abort(reason=reason)
+
+        if existing_entry and updates is not None:
+            self._abort_if_unique_id_configured(updates=updates)
+            return await self.async_abort(reason="already_configured")
+
+        placeholders = dict(self.context.get("title_placeholders", {}) or {})
+        placeholders.setdefault("email", normalized.email)
+        self.context["title_placeholders"] = placeholders
+        self._set_confirm_only()
+        return await self.async_step_user()
+
+    async def async_step_discovery_update_info(
+        self, discovery_info: Mapping[str, Any] | None
+    ) -> FlowResult:
+        """Handle discovery updates for already configured entries."""
+
+        try:
+            normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
+        except DiscoveryFlowError as err:
+            _LOGGER.debug("Discovery update ignored: %s", err.reason)
+            return await self.async_abort(reason=err.reason)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Discovery update invalid: %s", err)
+            return await self.async_abort(reason="invalid_discovery_info")
+
+        await self.async_set_unique_id(normalized.unique_id, raise_on_progress=False)
+
+        existing_entry = _find_entry_by_email(self.hass, normalized.email)
+        if existing_entry is None:
+            return await self.async_step_discovery(discovery_info)
+
+        try:
+            _, updates = await _ingest_discovery_credentials(
+                self, normalized, existing_entry=existing_entry
+            )
+        except DiscoveryFlowError as err:
+            reason = err.reason
+            if reason not in {
+                "invalid_discovery_info",
+                "cannot_connect",
+                "invalid_auth",
+            }:
+                reason = (
+                    "cannot_connect" if reason != "invalid_discovery_info" else reason
+                )
+            return await self.async_abort(reason=reason)
+
+        if updates is None:
+            updates = {"data": dict(existing_entry.data)}
+
+        self._abort_if_unique_id_configured(updates=updates)
+        return await self.async_abort(reason="already_configured")
 
     # ------------------ Step: choose authentication path ------------------
     async def async_step_user(
