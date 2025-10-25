@@ -62,8 +62,12 @@
     "abort": {
       "already_configured": "Google Find My Device is already configured.",
       "cannot_connect": "Failed to connect to Google Find My Device.",
-      "invalid_discovery_info": "Discovery information is invalid or incomplete. Start setup from the Integrations page.",
+      "invalid_discovery_info": "The discovery payload was invalid. Check the credentials and try again.",
       "reauth_successful": "Reauthentication successful."
+    },
+    "progress": {
+      "discovery_secrets_new": "Auth/secrets.json detected for {email}",
+      "discovery_secrets_update": "New credentials detected for {email}"
     }
   },
   "options": {

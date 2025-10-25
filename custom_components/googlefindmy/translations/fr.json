@@ -64,8 +64,12 @@
     "abort": {
       "already_configured": "Google Find My Device est déjà configuré.",
       "cannot_connect": "Échec de la connexion à Google Find My Device.",
-      "invalid_discovery_info": "Les informations de découverte sont invalides ou incomplètes. Lancez la configuration depuis la page des intégrations.",
+      "invalid_discovery_info": "La charge de découverte est invalide. Vérifiez les identifiants et réessayez.",
       "reauth_successful": "Réauthentification réussie."
+    },
+    "progress": {
+      "discovery_secrets_new": "Fichier Auth/secrets.json détecté pour {email}",
+      "discovery_secrets_update": "Nouvelles informations d'identification détectées pour {email}"
     }
   },
   "options": {

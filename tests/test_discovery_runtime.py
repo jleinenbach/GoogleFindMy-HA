@@ -69,8 +69,8 @@ def test_secrets_watcher_triggers_new_discovery(
 
     async def _fake_translations(hass_obj, language, category, integrations):
         return {
-            f"component.{DOMAIN}.discovery.secrets_json.title": "Discovered {email}",
-            f"component.{DOMAIN}.discovery.secrets_json_update.title": "Updated {email}",
+            f"component.{DOMAIN}.config.progress.discovery_secrets_new": "Discovered {email}",
+            f"component.{DOMAIN}.config.progress.discovery_secrets_update": "Updated {email}",
         }
 
     monkeypatch.setattr(
@@ -116,8 +116,8 @@ def test_secrets_watcher_updates_existing_entry(
 
     async def _fake_translations(hass_obj, language, category, integrations):
         return {
-            f"component.{DOMAIN}.discovery.secrets_json.title": "Discovered {email}",
-            f"component.{DOMAIN}.discovery.secrets_json_update.title": "Updated {email}",
+            f"component.{DOMAIN}.config.progress.discovery_secrets_new": "Discovered {email}",
+            f"component.{DOMAIN}.config.progress.discovery_secrets_update": "Updated {email}",
         }
 
     monkeypatch.setattr(
@@ -137,7 +137,7 @@ def test_secrets_watcher_updates_existing_entry(
 
     assert len(triggered) == 1
     update = triggered[0]
-    assert update["source"] == config_flow.SOURCE_DISCOVERY_UPDATE_INFO
+    assert update["source"] == config_flow.SOURCE_DISCOVERY_UPDATE
     assert update["discovery_ns"] == "test.ns"
     assert update["email"] == "owner@example.com"
     assert update.get("title") == "Updated owner@example.com"

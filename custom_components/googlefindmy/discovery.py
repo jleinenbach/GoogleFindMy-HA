@@ -435,7 +435,7 @@ class SecretsJSONWatcher:
                 _LOGGER.debug("Failed to query existing entries for discovery: %s", err)
 
             source = (
-                cf.SOURCE_DISCOVERY_UPDATE_INFO
+                cf.SOURCE_DISCOVERY_UPDATE
                 if existing_entry is not None
                 else cf.SOURCE_DISCOVERY
             )
@@ -486,9 +486,9 @@ class SecretsJSONWatcher:
             resources = {}
 
         key = (
-            f"component.{DOMAIN}.discovery.secrets_json_update.title"
+            f"component.{DOMAIN}.config.progress.discovery_secrets_update"
             if is_update
-            else f"component.{DOMAIN}.discovery.secrets_json.title"
+            else f"component.{DOMAIN}.config.progress.discovery_secrets_new"
         )
         template = resources.get(key)
         if isinstance(template, str):
