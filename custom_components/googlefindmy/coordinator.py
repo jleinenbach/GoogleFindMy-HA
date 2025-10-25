@@ -661,7 +661,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._subentry_snapshots: dict[str, tuple[dict[str, Any], ...]] = {}
         self._feature_to_subentry: dict[str, str] = {}
         self._default_subentry_key_value: str = "core_tracking"
-        self._subentry_manager: "ConfigEntrySubEntryManager | None" = None
+        self._subentry_manager: ConfigEntrySubEntryManager | None = None
 
         # Statistics (extend as needed)
         self.stats: dict[str, int] = {
@@ -722,7 +722,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         return self._cache
 
-    def attach_subentry_manager(self, manager: "ConfigEntrySubEntryManager") -> None:
+    def attach_subentry_manager(self, manager: ConfigEntrySubEntryManager) -> None:
         """Attach the config entry subentry manager to the coordinator."""
 
         self._subentry_manager = manager

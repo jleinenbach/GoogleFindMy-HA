@@ -391,6 +391,211 @@ def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> st
     return ident
 
 
+def _strip_entry_namespace(entry_id: str, ident: str) -> str:
+    """Strip the entry namespace prefix (`<entry_id>:`) when present."""
+
+    if not ident or ":" not in ident:
+        return ident
+
+    prefix, canonical = ident.split(":", 1)
+    if canonical and prefix == entry_id:
+        return canonical
+
+    return ident
+
+
+def _dedupe_aliases(
+    exclude: str | None,
+    *sources: Iterable[Any] | None,
+) -> list[str]:
+    """Return a deduplicated alias list excluding the active name."""
+
+    deduped: list[str] = []
+    for source in sources:
+        if not source:
+            continue
+        for alias in source:
+            if not isinstance(alias, str):
+                continue
+            candidate = alias.strip()
+            if not candidate:
+                continue
+            if exclude and candidate == exclude:
+                continue
+            if candidate not in deduped:
+                deduped.append(candidate)
+    return deduped
+
+
+def _safe_epoch(value: Any) -> int:
+    """Best-effort conversion to an integer epoch timestamp."""
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sanitize_ignored_meta(device_id: str, meta: Mapping[str, Any]) -> dict[str, Any]:
+    """Return sanitized metadata for ignored device bookkeeping."""
+
+    raw_name = meta.get("name") if isinstance(meta, Mapping) else None
+    if isinstance(raw_name, str) and raw_name.strip():
+        name = raw_name.strip()
+    else:
+        name = device_id
+
+    aliases = _dedupe_aliases(
+        name, meta.get("aliases") if isinstance(meta, Mapping) else None, [raw_name]
+    )
+
+    ignored_at = _safe_epoch(meta.get("ignored_at")) if isinstance(meta, Mapping) else 0
+    if not ignored_at:
+        ignored_at = int(time.time())
+
+    source = meta.get("source") if isinstance(meta, Mapping) else None
+    if not isinstance(source, str) or not source:
+        source = "registry"
+
+    return {
+        "name": name,
+        "aliases": aliases,
+        "ignored_at": ignored_at,
+        "source": source,
+    }
+
+
+def _merge_sanitized_ignored_meta(
+    existing: Mapping[str, Any], incoming: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Merge two sanitized ignored metadata records."""
+
+    existing_name = (
+        existing.get("name") if isinstance(existing.get("name"), str) else None
+    )
+    incoming_name = (
+        incoming.get("name") if isinstance(incoming.get("name"), str) else None
+    )
+    name = existing_name or incoming_name or ""
+
+    aliases = _dedupe_aliases(
+        name,
+        existing.get("aliases"),
+        incoming.get("aliases"),
+        [existing_name, incoming_name],
+    )
+
+    ignored_at = max(
+        _safe_epoch(existing.get("ignored_at")), _safe_epoch(incoming.get("ignored_at"))
+    )
+    source = existing.get("source") or incoming.get("source") or "registry"
+
+    if not name:
+        name = incoming_name or existing_name or ""
+
+    return {
+        "name": name,
+        "aliases": aliases,
+        "ignored_at": ignored_at,
+        "source": source,
+    }
+
+
+def _normalize_ignored_device_map(
+    entry_id: str, mapping: Mapping[str, Mapping[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], bool]:
+    """Normalize ignored device identifiers for an entry."""
+
+    normalized: dict[str, dict[str, Any]] = {}
+    changed = False
+
+    for raw_id, meta in mapping.items():
+        canonical = _strip_entry_namespace(entry_id, raw_id)
+        if canonical != raw_id:
+            changed = True
+
+        sanitized = _sanitize_ignored_meta(canonical, meta)
+        existing = normalized.get(canonical)
+        if existing is None:
+            normalized[canonical] = sanitized
+        else:
+            normalized[canonical] = _merge_sanitized_ignored_meta(existing, sanitized)
+            if normalized[canonical] != existing:
+                changed = True
+
+    if normalized != dict(mapping):
+        changed = True
+
+    return normalized, changed
+
+
+def _normalize_visible_device_ids(
+    entry_id: str, raw_ids: Iterable[Any]
+) -> tuple[list[str], bool]:
+    """Normalize visible device identifiers for a subentry."""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    changed = False
+
+    for candidate in raw_ids:
+        if not isinstance(candidate, str) or not candidate:
+            changed = True
+            continue
+        canonical = _strip_entry_namespace(entry_id, candidate)
+        if canonical != candidate:
+            changed = True
+        if canonical in seen:
+            if canonical != candidate:
+                changed = True
+            continue
+        seen.add(canonical)
+        normalized.append(canonical)
+
+    return normalized, changed
+
+
+def _migrate_entry_identifier_namespaces(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Strip entry namespaces from ignored/visible device identifiers."""
+
+    options = dict(entry.options)
+    current_raw = options.get(
+        OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES)
+    )
+    ignored_map, _ = coerce_ignored_mapping(current_raw)
+    normalized_map, options_changed = _normalize_ignored_device_map(
+        entry.entry_id, ignored_map
+    )
+    if options_changed:
+        options[OPT_IGNORED_DEVICES] = normalized_map
+        options[OPT_OPTIONS_SCHEMA_VERSION] = 2
+    if options_changed and options != entry.options:
+        hass.config_entries.async_update_entry(entry, options=options)
+
+    subentries = getattr(entry, "subentries", None)
+    if not isinstance(subentries, Mapping):
+        return
+
+    for subentry in subentries.values():
+        raw_visible = subentry.data.get("visible_device_ids")
+        if not isinstance(raw_visible, (list, tuple, set)):
+            continue
+        normalized_visible, subentry_changed = _normalize_visible_device_ids(
+            entry.entry_id, raw_visible
+        )
+        if not subentry_changed:
+            continue
+        payload = dict(subentry.data)
+        payload["visible_device_ids"] = list(normalized_visible)
+        hass.config_entries.async_update_subentry(
+            entry,
+            subentry,
+            data=payload,
+        )
+
+
 # --- BEGIN: Helpers for resolution and manual locate ---------------------------
 def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> tuple[str, str]:
     """Resolve HA device_id/entity_id/canonical_id -> (canonical_id, friendly_name).
@@ -1514,6 +1719,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _LOGGER.debug("Nova API session provider registration skipped: %s", err)
 
     # Soft-migrate mutable settings from data -> options and unique_ids
+    _migrate_entry_identifier_namespaces(hass, entry)
     await _async_soft_migrate_data_to_options(hass, entry)
     await _async_migrate_unique_ids(hass, entry)
 
@@ -1844,14 +2050,19 @@ async def async_remove_config_entry_device(
     if entry.entry_id not in device_entry.config_entries:
         return False
 
-    dev_id = next(
-        (ident for (domain, ident) in device_entry.identifiers if domain == DOMAIN),
-        None,
-    )
-    if not dev_id:
+    raw_ident: str | None = None
+    canonical_id: str | None = None
+    for domain, ident in device_entry.identifiers:
+        if domain != DOMAIN or not isinstance(ident, str) or not ident:
+            continue
+        raw_ident = ident
+        canonical_id = _normalize_device_identifier(device_entry, ident)
+        break
+
+    if not canonical_id:
         return False
 
-    if dev_id == "integration" or dev_id == f"integration_{entry.entry_id}":
+    if canonical_id == "integration" or canonical_id == f"integration_{entry.entry_id}":
         return False
 
     try:
@@ -1866,9 +2077,9 @@ async def async_remove_config_entry_device(
             runtime_entry = runtime_bucket.get(entry.entry_id)
             coordinator = getattr(runtime_entry, "coordinator", None)
         if isinstance(coordinator, GoogleFindMyCoordinator):
-            coordinator.purge_device(dev_id)
+            coordinator.purge_device(canonical_id)
     except Exception as err:
-        _LOGGER.debug("Coordinator purge failed for %s: %s", dev_id, err)
+        _LOGGER.debug("Coordinator purge failed for %s: %s", canonical_id, err)
 
     try:
         opts = dict(entry.options)
@@ -1877,19 +2088,47 @@ async def async_remove_config_entry_device(
         )
         ignored_map, _migrated = coerce_ignored_mapping(current_raw)
 
-        name_to_store = device_entry.name_by_user or device_entry.name or dev_id
+        canonical_meta = ignored_map.get(canonical_id)
+        legacy_meta = None
+        if raw_ident and raw_ident != canonical_id and raw_ident in ignored_map:
+            legacy_meta = ignored_map.pop(raw_ident)
 
-        meta = ignored_map.get(dev_id, {})
-        prev_name = meta.get("name")
-        aliases = list(meta.get("aliases") or [])
-        if prev_name and prev_name != name_to_store and prev_name not in aliases:
-            aliases.append(prev_name)
+        name_to_store = device_entry.name_by_user or device_entry.name or canonical_id
 
-        ignored_map[dev_id] = {
+        alias_sources: list[Iterable[Any] | None] = []
+        name_sources: list[list[Any] | None] = []
+        for meta in (canonical_meta, legacy_meta):
+            if isinstance(meta, Mapping):
+                alias_sources.append(meta.get("aliases"))
+                name_sources.append([meta.get("name")])
+            else:
+                alias_sources.append(None)
+                name_sources.append(None)
+
+        aliases = _dedupe_aliases(
+            name_to_store,
+            *alias_sources,
+            *name_sources,
+        )
+
+        ignored_at = int(time.time())
+
+        source = next(
+            (
+                meta.get("source")
+                for meta in (canonical_meta, legacy_meta)
+                if isinstance(meta, Mapping)
+                and isinstance(meta.get("source"), str)
+                and meta.get("source")
+            ),
+            "registry",
+        )
+
+        ignored_map[canonical_id] = {
             "name": name_to_store,
             "aliases": aliases,
-            "ignored_at": int(time.time()),
-            "source": "registry",
+            "ignored_at": ignored_at,
+            "source": source,
         }
         opts[OPT_IGNORED_DEVICES] = ignored_map
         opts[OPT_OPTIONS_SCHEMA_VERSION] = 2
@@ -1899,11 +2138,11 @@ async def async_remove_config_entry_device(
             _LOGGER.info(
                 "Marked device '%s' (%s) as ignored for entry '%s'",
                 name_to_store,
-                dev_id,
+                canonical_id,
                 entry.title,
             )
     except Exception as err:
-        _LOGGER.debug("Persisting delete decision failed for %s: %s", dev_id, err)
+        _LOGGER.debug("Persisting delete decision failed for %s: %s", canonical_id, err)
 
     return True
 
