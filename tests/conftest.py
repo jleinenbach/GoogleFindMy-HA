@@ -1,0 +1,560 @@
+# tests/conftest.py
+"""Test configuration and environment stubs for integration tests."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from collections.abc import Mapping
+from types import MappingProxyType, ModuleType, SimpleNamespace
+from datetime import datetime, timezone
+import json
+
+import pytest
+
+# Ensure the package root is importable without installing the package.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+INTEGRATION_ROOT = ROOT / "custom_components" / "googlefindmy"
+
+
+def _stub_homeassistant() -> None:
+    """Install lightweight stubs for Home Assistant modules required at import time."""
+
+    ha_pkg = sys.modules.setdefault("homeassistant", ModuleType("homeassistant"))
+    ha_pkg.__path__ = getattr(ha_pkg, "__path__", [])  # mark as package
+
+    config_entries = ModuleType("homeassistant.config_entries")
+
+    subentry_counter = {"value": 0}
+
+    class _UndefinedType:
+        """Sentinel mirroring Home Assistant's UNDEFINED."""
+
+        def __repr__(self) -> str:  # pragma: no cover - debugging helper
+            return "UNDEFINED"
+
+    UNDEFINED = _UndefinedType()
+
+    def _next_subentry_id() -> str:
+        subentry_counter["value"] += 1
+        return f"subentry-{subentry_counter['value']}"
+
+    class ConfigEntry:  # minimal placeholder
+        pass
+
+    class ConfigEntryState:  # minimal enum-like placeholder
+        LOADED = "loaded"
+        NOT_LOADED = "not_loaded"
+
+    class ConfigEntryAuthFailed(Exception):
+        pass
+
+    class ConfigFlow:
+        """Minimal stub matching the ConfigFlow API used in tests."""
+
+        VERSION = 1
+
+        def __init_subclass__(cls, **kwargs):  # type: ignore[override]
+            super().__init_subclass__()
+
+        def __init__(self) -> None:
+            self.context: dict[str, object] = {}
+            self.hass = None
+
+        async def async_show_form(
+            self, *args, **kwargs
+        ):  # pragma: no cover - defensive
+            return {"type": "form"}
+
+        async def async_show_menu(
+            self, *args, **kwargs
+        ):  # pragma: no cover - defensive
+            return {"type": "menu"}
+
+        async def async_abort(self, **kwargs):
+            return {"type": "abort", **kwargs}
+
+        def _set_confirm_only(self) -> None:
+            self.context["confirm_only"] = True
+
+        def add_suggested_values_to_schema(self, schema, suggested):  # noqa: D401 - stub
+            return schema
+
+    class OptionsFlow:
+        """Minimal OptionsFlow stub for imports."""
+
+        def async_show_form(self, *args, **kwargs):  # pragma: no cover - defensive
+            return {"type": "form"}
+
+        def async_create_entry(
+            self, *, title: str, data
+        ):  # pragma: no cover - defensive
+            return {"type": "create_entry", "title": title, "data": data}
+
+        def async_abort(self, **kwargs):  # pragma: no cover - defensive
+            return {"type": "abort", **kwargs}
+
+        def add_suggested_values_to_schema(self, schema, suggested):  # noqa: D401 - stub
+            return schema
+
+    class OptionsFlowWithReload(OptionsFlow):
+        """Placeholder inheriting OptionsFlow behaviour."""
+
+    class ConfigSubentry:
+        """Simple ConfigSubentry stand-in used by unit tests."""
+
+        def __init__(
+            self,
+            *,
+            data: dict[str, object],
+            subentry_type: str,
+            title: str,
+            unique_id: str | None = None,
+            subentry_id: str | None = None,
+        ) -> None:
+            self.data: Mapping[str, object] = MappingProxyType(dict(data))
+            self.subentry_type: str = subentry_type
+            self.title: str = title
+            self.unique_id: str | None = unique_id
+            self.subentry_id: str = subentry_id or _next_subentry_id()
+
+        def as_dict(self) -> dict[str, object]:  # pragma: no cover - helper parity
+            return {
+                "data": dict(self.data),
+                "subentry_id": self.subentry_id,
+                "subentry_type": self.subentry_type,
+                "title": self.title,
+                "unique_id": self.unique_id,
+            }
+
+    config_entries.ConfigEntry = ConfigEntry
+    config_entries.ConfigEntryState = ConfigEntryState
+    config_entries.ConfigEntryAuthFailed = ConfigEntryAuthFailed
+    config_entries.ConfigSubentry = ConfigSubentry
+    config_entries.ConfigFlow = ConfigFlow
+    config_entries.OptionsFlow = OptionsFlow
+    config_entries.OptionsFlowWithReload = OptionsFlowWithReload
+    config_entries.UNDEFINED = UNDEFINED
+    sys.modules["homeassistant.config_entries"] = config_entries
+
+    vol_module = ModuleType("voluptuous")
+
+    class _Schema:
+        def __init__(self, schema):
+            self.schema = schema
+
+        def __call__(self, value):  # pragma: no cover - defensive
+            return value
+
+    class _Marker:
+        def __init__(self, key):
+            self.key = key
+            self.schema = {key}
+
+        def __hash__(self) -> int:  # pragma: no cover - defensive
+            return hash(self.key)
+
+        def __eq__(self, other: object) -> bool:  # pragma: no cover - defensive
+            if isinstance(other, _Marker):
+                return self.key == other.key
+            return self.key == other
+
+    def _identity(value):
+        return value
+
+    vol_module.Schema = _Schema
+
+    def _optional(key, default=None, **_: object) -> _Marker:
+        return _Marker(key)
+
+    def _required(key, description=None, default=None, **_: object) -> _Marker:
+        return _Marker(key)
+
+    vol_module.Optional = _optional
+    vol_module.Required = _required
+    vol_module.Any = lambda *items, **kwargs: _identity
+    vol_module.All = lambda *validators, **kwargs: _identity
+    vol_module.In = lambda items: _identity
+    vol_module.Range = lambda **kwargs: _identity
+    vol_module.Coerce = lambda typ: _identity
+
+    sys.modules["voluptuous"] = vol_module
+
+    data_entry_flow = ModuleType("homeassistant.data_entry_flow")
+    data_entry_flow.FlowResult = dict  # type: ignore[assignment]
+    sys.modules["homeassistant.data_entry_flow"] = data_entry_flow
+
+    const_module = ModuleType("homeassistant.const")
+
+    class Platform:  # enum-like stub covering platforms used in __init__
+        DEVICE_TRACKER = "device_tracker"
+        BUTTON = "button"
+        SENSOR = "sensor"
+        BINARY_SENSOR = "binary_sensor"
+
+    const_module.EVENT_HOMEASSISTANT_STARTED = "start"
+    const_module.EVENT_HOMEASSISTANT_STOP = "stop"
+    const_module.ATTR_LATITUDE = "latitude"
+    const_module.ATTR_LONGITUDE = "longitude"
+    const_module.ATTR_GPS_ACCURACY = "gps_accuracy"
+    const_module.Platform = Platform
+    sys.modules["homeassistant.const"] = const_module
+
+    loader_module = ModuleType("homeassistant.loader")
+
+    async def _async_get_integration(_hass, _domain):  # pragma: no cover - stub
+        return SimpleNamespace(name="stub", version="0.0.0")
+
+    loader_module.async_get_integration = _async_get_integration
+    sys.modules["homeassistant.loader"] = loader_module
+    setattr(ha_pkg, "loader", loader_module)
+
+    core_module = ModuleType("homeassistant.core")
+
+    class CoreState:  # minimal CoreState stub
+        running = "running"
+
+    class ServiceCall:  # pragma: no cover - stub for service handlers
+        def __init__(self, data=None):
+            self.data = data or {}
+
+    class HomeAssistant:  # minimal HomeAssistant placeholder
+        state = CoreState.running
+
+    core_module.CoreState = CoreState
+    core_module.HomeAssistant = HomeAssistant
+    core_module.ServiceCall = ServiceCall
+    core_module.callback = lambda func: func
+    sys.modules["homeassistant.core"] = core_module
+
+    exceptions_module = ModuleType("homeassistant.exceptions")
+
+    class HomeAssistantError(Exception):
+        pass
+
+    class ConfigEntryNotReady(HomeAssistantError):
+        pass
+
+    class ServiceValidationError(HomeAssistantError):
+        """Stubbed ServiceValidationError carrying translation context."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args)
+            self.translation_domain = kwargs.get("translation_domain")
+            self.translation_key = kwargs.get("translation_key")
+            self.translation_placeholders = kwargs.get("translation_placeholders")
+
+    exceptions_module.HomeAssistantError = HomeAssistantError
+    exceptions_module.ConfigEntryNotReady = ConfigEntryNotReady
+    exceptions_module.ServiceValidationError = ServiceValidationError
+    exceptions_module.ConfigEntryAuthFailed = ConfigEntryAuthFailed
+    sys.modules["homeassistant.exceptions"] = exceptions_module
+
+    helpers_pkg = sys.modules.setdefault(
+        "homeassistant.helpers", ModuleType("homeassistant.helpers")
+    )
+    helpers_pkg.__path__ = getattr(helpers_pkg, "__path__", [])
+
+    for sub in (
+        "device_registry",
+        "entity_registry",
+        "issue_registry",
+        "update_coordinator",
+    ):
+        module_name = f"homeassistant.helpers.{sub}"
+        module = ModuleType(module_name)
+        sys.modules[module_name] = module
+        setattr(helpers_pkg, sub, module)
+
+    entity_module = ModuleType("homeassistant.helpers.entity")
+
+    class DeviceInfo:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    entity_module.DeviceInfo = DeviceInfo
+
+    class EntityCategory:
+        CONFIG = "config"
+        DIAGNOSTIC = "diagnostic"
+
+    entity_module.EntityCategory = EntityCategory
+    sys.modules["homeassistant.helpers.entity"] = entity_module
+    setattr(helpers_pkg, "entity", entity_module)
+
+    from collections.abc import Callable, Iterable
+
+    entity_platform_module = ModuleType("homeassistant.helpers.entity_platform")
+    entity_platform_module.AddEntitiesCallback = Callable[[Iterable], None]
+    sys.modules["homeassistant.helpers.entity_platform"] = entity_platform_module
+    setattr(helpers_pkg, "entity_platform", entity_platform_module)
+
+    restore_state_module = ModuleType("homeassistant.helpers.restore_state")
+
+    class RestoreEntity:
+        async def async_get_last_state(self):  # pragma: no cover - stub behaviour
+            return None
+
+    restore_state_module.RestoreEntity = RestoreEntity
+    sys.modules["homeassistant.helpers.restore_state"] = restore_state_module
+    setattr(helpers_pkg, "restore_state", restore_state_module)
+
+    issue_registry_module = sys.modules["homeassistant.helpers.issue_registry"]
+    issue_registry_module.IssueSeverity = SimpleNamespace(ERROR="error")
+
+    class _IssueRegistry:
+        """Minimal in-memory Repairs issue registry used by tests."""
+
+        def __init__(self) -> None:
+            self._issues: dict[tuple[str, str], dict[str, object]] = {}
+
+        def async_get_issue(
+            self, domain: str, issue_id: str
+        ) -> dict[str, object] | None:
+            return self._issues.get((domain, issue_id))
+
+        def async_create_issue(
+            self,
+            domain: str,
+            issue_id: str,
+            **data: object,
+        ) -> None:
+            self._issues[(domain, issue_id)] = {
+                **data,
+                "domain": domain,
+                "issue_id": issue_id,
+            }
+
+        def async_delete_issue(self, domain: str, issue_id: str) -> None:
+            self._issues.pop((domain, issue_id), None)
+
+    def _issue_registry_for(hass) -> _IssueRegistry:
+        registry = getattr(hass, "_issue_registry", None)
+        if registry is None:
+            registry = _IssueRegistry()
+            setattr(hass, "_issue_registry", registry)
+        return registry
+
+    issue_registry_module.async_get = _issue_registry_for
+
+    def _async_create_issue(hass, domain, issue_id, **data) -> None:
+        _issue_registry_for(hass).async_create_issue(domain, issue_id, **data)
+
+    def _async_delete_issue(hass, domain, issue_id) -> None:
+        _issue_registry_for(hass).async_delete_issue(domain, issue_id)
+
+    issue_registry_module.async_create_issue = _async_create_issue
+    issue_registry_module.async_delete_issue = _async_delete_issue
+
+    device_registry_module = sys.modules["homeassistant.helpers.device_registry"]
+    device_registry_module.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
+    device_registry_module.async_get = lambda _hass=None: SimpleNamespace(
+        async_get=lambda _id: None
+    )
+
+    cv_module = ModuleType("homeassistant.helpers.config_validation")
+
+    def _multi_select(choices):  # pragma: no cover - defensive
+        return lambda value: value
+
+    cv_module.multi_select = _multi_select
+    sys.modules["homeassistant.helpers.config_validation"] = cv_module
+    setattr(helpers_pkg, "config_validation", cv_module)
+
+    aiohttp_client_module = ModuleType("homeassistant.helpers.aiohttp_client")
+    aiohttp_client_module.async_get_clientsession = lambda hass: None
+    sys.modules["homeassistant.helpers.aiohttp_client"] = aiohttp_client_module
+    setattr(helpers_pkg, "aiohttp_client", aiohttp_client_module)
+
+    storage_module = ModuleType("homeassistant.helpers.storage")
+
+    class Store:  # minimal async Store stub
+        def __init__(self, *args, **kwargs) -> None:
+            self._data: dict[str, object] | None = None
+
+        async def async_load(self) -> dict[str, object] | None:
+            return self._data
+
+        def async_delay_save(self, *_args, **_kwargs) -> None:
+            return None
+
+    storage_module.Store = Store
+    sys.modules["homeassistant.helpers.storage"] = storage_module
+    setattr(helpers_pkg, "storage", storage_module)
+
+    class UpdateFailed(Exception):
+        pass
+
+    update_coordinator_module = sys.modules["homeassistant.helpers.update_coordinator"]
+    update_coordinator_module.UpdateFailed = UpdateFailed
+
+    from typing import Generic, TypeVar
+
+    _T = TypeVar("_T")
+
+    class DataUpdateCoordinator(Generic[_T]):
+        """Minimal stub for DataUpdateCoordinator supporting subclassing."""
+
+        def __init__(
+            self, hass=None, logger=None, name: str | None = None, update_interval=None
+        ):
+            self.hass = hass
+            self.logger = logger
+            self.name = name or "coordinator"
+            self.update_interval = update_interval
+
+        async def async_request_refresh(
+            self,
+        ) -> None:  # pragma: no cover - stubbed behaviour
+            return None
+
+        async def async_config_entry_first_refresh(
+            self,
+        ) -> None:  # pragma: no cover - stubbed behaviour
+            return None
+
+    update_coordinator_module.DataUpdateCoordinator = DataUpdateCoordinator
+
+    class CoordinatorEntity:
+        def __init__(self, coordinator) -> None:
+            self.coordinator = coordinator
+            self.hass = getattr(coordinator, "hass", None)
+
+        def async_write_ha_state(self) -> None:  # pragma: no cover - stub behaviour
+            return None
+
+        def __class_getitem__(cls, _item):  # pragma: no cover - typing compatibility
+            return cls
+
+    update_coordinator_module.CoordinatorEntity = CoordinatorEntity
+
+    event_module = ModuleType("homeassistant.helpers.event")
+
+    async def _async_call_later(
+        *_args, **_kwargs
+    ):  # pragma: no cover - stubbed behaviour
+        return None
+
+    event_module.async_call_later = _async_call_later
+    sys.modules["homeassistant.helpers.event"] = event_module
+    setattr(helpers_pkg, "event", event_module)
+
+    network_module = ModuleType("homeassistant.helpers.network")
+    network_module.get_url = lambda *args, **kwargs: "https://example.local"
+    sys.modules["homeassistant.helpers.network"] = network_module
+    setattr(helpers_pkg, "network", network_module)
+
+    entity_registry_module = sys.modules["homeassistant.helpers.entity_registry"]
+
+    def _async_get_entity_registry(_hass=None):  # pragma: no cover - stub behaviour
+        return SimpleNamespace(async_get=lambda _entity_id: None)
+
+    entity_registry_module.async_get = _async_get_entity_registry
+
+    util_pkg = sys.modules.setdefault(
+        "homeassistant.util", ModuleType("homeassistant.util")
+    )
+    dt_module = ModuleType("homeassistant.util.dt")
+    dt_module.UTC = timezone.utc
+    dt_module.utcnow = lambda: datetime.now(timezone.utc)
+    dt_module.now = dt_module.utcnow
+    dt_module.as_local = lambda dt: dt
+    sys.modules["homeassistant.util.dt"] = dt_module
+    setattr(util_pkg, "dt", dt_module)
+
+    components_pkg = sys.modules.setdefault(
+        "homeassistant.components", ModuleType("homeassistant.components")
+    )
+    components_pkg.__path__ = getattr(components_pkg, "__path__", [])
+
+    device_tracker_module = ModuleType("homeassistant.components.device_tracker")
+
+    class SourceType:
+        GPS = "gps"
+
+    class TrackerEntity:  # pragma: no cover - stub behaviour
+        _attr_has_entity_name = True
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    device_tracker_module.SourceType = SourceType
+    device_tracker_module.TrackerEntity = TrackerEntity
+    sys.modules["homeassistant.components.device_tracker"] = device_tracker_module
+    setattr(components_pkg, "device_tracker", device_tracker_module)
+
+    http_module = ModuleType("homeassistant.components.http")
+
+    class HomeAssistantView:  # pragma: no cover - stub for imports
+        requires_auth = False
+
+        async def get(self, *_args, **_kwargs):
+            return None
+
+    http_module.HomeAssistantView = HomeAssistantView
+    sys.modules["homeassistant.components.http"] = http_module
+    setattr(components_pkg, "http", http_module)
+
+    diagnostics_module = ModuleType("homeassistant.components.diagnostics")
+
+    def _async_redact_data(data, _keys):  # pragma: no cover - stub behaviour
+        return data
+
+    diagnostics_module.async_redact_data = _async_redact_data
+    sys.modules["homeassistant.components.diagnostics"] = diagnostics_module
+    setattr(components_pkg, "diagnostics", diagnostics_module)
+
+    recorder_module = ModuleType("homeassistant.components.recorder")
+    recorder_module.get_instance = lambda *args, **kwargs: None
+    history_module = ModuleType("homeassistant.components.recorder.history")
+
+    def _no_history(*args, **kwargs):  # pragma: no cover - stub
+        raise NotImplementedError
+
+    history_module.get_significant_states = _no_history
+    recorder_module.history = history_module
+    sys.modules["homeassistant.components.recorder"] = recorder_module
+    sys.modules["homeassistant.components.recorder.history"] = history_module
+    setattr(components_pkg, "recorder", recorder_module)
+
+
+@pytest.fixture(scope="session", name="integration_root")
+def fixture_integration_root() -> Path:
+    """Return the root path of the googlefindmy integration package."""
+
+    assert INTEGRATION_ROOT.is_dir(), "integration package root must exist"
+    return INTEGRATION_ROOT
+
+
+@pytest.fixture(scope="session", name="integration_python_files")
+def fixture_integration_python_files(integration_root: Path) -> list[Path]:
+    """Return all Python files under the integration root (sorted)."""
+
+    return sorted(integration_root.rglob("*.py"))
+
+
+@pytest.fixture(scope="session", name="manifest")
+def fixture_manifest(integration_root: Path) -> dict[str, object]:
+    """Load and return the integration manifest."""
+
+    manifest_path = integration_root / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert isinstance(manifest_data, dict)
+    return manifest_data
+
+
+_stub_homeassistant()
+
+components_pkg = sys.modules.setdefault(
+    "custom_components", ModuleType("custom_components")
+)
+components_pkg.__path__ = [str(ROOT / "custom_components")]
+
+gf_pkg = sys.modules.setdefault(
+    "custom_components.googlefindmy", ModuleType("custom_components.googlefindmy")
+)
+gf_pkg.__path__ = [str(ROOT / "custom_components/googlefindmy")]
+setattr(components_pkg, "googlefindmy", gf_pkg)

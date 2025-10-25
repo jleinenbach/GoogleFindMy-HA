@@ -1,29 +1,39 @@
 # custom_components/googlefindmy/map_view.py
 """Map view for Google Find My Device locations."""
+
 from __future__ import annotations
 
+import json
 import logging
+import time
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from html import escape
+from typing import Any
+from urllib.parse import quote
 
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
+from .coordinator import GoogleFindMyCoordinator
+
 from .const import (
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    WEEK_SECONDS,
+    map_token_hex_digest,
+    map_token_secret_seed,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 
 # ------------------------------- HTML Helpers -------------------------------
+
 
 def _html_response(title: str, body: str, status: int = 200) -> web.Response:
     """Return a minimal HTML response (no secrets, no stacktraces)."""
@@ -41,7 +51,60 @@ def _html_response(title: str, body: str, status: int = 200) -> web.Response:
     )
 
 
+# --------------------------- Token / Entry helpers ---------------------------
+
+
+def _entry_accept_tokens(
+    hass: HomeAssistant,
+    entry_id: str,
+    token_expiration_enabled: bool,
+) -> set[str]:
+    """Compute the accepted tokens for a given entry_id.
+
+    Contract (must match Buttons/Sensor/Tracker):
+      secret = map_token_secret_seed(...)
+      token  = map_token_hex_digest(secret)
+
+    For weekly tokens, accept the current and previous bucket (grace on week rollover).
+    For static tokens, accept only the static form.
+    """
+    ha_uuid = str(hass.data.get("core.uuid", "ha"))
+    tokens: set[str] = set()
+    if token_expiration_enabled:
+        now = int(time.time())
+        current_secret = map_token_secret_seed(ha_uuid, entry_id, True, now=now)
+        prev_secret = map_token_secret_seed(
+            ha_uuid, entry_id, True, now=now - WEEK_SECONDS
+        )
+        tokens.add(map_token_hex_digest(current_secret))
+        tokens.add(map_token_hex_digest(prev_secret))
+    else:
+        secret = map_token_secret_seed(ha_uuid, entry_id, False)
+        tokens.add(map_token_hex_digest(secret))
+    return tokens
+
+
+def _resolve_entry_by_token(hass: HomeAssistant, auth_token: str):
+    """Return (entry, accepted_tokens) for the entry that matches the token, else (None, None).
+
+    We iterate over all config entries for this DOMAIN and compare the provided token
+    against the per-entry accepted token set (weekly/static as per options).
+    """
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        token_exp = entry.options.get(
+            OPT_MAP_VIEW_TOKEN_EXPIRATION,
+            entry.data.get(
+                OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            ),
+        )
+        accepted = _entry_accept_tokens(hass, entry.entry_id, bool(token_exp))
+        if auth_token in accepted:
+            return entry, accepted
+    return None, None
+
+
 # ------------------------------- Map View -----------------------------------
+
 
 class GoogleFindMyMapView(HomeAssistantView):
     """View to serve device location maps."""
@@ -58,65 +121,98 @@ class GoogleFindMyMapView(HomeAssistantView):
         """Generate and serve a map for the device.
 
         Security notes:
-        - We use a short-lived/static token conveyed via query param. This is a UX helper
-          for opening the map from the device page. Do not use it for sensitive data.
+        - Token validation is **entry-scoped** (includes entry_id in the token).
+        - Weekly tokens accept current and previous bucket to survive boundary flips.
         - We never log tokens or full URLs that include tokens.
         """
-        # ---- 1) Token check (options-first; 401 on missing/invalid) ----
+        # ---- 1) Token check & entry resolution (401 on missing/invalid) ----
         auth_token = request.query.get("token")
         if not auth_token:
-            return _html_response("Unauthorized", "Missing authentication token.", status=401)
+            return _html_response(
+                "Unauthorized", "Missing authentication token.", status=401
+            )
 
-        if auth_token != self._get_simple_token():
-            # No token echo in logs; keep message generic.
-            _LOGGER.debug("Map token mismatch for device_id=%s", device_id)
-            return _html_response("Unauthorized", "Invalid authentication token.", status=401)
+        entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
+        if not entry:
+            _LOGGER.debug(
+                "Map token mismatch (no entry resolved) for device_id=%s", device_id
+            )
+            return _html_response(
+                "Unauthorized", "Invalid authentication token.", status=401
+            )
+
+        # ---- 2) Coordinator + device membership check (404 if unknown in this entry) ----
+        runtime = getattr(entry, "runtime_data", None)
+        coordinator: GoogleFindMyCoordinator | None = None
+        if isinstance(runtime, GoogleFindMyCoordinator):
+            coordinator = runtime
+        elif runtime is not None:
+            coordinator = getattr(runtime, "coordinator", None)
+
+        if not isinstance(coordinator, GoogleFindMyCoordinator):
+            _LOGGER.debug("Coordinator not found for entry_id=%s", entry.entry_id)
+            return _html_response("Server Error", "Integration not ready.", status=503)
+
+        data_list = getattr(coordinator, "data", None) or []
+        device_known = any(dev.get("id") == device_id for dev in data_list)
+        if not device_known:
+            _LOGGER.debug(
+                "Map requested for unknown device_id=%s in entry_id=%s",
+                device_id,
+                entry.entry_id,
+            )
+            return _html_response("Not Found", "Device not found.", status=404)
 
         try:
-            # ---- 2) Validate device_id against Device Registry; 404 if unknown ----
-            dev_reg = dr.async_get(self.hass)
-            device_known = False
-            for dev in list(dev_reg.devices.values()):
-                if any(ident[0] == DOMAIN and ident[1] == device_id for ident in dev.identifiers):
-                    device_known = True
-                    break
+            # ---- 3) Resolve a human-readable device name from THIS coordinator snapshot ----
+            device_name = (
+                next(
+                    (d.get("name") for d in data_list if d.get("id") == device_id), None
+                )
+                or "Unknown Device"
+            )
 
-            if not device_known:
-                _LOGGER.debug("Map requested for unknown device_id=%s", device_id)
-                return _html_response("Not Found", "Device not found.", status=404)
+            # ---- 4) Find the device_tracker entity (entity registry, scoped to this entry) ----
+            entity_registry = er.async_get(self.hass)
+            entity_id: str | None = None
+            entry_unique_id_candidates: list[str] = []
 
-            # ---- 3) Resolve a human-readable device name from coordinator snapshot (best effort) ----
-            coordinator_data = self.hass.data.get(DOMAIN, {})
-            device_name = "Unknown Device"
-            for entry_id, coordinator in coordinator_data.items():
-                if entry_id == "config_data":
+            entry_id = entry.entry_id
+            subentry_identifier = coordinator.stable_subentry_identifier(
+                feature="device_tracker"
+            )
+            if entry_id:
+                entry_unique_id_candidates.append(f"{entry_id}:{device_id}")
+                entry_unique_id_candidates.append(
+                    f"{entry_id}:{subentry_identifier}:{device_id}"
+                )
+                entry_unique_id_candidates.append(
+                    f"{DOMAIN}_{entry_id}_{subentry_identifier}_{device_id}"
+                )
+                entry_unique_id_candidates.append(f"{DOMAIN}_{entry_id}_{device_id}")
+            entry_unique_id_candidates.append(f"{DOMAIN}_{device_id}")
+
+            for unique_id in entry_unique_id_candidates:
+                candidate_entity_id = entity_registry.async_get_entity_id(
+                    "device_tracker", DOMAIN, unique_id
+                )
+                if not candidate_entity_id:
                     continue
-                data_list = getattr(coordinator, "data", None) or []
-                for device in data_list:
-                    if device.get("id") == device_id:
-                        device_name = device.get("name", device_name)
-                        break
 
-            # ---- 4) Find the device_tracker entity (entity registry) ----
-            # Prefer the actual entity id over a guess.
-            entity_id_guess = f"device_tracker.{device_id.replace('-', '_').lower()}"
-            entity_registry = async_get_entity_registry(self.hass)
-            entity_id: Optional[str] = None
-
-            for entity in entity_registry.entities.values():
-                if (
-                    entity.unique_id
-                    and device_id in entity.unique_id
-                    and entity.platform == DOMAIN
-                    and entity.entity_id.startswith("device_tracker.")
-                ):
-                    entity_id = entity.entity_id
+                registry_entry = entity_registry.async_get(candidate_entity_id)
+                if registry_entry and registry_entry.config_entry_id == entry.entry_id:
+                    entity_id = candidate_entity_id
                     break
 
             if not entity_id:
-                # Fall back to the guess; the page will render "no history", which is acceptable UX.
-                entity_id = entity_id_guess
-                _LOGGER.debug("No explicit tracker entity found for %s, using guess %s", device_id, entity_id)
+                # Fallback to a guess; page will render "no history" if none found, which is acceptable UX.
+                entity_id = f"device_tracker.{device_id.replace('-', '_').lower()}"
+                _LOGGER.debug(
+                    "No explicit tracker entity found for %s in entry_id=%s, using guess %s",
+                    device_id,
+                    entry.entry_id,
+                    entity_id,
+                )
 
             # ---- 5) Parse time range and accuracy filter from query ----
             end_time = dt_util.utcnow()
@@ -128,7 +224,9 @@ class GoogleFindMyMapView(HomeAssistantView):
 
             if start_param:
                 try:
-                    start_time = datetime.fromisoformat(start_param.replace("Z", "+00:00"))
+                    start_time = datetime.fromisoformat(
+                        start_param.replace("Z", "+00:00")
+                    )
                     if start_time.tzinfo is None:
                         start_time = start_time.replace(tzinfo=dt_util.UTC)
                 except ValueError:
@@ -160,7 +258,7 @@ class GoogleFindMyMapView(HomeAssistantView):
 
             locations: list[dict[str, Any]] = []
             if entity_id in history:
-                last_seen = None
+                last_seen_epoch: float | None = None
                 for state in history[entity_id]:
                     lat_raw = state.attributes.get("latitude")
                     lon_raw = state.attributes.get("longitude")
@@ -172,11 +270,46 @@ class GoogleFindMyMapView(HomeAssistantView):
                     except (TypeError, ValueError):
                         continue
 
-                    current_last_seen = state.attributes.get("last_seen")
-                    if current_last_seen and current_last_seen == last_seen:
+                    last_seen_attr = state.attributes.get("last_seen")
+                    last_seen_utc_attr = state.attributes.get("last_seen_utc")
+                    current_last_seen_dt: datetime | None = None
+
+                    for candidate in (last_seen_utc_attr, last_seen_attr):
+                        if candidate is None:
+                            continue
+                        if isinstance(candidate, datetime):
+                            current_last_seen_dt = candidate
+                        elif isinstance(candidate, (int, float)):
+                            try:
+                                current_last_seen_dt = datetime.fromtimestamp(
+                                    float(candidate), tz=dt_util.UTC
+                                )
+                            except (OSError, OverflowError, ValueError, TypeError):
+                                current_last_seen_dt = None
+                        elif isinstance(candidate, str):
+                            parsed_candidate = dt_util.parse_datetime(candidate)
+                            if parsed_candidate is not None:
+                                current_last_seen_dt = parsed_candidate
+                        if current_last_seen_dt is not None:
+                            break
+
+                    if current_last_seen_dt is None:
+                        current_last_seen_dt = state.last_updated
+                    elif current_last_seen_dt.tzinfo is None:
+                        current_last_seen_dt = current_last_seen_dt.replace(
+                            tzinfo=dt_util.UTC
+                        )
+
+                    current_last_seen_dt = dt_util.as_utc(current_last_seen_dt)
+                    current_last_seen_epoch = current_last_seen_dt.timestamp()
+
+                    if (
+                        last_seen_epoch is not None
+                        and current_last_seen_epoch == last_seen_epoch
+                    ):
                         # de-dupe by identical last_seen
                         continue
-                    last_seen = current_last_seen
+                    last_seen_epoch = current_last_seen_epoch
 
                     acc_raw = state.attributes.get("gps_accuracy", 0)
                     try:
@@ -190,11 +323,12 @@ class GoogleFindMyMapView(HomeAssistantView):
                             "lon": lon,
                             "accuracy": acc,
                             "timestamp": state.last_updated.isoformat(),
-                            "last_seen": current_last_seen,
+                            "last_seen": current_last_seen_epoch,
                             "entity_id": entity_id,
                             "state": state.state,
                             "is_own_report": state.attributes.get("is_own_report"),
-                            "semantic_location": state.attributes.get("semantic_location"),
+                            # Harmonize with coordinator attributes: use 'semantic_name'
+                            "semantic_location": state.attributes.get("semantic_name"),
                         }
                     )
 
@@ -202,7 +336,9 @@ class GoogleFindMyMapView(HomeAssistantView):
             html_content = self._generate_map_html(
                 device_name, locations, device_id, start_time, end_time, accuracy_filter
             )
-            return web.Response(text=html_content, content_type="text/html", charset="utf-8")
+            return web.Response(
+                text=html_content, content_type="text/html", charset="utf-8"
+            )
 
         except Exception as err:  # defensive: HTML error page instead of raw tracebacks
             _LOGGER.error("Error generating map for device %s: %s", device_id, err)
@@ -226,13 +362,22 @@ class GoogleFindMyMapView(HomeAssistantView):
         start_local = start_local_tz.strftime("%Y-%m-%dT%H:%M")
         end_local = end_local_tz.strftime("%Y-%m-%dT%H:%M")
 
+        device_name_html = escape(device_name, quote=True)
+        start_local_attr = escape(start_local, quote=True)
+        end_local_attr = escape(end_local, quote=True)
+        accuracy_attr = escape(str(accuracy_filter), quote=True)
+
+        start_query_encoded = escape(quote(start_time.isoformat()), quote=True)
+        end_query_encoded = escape(quote(end_time.isoformat()), quote=True)
+        accuracy_query_encoded = escape(quote(str(accuracy_filter)), quote=True)
+
         if not locations:
             # Empty state page with controls for time range selection
             return f"""
             <!DOCTYPE html>
             <html>
             <head>
-                <title>{device_name} - Location Map</title>
+                <title>{device_name_html} - Location Map</title>
                 <meta charset="utf-8" />
                 <style>
                     body {{ font-family: Arial, sans-serif; margin: 20px; }}
@@ -249,16 +394,16 @@ class GoogleFindMyMapView(HomeAssistantView):
                 </style>
             </head>
             <body>
-                <h1>{device_name}</h1>
-                <div class="controls">
+                <h1>{device_name_html}</h1>
+                <div class="controls" id="mapControls" data-initial-start="{start_query_encoded}" data-initial-end="{end_query_encoded}">
                     <h3>Select Time Range</h3>
                     <div class="time-control">
                         <label for="startTime">Start:</label>
-                        <input type="datetime-local" id="startTime" value="{start_local}">
+                        <input type="datetime-local" id="startTime" value="{start_local_attr}">
                     </div>
                     <div class="time-control">
                         <label for="endTime">End:</label>
-                        <input type="datetime-local" id="endTime" value="{end_local}">
+                        <input type="datetime-local" id="endTime" value="{end_local_attr}">
                     </div>
                     <div class="quick-buttons">
                         <button onclick="setQuickRange(1)">Last 1 Day</button>
@@ -275,6 +420,108 @@ class GoogleFindMyMapView(HomeAssistantView):
                 </div>
 
                 <script>
+                function updateLocationWithParams(updates) {{
+                    const existing = window.location.search.slice(1);
+                    const keys = Object.keys(updates);
+                    const preserved = existing
+                        ? existing.split('&').filter(Boolean).filter((pair) => {{
+                            const [rawKey] = pair.split('=');
+                            if (!rawKey) {{
+                                return false;
+                            }}
+                            let decodedKey = rawKey;
+                            try {{
+                                decodedKey = decodeURIComponent(rawKey);
+                            }} catch (err) {{
+                                decodedKey = rawKey;
+                            }}
+                            return !keys.includes(decodedKey);
+                        }})
+                        : [];
+
+                    keys.forEach((key) => {{
+                        const value = updates[key];
+                        if (value === null || value === undefined) {{
+                            return;
+                        }}
+                        preserved.push(`${{encodeURIComponent(key)}}=${{encodeURIComponent(value)}}`);
+                    }});
+
+                    const query = preserved.join('&');
+                    const path = window.location.pathname;
+                    const hash = window.location.hash || '';
+                    const nextUrl = query ? `${{path}}?${{query}}${{hash}}` : `${{path}}{{hash}}`;
+                    window.location.href = nextUrl;
+                }}
+
+                function safeDecodeComponent(value) {{
+                    if (!value) {{
+                        return "";
+                    }}
+                    try {{
+                        return decodeURIComponent(value);
+                    }} catch (err) {{
+                        return value;
+                    }}
+                }}
+
+                function extractLocalInput(value) {{
+                    if (!value) {{
+                        return "";
+                    }}
+                    const match = value.match(/^(\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}})/);
+                    if (match) {{
+                        return match[1];
+                    }}
+                    const parsed = new Date(value);
+                    if (!Number.isNaN(parsed.getTime())) {{
+                        return formatDateTime(parsed);
+                    }}
+                    if (value.length >= 16) {{
+                        return value.slice(0, 16);
+                    }}
+                    return "";
+                }}
+
+                function registerInitialField(field, encoded) {{
+                    if (!field) {{
+                        return;
+                    }}
+                    const decoded = safeDecodeComponent(encoded);
+                    if (!field.dataset.initialIso) {{
+                        field.dataset.initialIso = decoded;
+                    }}
+                    if (!field.dataset.initialLocal) {{
+                        if (!field.value && decoded) {{
+                            const normalized = extractLocalInput(decoded);
+                            if (normalized) {{
+                                field.value = normalized;
+                            }}
+                        }}
+                        field.dataset.initialLocal = field.value || "";
+                    }}
+                }}
+
+                function convertFieldToIso(field, currentValue) {{
+                    if (!field) {{
+                        return null;
+                    }}
+                    const initialLocal = field.dataset.initialLocal;
+                    const initialIso = field.dataset.initialIso;
+                    if (
+                        initialLocal !== undefined &&
+                        initialIso &&
+                        currentValue === initialLocal
+                    ) {{
+                        return initialIso;
+                    }}
+                    const parsed = new Date(currentValue);
+                    if (Number.isNaN(parsed.getTime())) {{
+                        return null;
+                    }}
+                    return parsed.toISOString();
+                }}
+
                 function setQuickRange(days) {{
                     const end = new Date();
                     const start = new Date(end.getTime() - (days * 24 * 60 * 60 * 1000));
@@ -284,23 +531,48 @@ class GoogleFindMyMapView(HomeAssistantView):
                 }}
 
                 function formatDateTime(date) {{
-                    return date.toISOString().slice(0, 16);
+                    const year = date.getFullYear();
+                    const month = String(date.getMonth() + 1).padStart(2, '0');
+                    const day = String(date.getDate()).padStart(2, '0');
+                    const hours = String(date.getHours()).padStart(2, '0');
+                    const minutes = String(date.getMinutes()).padStart(2, '0');
+                    return `${{year}}-${{month}}-${{day}}T${{hours}}:${{minutes}}`;
                 }}
 
                 function updateMap() {{
-                    const startTime = document.getElementById('startTime').value;
-                    const endTime = document.getElementById('endTime').value;
+                    const startField = document.getElementById('startTime');
+                    const endField = document.getElementById('endTime');
+                    const startValue = startField ? startField.value : '';
+                    const endValue = endField ? endField.value : '';
 
-                    if (!startTime || !endTime) {{
+                    if (!startValue || !endValue) {{
                         alert('Please select both start and end times');
                         return;
                     }}
 
-                    const url = new URL(window.location.href);
-                    url.searchParams.set('start', startTime + ':00Z');
-                    url.searchParams.set('end', endTime + ':00Z');
-                    window.location.href = url.toString();
+                    const startIso = convertFieldToIso(startField, startValue);
+                    const endIso = convertFieldToIso(endField, endValue);
+
+                    if (!startIso || !endIso) {{
+                        alert('Please provide valid start and end times');
+                        return;
+                    }}
+
+                    updateLocationWithParams({{
+                        start: startIso,
+                        end: endIso,
+                    }});
                 }}
+
+                document.addEventListener('DOMContentLoaded', function() {{
+                    const controls = document.getElementById('mapControls');
+                    if (controls) {{
+                        const startField = document.getElementById('startTime');
+                        const endField = document.getElementById('endTime');
+                        registerInitialField(startField, controls.dataset.initialStart);
+                        registerInitialField(endField, controls.dataset.initialEnd);
+                    }}
+                }});
                 </script>
             </body>
             </html>
@@ -314,6 +586,8 @@ class GoogleFindMyMapView(HomeAssistantView):
         markers_js: list[str] = []
         for i, loc in enumerate(locations):
             accuracy = float(loc.get("accuracy", 0.0))
+            lat = float(loc.get("lat", 0.0))
+            lon = float(loc.get("lon", 0.0))
 
             # Color based on accuracy
             if accuracy <= 5:
@@ -324,7 +598,9 @@ class GoogleFindMyMapView(HomeAssistantView):
                 color = "red"
 
             # Convert UTC timestamp to Home Assistant timezone
-            timestamp_utc = datetime.fromisoformat(str(loc["timestamp"]).replace("Z", "+00:00"))
+            timestamp_utc = datetime.fromisoformat(
+                str(loc["timestamp"]).replace("Z", "+00:00")
+            )
             timestamp_local = dt_util.as_local(timestamp_utc)
 
             # Determine report source
@@ -339,31 +615,44 @@ class GoogleFindMyMapView(HomeAssistantView):
                 report_source = "❓ Unknown"
                 report_color = "#6c757d"  # Gray
 
-            # Semantic location if available
-            semantic_info = ""
+            timestamp_display = escape(
+                timestamp_local.strftime("%Y-%m-%d %H:%M:%S %Z"), quote=True
+            )
+            report_source_html = escape(report_source, quote=True)
             semantic_location = loc.get("semantic_location")
-            if semantic_location:
-                semantic_info = f"<b>Location Name:</b> {semantic_location}<br>"
+            entity_id_text = escape(str(loc.get("entity_id", "Unknown")), quote=True)
+            state_text = escape(str(loc.get("state", "Unknown")), quote=True)
 
-            popup_text = f"""
-            <b>Location {i+1}</b><br>
-            <b>Coordinates:</b> {loc['lat']:.6f}, {loc['lon']:.6f}<br>
-            <b>GPS Accuracy:</b> {accuracy:.1f} meters<br>
-            <b>Timestamp:</b> {timestamp_local.strftime('%Y-%m-%d %H:%M:%S %Z')}<br>
-            <b style="color: {report_color}">Report Source:</b> <span style="color: {report_color}">{report_source}</span><br>
-            {semantic_info}<b>Entity ID:</b> {loc.get('entity_id', 'Unknown')}<br>
-            <b>Entity State:</b> {loc.get('state', 'Unknown')}<br>
-            """
+            popup_parts = [
+                f"<b>Location {i + 1}</b><br>",
+                f"<b>Coordinates:</b> {lat:.6f}, {lon:.6f}<br>",
+                f"<b>GPS Accuracy:</b> {accuracy:.1f} meters<br>",
+                f"<b>Timestamp:</b> {timestamp_display}<br>",
+                (
+                    f'<b style="color: {report_color}">Report Source:</b> '
+                    f'<span style="color: {report_color}">{report_source_html}</span><br>'
+                ),
+            ]
+            if semantic_location:
+                popup_parts.append(
+                    f"<b>Location Name:</b> {escape(str(semantic_location), quote=True)}<br>"
+                )
+            popup_parts.append(f"<b>Entity ID:</b> {entity_id_text}<br>")
+            popup_parts.append(f"<b>Entity State:</b> {state_text}<br>")
+
+            popup_html = "".join(popup_parts)
+            popup_js = json.dumps(popup_html)
+            tooltip_js = json.dumps(f"Accuracy: {accuracy:.1f}m")
 
             markers_js.append(
                 f"""
-                var marker_{i} = L.marker([{loc['lat']}, {loc['lon']}]);
+                var marker_{i} = L.marker([{lat}, {lon}]);
                 marker_{i}.accuracy = {accuracy};
-                marker_{i}.bindPopup(`{popup_text}`);
-                marker_{i}.bindTooltip('Accuracy: {accuracy:.1f}m');
+                marker_{i}.bindPopup({popup_js});
+                marker_{i}.bindTooltip({tooltip_js});
                 marker_{i}.addTo(map);
 
-                var circle_{i} = L.circle([{loc['lat']}, {loc['lon']}], {{
+                var circle_{i} = L.circle([{lat}, {lon}], {{
                     radius: {accuracy},
                     color: '{color}',
                     fillColor: '{color}',
@@ -380,7 +669,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>{device_name} - Location Map</title>
+            <title>{device_name_html} - Location Map</title>
             <meta charset="utf-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -440,22 +729,22 @@ class GoogleFindMyMapView(HomeAssistantView):
             </style>
         </head>
         <body>
-            <div class="filter-panel collapsed" id="filterPanel">
+            <div class="filter-panel collapsed" id="filterPanel" data-initial-start="{start_query_encoded}" data-initial-end="{end_query_encoded}" data-initial-accuracy="{accuracy_query_encoded}">
                 <button class="toggle-btn" onclick="toggleFilters()">📅 Filters</button>
 
                 <div class="filter-content" id="filterContent">
-                    <h2>{device_name}</h2>
+                    <h2>{device_name_html}</h2>
                     <div class="info">{len(locations)} locations shown</div>
                     <div class="current-time" id="currentTime">🕐 Loading current time...</div>
 
                     <div class="filter-section">
                         <div class="filter-control">
                             <label for="startTime">Start:</label>
-                            <input type="datetime-local" id="startTime" value="{start_local}">
+                            <input type="datetime-local" id="startTime" value="{start_local_attr}">
                         </div>
                         <div class="filter-control">
                             <label for="endTime">End:</label>
-                            <input type="datetime-local" id="endTime" value="{end_local}">
+                            <input type="datetime-local" id="endTime" value="{end_local_attr}">
                         </div>
                     </div>
 
@@ -464,7 +753,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                             <label for="accuracySlider">Accuracy Filter:</label>
                             <div class="slider-container">
                                 <input type="range" id="accuracySlider" class="accuracy-slider"
-                                       min="0" max="300" value="{accuracy_filter}" oninput="updateAccuracyFilter()">
+                                       min="0" max="300" value="{accuracy_attr}" oninput="updateAccuracyFilter()">
                                 <span class="accuracy-value" id="accuracyValue">Disabled</span>
                             </div>
                         </div>
@@ -477,6 +766,40 @@ class GoogleFindMyMapView(HomeAssistantView):
 
             <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
             <script>
+                function updateLocationWithParams(updates) {{
+                    const queryString = window.location.search.slice(1);
+                    const keys = Object.keys(updates);
+                    const preserved = queryString
+                        ? queryString.split('&').filter(Boolean).filter((pair) => {{
+                            const [rawKey] = pair.split('=');
+                            if (!rawKey) {{
+                                return false;
+                            }}
+                            let decodedKey = rawKey;
+                            try {{
+                                decodedKey = decodeURIComponent(rawKey);
+                            }} catch (err) {{
+                                decodedKey = rawKey;
+                            }}
+                            return !keys.includes(decodedKey);
+                        }})
+                        : [];
+
+                    keys.forEach((key) => {{
+                        const value = updates[key];
+                        if (value === null || value === undefined) {{
+                            return;
+                        }}
+                        preserved.push(`${{encodeURIComponent(key)}}=${{encodeURIComponent(value)}}`);
+                    }});
+
+                    const query = preserved.join('&');
+                    const basePath = window.location.pathname;
+                    const hash = window.location.hash || '';
+                    const destination = query ? `${{basePath}}?${{query}}${{hash}}` : `${{basePath}}{{hash}}`;
+                    window.location.href = destination;
+                }}
+
                 var map = L.map('map').setView([{center_lat}, {center_lon}], 13);
 
                 L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
@@ -559,6 +882,74 @@ class GoogleFindMyMapView(HomeAssistantView):
                     if (infoElement) {{ infoElement.textContent = visibleCount + ' locations shown'; }}
                 }}
 
+                function safeDecodeComponent(value) {{
+                    if (!value) {{
+                        return "";
+                    }}
+                    try {{
+                        return decodeURIComponent(value);
+                    }} catch (err) {{
+                        return value;
+                    }}
+                }}
+
+                function extractLocalInput(value) {{
+                    if (!value) {{
+                        return "";
+                    }}
+                    const match = value.match(/^(\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}})/);
+                    if (match) {{
+                        return match[1];
+                    }}
+                    const parsed = new Date(value);
+                    if (!Number.isNaN(parsed.getTime())) {{
+                        return formatDateTime(parsed);
+                    }}
+                    if (value.length >= 16) {{
+                        return value.slice(0, 16);
+                    }}
+                    return "";
+                }}
+
+                function registerInitialField(field, encoded) {{
+                    if (!field) {{
+                        return;
+                    }}
+                    const decoded = safeDecodeComponent(encoded);
+                    if (!field.dataset.initialIso) {{
+                        field.dataset.initialIso = decoded;
+                    }}
+                    if (!field.dataset.initialLocal) {{
+                        if (!field.value && decoded) {{
+                            const normalized = extractLocalInput(decoded);
+                            if (normalized) {{
+                                field.value = normalized;
+                            }}
+                        }}
+                        field.dataset.initialLocal = field.value || "";
+                    }}
+                }}
+
+                function convertFieldToIso(field, currentValue) {{
+                    if (!field) {{
+                        return null;
+                    }}
+                    const initialLocal = field.dataset.initialLocal;
+                    const initialIso = field.dataset.initialIso;
+                    if (
+                        initialLocal !== undefined &&
+                        initialIso &&
+                        currentValue === initialLocal
+                    ) {{
+                        return initialIso;
+                    }}
+                    const parsed = new Date(currentValue);
+                    if (Number.isNaN(parsed.getTime())) {{
+                        return null;
+                    }}
+                    return parsed.toISOString();
+                }}
+
                 function setQuickRange(days) {{
                     const end = new Date();
                     const start = new Date(end.getTime() - (days * 24 * 60 * 60 * 1000));
@@ -566,33 +957,72 @@ class GoogleFindMyMapView(HomeAssistantView):
                     document.getElementById('startTime').value = formatDateTime(start);
                 }}
 
-                function formatDateTime(date) {{ return date.toISOString().slice(0, 16); }}
+                function formatDateTime(date) {{
+                    const year = date.getFullYear();
+                    const month = String(date.getMonth() + 1).padStart(2, '0');
+                    const day = String(date.getDate()).padStart(2, '0');
+                    const hours = String(date.getHours()).padStart(2, '0');
+                    const minutes = String(date.getMinutes()).padStart(2, '0');
+                    return `${{year}}-${{month}}-${{day}}T${{hours}}:${{minutes}}`;
+                }}
 
                 function updateMap() {{
-                    const startTime = document.getElementById('startTime').value;
-                    const endTime = document.getElementById('endTime').value;
-                    const accuracyFilter = document.getElementById('accuracySlider').value;
+                    const startField = document.getElementById('startTime');
+                    const endField = document.getElementById('endTime');
+                    const accuracyField = document.getElementById('accuracySlider');
+                    const startValue = startField ? startField.value : '';
+                    const endValue = endField ? endField.value : '';
+                    const accuracyFilter = accuracyField ? accuracyField.value : '';
 
-                    if (!startTime || !endTime) {{
+                    if (!startValue || !endValue) {{
                         alert('Please select both start and end times');
                         return;
                     }}
 
-                    const url = new URL(window.location.href);
-                    url.searchParams.set('start', startTime + ':00Z');
-                    url.searchParams.set('end', endTime + ':00Z');
-                    if (accuracyFilter > 0) {{
-                        url.searchParams.set('accuracy', accuracyFilter);
-                    }} else {{
-                        url.searchParams.delete('accuracy');
+                    const startIso = convertFieldToIso(startField, startValue);
+                    const endIso = convertFieldToIso(endField, endValue);
+
+                    if (!startIso || !endIso) {{
+                        alert('Please provide valid start and end times');
+                        return;
                     }}
-                    window.location.href = url.toString();
+
+                    const updates = {{
+                        start: startIso,
+                        end: endIso,
+                    }};
+                    if (parseInt(accuracyFilter, 10) > 0) {{
+                        updates.accuracy = accuracyFilter;
+                    }} else {{
+                        updates.accuracy = null;
+                    }}
+
+                    updateLocationWithParams(updates);
                 }}
 
                 document.addEventListener('DOMContentLoaded', function() {{
+                    const filterPanel = document.getElementById('filterPanel');
+                    if (filterPanel) {{
+                        const startField = document.getElementById('startTime');
+                        const endField = document.getElementById('endTime');
+                        const startAttr = filterPanel.dataset.initialStart;
+                        const endAttr = filterPanel.dataset.initialEnd;
+                        const accuracyAttr = filterPanel.dataset.initialAccuracy;
+
+                        registerInitialField(startField, startAttr);
+                        registerInitialField(endField, endAttr);
+                        if (accuracyAttr) {{
+                            const decodedAccuracy = decodeURIComponent(accuracyAttr);
+                            const slider = document.getElementById('accuracySlider');
+                            if (slider && decodedAccuracy !== '') {{
+                                slider.value = decodedAccuracy;
+                            }}
+                        }}
+                    }}
+
                     updateAccuracyFilter();
-                    const initialFilter = {accuracy_filter};
-                    if (initialFilter > 0) {{ filterMarkersByAccuracy(initialFilter); }}
+                    const sliderValue = parseInt(document.getElementById('accuracySlider').value, 10);
+                    if (sliderValue > 0) {{ filterMarkersByAccuracy(sliderValue); }}
 
                     function updateCurrentTime() {{
                         const now = new Date();
@@ -611,37 +1041,9 @@ class GoogleFindMyMapView(HomeAssistantView):
         </html>
         """
 
-    # ---------------------------- Token helper ----------------------------
-
-    def _get_simple_token(self) -> str:
-        """Generate a simple token for basic authentication.
-
-        Notes:
-        - Options-first harmony with other platforms (weekly/static).
-        - No logging of the token value here or elsewhere.
-        """
-        import hashlib
-        import time
-
-        config_entries = self.hass.config_entries.async_entries(DOMAIN)
-        token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-        if config_entries:
-            entry = config_entries[0]
-            token_expiration_enabled = entry.options.get(
-                OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                entry.data.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION),
-            )
-
-        # Prefer HA's instance UUID if present; fall back to a benign constant.
-        ha_uuid = str(self.hass.data.get("core.uuid") or "ha")
-
-        if token_expiration_enabled:
-            week = str(int(time.time() // 604800))  # 7-day bucket
-            return hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
-        return hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
-
 
 # ------------------------------ Redirect View -------------------------------
+
 
 class GoogleFindMyMapRedirectView(HomeAssistantView):
     """View to redirect to appropriate map URL based on request origin."""
@@ -665,7 +1067,9 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
         # Require token but do not echo it back in logs.
         auth_token = request.query.get("token")
         if not auth_token:
-            return _html_response("Bad Request", "Missing authentication token.", status=400)
+            return _html_response(
+                "Bad Request", "Missing authentication token.", status=400
+            )
 
         # Preserve all query parameters (incl. start/end/accuracy/token) in the redirect.
         # Build a relative URL so the browser keeps the current origin automatically.

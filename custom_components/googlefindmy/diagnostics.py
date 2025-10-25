@@ -11,12 +11,19 @@ Privacy note:
 - POPETS’25 (Böttger et al., 2025) highlights that EID-related artifacts and UT bits can be used
   for correlation/identification. We therefore **over-redact** such fields, even if we never place
   them into diagnostics directly. This is a defense-in-depth safeguard to keep future changes safe.
+
+Additional privacy hardening (message bodies):
+- Coordinator "recent errors" may contain a human-readable "where(...)" prefix that can embed device
+  names. We therefore strip any parenthesized content from the prefix and avoid returning the free-form
+  message body entirely. Only a coarse "where" tag, error type, and timestamp are exposed.
 """
+
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
@@ -37,10 +44,14 @@ from .const import (
     OPT_ENABLE_STATS_ENTITIES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_IGNORED_DEVICES,
+    # defaults for options (used to avoid hard-coded literals)
+    DEFAULT_ENABLE_STATS_ENTITIES,
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     # secrets in entry.data (must never be exposed)
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
 )
+from .coordinator import GoogleFindMyCoordinator
 
 # ---------------------------------------------------------------------------
 # Redaction policy
@@ -124,7 +135,7 @@ TO_REDACT: list[str] = [
 # ---------------------------------------------------------------------------
 
 
-def _monotonic_to_wall_seconds(last_mono: Optional[float]) -> Optional[float]:
+def _monotonic_to_wall_seconds(last_mono: float | None) -> float | None:
     """Convert a stored monotonic timestamp to wall-clock seconds since epoch (UTC).
 
     We infer the wall time using the current monotonic delta; this is best-effort
@@ -158,7 +169,7 @@ def _coerce_pos_int(value: Any, default: int) -> int:
         return default
 
 
-def _iso_utc(ts: Optional[float]) -> Optional[str]:
+def _iso_utc(ts: float | None) -> str | None:
     """Render epoch seconds as ISO 8601 UTC string, or None."""
     if not isinstance(ts, (int, float)) or ts <= 0:
         return None
@@ -177,6 +188,62 @@ def _safe_truncate(text: Any, limit: int = 160) -> str:
     if len(s) <= limit:
         return s
     return s[: max(0, limit - 1)] + "…"
+
+
+def _sanitize_diag_entry(payload: Any) -> dict[str, Any]:
+    """Return a diagnostics-friendly snapshot of a buffer entry."""
+    if not isinstance(payload, dict):
+        return {}
+
+    sanitized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str):
+            # Skip unknown key types to avoid leaking repr() content.
+            continue
+
+        lowered_key = key.casefold()
+        # Drop any name/title/label-like keys to avoid leaking human readable names.
+        if "name" in lowered_key or "title" in lowered_key or "label" in lowered_key:
+            continue
+
+        if isinstance(value, (int, float, bool)) or value is None:
+            sanitized[key] = value
+        else:
+            sanitized[key] = _safe_truncate(value)
+    return sanitized
+
+
+def _diagnostics_buffer_summary(raw: Any) -> dict[str, Any]:
+    """Sanitize a diagnostics buffer payload for coordinator diagnostics."""
+    if not isinstance(raw, dict):
+        return {}
+
+    summary: dict[str, Any] = {}
+
+    raw_summary = raw.get("summary")
+    if isinstance(raw_summary, dict):
+        sanitized_summary: dict[str, Any] = {}
+        for key, value in raw_summary.items():
+            if isinstance(value, (int, float)):
+                sanitized_summary[key] = value
+            else:
+                sanitized_summary[key] = _safe_truncate(value, 48)
+        if sanitized_summary:
+            summary["summary"] = sanitized_summary
+
+    raw_warnings = raw.get("warnings")
+    if isinstance(raw_warnings, list) and raw_warnings:
+        summary["warnings_preview"] = [
+            _sanitize_diag_entry(item) for item in raw_warnings[:5]
+        ]
+
+    raw_errors = raw.get("errors")
+    if isinstance(raw_errors, list) and raw_errors:
+        summary["errors_preview"] = [
+            _sanitize_diag_entry(item) for item in raw_errors[:5]
+        ]
+
+    return summary
 
 
 def _perf_durations(perf: dict[str, Any]) -> dict[str, Any]:
@@ -200,12 +267,16 @@ def _concurrency_block(hass: HomeAssistant) -> dict[str, int]:
     """Return contention counters collected during setup/runtime."""
     bucket = hass.data.get(DOMAIN, {}) or {}
     return {
-        "fcm_lock_contention_count": int(bucket.get("fcm_lock_contention_count", 0) or 0),
-        "services_lock_contention_count": int(bucket.get("services_lock_contention_count", 0) or 0),
+        "fcm_lock_contention_count": int(
+            bucket.get("fcm_lock_contention_count", 0) or 0
+        ),
+        "services_lock_contention_count": int(
+            bucket.get("services_lock_contention_count", 0) or 0
+        ),
     }
 
 
-def _fcm_receiver_state(hass: HomeAssistant) -> Optional[dict[str, Any]]:
+def _fcm_receiver_state(hass: HomeAssistant) -> dict[str, Any] | None:
     """Summarize FCM receiver runtime health without leaking internals."""
     bucket = hass.data.get(DOMAIN, {}) or {}
     rcvr = bucket.get("fcm_receiver")
@@ -244,8 +315,18 @@ def _fcm_receiver_state(hass: HomeAssistant) -> Optional[dict[str, Any]]:
     }
 
 
-def _recent_errors_block(coordinator: Any) -> Optional[list[dict[str, Any]]]:
-    """Convert coordinator.recent_errors (deque) to a redacted list."""
+def _recent_errors_block(coordinator: Any) -> list[dict[str, Any]] | None:
+    """Convert coordinator.recent_errors (deque) to a redacted list.
+
+    Original intent:
+        Return a bounded list of recent non-fatal errors for diagnostics.
+
+    Correction / privacy hardening:
+        Messages may include a 'where(...)' prefix that could embed device display names.
+        We now extract only the coarse 'where' label (text before the first ':') and
+        replace any parenthesized content with a generic placeholder '(*)'. The free-form
+        message body is **not** included to avoid PII leakage.
+    """
     try:
         recent = getattr(coordinator, "recent_errors", None)
     except Exception:
@@ -261,11 +342,20 @@ def _recent_errors_block(coordinator: Any) -> Optional[list[dict[str, Any]]]:
         except Exception:
             # Be defensive with unknown tuple shapes
             ts, etype, msg = (None, None, None)
+
+        # Extract a safe "where" tag (prefix up to ':') and scrub parentheses content.
+        where = None
+        try:
+            prefix = str(msg or "").split(":", 1)[0].strip()
+            where = re.sub(r"\([^)]*\)", "(*)", prefix)
+        except Exception:
+            where = None
+
         items.append(
             {
                 "timestamp": _iso_utc(ts),
                 "error_type": _safe_truncate(etype, 64),
-                "message": _safe_truncate(msg, 160),
+                "where": _safe_truncate(where, 64),
             }
         )
     return items or None
@@ -304,18 +394,21 @@ async def async_get_config_entry_diagnostics(
         # Stay resilient if loader fails in custom environments
         integration_meta = {}
 
-    # --- Coordinator / runtime_data (preferred) or hass.data fallback ---
-    coordinator = None
+    # --- Coordinator / runtime_data (typed container) ---
+    coordinator: GoogleFindMyCoordinator | None = None
     runtime = getattr(entry, "runtime_data", None)
-    if runtime:
-        # Allow either a direct coordinator or a holder object with attribute "coordinator"
-        coordinator = getattr(runtime, "coordinator", runtime)
-    if coordinator is None:
-        coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if isinstance(runtime, GoogleFindMyCoordinator):
+        coordinator = runtime
+    elif runtime is not None and hasattr(runtime, "coordinator"):
+        candidate = getattr(runtime, "coordinator")
+        if isinstance(candidate, GoogleFindMyCoordinator):
+            coordinator = candidate
 
     # --- Build a compact, anonymized options snapshot (no raw strings that could contain PII) ---
     opt = entry.options
-    ignored_raw = opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
+    ignored_raw = (
+        opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
+    )
 
     # Coerce to handle legacy list[str] format gracefully
     if isinstance(ignored_raw, list):
@@ -327,17 +420,29 @@ async def async_get_config_entry_diagnostics(
 
     config_summary = {
         # Durations and numeric thresholds
-        "location_poll_interval": _coerce_pos_int(opt.get(OPT_LOCATION_POLL_INTERVAL, 300), 300),
+        "location_poll_interval": _coerce_pos_int(
+            opt.get(OPT_LOCATION_POLL_INTERVAL, 300), 300
+        ),
         "device_poll_delay": _coerce_pos_int(opt.get(OPT_DEVICE_POLL_DELAY, 5), 5),
-        "min_accuracy_threshold": _coerce_pos_int(opt.get(OPT_MIN_ACCURACY_THRESHOLD, 100), 100),
+        "min_accuracy_threshold": _coerce_pos_int(
+            opt.get(OPT_MIN_ACCURACY_THRESHOLD, 100), 100
+        ),
         "movement_threshold": _coerce_pos_int(opt.get(OPT_MOVEMENT_THRESHOLD, 50), 50),
         # Feature toggles
-        "google_home_filter_enabled": bool(opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, False)),
-        "enable_stats_entities": bool(opt.get(OPT_ENABLE_STATS_ENTITIES, True)),
+        "google_home_filter_enabled": bool(
+            opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, False)
+        ),
+        "enable_stats_entities": bool(
+            opt.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
+        ),
         # Token lifetime: store boolean value
-        "map_view_token_expiration": bool(opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, False)),
+        "map_view_token_expiration": bool(
+            opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+        ),
         # Counts only (never expose strings/IDs)
-        "google_home_filter_keywords_count": _count_keywords(opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS)),
+        "google_home_filter_keywords_count": _count_keywords(
+            opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS)
+        ),
         "ignored_devices_count": ignored_count,
     }
 
@@ -372,12 +477,16 @@ async def async_get_config_entry_diagnostics(
             known_devices_count = None
 
         try:
-            cache_items_count = len(getattr(coordinator, "_device_location_data", {}) or {})
+            cache_items_count = len(
+                getattr(coordinator, "_device_location_data", {}) or {}
+            )
         except (AttributeError, TypeError):
             cache_items_count = None
 
         try:
-            last_poll_wall = _monotonic_to_wall_seconds(getattr(coordinator, "_last_poll_mono", None))
+            last_poll_wall = _monotonic_to_wall_seconds(
+                getattr(coordinator, "_last_poll_mono", None)
+            )
         except (AttributeError, TypeError):
             last_poll_wall = None
 
@@ -394,8 +503,22 @@ async def async_get_config_entry_diagnostics(
         perf_metrics = getattr(coordinator, "performance_metrics", {}) or {}
         setup_perf = _perf_durations(perf_metrics)
 
-        # Recent, redacted non-fatal errors (bounded)
+        # Recent, strictly redacted non-fatal errors (bounded)
         recent_errors = _recent_errors_block(coordinator)
+
+        # Optional anonymous counters: enabled poll targets & present devices as seen last
+        try:
+            enabled_poll_targets_count = len(
+                getattr(coordinator, "_enabled_poll_device_ids", set()) or set()
+            )
+        except (AttributeError, TypeError):
+            enabled_poll_targets_count = None
+        try:
+            present_devices_seen_count = len(
+                getattr(coordinator, "_present_device_ids", set()) or set()
+            )
+        except (AttributeError, TypeError):
+            present_devices_seen_count = None
 
         coordinator_block = {
             "is_polling": bool(getattr(coordinator, "_is_polling", False)),
@@ -403,11 +526,23 @@ async def async_get_config_entry_diagnostics(
             "cache_items_count": cache_items_count,
             "last_poll_wall_ts": last_poll_wall,  # seconds since epoch (UTC)
             "stats": stats,
+            "enabled_poll_targets_count": enabled_poll_targets_count,
+            "present_devices_seen_count": present_devices_seen_count,
         }
         if setup_perf:
             coordinator_block["setup_performance"] = setup_perf
         if recent_errors:
             coordinator_block["recent_errors"] = recent_errors
+
+        diag_buffer = getattr(coordinator, "_diag", None)
+        if diag_buffer is not None and hasattr(diag_buffer, "to_dict"):
+            try:
+                raw_diag = diag_buffer.to_dict()
+            except Exception:
+                raw_diag = None
+            sanitized_diag = _diagnostics_buffer_summary(raw_diag)
+            if sanitized_diag:
+                coordinator_block["diagnostics_buffer"] = sanitized_diag
 
     # Concurrency & FCM receiver (global, not per-entry)
     concurrency = _concurrency_block(hass)

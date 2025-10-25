@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/NovaApi/ExecuteAction/nbe_execute_action.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
@@ -6,12 +7,12 @@
 from __future__ import annotations
 
 import binascii
-from typing import Any, Optional
+from typing import Any
 
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 
 # Session-stable client UUID (created lazily to avoid import-time side effects)
-_CLIENT_UUID: Optional[str] = None
+_CLIENT_UUID: str | None = None
 
 
 def _get_client_uuid() -> str:
@@ -26,8 +27,8 @@ def create_action_request(
     canonic_device_id: str,
     gcm_registration_id: str,
     *,
-    request_uuid: Optional[str] = None,
-    fmd_client_uuid: Optional[str] = None,
+    request_uuid: str | None = None,
+    fmd_client_uuid: str | None = None,
 ) -> Any:
     """Build an ExecuteActionRequest protobuf for Nova (pure builder, no I/O).
 

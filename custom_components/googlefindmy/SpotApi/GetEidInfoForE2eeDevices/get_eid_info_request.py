@@ -1,7 +1,6 @@
 # custom_components/googlefindmy/SpotApi/GetEidInfoForE2eeDevices/get_eid_info_request.py
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
-#
 """
 GetEidInfoForE2eeDevices request helpers (async-first).
 
@@ -29,12 +28,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from google.protobuf.message import DecodeError  # parse-time error type for protobufs
 
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2
 from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ def _build_request_bytes() -> bytes:
     return req.SerializeToString()
 
 
-async def _spot_call_async(scope: str, payload: bytes) -> bytes:
+async def _spot_call_async(scope: str, payload: bytes, *, cache: TokenCache) -> bytes:
     """Call the Spot API asynchronously.
 
     Prefer an async helper if available; otherwise run the sync helper in an executor.
@@ -69,29 +71,41 @@ async def _spot_call_async(scope: str, payload: bytes) -> bytes:
         Raw response bytes.
 
     Raises:
-        RuntimeError: on underlying request errors.
+        SpotApiEmptyResponseError: if trailers-only/invalid body is indicated.
+        RuntimeError: on other underlying request errors.
     """
     # Try native async helper first
     try:
         from custom_components.googlefindmy.SpotApi.spot_request import (  # type: ignore
             async_spot_request,
+            SpotTrailersOnlyError,
         )
 
         if callable(async_spot_request):
-            return await async_spot_request(scope, payload)
-    except Exception:
-        # Fallback to sync path below
-        pass
+            try:
+                return await async_spot_request(scope, payload, cache=cache)
+            except SpotTrailersOnlyError as e:
+                # Map to integration-level error expected by callers
+                raise SpotApiEmptyResponseError(
+                    "Empty gRPC body (trailers-only) for GetEidInfoForE2eeDevices"
+                ) from e
+            except TypeError as exc:
+                raise RuntimeError(
+                    "async_spot_request() implementation is outdated; missing cache= support."
+                ) from exc
+    except Exception as import_error:  # pragma: no cover - defensive
+        raise RuntimeError(
+            "Async SPOT request helper is unavailable; update integration dependencies."
+        ) from import_error
 
-    # Fallback: run synchronous spot_request in a worker thread
-    from custom_components.googlefindmy.SpotApi.spot_request import spot_request  # type: ignore
 
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, spot_request, scope, payload)
-
-
-async def async_get_eid_info() -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesResponse:
+async def async_get_eid_info(
+    *, cache: TokenCache
+) -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesResponse:
     """Fetch and parse EID info for E2EE devices (async, preferred).
+
+    Args:
+        cache: Entry-scoped TokenCache used for SPOT authentication and token reuse.
 
     Returns:
         Parsed `GetEidInfoForE2eeDevicesResponse` protobuf message.
@@ -99,14 +113,15 @@ async def async_get_eid_info() -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesRespo
     Raises:
         SpotApiEmptyResponseError: if the response body is empty (e.g., trailers-only).
         DecodeError: if the protobuf payload cannot be parsed.
-        RuntimeError: for lower-level Spot API request failures.
+        RuntimeError: for lower-level Spot API request failures or missing helpers.
     """
     serialized_request = _build_request_bytes()
-    response_bytes = await _spot_call_async("GetEidInfoForE2eeDevices", serialized_request)
+    response_bytes = await _spot_call_async(
+        "GetEidInfoForE2eeDevices", serialized_request, cache=cache
+    )
 
-    # Defensive checks + diagnostics for trailers-only / empty payloads
+    # Defensive checks + diagnostics for trailers-only / empty payloads (sync-path fallback)
     if not response_bytes:
-        # Actionable guidance: most often caused by expired/invalid auth; forces re-auth in higher layers
         _LOGGER.warning(
             "GetEidInfoForE2eeDevices: empty/none response (len=0, pre=). "
             "This often indicates an authentication issue (trailers-only with grpc-status!=0). "

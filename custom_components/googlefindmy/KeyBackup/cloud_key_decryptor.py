@@ -23,11 +23,11 @@ Design goals (HA Best Practices / Platinum Quality targets):
 NOTE: Do not import this module just to run the sample block below. The
 `if __name__ == "__main__":` section is only for local/manual testing.
 """
+
 from __future__ import annotations
 
 import secrets
 from binascii import unhexlify
-from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -114,7 +114,7 @@ def _split_iv_and_ciphertext(
 def decrypt_aes_gcm(
     key: bytes,
     encrypted_data_and_iv: bytes,
-    additional_data: Optional[bytes] = None,
+    additional_data: bytes | None = None,
     iv_length: int = GCM_IV_LEN_DEFAULT,
 ) -> bytes:
     """Decrypt AES-GCM where the IV is prepended to the payload.
@@ -145,7 +145,7 @@ def decrypt_aes_gcm(
 def encrypt_aes_gcm(
     key: bytes,
     plaintext: bytes,
-    additional_data: Optional[bytes] = None,
+    additional_data: bytes | None = None,
     iv_length: int = GCM_IV_LEN_DEFAULT,
 ) -> bytes:
     """Encrypt with AES-GCM and prepend the IV to the ciphertext+tag.
@@ -242,7 +242,9 @@ def decrypt_aes_gcm_with_derived_key(
     hkdf_info = P256_HKDF_AES_GCM if derive_with_public_key else SHARED_HKDF_AES_GCM
 
     if derive_with_public_key:
-        shared_public_key = encrypted_data[version_length : version_length + ciphertext_offset]
+        shared_public_key = encrypted_data[
+            version_length : version_length + ciphertext_offset
+        ]
         private_key = derive_shared_secret(private_key, shared_public_key)
 
     derived_key = derive_key_using_hkdf_sha256(private_key, hkdf_salt, hkdf_info)
@@ -268,7 +270,9 @@ def derive_shared_secret(private_key_jwt: bytes, public_key: bytes) -> bytes:
         raise ValueError("Public key must be 65 bytes (uncompressed SEC1)")
 
     private_key_bytes = private_key_jwt[:32]
-    priv = ec.derive_private_key(int.from_bytes(private_key_bytes, "big"), ec.SECP256R1())
+    priv = ec.derive_private_key(
+        int.from_bytes(private_key_bytes, "big"), ec.SECP256R1()
+    )
     pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), public_key)
     return priv.exchange(ec.ECDH(), pub)
 
@@ -282,19 +286,27 @@ def decrypt_recovery_key(lskf_hash: bytes, encrypted_recovery_key: bytes) -> byt
     )
 
 
-def decrypt_application_key(recovery_key: bytes, encrypted_application_key: bytes) -> bytes:
+def decrypt_application_key(
+    recovery_key: bytes, encrypted_application_key: bytes
+) -> bytes:
     """Decrypt application key using the recovery key."""
     return decrypt_aes_gcm_with_derived_key(
-        encrypted_application_key, recovery_key, ascii_to_bytes("V1 encrypted_application_key")
+        encrypted_application_key,
+        recovery_key,
+        ascii_to_bytes("V1 encrypted_application_key"),
     )
 
 
-def decrypt_security_domain_key(application_key: bytes, encrypted_security_domain_key: bytes) -> bytes:
+def decrypt_security_domain_key(
+    application_key: bytes, encrypted_security_domain_key: bytes
+) -> bytes:
     """Decrypt security domain key using the application key."""
     return decrypt_aes_gcm(application_key, encrypted_security_domain_key)
 
 
-def decrypt_shared_key(security_domain_key: bytes, encrypted_shared_key: bytes) -> bytes:
+def decrypt_shared_key(
+    security_domain_key: bytes, encrypted_shared_key: bytes
+) -> bytes:
     """Decrypt shared key using the security domain key (ECDH/HKDF mode)."""
     return decrypt_aes_gcm_with_derived_key(
         encrypted_shared_key, security_domain_key, ascii_to_bytes("V1 shared_key"), True
@@ -332,7 +344,9 @@ def decrypt_account_key(owner_key: bytes, encrypted_account_key: bytes) -> bytes
     if len(encrypted_account_key) == 32:  # 16 IV + 16 CT (CBC)
         return decrypt_aes_cbc_no_padding(owner_key, encrypted_account_key, CBC_IV_LEN)
     if len(encrypted_account_key) == 44:  # 12 IV + 32 CT||TAG (GCM)
-        return decrypt_aes_gcm(owner_key, encrypted_account_key, iv_length=GCM_IV_LEN_DEFAULT)
+        return decrypt_aes_gcm(
+            owner_key, encrypted_account_key, iv_length=GCM_IV_LEN_DEFAULT
+        )
     raise ValueError("The encrypted Account Key has invalid length")
 
 
@@ -346,9 +360,15 @@ if __name__ == "__main__":
     # Load sample data
     pin = get_example_data("sample_pin")
     pin_salt = unhexlify(get_example_data("sample_pin_salt"))
-    encrypted_recovery_key = unhexlify(get_example_data("sample_locally_encrypted_recovery_key"))
-    encrypted_application_key = unhexlify(get_example_data("sample_encrypted_application_key"))
-    encrypted_security_domain_key = unhexlify(get_example_data("sample_encrypted_security_domain_key"))
+    encrypted_recovery_key = unhexlify(
+        get_example_data("sample_locally_encrypted_recovery_key")
+    )
+    encrypted_application_key = unhexlify(
+        get_example_data("sample_encrypted_application_key")
+    )
+    encrypted_security_domain_key = unhexlify(
+        get_example_data("sample_encrypted_security_domain_key")
+    )
     encrypted_shared_key = unhexlify(get_example_data("sample_encrypted_shared_key"))
     encrypted_owner_key = unhexlify(get_example_data("sample_encrypted_owner_key"))
     encrypted_eik = unhexlify(get_example_data("sample_encrypted_eik"))
@@ -358,7 +378,9 @@ if __name__ == "__main__":
     lskf_hash = get_lskf_hash(pin, pin_salt)
     recovery_key = decrypt_recovery_key(lskf_hash, encrypted_recovery_key)
     application_key = decrypt_application_key(recovery_key, encrypted_application_key)
-    security_domain_key = decrypt_security_domain_key(application_key, encrypted_security_domain_key)
+    security_domain_key = decrypt_security_domain_key(
+        application_key, encrypted_security_domain_key
+    )
     shared_key = decrypt_shared_key(security_domain_key, encrypted_shared_key)
     owner_key = decrypt_owner_key(shared_key, encrypted_owner_key)
     eik = decrypt_eik(owner_key, encrypted_eik)

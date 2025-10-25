@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/NovaApi/ExecuteAction/PlaySound/sound_request.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
@@ -5,7 +6,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
 
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     create_action_request,
@@ -17,7 +17,7 @@ def create_sound_request(
     should_start: bool,
     canonic_device_id: str,
     gcm_registration_id: str,
-    request_uuid: Optional[str] = None,
+    request_uuid: str | None = None,
 ) -> str:
     """Build the hex-encoded Nova payload for a Play/Stop Sound action (pure builder).
 

@@ -1,7 +1,9 @@
+# custom_components/googlefindmy/NovaApi/ExecuteAction/LocateTracker/decrypted_location.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
+
 
 class WrappedLocation:
     def __init__(self, decrypted_location, time, accuracy, status, is_own_report, name):

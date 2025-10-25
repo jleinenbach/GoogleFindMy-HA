@@ -1,4 +1,4 @@
-# Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> 
+# Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
 A comprehensive Home Assistant custom integration for Google's FindMy Device network, enabling real-time(ish) tracking and control of FindMy devices directly within Home Assistant!
 
@@ -12,10 +12,14 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 [Google FindMy Discord Server](https://discord.gg/RHvBYZ58P)
 
 ---
-<img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
+<img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Continuous integration status](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml/badge.svg)](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
+
+### Continuous integration checks
+
+Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, `mypy --strict`, and `pytest -q --cov` on Python 3.12 to protect code quality before merges.
 
 ---
-## Features 
+## Features
 
 - 🗺️ **Real-time Device Tracking**: Track Google FindMy devices with location data, sourced from the FindMy network
 - ⏱️ **Configurable Polling**: Flexible polling intervals with rate limit protection
@@ -24,7 +28,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 - 📍 **Historical Map-View**: Each tracker has a filterable Map-View that shows tracker movement with location data
 - 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
 - ❣️ **More to come!**
-  
+
 >[!NOTE]
 >**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**
 >
@@ -56,7 +60,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 3. Copy the entire contents of the secrets.json file.
     - Specifically, open the file in a text editor, select all, and copy.
 
-### <ins>Authentication Part 2 (Home Assistant Steps)</ins> 
+### <ins>Authentication Part 2 (Home Assistant Steps)</ins>
 4. Add the integration to your Home Assistant install.
 5. In Home Assistant, paste the copied text from secrets.json when prompted.
 6. After completing authentication and adding devices, RESTART Home Assistant!
@@ -64,6 +68,12 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 ### Problems with Authentication?
 >[!NOTE]
 >Recently, some have had issues with the script from the repository above.  If you follow all the steps in Leon's repository and are unable to get through the main.py sequence due to errors, please try using my modification of the script [BACKUP:GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools)
+
+### Automatic discovery & credential updates
+
+- **Auth/secrets.json watcher:** Home Assistant now monitors the integration's `Auth/secrets.json` file. Dropping a new bundle into `custom_components/googlefindmy/Auth/` immediately opens the config flow with the email and tokens pre-filled, so you can confirm the entry without pasting anything manually.
+- **Update flows for existing entries:** When the watcher detects refreshed credentials for an account that is already configured, the integration pushes a `discovery_update` flow. Accepting it reauthenticates the existing entry and keeps all devices and options intact.
+- **Cloud discovery channel:** Cloud-triggered discovery continues to operate in parallel, using the same deduplication logic as the secrets watcher. Regardless of source, duplicate flows are suppressed using Home Assistant's `DiscoveryKey` mechanism.
 
 ## Configuration Options
 
@@ -81,6 +91,17 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | enable_stats_entities | true | toggle | Enables/disables "Google Find My Integration" statistics entity, which displays various useful statistics, including when polling is active |
 | map_vew_token_expiration | false | toggle | Enables/disables expiration of generated API token for accessing recorder history, used in Map View location data queries |
 
+## Subentries and feature groups
+
+Home Assistant's config-entry **subentries** let the integration organize devices and helper entities into feature groups. During setup, the config flow seeds a `Core tracking` group that powers the device tracker, sensors, binary sensors, and helper buttons exposed by the integration. The group metadata includes the Home Assistant platforms that should load, whether Firebase Cloud Messaging (FCM) push is enabled, and which devices are currently visible in that group.
+
+- **Initial setup:** The device-selection step creates or updates the `Core tracking` feature group automatically. No manual action is required unless you later add additional Google accounts or feature groups.
+- **Options workflow:** Every options step that exposes a **Feature group** selector applies its changes only to the chosen subentry. For example, when you modify polling thresholds or enable the statistics helpers, the integration persists those toggles on the selected feature group and keeps its registry of visible devices in sync.
+- **Device visibility:** Restoring ignored devices assigns them to the feature group you pick in the options flow so they reappear under the correct collection of entities.
+- **Repairs menu:** The **Subentry repairs** workflow provides bulk management tools. Use **Move devices** to reassign trackers between groups, or **Delete subentry** to retire a group after selecting a fallback destination for its devices. The integration enforces that at least one feature group remains so core tracking continues to function.
+
+Advanced installations that use push notifications or future feature packs may surface additional groups. Each group is fully independent: credentials, options, and repair actions all respect the feature group that you select in the UI.
+
 ## Services (Actions)
 
 The integration provides a couple of Home Assistant Actions for use with automations.  Note that Device ID is different than Entity ID.  Device ID is a long, alpha-numeric value that can be obtained from the Device info pages.
@@ -90,6 +111,40 @@ The integration provides a couple of Home Assistant Actions for use with automat
 | googlefindmy.locate_device | Device ID | Request fresh location data for a specific device. |
 | googlefindmy.play_sound | Device ID | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. |
 | googlefindmy.refresh_device_urls | - | Refreshes all device Map View URLs.  Useful if you are having problems with accessing Map View pages. |
+
+## Supported devices and functions
+
+- **Device coverage:** Phones, tablets, Wear OS devices, earbuds, and compatible Bluetooth trackers surfaced in the Google Find My Device network.  Any device that appears in the official Google Find My interface is eligible to be imported.
+- **Entities created:** Each tracked device exposes a `device_tracker` entity for live location, a binary sensor for connection state, and optional helper entities (statistics, sound trigger button) depending on device capabilities.
+- **Action support:** Sound playback is available on hardware that exposes the native "Play sound" action within Google's ecosystem.  The integration hides the button on devices that do not advertise support, aligning with [Home Assistant action documentation](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-supported-functions/).
+
+## Data updates and background behavior
+
+- **Coordinator-driven updates:** Location and metadata are refreshed through Home Assistant's [`DataUpdateCoordinator`](https://developers.home-assistant.io/docs/integration_fetching_data/) with a default 300-second polling interval.  Staggered per-device delays keep API calls within Google's rate limits.
+- **Manual refresh:** Call the `googlefindmy.locate_device` action to request fresh data outside the scheduled polling cycle.  The integration debounces requests to avoid repeated queries that would exceed the appropriate polling guidance.
+- **Repair flows:** When authentication expires or Google invalidates API tokens, the integration raises a [Home Assistant repair issue](https://developers.home-assistant.io/docs/core/platform/repairs/) that guides you through reauthentication without removing the config entry.
+
+## Known limitations
+
+- **Historical data availability:** Map View history is generated locally and depends on the Recorder integration retaining statistics; pruning recorder data will remove historical traces.
+- **Offline devices:** Google only reports the last known location for powered-off or offline hardware.  Devices may appear as `unavailable` until they reconnect to the Find My network.
+- **Authentication tooling:** Generating `Auth/secrets.json` currently relies on the external GoogleFindMyTools scripts.  Future upstream changes to Google's login flow may require updated tooling before the integration can connect again.
+- **Multiple households:** Home Assistant imports all trackers from the authenticated Google account.  Fine-grained sharing to limit visibility per household member is not yet available and should be handled via entity permissions.
+
+## Deinstallation / Removal
+
+1. Disable or delete related automations, dashboards, and notification flows that reference `googlefindmy` entities to prevent "entity not found" errors after removal.
+2. Open **Settings → Devices & Services → Integrations → Google Find My Device**.
+3. Use the **⋮ menu → Delete** action to remove the config entry.  Home Assistant will unload entities and purge the stored token cache.
+4. If you installed through HACS, remove the integration from HACS to stop future updates.  For manual installs, delete `custom_components/googlefindmy/` from your Home Assistant configuration directory.
+5. Restart Home Assistant to clear any cached services.  If you encounter lingering repairs, resolve them through the [Home Assistant Repairs dashboard](https://www.home-assistant.io/integrations/repairs/).
+
+## Concrete use cases
+
+- Trigger a sound alert on misplaced earbuds via the `googlefindmy.play_sound` action when a BLE beacon indicates they are nearby.
+- Build an automation that notifies you when a tracker enters or leaves a geofenced zone based on the `device_tracker` entity state.
+- Monitor integration health by surfacing the statistics entity in dashboards to verify polling intervals and API latency.
+- Combine the Map View history with [companion dashboards](https://github.com/BSkando/GoogleFindMy-Card) to visualize multi-day movement patterns for shared family devices.
 
 ## Troubleshooting
 
@@ -109,6 +164,14 @@ The integration respects Google's rate limits by:
 - Minimum poll interval enforcement
 - Automatic retry with exponential backoff
 
+### 401 Unauthorized responses
+- When Google's Nova endpoint returns 401, the integration now clears both the
+  entry-scoped and global ADM token cache entries before refreshing. This
+  ensures a brand-new token is minted and stored automatically, without
+  requiring you to restart Home Assistant or re-run the configuration flow.
+- The regeneration also refreshes the associated metadata so subsequent
+  requests resume with the updated token immediately.
+
 ## Privacy and Security
 
 - All location data uses Google's end-to-end encryption
@@ -118,13 +181,50 @@ The integration respects Google's rate limits by:
 
 ## Contributing
 
-Contributions are welcome and encouraged! 
+Contributions are welcome and encouraged!
 
-To contrubuted, please:
+To contribute, please:
 1. Fork the repository
 2. Create a feature branch
-3. Test thoroughly with your Find My devices
-4. Submit a pull request with detailed description
+3. Install the development dependencies with `python -m pip install -r requirements-dev.txt`
+4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes
+5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments).
+6. When running pytest (either through the helper script or directly) fix any failures and address every `DeprecationWarning` you encounter—rerun with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings.
+7. Test thoroughly with your Find My devices
+8. Submit a pull request with detailed description
+
+### Release process
+
+- Update the version in both `custom_components/googlefindmy/manifest.json` and `custom_components/googlefindmy/const.py` (`INTEGRATION_VERSION`) at the same time so the manifest metadata and runtime constants remain in sync.
+- Run the full verification suite (`ruff format --check`, targeted pytest modules, and `pytest -q`) before tagging a release to confirm the version bump did not introduce regressions.
+
+### Development Scripts
+
+Manifest validation (`hassfest`) now runs exclusively through the
+[`hassfest-auto-fix`](.github/workflows/hassfest-auto-fix.yml) workflow. Every
+push to `main` and every pull request automatically executes the
+[`home-assistant/actions/hassfest`](https://github.com/home-assistant/actions/tree/master/hassfest#readme)
+GitHub Action, which rewrites manifests when needed and re-runs the validator to
+confirm the fixes.
+
+When you need to inspect or download the results locally:
+
+1. Open the relevant workflow run from the PR or commit.
+2. Expand the **Run hassfest (may rewrite manifest)** step to review the console
+   output, or download the generated artifact directly from the workflow UI.
+3. If you need a fresh validation pass, trigger the workflow manually from the
+   **Run workflow** button in the Actions tab or by re-running the job on the PR.
+
+## Legacy CLI helpers & token cache selection
+
+Several modules still expose lightweight CLI entry points (for example the device
+listing helper and the standalone "Play/Stop Sound" examples). These scripts now
+require you to target a specific Home Assistant config entry whenever more than
+one token cache is available. Set the environment variable
+`GOOGLEFINDMY_ENTRY_ID` to the desired config entry ID before running the CLI, or
+pass a `cache=` override when instantiating the legacy `FcmReceiver` shim. If you
+omit the entry ID while multiple caches are active the CLI will abort with a
+message listing the available IDs so you can pick the right account.
 
 ## Credits
 

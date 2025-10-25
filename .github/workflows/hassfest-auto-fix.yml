@@ -1,0 +1,32 @@
+name: hassfest (auto-fix)
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Run hassfest (may rewrite manifest)
+        id: hassfest
+        uses: home-assistant/actions/hassfest@master
+        continue-on-error: true
+
+      - name: Commit hassfest auto-sorts (if any)
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(hassfest): auto-sort manifest keys"
+          file_pattern: "custom_components/**/manifest.json"
+
+      - name: Re-run hassfest
+        uses: home-assistant/actions/hassfest@master
