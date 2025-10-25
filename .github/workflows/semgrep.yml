@@ -67,7 +67,21 @@ jobs:
             baseline_ref=""
           fi
 
-          semgrep scan --config auto --json $baseline_ref --output=semgrep.json || true
+          set +e
+          semgrep scan --config auto --json $baseline_ref --output=semgrep.json
+          semgrep_exit=$?
+          set -e
+
+          if [ "$semgrep_exit" -eq 2 ]; then
+            echo "::notice::Semgrep returned exit code 2 for the JSON scan; uploading an empty fallback artifact."
+            echo '{"results": []}' > semgrep.json
+            exit 0
+          fi
+
+          if [ "$semgrep_exit" -gt 1 ]; then
+            exit "$semgrep_exit"
+          fi
+
           if [ ! -s semgrep.json ]; then
             echo '{"results": []}' > semgrep.json
           fi
@@ -80,7 +94,37 @@ jobs:
             baseline_ref=""
           fi
 
-          semgrep scan --config auto --sarif $baseline_ref --output=semgrep.sarif || true
+          set +e
+          semgrep scan --config auto --sarif $baseline_ref --output=semgrep.sarif
+          semgrep_exit=$?
+          set -e
+
+          if [ "$semgrep_exit" -eq 2 ]; then
+            echo "::notice::Semgrep returned exit code 2 for the SARIF scan; uploading an empty fallback artifact."
+            cat <<'SARIF' > semgrep.sarif
+            {
+              "version": "2.1.0",
+              "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+              "runs": [
+                {
+                  "tool": {
+                    "driver": {
+                      "name": "Semgrep",
+                      "informationUri": "https://semgrep.dev/",
+                      "rules": []
+                    }
+                  },
+                  "results": []
+                }
+              ]
+            }
+            SARIF
+            exit 0
+          fi
+
+          if [ "$semgrep_exit" -gt 1 ]; then
+            exit "$semgrep_exit"
+          fi
 
           if ! jq -e '(.runs // []) | map(select((.results // []) | length > 0)) | length > 0' semgrep.sarif >/dev/null 2>&1; then
             cat <<'SARIF' > semgrep.sarif
