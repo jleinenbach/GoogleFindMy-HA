@@ -113,10 +113,12 @@ rules:
       evidence: []
     - id: discovery-update-info
       status: done
-      evidence: []
+      evidence:
+        - "README.md#automatic-discovery--credential-updates"
     - id: discovery
       status: done
-      evidence: []
+      evidence:
+        - "README.md#automatic-discovery--credential-updates"
     - id: docs-data-update
       status: done
       evidence:

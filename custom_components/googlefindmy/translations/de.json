@@ -64,8 +64,12 @@
     "abort": {
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
-      "invalid_discovery_info": "Die Discovery-Daten sind ungültig oder unvollständig. Bitte starte die Einrichtung über die Integrationsseite neu.",
+      "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",
       "reauth_successful": "Erneute Authentifizierung erfolgreich."
+    },
+    "progress": {
+      "discovery_secrets_new": "Auth/secrets.json für {email} erkannt",
+      "discovery_secrets_update": "Neue Anmeldedaten für {email} erkannt"
     }
   },
   "options": {

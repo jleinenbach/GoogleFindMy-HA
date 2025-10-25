@@ -64,8 +64,12 @@
     "abort": {
       "already_configured": "Google Find My Device è già configurato.",
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
-      "invalid_discovery_info": "Le informazioni di rilevamento sono non valide o incomplete. Avvia la configurazione dalla pagina delle integrazioni.",
+      "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",
       "reauth_successful": "Riautenticazione riuscita."
+    },
+    "progress": {
+      "discovery_secrets_new": "Auth/secrets.json rilevato per {email}",
+      "discovery_secrets_update": "Nuove credenziali rilevate per {email}"
     }
   },
   "options": {

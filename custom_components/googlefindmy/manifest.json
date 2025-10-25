@@ -5,6 +5,28 @@
   "codeowners": ["@BSkando"],
   "config_flow": true,
   "dependencies": ["http"],
+  "discovery": [
+    {
+      "name": "cloud_scan",
+      "source": "cloud_discovery",
+      "version": 1
+    },
+    {
+      "name": "auth_file",
+      "source": "auth_secrets",
+      "version": 1
+    }
+  ],
+  "discovery_update_info": [
+    {
+      "name": "cloud_scan",
+      "version": 1
+    },
+    {
+      "name": "auth_file",
+      "version": 1
+    }
+  ],
   "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
   "integration_type": "device",
   "iot_class": "cloud_polling",

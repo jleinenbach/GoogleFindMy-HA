@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Awaitable
+from typing import TYPE_CHECKING
+from collections.abc import Awaitable
 from unittest.mock import AsyncMock
 
 import importlib
@@ -28,7 +29,7 @@ def _make_hass() -> SimpleNamespace:
     return SimpleNamespace(data={}, config_entries=config_entries)
 
 
-def test_trigger_cloud_discovery_uses_helper(monkeypatch: "pytest.MonkeyPatch") -> None:
+def test_trigger_cloud_discovery_uses_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     """The helper should prefer async_create_discovery_flow when available."""
 
     hass = _make_hass()
@@ -73,7 +74,7 @@ def test_trigger_cloud_discovery_uses_helper(monkeypatch: "pytest.MonkeyPatch") 
     assert runtime["results"], "discovery payload should be recorded"
 
 
-def test_trigger_cloud_discovery_falls_back(monkeypatch: "pytest.MonkeyPatch") -> None:
+def test_trigger_cloud_discovery_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing helper should fall back to config_entries.flow.async_init."""
 
     hass = _make_hass()
@@ -100,12 +101,13 @@ def test_trigger_cloud_discovery_falls_back(monkeypatch: "pytest.MonkeyPatch") -
 
 
 def test_trigger_cloud_discovery_deduplicates(
-    monkeypatch: "pytest.MonkeyPatch", caplog
+    monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
     """Multiple discoveries with the same stable key should deduplicate flows."""
 
     hass = _make_hass()
     caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.__init__")
+    caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.discovery")
 
     gate = asyncio.Event()
     calls: list[dict] = []
@@ -154,7 +156,7 @@ def test_trigger_cloud_discovery_deduplicates(
     asyncio.run(_exercise())
 
 
-def test_results_append_triggers_flow(monkeypatch: "pytest.MonkeyPatch") -> None:
+def test_results_append_triggers_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     """Appending to the results list should schedule a discovery flow."""
 
     hass = _make_hass()

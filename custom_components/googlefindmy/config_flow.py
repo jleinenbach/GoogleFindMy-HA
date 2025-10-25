@@ -743,7 +743,7 @@ def _normalize_and_validate_discovery_payload(
 
 
 async def _ingest_discovery_credentials(
-    flow: "ConfigFlow",
+    flow: ConfigFlow,
     discovery: CloudDiscoveryData,
     *,
     existing_entry: ConfigEntry | None = None,
