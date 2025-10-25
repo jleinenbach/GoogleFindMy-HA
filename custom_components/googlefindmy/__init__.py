@@ -31,12 +31,14 @@ This module aims to be self-documenting. All public functions include precise do
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
 import os
 import socket
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
@@ -163,6 +165,10 @@ PLATFORMS: list[Platform] = [
 
 # Latest config entry schema version handled by this integration
 CONFIG_ENTRY_VERSION: int = 2
+
+
+_CLOUD_DISCOVERY_NAMESPACE = f"{DOMAIN}.cloud_scan"
+_CLOUD_DISCOVERY_BUCKET_KEY = "cloud_discovery"
 
 
 # ---- Runtime typing helpers -------------------------------------------------
@@ -1476,6 +1482,267 @@ def _extract_email_from_entry(entry: ConfigEntry) -> str:
     return ""
 
 
+class _CloudDiscoveryResults(list[dict[str, Any]]):
+    """Results container that triggers config flows on append."""
+
+    __slots__ = ("_hass",)
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        super().__init__()
+        self._hass = hass
+
+    def append(  # type: ignore[override]
+        self,
+        item: Mapping[str, Any],
+        *,
+        trigger: bool = True,
+    ) -> None:
+        payload = dict(item)
+        super().append(payload)
+        if not trigger:
+            return
+
+        email = payload.get("email") or payload.get(CONF_GOOGLE_EMAIL)
+        token = payload.get("token") or payload.get(CONF_OAUTH_TOKEN)
+        secrets_raw = payload.get("secrets_bundle") or payload.get(DATA_SECRET_BUNDLE)
+        secrets_bundle = secrets_raw if isinstance(secrets_raw, Mapping) else None
+        discovery_ns = payload.get("discovery_ns")
+        stable_key = payload.get("discovery_stable_key")
+
+        coro = _trigger_cloud_discovery(
+            self._hass,
+            email=email if isinstance(email, str) else None,
+            token=token if isinstance(token, str) else None,
+            secrets_bundle=secrets_bundle,
+            discovery_ns=discovery_ns if isinstance(discovery_ns, str) else None,
+            discovery_stable_key=stable_key if isinstance(stable_key, str) else None,
+        )
+        self._schedule(coro)
+
+    def _schedule(self, coro: Awaitable[bool]) -> None:
+        create_task = getattr(self._hass, "async_create_task", None)
+        if callable(create_task):
+            create_task(coro)
+            return
+
+        try:
+            asyncio.create_task(coro)
+        except RuntimeError:
+            _LOGGER.debug(
+                "Cloud discovery append scheduling skipped: event loop not running"
+            )
+
+
+def _cloud_discovery_runtime(hass: HomeAssistant) -> dict[str, Any]:
+    """Return the mutable runtime bucket tracking cloud discovery state."""
+
+    bucket = hass.data.setdefault(DOMAIN, {})
+    runtime = bucket.get(_CLOUD_DISCOVERY_BUCKET_KEY)
+    if not isinstance(runtime, dict):
+        runtime = {}
+        bucket[_CLOUD_DISCOVERY_BUCKET_KEY] = runtime
+
+    lock = runtime.get("lock")
+    if not getattr(lock, "acquire", None):
+        lock = asyncio.Lock()
+        runtime["lock"] = lock
+
+    active = runtime.get("active_keys")
+    if not isinstance(active, set):
+        active = set()
+        runtime["active_keys"] = active
+
+    results = runtime.get("results")
+    if isinstance(results, _CloudDiscoveryResults):
+        if results._hass is not hass:
+            replacement = _CloudDiscoveryResults(hass)
+            replacement.extend(results)
+            runtime["results"] = replacement
+    else:
+        replacement = _CloudDiscoveryResults(hass)
+        if isinstance(results, list):
+            replacement.extend(results)
+        runtime["results"] = replacement
+
+    return runtime
+
+
+def _cloud_discovery_stable_key(
+    email: str | None,
+    token: str | None,
+    secrets_bundle: Mapping[str, Any] | None,
+) -> str:
+    """Generate a stable identifier used to deduplicate discovery flows."""
+
+    normalized_email = _normalize_email(email if isinstance(email, str) else None)
+    if not normalized_email and isinstance(secrets_bundle, Mapping):
+        for key in ("google_email", "email", "username", "Email"):
+            value = secrets_bundle.get(key)
+            if isinstance(value, str) and value:
+                normalized_email = _normalize_email(value)
+                if normalized_email:
+                    break
+
+    if normalized_email:
+        return f"email:{normalized_email}"
+
+    candidate_token: str | None = token if isinstance(token, str) and token else None
+    if not candidate_token and isinstance(secrets_bundle, Mapping):
+        for key in ("aas_token", "oauth_token", "token"):
+            value = secrets_bundle.get(key)
+            if isinstance(value, str) and value:
+                candidate_token = value
+                break
+
+    if candidate_token:
+        digest = hashlib.sha256(candidate_token.encode("utf-8")).hexdigest()
+        return f"token:{digest[:16]}"
+
+    return f"anonymous:{uuid.uuid4().hex[:12]}"
+
+
+def _redact_account_for_log(email: str | None, stable_key: str) -> str:
+    """Return a partially redacted account identifier safe for logging."""
+
+    normalized = _normalize_email(email if isinstance(email, str) else None)
+    if normalized:
+        local_part, _, domain = normalized.partition("@")
+        if local_part:
+            prefix = local_part[:3] if len(local_part) >= 3 else local_part[:1]
+            redacted_local = f"{prefix}***"
+        else:
+            redacted_local = "***"
+        return f"{redacted_local}@{domain}" if domain else redacted_local
+
+    if stable_key.startswith("token:"):
+        return f"{stable_key[:10]}…"
+
+    if stable_key.startswith("anonymous:"):
+        return stable_key
+
+    return f"{stable_key[:12]}…" if len(stable_key) > 12 else stable_key
+
+
+def _assemble_cloud_discovery_payload(
+    *,
+    email: str | None,
+    token: str | None,
+    secrets_bundle: Mapping[str, Any] | None,
+    discovery_ns: str,
+    discovery_stable_key: str,
+) -> dict[str, Any]:
+    """Prepare the payload forwarded to the config flow discovery handler."""
+
+    clean_email = email.strip() if isinstance(email, str) else ""
+    payload: dict[str, Any] = {
+        "email": clean_email,
+        CONF_GOOGLE_EMAIL: clean_email,
+        "discovery_ns": discovery_ns,
+        "discovery_stable_key": discovery_stable_key,
+    }
+
+    if isinstance(token, str) and token:
+        payload["token"] = token
+        payload[CONF_OAUTH_TOKEN] = token
+
+    if secrets_bundle is not None:
+        secrets_copy = dict(secrets_bundle)
+        payload["secrets_bundle"] = secrets_copy
+        payload[DATA_SECRET_BUNDLE] = secrets_copy
+
+    return payload
+
+
+async def _trigger_cloud_discovery(
+    hass: HomeAssistant,
+    *,
+    email: str | None,
+    token: str | None,
+    secrets_bundle: Mapping[str, Any] | None = None,
+    discovery_ns: str | None = None,
+    discovery_stable_key: str | None = None,
+) -> bool:
+    """Create or resume a config flow based on cloud-scan discovery data."""
+
+    runtime = _cloud_discovery_runtime(hass)
+    ns = discovery_ns or _CLOUD_DISCOVERY_NAMESPACE
+    secrets_copy = dict(secrets_bundle) if isinstance(secrets_bundle, Mapping) else None
+    stable_key = discovery_stable_key or _cloud_discovery_stable_key(
+        email,
+        token,
+        secrets_copy,
+    )
+
+    payload = _assemble_cloud_discovery_payload(
+        email=email,
+        token=token,
+        secrets_bundle=secrets_copy,
+        discovery_ns=ns,
+        discovery_stable_key=stable_key,
+    )
+
+    lock = runtime["lock"]
+    async with lock:
+        results_list = runtime["results"]
+        if isinstance(results_list, _CloudDiscoveryResults):
+            results_list.append(payload, trigger=False)
+        else:
+            results_list.append(dict(payload))
+        if stable_key in runtime["active_keys"]:
+            _LOGGER.debug(
+                "Cloud discovery request deduplicated for %s (flow already active)",
+                _redact_account_for_log(email, stable_key),
+            )
+            return False
+        runtime["active_keys"].add(stable_key)
+
+    triggered = False
+    try:
+        from . import config_flow as cf
+
+        helper = getattr(cf, "async_create_discovery_flow", None)
+        try:
+            discovery_key = cf.DiscoveryKey(domain=DOMAIN, key=(ns, stable_key))
+        except Exception:
+            discovery_key = None
+
+        if callable(helper):
+            try:
+                await helper(
+                    hass,
+                    DOMAIN,
+                    context={"source": cf.SOURCE_DISCOVERY},
+                    data=payload,
+                    discovery_key=discovery_key,
+                )
+                triggered = True
+            except (AttributeError, NotImplementedError) as err:
+                _LOGGER.debug(
+                    "Discovery helper unavailable (%s); falling back to async_init",
+                    err,
+                )
+            except Exception as err:  # noqa: BLE001 - surface unexpected errors
+                _LOGGER.warning(
+                    "Cloud discovery flow creation failed for %s: %s",
+                    _redact_account_for_log(email, stable_key),
+                    err,
+                )
+                raise
+
+        if not triggered:
+            await hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": cf.SOURCE_DISCOVERY},
+                data=payload,
+            )
+            triggered = True
+
+        return triggered
+    finally:
+        async with lock:
+            runtime["active_keys"].discard(stable_key)
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the integration namespace and register global services.
 
@@ -1485,6 +1752,8 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         automations referencing these services.
     """
     bucket = hass.data.setdefault(DOMAIN, {})
+    runtime = _cloud_discovery_runtime(hass)
+    bucket.setdefault("cloud_scan_results", runtime["results"])
     bucket.setdefault("entries", {})  # entry_id -> RuntimeData
     bucket.setdefault(
         "device_owner_index", {}
