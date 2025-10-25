@@ -421,6 +421,14 @@
       "description": "Questo account Google (**{email}**) è già configurato in un'altra voce:\n\n{entries}\n\nDisattiva o rimuovi le voci duplicate in modo che rimanga attiva una sola voce per account, quindi ricarica l'integrazione (o riavvia Home Assistant)."
     }
   },
+  "discovery": {
+    "secrets_json": {
+      "title": "Auth/secrets.json rilevato per {email}"
+    },
+    "secrets_json_update": {
+      "title": "Nuove credenziali rilevate per {email}"
+    }
+  },
   "exceptions": {
     "device_not_found": {
       "message": "Il dispositivo {device_id} non è stato trovato o non fa parte di questa integrazione."

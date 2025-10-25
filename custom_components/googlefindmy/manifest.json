@@ -5,6 +5,34 @@
   "codeowners": ["@BSkando"],
   "config_flow": true,
   "dependencies": ["http"],
+  "discovery": {
+    "version": 1,
+    "channels": [
+      {
+        "name": "cloud_scan",
+        "source": "cloud_discovery",
+        "description": "Cloud-triggered config flows using the Google Find My Device scan API"
+      },
+      {
+        "name": "auth_file",
+        "source": "auth_secrets",
+        "description": "Local Auth/secrets.json watcher emitting discovery flows"
+      }
+    ]
+  },
+  "discovery_update_info": {
+    "version": 1,
+    "channels": [
+      {
+        "name": "cloud_scan",
+        "description": "Discovery updates forwarded when Google cloud payloads change"
+      },
+      {
+        "name": "auth_file",
+        "description": "Updated Auth/secrets.json bundles mapped onto existing entries"
+      }
+    ]
+  },
   "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
   "integration_type": "device",
   "iot_class": "cloud_polling",
