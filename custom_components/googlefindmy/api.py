@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from typing import (
     Any,
     Protocol,
@@ -506,23 +507,29 @@ class GoogleFindMyAPI:
         if cap_index:
             self._device_capabilities.update(cap_index)
 
-        devices: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
+        devices_by_id: OrderedDict[str, dict[str, Any]] = OrderedDict()
         for device_name, canonic_id in get_canonic_ids(parsed):
             canonical_id = str(canonic_id)
-            if canonical_id in seen_ids:
+            existing = devices_by_id.get(canonical_id)
+            can_ring_hint = self._device_capabilities.get(canonical_id)
+
+            if existing is not None:
+                if can_ring_hint is not None:
+                    existing["can_ring"] = bool(can_ring_hint)
+                if not existing.get("name") and device_name:
+                    existing["name"] = device_name
                 continue
-            seen_ids.add(canonical_id)
 
             item = {
                 "name": device_name,
                 "id": canonical_id,
                 "device_id": canonical_id,
             }
-            if canonical_id in self._device_capabilities:
-                item["can_ring"] = bool(self._device_capabilities[canonical_id])
-            devices.append(item)
-        return devices
+            if can_ring_hint is not None:
+                item["can_ring"] = bool(can_ring_hint)
+            devices_by_id[canonical_id] = item
+
+        return list(devices_by_id.values())
 
     def _extend_with_empty_location_fields(
         self, items: list[dict[str, Any]]
