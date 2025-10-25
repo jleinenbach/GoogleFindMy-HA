@@ -425,6 +425,14 @@
       "description": "To konto Google (**{email}**) jest już skonfigurowane w innym wpisie:\n\n{entries}\n\nWyłącz lub usuń zduplikowane wpisy, aby dla każdego konta pozostał tylko jeden aktywny wpis, a następnie przeładuj integrację (lub uruchom ponownie Home Assistanta)."
     }
   },
+  "discovery": {
+    "secrets_json": {
+      "title": "Wykryto Auth/secrets.json dla {email}"
+    },
+    "secrets_json_update": {
+      "title": "Wykryto nowe poświadczenia dla {email}"
+    }
+  },
   "exceptions": {
     "device_not_found": {
       "message": "Urządzenie {device_id} nie zostało znalezione lub nie należy do tej integracji."

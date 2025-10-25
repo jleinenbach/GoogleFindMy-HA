@@ -425,6 +425,14 @@
       "description": "Ce compte Google (**{email}**) est déjà configuré par une autre entrée :\n\n{entries}\n\nDésactivez ou supprimez les entrées en double afin qu'une seule entrée par compte reste active, puis rechargez l'intégration (ou redémarrez Home Assistant)."
     }
   },
+  "discovery": {
+    "secrets_json": {
+      "title": "Auth/secrets.json détecté pour {email}"
+    },
+    "secrets_json_update": {
+      "title": "Nouvelles informations d'identification détectées pour {email}"
+    }
+  },
   "exceptions": {
     "device_not_found": {
       "message": "L’appareil {device_id} est introuvable ou ne fait pas partie de cette intégration."
