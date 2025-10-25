@@ -2,8 +2,6 @@ name: Semgrep Autofix (PR)
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '42 3 * * *'
 
 permissions:
   contents: write
