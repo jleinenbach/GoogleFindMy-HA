@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 import inspect
+from typing import Any
 
 import pytest
 
@@ -41,7 +41,7 @@ def test_normalize_and_validate_discovery_payload() -> None:
 
 
 def test_async_step_discovery_new_entry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Discovery for a new account should prepare auth data and show confirm."""
+    """Discovery for a new account should prepare auth data and skip manual forms."""
 
     async def _fake_pick(
         email: str,
@@ -70,6 +70,7 @@ def test_async_step_discovery_new_entry(monkeypatch: pytest.MonkeyPatch) -> None
         flow.hass = hass  # type: ignore[assignment]
         flow.context = {}
         flow.unique_id = None  # type: ignore[attr-defined]
+        flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
 
         async def _set_unique_id(
             value: str, *, raise_on_progress: bool = False
@@ -78,6 +79,7 @@ def test_async_step_discovery_new_entry(monkeypatch: pytest.MonkeyPatch) -> None
             flow._unique_id = value  # type: ignore[attr-defined]
 
         flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+        flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
 
         payload = {
             CONF_GOOGLE_EMAIL: "new.user@example.com",
@@ -175,6 +177,41 @@ def test_async_step_discovery_existing_entry_updates(
     result = asyncio.run(_exercise())
     assert result["type"] == "abort"
     assert result["reason"] == "already_configured"
+
+
+def test_async_step_user_confirm_only_submission() -> None:
+    """Confirm-only submissions with preloaded data should advance automatically."""
+
+    async def _exercise() -> dict[str, Any]:
+        flow = config_flow.ConfigFlow()
+        flow.context = {}
+        flow.hass = object()  # type: ignore[assignment]
+        flow._auth_data = {  # type: ignore[attr-defined]
+            DATA_AUTH_METHOD: config_flow._AUTH_METHOD_SECRETS,
+            CONF_GOOGLE_EMAIL: "autoconfirm@example.com",
+            CONF_OAUTH_TOKEN: "aas_et/CONFIRM",
+        }
+        flow._available_devices = [  # type: ignore[attr-defined]
+            ("Device", "device-id"),
+        ]
+        flow.unique_id = None  # type: ignore[attr-defined]
+
+        async def _set_unique_id(
+            value: str, *, raise_on_progress: bool = False
+        ) -> None:
+            flow.unique_id = value  # type: ignore[attr-defined]
+            flow._unique_id = value  # type: ignore[attr-defined]
+
+        flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+        flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
+
+        result = await flow.async_step_user({})
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    result = asyncio.run(_exercise())
+    assert result["type"] == "form"
 
 
 def test_async_step_discovery_invalid_payload() -> None:

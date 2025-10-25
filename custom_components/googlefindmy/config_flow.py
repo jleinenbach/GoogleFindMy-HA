@@ -870,7 +870,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         placeholders.setdefault("email", normalized.email)
         self.context["title_placeholders"] = placeholders
         self._set_confirm_only()
-        return await self.async_step_user()
+        return await self.async_step_device_selection()
 
     async def async_step_discovery_update_info(
         self, discovery_info: Mapping[str, Any] | None
@@ -926,6 +926,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_secrets_json()
             if method == _AUTH_METHOD_INDIVIDUAL:
                 return await self.async_step_individual_tokens()
+            if (
+                method is None
+                and self._auth_data.get(CONF_OAUTH_TOKEN)
+                and self._auth_data.get(CONF_GOOGLE_EMAIL)
+            ):
+                _LOGGER.debug(
+                    "User step: confirm-only submission detected; proceeding to device selection.",
+                )
+                return await self.async_step_device_selection()
         _LOGGER.debug("User step: presenting auth method selection form.")
         return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
 
