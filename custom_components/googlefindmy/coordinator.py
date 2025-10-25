@@ -1396,6 +1396,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         dev_reg = dr.async_get(self.hass)
         created_or_updated = 0
+        service_device_id = getattr(self, "_service_device_id", None)
 
         for d in devices:
             dev_id = d.get("id")
@@ -1416,12 +1417,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     if entry_id in legacy_dev.config_entries:
                         new_idents = set(legacy_dev.identifiers)
                         new_idents.add(ns_ident)
-                        dev_reg.async_update_device(
-                            device_id=legacy_dev.id,
-                            new_identifiers=new_idents,
+                        needs_identifiers = new_idents != legacy_dev.identifiers
+                        needs_via = (
+                            service_device_id is not None
+                            and legacy_dev.via_device != service_device_id
                         )
+                        if needs_identifiers or needs_via:
+                            update_kwargs: dict[str, Any] = {
+                                "device_id": legacy_dev.id,
+                            }
+                            if needs_identifiers:
+                                update_kwargs["new_identifiers"] = new_idents
+                            if needs_via:
+                                update_kwargs["via_device"] = service_device_id
+                            dev_reg.async_update_device(**update_kwargs)
+                            if needs_identifiers:
+                                legacy_dev.identifiers = new_idents
+                            if needs_via:
+                                legacy_dev.via_device = service_device_id
+                            created_or_updated += 1
                         dev = legacy_dev
-                        created_or_updated += 1
                     else:
                         # Belongs to another entry → create a new device with namespaced ident (no merge).
                         dev = None
