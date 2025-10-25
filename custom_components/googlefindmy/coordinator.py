@@ -655,6 +655,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._enabled_poll_device_ids: set[str] = set()
         self._devices_with_entry: set[str] = set()
         self._dr_unsub: Callable | None = None
+        # Deferred via_device linking for end devices awaiting the service anchor
+        self._pending_via_updates: set[str] = set()
 
         # Subentry awareness (feature groups / platform scoping)
         self._subentry_metadata: dict[str, SubentryMetadata] = {}
@@ -1198,15 +1200,31 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         # Fast-path: already ensured in this runtime
-        if getattr(self, "_service_device_ready", False):
+        if getattr(self, "_service_device_ready", False) and getattr(
+            self, "_service_device_id", None
+        ):
+            self._apply_pending_via_updates()
             return
 
         dev_reg = dr.async_get(hass)
+        if not hasattr(dev_reg, "async_get_or_create") or not hasattr(
+            dev_reg, "async_update_device"
+        ):
+            _LOGGER.debug(
+                "Service-device ensure skipped: registry stub missing create/update APIs."
+            )
+            return
         identifiers = {
             service_device_identifier(entry.entry_id)
         }  # {(DOMAIN, f"integration_<entry_id>")}
 
-        device = dev_reg.async_get_device(identifiers=identifiers)
+        get_device = getattr(dev_reg, "async_get_device", None)
+        device = None
+        if callable(get_device):
+            try:
+                device = get_device(identifiers=identifiers)
+            except TypeError:
+                device = None
         if device is None:
             device = dev_reg.async_get_or_create(
                 config_entry_id=entry.entry_id,
@@ -1251,8 +1269,67 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._service_device_ready = True
         self._service_device_id = getattr(device, "id", None)
 
+        # Backfill any end devices that were created before the service device was known
+        self._apply_pending_via_updates()
+
     # Optional back-compat alias (some callers may use the public-style name)
     ensure_service_device_exists = _ensure_service_device_exists
+
+    def _ensure_pending_via_container(self) -> set[str]:
+        """Return the shared set used to track devices awaiting via updates."""
+
+        pending = getattr(self, "_pending_via_updates", None)
+        if pending is None:
+            pending = set()
+            setattr(self, "_pending_via_updates", pending)
+        return pending
+
+    def _note_pending_via_update(self, device_id: str | None) -> None:
+        """Track a device that should be linked once the service device is known."""
+
+        if not isinstance(device_id, str) or not device_id:
+            return
+        pending = self._ensure_pending_via_container()
+        pending.add(device_id)
+
+    def _apply_pending_via_updates(self) -> None:
+        """Link any pending devices to the service device once it is available."""
+
+        hass = getattr(self, "hass", None)
+        service_device_id = getattr(self, "_service_device_id", None)
+        pending = getattr(self, "_pending_via_updates", None)
+
+        if hass is None or service_device_id is None or not pending:
+            return
+
+        dev_reg = dr.async_get(hass)
+        if not hasattr(dev_reg, "async_get") or not hasattr(
+            dev_reg, "async_update_device"
+        ):
+            return
+        updated = 0
+        still_pending: set[str] = set()
+
+        for device_id in list(pending):
+            device = dev_reg.async_get(device_id)
+            if device is None:
+                still_pending.add(device_id)
+                continue
+            if device.via_device == service_device_id:
+                continue
+            dev_reg.async_update_device(
+                device_id=device_id, via_device=service_device_id
+            )
+            updated += 1
+
+        pending.clear()
+        if still_pending:
+            pending.update(still_pending)
+
+        if updated:
+            _LOGGER.debug(
+                "Linked %d device(s) to Google Find My service device", updated
+            )
 
     def _sync_owner_index(self, devices: list[dict[str, Any]] | None) -> None:
         """Sync hass.data owner index for this entry (FCM fallback support)."""
@@ -1395,6 +1472,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return 0
 
         dev_reg = dr.async_get(self.hass)
+        if not hasattr(dev_reg, "async_get_or_create"):
+            _LOGGER.debug(
+                "Skipping Device Registry ensure: registry stub missing async_get_or_create."
+            )
+            return 0
+        update_device = getattr(dev_reg, "async_update_device", None)
+        get_device = getattr(dev_reg, "async_get_device", None)
         created_or_updated = 0
         service_device_id = getattr(self, "_service_device_id", None)
 
@@ -1408,10 +1492,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             legacy_ident = (DOMAIN, dev_id)
 
             # Preferred: device already known by namespaced identifier?
-            dev = dev_reg.async_get_device(identifiers={ns_ident})
+            dev = None
+            if callable(get_device):
+                try:
+                    dev = get_device(identifiers={ns_ident})
+                except TypeError:
+                    dev = None
             if dev is None:
                 # Legacy present?
-                legacy_dev = dev_reg.async_get_device(identifiers={legacy_ident})
+                legacy_dev = None
+                if callable(get_device):
+                    try:
+                        legacy_dev = get_device(identifiers={legacy_ident})
+                    except TypeError:
+                        legacy_dev = None
                 if legacy_dev is not None:
                     # If legacy device belongs to THIS entry, migrate by adding namespaced ident.
                     if entry_id in legacy_dev.config_entries:
@@ -1430,12 +1524,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 update_kwargs["new_identifiers"] = new_idents
                             if needs_via:
                                 update_kwargs["via_device"] = service_device_id
-                            dev_reg.async_update_device(**update_kwargs)
+                            if callable(update_device):
+                                update_device(**update_kwargs)
                             if needs_identifiers:
                                 legacy_dev.identifiers = new_idents
                             if needs_via:
                                 legacy_dev.via_device = service_device_id
                             created_or_updated += 1
+                        if service_device_id is None:
+                            self._note_pending_via_update(legacy_dev.id)
                         dev = legacy_dev
                     else:
                         # Belongs to another entry → create a new device with namespaced ident (no merge).
@@ -1460,6 +1557,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     via_device=getattr(self, "_service_device_id", None),
                 )
                 created_or_updated += 1
+                if service_device_id is None:
+                    self._note_pending_via_update(getattr(dev, "id", None))
             else:
                 # Keep name fresh if not user-overridden and a new upstream label is available
                 raw_name = (d.get("name") or "").strip()
@@ -1469,9 +1568,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     else None
                 )
                 if use_name and not dev.name_by_user and dev.name != use_name:
-                    dev_reg.async_update_device(device_id=dev.id, name=use_name)
-                    created_or_updated += 1  # count as an update for logging parity
+                    if callable(update_device):
+                        update_device(device_id=dev.id, name=use_name)
+                        created_or_updated += 1  # count as an update for logging parity
 
+                if service_device_id is None and dev is not None:
+                    self._note_pending_via_update(getattr(dev, "id", None))
+
+        self._apply_pending_via_updates()
         return created_or_updated
 
     # --- NEW: Repairs + Auth state helpers ---------------------------------
@@ -2230,6 +2334,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     slot["can_ring"] = can_ring
 
             # 2.5) Ensure Device Registry entries exist (service device + end-devices, namespaced)
+            self._ensure_service_device_exists()
             created = self._ensure_registry_for_devices(all_devices, ignored)
             if created:
                 _LOGGER.debug(
