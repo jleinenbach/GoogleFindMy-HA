@@ -914,6 +914,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured(updates=updates)
         return await self.async_abort(reason="already_configured")
 
+    async def async_step_discovery_update(
+        self, discovery_info: Mapping[str, Any] | None
+    ) -> FlowResult:
+        """Provide legacy discovery-update entry point used by the helper."""
+
+        return await self.async_step_discovery_update_info(discovery_info)
+
     # ------------------ Step: choose authentication path ------------------
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
