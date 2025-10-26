@@ -11,7 +11,7 @@
 ## Environment verification
 
 * **Requirement:** Determine the current connectivity status before every implementation cycle.
-* **Checks:** Run a quick internet-access probe that exercises the real package channels (for example, `python -m pip install --dry-run --no-deps pip`, `pip index versions pip`, or a package-manager metadata refresh such as `apt-get update`) and record the outcome in the summary. Avoid ICMP-only probes like `ping 8.8.8.8`, which are blocked in the managed environment and do not reflect HTTP/HTTPS reachability.
+* **Checks:** Run a quick internet-access probe that exercises the real package channels (for example, `python -m pip install --dry-run --no-deps pip`, `pip index versions pip`, or a package-manager metadata refresh such as `apt-get update`) and record the outcome in the summary. Avoid ICMP-only probes like `ping 8.8.8.8`, which are blocked in the managed environment and do not reflect HTTP/HTTPS reachability. When a tool installs command-line entry points into `~/.pyenv/versions/*/bin`, invoke it as `python -m <module>` so the connectivity probe also confirms module availability despite PATH differences.
 * **Online mode:** When a network connection is available you may install or update missing development tooling (for example, `pip`, `pip-tools`, `pre-commit`, `rustup`, `node`, `jq`) whenever it is necessary for maintenance or local verification.
 * **Offline mode:** When no connection is available, limit the work to local analysis only and call out any follow-up actions that must happen once connectivity is restored.
 
@@ -52,8 +52,8 @@
 > – pytest -q *(reconfirm that the tests pass)*
 > – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(full run across the entire codebase and tests)*
 > – ruff check --fix --exit-non-zero-on-fix && ruff check *(optional when additional linting fixes are necessary)*
-> – pip-compile requirements-dev.in && pip-compile custom_components/googlefindmy/requirements.in *(when updates are required)*
-> – pip-audit -r requirements-dev.txt -r custom_components/googlefindmy/requirements.txt *(security scan; exit code 1 is acceptable but must be noted)*
+> – pip-compile requirements-dev.in && pip-compile custom_components/googlefindmy/requirements.in *(when the corresponding `*.in` inputs exist; otherwise, record that no compile targets are present and skip without creating ad-hoc `requirements.txt` files)*
+> – pip-audit -r requirements-dev.txt -r custom_components/googlefindmy/requirements.txt *(security scan; exit code 1 is acceptable but must be noted)* — prefer `python -m pip_audit` so the tool resolves even when the entry point directory is absent from `$PATH`
 > – review package/version updates and synchronize lock files/manifests as needed (see the "Home Assistant version & dependencies" section)
 > – rerun the relevant tests/linters after dependency updates
 >
@@ -72,7 +72,8 @@
 ## Maintenance mode
 
 * **Activation:** Maintenance mode is triggered explicitly through a maintainer request, an issue label, or a direct user request. Confirm in your response or PR description that maintenance mode is active.
-* **Required checks:** Run the full suite—`mypy --strict` across the entire repository (with no exclusions), complete test suites (`pytest` plus any integration/end-to-end tests), `ruff check`, `ruff format --check`, `pre-commit run --all-files`, `pip-compile`, `pip-audit`, configuration/manifest synchronization (see "Home Assistant version & dependencies"), and documentation alignment.
+* **Required checks:** Run the full suite—`mypy --strict` across the entire repository (with no exclusions), complete test suites (`pytest` plus any integration/end-to-end tests), `ruff check`, `ruff format --check`, `pre-commit run --all-files`, `pip-compile`, `pip-audit`, configuration/manifest synchronization (see "Home Assistant version & dependencies"), and documentation alignment. Launch CLI utilities with `python -m` (for example, `python -m pre_commit run --all-files`, `python -m piptools compile`, `python -m pip_audit`) to avoid PATH-related "command not found" failures when the virtualenv bin directory is not exported by default.
+* **Connectivity caveat:** The managed environment occasionally blocks TLS handshakes for PyPI-hosted metadata, which causes `pip-audit` (and other HTTPS-dependent checks) to fail with `SSLError: CERTIFICATE_VERIFY_FAILED`. When this happens, document the failure in the PR/testing summary, capture the offending package URL, and proceed with the remaining maintenance tasks instead of repeatedly retrying the audit.
 * **Configuration alignment:** Ensure configuration files (`pyproject.toml`, `.pre-commit-config.yaml`, `manifest.json`, requirement files) reflect the same dependency versions and document the synchronization.
 * **Completion notice:** When finished, report whether another maintenance run is required (for example, due to pending upstream fixes) or maintenance mode can be closed. Capture any remaining TODOs or follow-up tasks.
 
