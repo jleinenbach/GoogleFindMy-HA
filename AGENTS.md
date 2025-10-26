@@ -8,12 +8,12 @@
 > **Non-blocking:** Missing optional artifacts (README sections, `quality_scale.yaml`, CODEOWNERS, CI files) **must not block** urgent fixes. The agent proposes a minimal stub or follow-up task instead.
 > **References:** This contract relies on the sources listed below; for a curated, extended list of links, see [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md).
 
-## Umgebungsprüfung
+## Environment verification
 
-* **Verbindlichkeit:** Vor jeder Implementierungsrunde ist die aktuelle Netzwerksituation zu ermitteln.
-* **Prüfschritte:** Führe einen kurzen Internetzugangstest (z. B. `ping -c 1 8.8.8.8`, `ping -c 1 1.1.1.1` oder `curl -I https://www.google.com`) aus und dokumentiere den Status in der Zusammenfassung.
-* **Online-Betrieb:** Bei vorhandener Internetverbindung dürfen fehlende Entwicklungswerkzeuge (z. B. `pip`, `pip-tools`, `pre-commit`, `rustup`, `node`, `jq`) installiert oder aktualisiert werden, sofern dies für die Wartung oder lokale Prüfungen erforderlich ist.
-* **Offline-Betrieb:** Bei nicht bestehender Verbindung sind nur rein lokale Prüfungen/Analysen erlaubt; verweise in der Kommunikation auf notwendige Nacharbeiten nach Wiederherstellung der Verbindung.
+* **Requirement:** Determine the current connectivity status before every implementation cycle.
+* **Checks:** Run a quick internet-access probe (for example, `ping -c 1 8.8.8.8`, `ping -c 1 1.1.1.1`, or `curl -I https://www.google.com`) and record the outcome in the summary.
+* **Online mode:** When a network connection is available you may install or update missing development tooling (for example, `pip`, `pip-tools`, `pre-commit`, `rustup`, `node`, `jq`) whenever it is necessary for maintenance or local verification.
+* **Offline mode:** When no connection is available, limit the work to local analysis only and call out any follow-up actions that must happen once connectivity is restored.
 
 ---
 
@@ -32,49 +32,49 @@
 * **Deprecation remediation.** Investigate and resolve every `DeprecationWarning` observed during implementation, local verification, or CI. Prefer code changes over warning filters; if a warning must persist, document the upstream blocker in the PR description with a follow-up issue reference.
 * **Coverage targets.** Keep **config flow at 100 %**; repo total **≥ 95 %**. If temporarily lower due to necessary code removal, **open a follow-up issue** to restore coverage and reference it in the PR.
 * **Behavioral safety.** No secrets/PII in logs; user-visible errors use translated `translation_key`s; entities report `unavailable` on communication failures.
-* **Docs/i18n (when user-facing behavior changes).** Update `README.md` und alle relevanten Übersetzungen; keine hartcodierten UI-Strings in Python. Stelle sicher, dass Platzhalter/Keys in Python-Dateien mit `strings.json` und `translations/en.json` übereinstimmen. Danach synchronisiere sämtliche Dateien in `custom_components/googlefindmy/translations/*.json` (z. B. via `python script/sync_translations.py`, `pre-commit run translations-sync`, `git diff -- custom_components/googlefindmy/translations`). Folge **Rule §9.DOC** für Dokumentations-/Docstring-Erhalt. Dokumentiere CI/Test-Guidance-Anpassungen direkt in der PR-Beschreibung, damit Automationshinweise aktuell bleiben.
+* **Docs/i18n (when user-facing behavior changes).** Update `README.md` and every relevant translation; avoid hard-coded UI strings in Python. Make sure placeholders/keys referenced in Python files match `strings.json` and `translations/en.json`. Afterwards synchronize every file in `custom_components/googlefindmy/translations/*.json` (for example, via `python script/sync_translations.py`, `pre-commit run translations-sync`, or `git diff -- custom_components/googlefindmy/translations`). Follow **Rule §9.DOC** so documentation and docstrings stay intact. Document any CI/test guidance adjustments directly in the PR description so automation notes remain accurate.
 * **Deprecation check (concise).** Add 2–4 bullets with links to HA release notes/dev docs that might affect this change (§8).
 * **Quality-scale evidence (lightweight).** If a Quality-Scale rule is touched, append one evidence bullet in `quality_scale.yaml` (or propose adding the file). **Do not block** if it’s missing—note this in the PR.
 * **Historical context.** For regressions, reference implementations, or suspected newly introduced bugs, inspect the relevant commit history (e.g., `git log -- <file>`, `git show <commit>`, `git diff <old>..<new>`).
 
 > **Local run (VERIFY)**
-> **Offline-Modus:**
-> – pre-commit run --all-files *(Pflichtlauf, auch wenn pre-commit.ci Autofixes liefern kann)*
-> – ruff format --check *(Pflicht; Ergebnis im Abschnitt "Testing" dokumentieren)*
-> – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(Pflicht bei Python-Änderungen; Ergebnis dokumentieren)*
-> – pytest -q *(Pflicht; prüfe und behebe alle `DeprecationWarning`s; Ergebnis dokumentieren)*
+> **Offline mode:**
+> – pre-commit run --all-files *(mandatory, even if pre-commit.ci could supply autofixes)*
+> – ruff format --check *(mandatory; capture the outcome in the "Testing" section)*
+> – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(mandatory for Python changes; capture the outcome)*
+> – pytest -q *(mandatory; investigate and resolve every `DeprecationWarning`; capture the outcome)*
 >
-> **Online-Modus (zusätzlich zu Offline):**
-> – pip install -r requirements-dev.txt *(fehlende Abhängigkeiten installieren/aktualisieren)*
-> – pre-commit install *(Hooks sicherstellen)*
-> – pre-commit run --all-files *(erneut ausführen, falls neue Hooks installiert wurden)*
-> – ruff format --check *(erneut bestätigen, dass Formatierung passt)*
-> – pytest -q *(erneut bestätigen, dass Tests bestehen)*
-> – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(vollständiger Lauf über gesamten Code und Tests)*
-> – ruff check --fix --exit-non-zero-on-fix && ruff check *(optional, wenn zusätzliche Linting-Fixes notwendig sind)*
-> – pip-compile requirements-dev.in && pip-compile custom_components/googlefindmy/requirements.in *(sofern Aktualisierungen benötigt werden)*
-> – pip-audit -r requirements-dev.txt -r custom_components/googlefindmy/requirements.txt *(Sicherheitsprüfung; Exitcode 1 zulässig, aber dokumentieren)*
-> – prüfe Paket-/Versionsupdates und synchronisiere Lockfiles/Manifeste entsprechend (siehe Abschnitt „Home Assistant-Version & Abhängigkeiten“)
-> – führe nach Abhängigkeitsupdates relevante Test-/Lint-Läufe erneut aus
+> **Online mode (in addition to the offline steps):**
+> – pip install -r requirements-dev.txt *(install or update missing dependencies)*
+> – pre-commit install *(make sure hooks are installed)*
+> – pre-commit run --all-files *(run again if new hooks were installed)*
+> – ruff format --check *(reconfirm that formatting is correct)*
+> – pytest -q *(reconfirm that the tests pass)*
+> – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(full run across the entire codebase and tests)*
+> – ruff check --fix --exit-non-zero-on-fix && ruff check *(optional when additional linting fixes are necessary)*
+> – pip-compile requirements-dev.in && pip-compile custom_components/googlefindmy/requirements.in *(when updates are required)*
+> – pip-audit -r requirements-dev.txt -r custom_components/googlefindmy/requirements.txt *(security scan; exit code 1 is acceptable but must be noted)*
+> – review package/version updates and synchronize lock files/manifests as needed (see the "Home Assistant version & dependencies" section)
+> – rerun the relevant tests/linters after dependency updates
 >
-> *(Der Helfer `python script/local_verify.py` deckt Ruff + Pytest im Schnelllauf ab; führe ihn zusätzlich aus, ersetze aber nicht die Pflichtläufe oben. Dokumentiere jede manuell ausgeführte Komponente.)*
+> *(The helper `python script/local_verify.py` covers Ruff + Pytest as a quick pass; run it in addition to—but never instead of—the mandatory steps above. Document every component you run manually.)*
 > *Hassfest validation now runs in CI via `.github/workflows/hassfest-auto-fix.yml`; rely on that workflow and re-run it from the PR UI whenever you need a fresh manifest check.*
 >
 > **optional escalation:** `PYTHONWARNINGS=error::DeprecationWarning pytest -q` *(turns new deprecations into hard failures so they cannot be overlooked—clear the root cause or document the upstream blocker before retrying without the flag).*
 
-## Home Assistant-Version & Abhängigkeiten
+## Home Assistant version & dependencies
 
-* **Kompatibilitätsziel:** Die Integration muss mit der jeweils neuesten Home-Assistant-Stable-Version lauffähig sein. Fällt eine ältere Version aufgrund inkompatibler Änderungen weg, dokumentiere die ältestmögliche unterstützte Version in README/Release-Notes.
-* **Synchronisationspunkte:** Halte `custom_components/googlefindmy/manifest.json`, `custom_components/googlefindmy/requirements.txt`, `pyproject.toml` und `requirements-dev.txt` synchron. Bei Versionsupdates prüfe jeweils, ob weitere Dateien (z. B. `hacs.json`, `script/`-Hilfen) angepasst werden müssen.
-* **Upgrade-Workflow:** Bei Internetzugang dürfen/sollen Paketupdates mit `pip install`, `pip-compile`, `pip-audit`, `poetry update` (falls relevant) sowie `python -m pip list --outdated` durchgeführt werden. Anschließend Tests/Lints erneut ausführen und Ergebnisse dokumentieren.
-* **Änderungsnotizen:** Dokumentiere geänderte Mindestversionen oder entfernte Altversionen in der PR-Beschreibung und, falls nötig, in `CHANGELOG.md`/`README.md`.
+* **Compatibility target:** Keep the integration working with the latest Home Assistant stable release. When older releases become incompatible, document the oldest supported version in the README or release notes.
+* **Synchronization points:** Keep `custom_components/googlefindmy/manifest.json`, `custom_components/googlefindmy/requirements.txt`, `pyproject.toml`, and `requirements-dev.txt` aligned. When bumping versions, check whether other files (for example, `hacs.json` or helpers under `script/`) must change as well.
+* **Upgrade workflow:** With internet access, perform dependency maintenance via `pip install`, `pip-compile`, `pip-audit`, `poetry update` (if relevant), and `python -m pip list --outdated`. Afterwards rerun tests/linters and document the outcomes.
+* **Change notes:** Record adjusted minimum versions or dropped legacy releases in the PR description and, when needed, in `CHANGELOG.md` or `README.md`.
 
-## Wartungsmodus
+## Maintenance mode
 
-* **Anforderung/Start:** Wartungsmodus wird explizit durch Maintainer-Anfrage, Ticket-Label oder direkte Nutzeranforderung ausgelöst. Bestätige in der Antwort/PR-Beschreibung, dass der Modus aktiv ist.
-* **Pflichtprüfungen:** Führe vollständige Läufe sämtlicher Prüfungen durch, inkl. `mypy --strict` über das gesamte Repo (ohne Ausschlüsse), vollständiger Test-Suites (`pytest`, optionale Integrations-/End-to-End-Tests), `ruff check`, `ruff format --check`, `pre-commit run --all-files`, `pip-compile`, `pip-audit`, Manifest-/Konfig-Sync (siehe Abschnitt „Home Assistant-Version & Abhängigkeiten“) sowie Dokumentationsabgleich.
-* **Konfigurationsabgleich:** Stelle sicher, dass Konfigurationsdateien (`pyproject.toml`, `.pre-commit-config.yaml`, `manifest.json`, Requirements-Dateien) denselben Versionsstand widerspiegeln und dokumentiere die Synchronisation.
-* **Abschlussmeldung:** Kommuniziere nach Abschluss, ob ein erneuter Lauf nötig ist (z. B. wegen ausstehender Upstream-Fixes) oder der Wartungsmodus beendet werden kann. Notiere verbleibende To-Dos/Folgeaufgaben.
+* **Activation:** Maintenance mode is triggered explicitly through a maintainer request, an issue label, or a direct user request. Confirm in your response or PR description that maintenance mode is active.
+* **Required checks:** Run the full suite—`mypy --strict` across the entire repository (with no exclusions), complete test suites (`pytest` plus any integration/end-to-end tests), `ruff check`, `ruff format --check`, `pre-commit run --all-files`, `pip-compile`, `pip-audit`, configuration/manifest synchronization (see "Home Assistant version & dependencies"), and documentation alignment.
+* **Configuration alignment:** Ensure configuration files (`pyproject.toml`, `.pre-commit-config.yaml`, `manifest.json`, requirement files) reflect the same dependency versions and document the synchronization.
+* **Completion notice:** When finished, report whether another maintenance run is required (for example, due to pending upstream fixes) or maintenance mode can be closed. Capture any remaining TODOs or follow-up tasks.
 
 ---
 

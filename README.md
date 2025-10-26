@@ -131,7 +131,7 @@ The integration provides a couple of Home Assistant Actions for use with automat
 - **Authentication tooling:** Generating `Auth/secrets.json` currently relies on the external GoogleFindMyTools scripts.  Future upstream changes to Google's login flow may require updated tooling before the integration can connect again.
 - **Multiple households:** Home Assistant imports all trackers from the authenticated Google account.  Fine-grained sharing to limit visibility per household member is not yet available and should be handled via entity permissions.
 
-## Deinstallation / Removal
+## Uninstallation / Removal
 
 1. Disable or delete related automations, dashboards, and notification flows that reference `googlefindmy` entities to prevent "entity not found" errors after removal.
 2. Open **Settings → Devices & Services → Integrations → Google Find My Device**.

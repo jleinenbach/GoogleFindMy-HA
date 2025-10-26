@@ -209,10 +209,8 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
         if len(entry_ids) > 1:
             available = ", ".join(sorted(entry_ids)) or "<none>"
             raise RuntimeError(
-                "Multiple token caches registered. Provide the ConfigEntry ID via the "
-                "CLI argument or set GOOGLEFINDMY_ENTRY_ID. Mehrere Token-Caches "
-                "registriert. Bitte die ConfigEntry-ID per CLI angeben oder "
-                "GOOGLEFINDMY_ENTRY_ID setzen. Available IDs: {avail}.".format(
+                "Multiple token caches registered. Provide the ConfigEntry ID via "
+                "the CLI argument or set GOOGLEFINDMY_ENTRY_ID. Available IDs: {avail}.".format(
                     avail=available
                 )
             )
@@ -225,8 +223,7 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
     except KeyError as err:
         available = ", ".join(sorted(entry_ids)) or "<none>"
         raise RuntimeError(
-            "Unknown entry_id '{entry}'. Available entry IDs: {avail}. "
-            "Unbekannte Entry-ID '{entry}'. Verfügbare IDs: {avail}.".format(
+            "Unknown entry_id '{entry}'. Available entry IDs: {avail}.".format(
                 entry=normalized, avail=available
             )
         ) from err
