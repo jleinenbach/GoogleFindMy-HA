@@ -48,6 +48,15 @@ from .const import CONF_GOOGLE_EMAIL, CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, DOMA
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _log_task_exception(task: "asyncio.Task[bool]") -> None:
+    """Log and suppress exceptions from asynchronous tasks."""
+
+    try:
+        task.result()
+    except Exception as err:  # noqa: BLE001 - logging best effort
+        _LOGGER.debug("Suppressed cloud discovery task exception: %s", err)
+
 CLOUD_DISCOVERY_NAMESPACE = f"{DOMAIN}.cloud_scan"
 SECRETS_DISCOVERY_NAMESPACE = f"{DOMAIN}.secrets_file"
 _DEFAULT_SECRETS_SCAN_INTERVAL = timedelta(seconds=30)
@@ -103,15 +112,26 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
     def _schedule(self, coro: Awaitable[bool]) -> None:
         create_task = getattr(self._hass, "async_create_task", None)
         if callable(create_task):
-            create_task(coro)
+            try:
+                task = create_task(
+                    coro,
+                    name="googlefindmy.cloud_discovery",  # type: ignore[arg-type]
+                )
+            except TypeError:
+                task = create_task(coro)
+            if isinstance(task, asyncio.Task):
+                task.add_done_callback(_log_task_exception)
             return
 
         try:
-            asyncio.create_task(coro)
+            task = asyncio.create_task(coro)
         except RuntimeError:
             _LOGGER.debug(
                 "Cloud discovery append scheduling skipped: event loop not running"
             )
+            return
+
+        task.add_done_callback(_log_task_exception)
 
 
 def _cloud_discovery_runtime(hass: HomeAssistant) -> dict[str, Any]:
