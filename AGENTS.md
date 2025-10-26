@@ -432,6 +432,8 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 See also: [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md) for additional, curated reference URLs.
 
+When consulting upstream documentation, prioritize the three Home Assistant domains that anchor our guidance: the developer portal (`https://developers.home-assistant.io`), the user-facing documentation (`https://www.home-assistant.io`), and the alerts/service bulletins site (`https://alerts.home-assistant.io`). If any of these hosts become unreachable even though the connectivity probe confirms general internet access, pause the work, request manual approval for the affected domain, and document the escalation before proceeding.
+
 ## pip-audit workflow guidance (CORRECTION — April 2025)
 
 **pip-audit reality check (v2.9.0)**
