@@ -103,24 +103,23 @@ jobs:
 
           if [ "$semgrep_exit" -eq 2 ]; then
             echo "::notice::Semgrep returned exit code 2 for the SARIF scan; uploading an empty fallback artifact."
-            cat <<'SARIF' > semgrep.sarif
-            {
-              "version": "2.1.0",
-              "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-              "runs": [
-                {
-                  "tool": {
-                    "driver": {
-                      "name": "Semgrep",
-                      "informationUri": "https://semgrep.dev/",
-                      "rules": []
-                    }
-                  },
-                  "results": []
-                }
-              ]
-            }
-            SARIF
+            printf '%s\n' \
+              '{' \
+              '  "version": "2.1.0",' \
+              '  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",' \
+              '  "runs": [' \
+              '    {' \
+              '      "tool": {' \
+              '        "driver": {' \
+              '          "name": "Semgrep",' \
+              '          "informationUri": "https://semgrep.dev/",' \
+              '          "rules": []' \
+              '        }' \
+              '      },' \
+              '      "results": []' \
+              '    }' \
+              '  ]' \
+              '}' > semgrep.sarif
             exit 0
           fi
 
@@ -129,24 +128,23 @@ jobs:
           fi
 
           if ! jq -e '(.runs // []) | map(select((.results // []) | length > 0)) | length > 0' semgrep.sarif >/dev/null 2>&1; then
-            cat <<'SARIF' > semgrep.sarif
-            {
-              "version": "2.1.0",
-              "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-              "runs": [
-                {
-                  "tool": {
-                    "driver": {
-                      "name": "Semgrep",
-                      "informationUri": "https://semgrep.dev/",
-                      "rules": []
-                    }
-                  },
-                  "results": []
-                }
-              ]
-            }
-            SARIF
+            printf '%s\n' \
+              '{' \
+              '  "version": "2.1.0",' \
+              '  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",' \
+              '  "runs": [' \
+              '    {' \
+              '      "tool": {' \
+              '        "driver": {' \
+              '          "name": "Semgrep",' \
+              '          "informationUri": "https://semgrep.dev/",' \
+              '          "rules": []' \
+              '        }' \
+              '      },' \
+              '      "results": []' \
+              '    }' \
+              '  ]' \
+              '}' > semgrep.sarif
           fi
 
       - name: Fail on high or critical findings
