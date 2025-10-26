@@ -49,13 +49,16 @@ from .const import CONF_GOOGLE_EMAIL, CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, DOMA
 _LOGGER = logging.getLogger(__name__)
 
 
-def _log_task_exception(task: "asyncio.Task[bool]") -> None:
-    """Log and suppress exceptions from asynchronous tasks."""
+def _log_task_exception(task: "asyncio.Future[Any]") -> None:
+    """Log and suppress exceptions raised by cloud discovery tasks."""
 
     try:
         task.result()
+    except asyncio.CancelledError:  # pragma: no cover - cancellation is expected
+        return
     except Exception as err:  # noqa: BLE001 - logging best effort
         _LOGGER.debug("Suppressed cloud discovery task exception: %s", err)
+
 
 CLOUD_DISCOVERY_NAMESPACE = f"{DOMAIN}.cloud_scan"
 SECRETS_DISCOVERY_NAMESPACE = f"{DOMAIN}.secrets_file"
@@ -119,8 +122,15 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
                 )
             except TypeError:
                 task = create_task(coro)
-            if isinstance(task, asyncio.Task):
+            if isinstance(task, asyncio.Future):
                 task.add_done_callback(_log_task_exception)
+            elif hasattr(task, "add_done_callback"):
+                try:
+                    task.add_done_callback(_log_task_exception)  # type: ignore[call-arg]
+                except Exception:  # noqa: BLE001 - defensive best effort
+                    _LOGGER.debug(
+                        "Unable to attach discovery task callback", exc_info=True
+                    )
             return
 
         try:
