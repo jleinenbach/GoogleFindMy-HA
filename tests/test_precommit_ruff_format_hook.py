@@ -3,49 +3,46 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from script.precommit_hooks import ruff_format
 
 
-def test_collect_changed_files_runs_git_diff_for_targets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Ensure the helper queries git diff when filenames are provided."""
+def test_main_injects_force_exclude(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force-exclude should be appended when not explicitly disabled."""
 
-    recorded: list[list[str]] = []
+    recorded_options: list[list[str]] = []
+    recorded_filenames: list[list[str]] = []
 
-    def _fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
-        command = args[0]
-        recorded.append(command)
-        return SimpleNamespace(returncode=0, stdout="first.py\nsecond.py\n")
+    def _fake_run(options, filenames):  # type: ignore[no-untyped-def]
+        recorded_options.append(list(options))
+        recorded_filenames.append(list(filenames))
+        return 0
 
-    monkeypatch.setattr(ruff_format.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ruff_format, "_run_ruff", _fake_run)
 
-    changed = ruff_format._collect_changed_files(["first.py", "second.py"])
+    exit_code = ruff_format.main(["some.py"])
 
-    assert recorded == [["git", "diff", "--name-only", "--", "first.py", "second.py"]]
-    assert changed == ["first.py", "second.py"]
+    assert exit_code == 0
+    assert recorded_options == [["--force-exclude"]]
+    assert recorded_filenames == [["some.py"]]
 
 
-def test_collect_changed_files_skips_diff_without_targets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Do not call git diff when no filenames are supplied."""
+def test_main_respects_no_force_exclude(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passing ``--no-force-exclude`` should avoid injecting ``--force-exclude``."""
 
-    called = False
+    recorded_options: list[list[str]] = []
 
-    def _fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
-        nonlocal called
-        called = True
-        return SimpleNamespace(returncode=0, stdout="")
+    def _fake_run(options, filenames):  # type: ignore[no-untyped-def]
+        recorded_options.append(list(options))
+        return 0
 
-    monkeypatch.setattr(ruff_format.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ruff_format, "_run_ruff", _fake_run)
 
-    assert ruff_format._collect_changed_files([]) == []
-    assert not called
+    exit_code = ruff_format.main(["--no-force-exclude", "--", "target.py"])
+
+    assert exit_code == 0
+    assert recorded_options == [["--no-force-exclude"]]
 
 
 def test_main_passes_through_check_without_custom_excludes(
@@ -53,17 +50,26 @@ def test_main_passes_through_check_without_custom_excludes(
 ) -> None:
     """Ensure ``--check`` is forwarded without injecting ``--exclude`` options."""
 
-    recorded_options: list[str] = []
+    recorded_options: list[list[str]] = []
 
     def _fake_run(options, filenames):  # type: ignore[no-untyped-def]
-        recorded_options.extend(options)
+        recorded_options.append(list(options))
         return 0
 
     monkeypatch.setattr(ruff_format, "_run_ruff", _fake_run)
-    monkeypatch.setattr(ruff_format, "_collect_changed_files", lambda filenames: [])
 
     exit_code = ruff_format.main(["--check"])
 
     assert exit_code == 0
-    assert "--check" in recorded_options
-    assert not any(option.startswith("--exclude") for option in recorded_options)
+    assert recorded_options == [["--check", "--force-exclude"]]
+
+
+def test_main_propagates_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ruff failures should bubble up to the caller."""
+
+    def _fake_run(options, filenames):  # type: ignore[no-untyped-def]
+        return 7
+
+    monkeypatch.setattr(ruff_format, "_run_ruff", _fake_run)
+
+    assert ruff_format.main(["config.py"]) == 7

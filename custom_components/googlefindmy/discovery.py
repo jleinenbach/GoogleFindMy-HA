@@ -443,31 +443,34 @@ class SecretsJSONWatcher:
                 result.email, is_update=existing_entry is not None
             )
 
+            payload = _assemble_cloud_discovery_payload(
+                email=result.email,
+                token=result.token,
+                secrets_bundle=result.bundle,
+                discovery_ns=self._namespace,
+                discovery_stable_key=result.stable_key,
+                title=title,
+                source=source,
+            )
+
+            runtime = _cloud_discovery_runtime(self._hass)
+            results_list = runtime["results"]
+
             try:
-                triggered = await _trigger_cloud_discovery(
-                    self._hass,
-                    email=result.email,
-                    token=result.token,
-                    secrets_bundle=result.bundle,
-                    discovery_ns=self._namespace,
-                    discovery_stable_key=result.stable_key,
-                    source=source,
-                    title=title,
-                )
+                results_list.append(payload)
             except Exception as err:  # noqa: BLE001 - keep watcher alive
                 _LOGGER.warning(
-                    "Secrets discovery flow creation failed for %s: %s",
+                    "Secrets discovery flow queueing failed for %s: %s",
                     _redact_account_for_log(result.email, result.stable_key),
                     err,
                 )
                 return
 
-            if triggered:
-                _LOGGER.info(
-                    "Triggered discovery flow for %s via secrets.json (%s)",
-                    _redact_account_for_log(result.email, result.stable_key),
-                    reason,
-                )
+            _LOGGER.debug(
+                "Queued secrets discovery for %s (%s)",
+                _redact_account_for_log(result.email, result.stable_key),
+                reason,
+            )
 
     async def _async_render_title(self, email: str, *, is_update: bool) -> str | None:
         language = (

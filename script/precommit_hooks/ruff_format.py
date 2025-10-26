@@ -51,18 +51,6 @@ def _run_ruff(options: Sequence[str], filenames: Sequence[str]) -> int:
     return subprocess.run(command, check=False).returncode
 
 
-def _collect_changed_files(filenames: Sequence[str]) -> list[str]:
-    if not filenames:
-        return []
-
-    diff_command = ["git", "diff", "--name-only", "--", *filenames]
-    result = subprocess.run(diff_command, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise SystemExit(result.returncode)
-
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
-
-
 def main(argv: Sequence[str]) -> int:
     if not argv:
         return 0
@@ -71,20 +59,7 @@ def main(argv: Sequence[str]) -> int:
     options = _maybe_force_exclude(list(options))
 
     ruff_exit = _run_ruff(options, filenames)
-    if ruff_exit not in (0, 1):
-        return ruff_exit
-
-    changed_files = _collect_changed_files(filenames)
-    if changed_files:
-        count = len(changed_files)
-        noun = "file" if count == 1 else "files"
-        print(f"{count} {noun} reformatted by Ruff:\n")
-        for path in changed_files:
-            print(f"  - {path}")
-        print("\nPlease review the changes, stage the files, and re-run pre-commit.")
-        return 1
-
-    return 0 if ruff_exit == 0 else ruff_exit
+    return ruff_exit
 
 
 if __name__ == "__main__":
