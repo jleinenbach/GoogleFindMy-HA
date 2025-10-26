@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import asyncio
+import inspect
 from collections.abc import Mapping
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from datetime import datetime, timezone
@@ -64,6 +66,12 @@ def _stub_homeassistant() -> None:
             self.context: dict[str, object] = {}
             self.hass = None
 
+        async def async_set_unique_id(
+            self, unique_id: str, *, raise_on_progress: bool = False
+        ) -> None:
+            self.unique_id = unique_id  # type: ignore[attr-defined]
+            self._unique_id = unique_id  # type: ignore[attr-defined]
+
         async def async_show_form(
             self, *args, **kwargs
         ):  # pragma: no cover - defensive
@@ -79,6 +87,60 @@ def _stub_homeassistant() -> None:
 
         def _set_confirm_only(self) -> None:
             self.context["confirm_only"] = True
+
+        def _async_current_entries(self, *, include_ignore: bool = False):
+            hass = getattr(self, "hass", None)
+            if hass is None:
+                return []
+            manager = getattr(hass, "config_entries", None)
+            if manager is None:
+                return []
+            try:
+                return list(manager.async_entries(getattr(self, "handler", None)))
+            except Exception:  # noqa: BLE001 - best effort fallback
+                return []
+
+        def _abort_if_unique_id_configured(
+            self,
+            *,
+            updates=None,
+            reload: bool = True,
+            **_: object,
+        ) -> None:
+            current_entries = self._async_current_entries()
+            target_unique_id = getattr(self, "unique_id", None)
+            if not current_entries or target_unique_id is None:
+                return
+
+            for entry in current_entries:
+                if getattr(entry, "unique_id", None) != target_unique_id:
+                    continue
+
+                if updates:
+                    update_callable = getattr(
+                        getattr(self.hass, "config_entries", None),
+                        "async_update_entry",
+                        None,
+                    )
+                    if callable(update_callable):
+                        update_callable(entry, **updates)
+
+                    if reload:
+                        reload_callable = getattr(
+                            getattr(self.hass, "config_entries", None),
+                            "async_reload",
+                            None,
+                        )
+                        if callable(reload_callable):
+                            outcome = reload_callable(entry.entry_id)
+                            if inspect.isawaitable(outcome):
+                                try:
+                                    loop = asyncio.get_running_loop()
+                                except RuntimeError:  # pragma: no cover - fallback path
+                                    asyncio.run(outcome)
+                                else:
+                                    loop.create_task(outcome)
+                return
 
         def add_suggested_values_to_schema(self, schema, suggested):  # noqa: D401 - stub
             return schema

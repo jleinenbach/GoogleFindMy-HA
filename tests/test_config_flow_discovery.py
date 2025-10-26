@@ -180,6 +180,267 @@ def test_async_step_discovery_existing_entry_updates(
     assert result["reason"] == "already_configured"
 
 
+def test_async_step_discovery_update_info_existing_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery-update payloads for existing entries should update and reload."""
+
+    class _Entry:
+        def __init__(self) -> None:
+            self.entry_id = "entry-id"
+            self.data: dict[str, Any] = {
+                CONF_GOOGLE_EMAIL: "existing@example.com",
+                CONF_OAUTH_TOKEN: "old-token",
+            }
+            self.unique_id = "existing@example.com"
+
+    entry = _Entry()
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.updated: list[tuple[Any, dict[str, Any]]] = []
+            self.reloaded: list[str] = []
+            self.lookups: list[str] = []
+
+        def async_entries(self, domain: str) -> list[Any]:
+            self.lookups.append(domain)
+            assert domain == config_flow.DOMAIN
+            return [entry]
+
+        def async_update_entry(self, target: Any, **updates: Any) -> None:
+            self.updated.append((target, updates))
+
+        def async_reload(self, entry_id: str) -> None:
+            self.reloaded.append(entry_id)
+
+    class _Hass:
+        def __init__(self) -> None:
+            self.config_entries = _ConfigEntries()
+
+    called_ingest: list[tuple[config_flow.ConfigFlow, Any]] = []
+
+    async def _fake_ingest(
+        flow: config_flow.ConfigFlow,
+        normalized: Any,
+        *,
+        existing_entry: Any | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        called_ingest.append((flow, normalized))
+        assert existing_entry is entry
+        return (
+            {"data": {CONF_OAUTH_TOKEN: "unused"}},
+            {"data": {CONF_OAUTH_TOKEN: "aas_et/UPDATED"}},
+        )
+
+    monkeypatch.setattr(
+        config_flow,
+        "_ingest_discovery_credentials",
+        _fake_ingest,
+    )
+
+    monkeypatch.setattr(
+        config_flow,
+        "_find_entry_by_email",
+        lambda _hass, _email: entry,
+    )
+
+    normalized = config_flow.CloudDiscoveryData(
+        email="existing@example.com",
+        unique_id="existing@example.com",
+        candidates=(("candidate", "aas_et/UPDATED"),),
+        secrets_bundle=None,
+    )
+
+    monkeypatch.setattr(
+        config_flow,
+        "_normalize_and_validate_discovery_payload",
+        lambda _payload: normalized,
+    )
+
+    async def _exercise() -> tuple[
+        dict[str, Any],
+        bool,
+        list[tuple[bool]],
+        list[str],
+        list[tuple[Any, dict[str, Any]]],
+        list[str],
+    ]:
+        hass = _Hass()
+        flow = config_flow.ConfigFlow()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.context = {}
+
+        calls: list[tuple[bool]] = []
+
+        def _current_entries(
+            self: config_flow.ConfigFlow, *, include_ignore: bool = False
+        ) -> list[Any]:
+            calls.append((include_ignore,))
+            assert not include_ignore
+            return [entry]
+
+        flow._async_current_entries = types.MethodType(  # type: ignore[assignment]
+            _current_entries,
+            flow,
+        )
+
+        async def _set_unique_id(
+            value: str, *, raise_on_progress: bool = False
+        ) -> None:
+            flow.unique_id = value  # type: ignore[attr-defined]
+            flow._unique_id = value  # type: ignore[attr-defined]
+
+        flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+        payload = {
+            CONF_GOOGLE_EMAIL: "existing@example.com",
+            "candidate_tokens": ["aas_et/UPDATED"],
+        }
+
+        result = await flow.async_step_discovery_update_info(payload)
+        if inspect.isawaitable(result):
+            result = await result
+
+        return (
+            result,
+            bool(called_ingest),
+            calls,
+            hass.config_entries.lookups,
+            hass.config_entries.updated,
+            hass.config_entries.reloaded,
+        )
+
+    result, ingest_called, calls, lookups, updates, reloaded = asyncio.run(
+        _exercise()
+    )
+    assert ingest_called, f"discovery ingestion helper was not invoked: lookups={lookups!r}, result={result!r}"
+    assert result["type"] == "abort"
+    assert result["reason"] == "already_configured"
+    assert calls, "abort helper did not inspect current entries"
+    assert updates == [(entry, {"data": {CONF_OAUTH_TOKEN: "aas_et/UPDATED"}})]
+    assert reloaded == [entry.entry_id]
+
+
+def test_async_step_discovery_update_info_invalid_payload() -> None:
+    """Invalid discovery-update payloads should abort early."""
+
+    class _ConfigEntries:
+        def async_entries(self, domain: str) -> list[Any]:
+            return []
+
+    class _Hass:
+        def __init__(self) -> None:
+            self.config_entries = _ConfigEntries()
+
+    async def _exercise() -> dict[str, Any]:
+        hass = _Hass()
+        flow = config_flow.ConfigFlow()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.context = {}
+
+        result = await flow.async_step_discovery_update_info(None)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    result = asyncio.run(_exercise())
+    assert result["type"] == "abort"
+    assert result["reason"] == "invalid_discovery_info"
+
+
+def test_async_step_discovery_update_info_ingest_invalid_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Errors raised by ingestion should propagate as documented reasons."""
+
+    class _Entry:
+        def __init__(self) -> None:
+            self.entry_id = "entry-id"
+            self.data: dict[str, Any] = {
+                CONF_GOOGLE_EMAIL: "existing@example.com",
+                CONF_OAUTH_TOKEN: "old-token",
+            }
+            self.unique_id = "existing@example.com"
+
+    entry = _Entry()
+
+    class _ConfigEntries:
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return [entry]
+
+    class _Hass:
+        def __init__(self) -> None:
+            self.config_entries = _ConfigEntries()
+
+    async def _raise_ingest(*_: Any, **__: Any) -> tuple[dict[str, Any], None]:
+        raise config_flow.DiscoveryFlowError("invalid_auth")
+
+    monkeypatch.setattr(
+        config_flow,
+        "_ingest_discovery_credentials",
+        _raise_ingest,
+    )
+
+    monkeypatch.setattr(
+        config_flow,
+        "_find_entry_by_email",
+        lambda _hass, _email: entry,
+    )
+
+    normalized = config_flow.CloudDiscoveryData(
+        email="existing@example.com",
+        unique_id="existing@example.com",
+        candidates=(("candidate", "aas_et/INVALID"),),
+        secrets_bundle=None,
+    )
+
+    monkeypatch.setattr(
+        config_flow,
+        "_normalize_and_validate_discovery_payload",
+        lambda _payload: normalized,
+    )
+
+    async def _exercise() -> dict[str, Any]:
+        hass = _Hass()
+        flow = config_flow.ConfigFlow()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.context = {}
+
+        def _current_entries(
+            self: config_flow.ConfigFlow, *, include_ignore: bool = False
+        ) -> list[Any]:
+            assert not include_ignore
+            return [entry]
+
+        flow._async_current_entries = types.MethodType(  # type: ignore[assignment]
+            _current_entries,
+            flow,
+        )
+
+        async def _set_unique_id(
+            value: str, *, raise_on_progress: bool = False
+        ) -> None:
+            flow.unique_id = value  # type: ignore[attr-defined]
+            flow._unique_id = value  # type: ignore[attr-defined]
+
+        flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+        payload = {
+            CONF_GOOGLE_EMAIL: "existing@example.com",
+            "candidate_tokens": ["aas_et/INVALID"],
+        }
+
+        result = await flow.async_step_discovery_update_info(payload)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    result = asyncio.run(_exercise())
+    assert result["type"] == "abort"
+    assert result["reason"] == "invalid_auth"
+
+
 def test_async_step_discovery_update_alias() -> None:
     """Legacy discovery update step should forward to the update-info handler."""
 
