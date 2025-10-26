@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Mapping, Sequence
 
 # --------------------------------------------------------------------------------------
 # Core identifiers
@@ -170,7 +171,19 @@ def _now_epoch() -> int:
     return int(time.time())
 
 
-def coerce_ignored_mapping(raw: object) -> tuple[dict[str, dict], bool]:
+IgnoredMetadata = dict[str, object]
+IgnoredMapping = dict[str, IgnoredMetadata]
+
+
+def _coerce_aliases(value: object) -> list[str]:
+    """Return a list of string aliases from arbitrary input."""
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [alias for alias in value if isinstance(alias, str)]
+    return []
+
+
+def coerce_ignored_mapping(raw: object) -> tuple[IgnoredMapping, bool]:
     """Coerce various legacy shapes into v2 mapping.
     Accepted inputs:
       v0: list[str]                   -> ids only
@@ -179,7 +192,7 @@ def coerce_ignored_mapping(raw: object) -> tuple[dict[str, dict], bool]:
     Returns (mapping, changed_flag).
     """
     changed = False
-    out: dict[str, dict] = {}
+    out: IgnoredMapping = {}
     if isinstance(raw, list):
         # v0 -> v2
         for dev_id in raw:
@@ -190,43 +203,59 @@ def coerce_ignored_mapping(raw: object) -> tuple[dict[str, dict], bool]:
                     _IGN_KEY_IGNORED_AT: _now_epoch(),
                     _IGN_KEY_SOURCE: "migrated_v0",
                 }
-        changed = True
-    elif isinstance(raw, dict):
+        changed = bool(out)
+    elif isinstance(raw, Mapping):
         # str->str ? (v1)
-        if all(isinstance(v, str) for v in raw.values()):
-            for dev_id, name in raw.items():  # type: ignore[assignment]
-                if isinstance(dev_id, str):
-                    out[dev_id] = {
-                        _IGN_KEY_NAME: name,
-                        _IGN_KEY_ALIASES: [],
-                        _IGN_KEY_IGNORED_AT: _now_epoch(),
-                        _IGN_KEY_SOURCE: "migrated_v1",
-                    }
+        mapping = raw
+        if all(isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()):
             changed = True
+            for dev_id, name in mapping.items():
+                out[dev_id] = {
+                    _IGN_KEY_NAME: name,
+                    _IGN_KEY_ALIASES: [],
+                    _IGN_KEY_IGNORED_AT: _now_epoch(),
+                    _IGN_KEY_SOURCE: "migrated_v1",
+                }
         else:
             # assume v2-ish; normalize keys
-            for dev_id, meta in raw.items():  # type: ignore[assignment]
+            for dev_id, meta in mapping.items():
                 if not isinstance(dev_id, str):
                     continue
-                if not isinstance(meta, dict):
-                    meta = {_IGN_KEY_NAME: str(meta)}
+                aliases: list[str] = []
+                ignored_at: int = _now_epoch()
+                source = "registry"
+                name = dev_id
+                if isinstance(meta, Mapping):
+                    str_meta: Mapping[str, object] = {
+                        key: value for key, value in meta.items() if isinstance(key, str)
+                    }
+                    name_value = str_meta.get(_IGN_KEY_NAME)
+                    if isinstance(name_value, str) and name_value:
+                        name = name_value
+                    aliases = _coerce_aliases(str_meta.get(_IGN_KEY_ALIASES))
+                    ignored_value = str_meta.get(_IGN_KEY_IGNORED_AT)
+                    if isinstance(ignored_value, (int, float)):
+                        ignored_at = int(ignored_value)
+                    source_value = str_meta.get(_IGN_KEY_SOURCE)
+                    if isinstance(source_value, str) and source_value:
+                        source = source_value
+                else:
+                    name = str(meta)
                 out[dev_id] = {
-                    _IGN_KEY_NAME: meta.get(_IGN_KEY_NAME) or dev_id,
-                    _IGN_KEY_ALIASES: list(meta.get(_IGN_KEY_ALIASES) or []),
-                    _IGN_KEY_IGNORED_AT: int(
-                        meta.get(_IGN_KEY_IGNORED_AT) or _now_epoch()
-                    ),
-                    _IGN_KEY_SOURCE: meta.get(_IGN_KEY_SOURCE) or "registry",
+                    _IGN_KEY_NAME: name,
+                    _IGN_KEY_ALIASES: aliases,
+                    _IGN_KEY_IGNORED_AT: ignored_at,
+                    _IGN_KEY_SOURCE: source,
                 }
     else:
         out = {}
     return out, changed
 
 
-def ignored_choices_for_ui(ignored_map: dict[str, dict]) -> dict[str, str]:
+def ignored_choices_for_ui(ignored_map: Mapping[str, Mapping[str, object]]) -> dict[str, str]:
     """Build UI labels 'Name (id)' directly from the stored mapping."""
     return {
-        dev_id: f"{(meta.get(_IGN_KEY_NAME) or dev_id)} ({dev_id})"
+        dev_id: f"{str(meta.get(_IGN_KEY_NAME) or dev_id)} ({dev_id})"
         for dev_id, meta in ignored_map.items()
     }
 

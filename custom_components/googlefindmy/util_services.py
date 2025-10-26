@@ -1,11 +1,11 @@
 # custom_components/googlefindmy/util_services.py
-"""Compatibility utilities for entity service registration."""
+"""Helpers for registering backward-compatible entity services."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 
 
 LOGGER = logging.getLogger(__name__)
