@@ -43,8 +43,6 @@
         "description": "Las credenciales de **{email}** parecen no ser válidas o han caducado. Proporciona nuevas credenciales a continuación.\n\nConsejo: puedes pegar el contenido completo de un secrets.json reciente **o** facilitar un nuevo token OAuth y correo electrónico.",
         "data": {
           "secrets_json": "Nuevo secrets.json (contenido completo)",
-          "oauth_token": "Nuevo token OAuth",
-          "google_email": "Correo de Google",
           "new_oauth_token": "Nuevo token OAuth"
         }
       }
@@ -429,6 +427,9 @@
     "device_not_found": {
       "message": "El dispositivo {device_id} no se encontró o no pertenece a esta integración."
     },
+    "no_active_entry": {
+      "message": "No hay ninguna entrada activa de Google Find My Device. Entradas activas: {active_count}/{total_count}. Activa una de las entradas configuradas ({entries}) o añade una cuenta nueva y vuelve a intentarlo."
+    },
     "locate_failed": {
       "message": "No se pudo localizar el dispositivo {device_id}: {error}"
     },
@@ -443,9 +444,6 @@
     },
     "missing_namespace": {
       "message": "Falta el espacio de nombres. Pasa el espacio de nombres específico de la entrada o el ID de ConfigEntry para mantener aislados los metadatos en caché."
-    },
-    "no_active_entry": {
-      "message": "No hay ninguna entrada activa de Google Find My Device. Entradas activas: {active_count}/{total_count}. Activa una de las entradas configuradas ({entries}) o añade una cuenta nueva y vuelve a intentarlo."
     }
   },
   "system_health": {

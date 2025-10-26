@@ -43,8 +43,6 @@
         "description": "Poświadczenia dla **{email}** są nieprawidłowe lub wygasły. Podaj poniżej nowe.\n\nWskazówka: możesz wkleić pełną zawartość nowego pliku secrets.json **albo** podać nowy token OAuth i adres e-mail.",
         "data": {
           "secrets_json": "Nowy secrets.json (pełna zawartość)",
-          "oauth_token": "Nowy token OAuth",
-          "google_email": "Nowy adres e-mail Google",
           "new_oauth_token": "Nowy token OAuth"
         }
       }
@@ -429,6 +427,9 @@
     "device_not_found": {
       "message": "Urządzenie {device_id} nie zostało znalezione lub nie należy do tej integracji."
     },
+    "no_active_entry": {
+      "message": "Brak aktywnych wpisów Google Find My Device. Aktywne wpisy: {active_count}/{total_count}. Włącz jeden ze skonfigurowanych wpisów ({entries}) lub dodaj nowe konto i spróbuj ponownie."
+    },
     "locate_failed": {
       "message": "Nie udało się zlokalizować urządzenia {device_id}: {error}"
     },
@@ -443,9 +444,6 @@
     },
     "missing_namespace": {
       "message": "Brak przestrzeni nazw. Przekaż przestrzeń nazw specyficzną dla wpisu lub identyfikator ConfigEntry, aby izolować buforowane metadane."
-    },
-    "no_active_entry": {
-      "message": "Brak aktywnych wpisów Google Find My Device. Aktywne wpisy: {active_count}/{total_count}. Włącz jeden ze skonfigurowanych wpisów ({entries}) lub dodaj nowe konto i spróbuj ponownie."
     }
   },
   "system_health": {
