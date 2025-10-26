@@ -45,7 +45,7 @@ rules:
     - id: docs-removal-instructions
       status: done
       evidence:
-        - "README.md#deinstallation--removal"
+        - "README.md#uninstallation--removal"
     - id: entity-event-setup
       status: done
       evidence: []
