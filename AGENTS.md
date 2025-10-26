@@ -11,7 +11,7 @@
 ## Environment verification
 
 * **Requirement:** Determine the current connectivity status before every implementation cycle.
-* **Checks:** Run a quick internet-access probe (for example, `ping -c 1 8.8.8.8`, `ping -c 1 1.1.1.1`, or `curl -I https://www.google.com`) and record the outcome in the summary.
+* **Checks:** Run a quick internet-access probe that exercises the real package channels (for example, `python -m pip install --dry-run --no-deps pip`, `pip index versions pip`, or a package-manager metadata refresh such as `apt-get update`) and record the outcome in the summary. Avoid ICMP-only probes like `ping 8.8.8.8`, which are blocked in the managed environment and do not reflect HTTP/HTTPS reachability.
 * **Online mode:** When a network connection is available you may install or update missing development tooling (for example, `pip`, `pip-tools`, `pre-commit`, `rustup`, `node`, `jq`) whenever it is necessary for maintenance or local verification.
 * **Offline mode:** When no connection is available, limit the work to local analysis only and call out any follow-up actions that must happen once connectivity is restored.
 
