@@ -425,14 +425,6 @@
       "description": "Dieses Google-Konto (**{email}**) wird bereits von einem anderen Eintrag verwendet:\n\n{entries}\n\nDeaktiviere oder entferne doppelte Einträge, sodass pro Konto nur eine Instanz aktiv bleibt, und lade anschließend die Integration neu (oder starte Home Assistant neu)."
     }
   },
-  "discovery": {
-    "secrets_json": {
-      "title": "Auth/secrets.json für {email} erkannt"
-    },
-    "secrets_json_update": {
-      "title": "Neue Anmeldedaten für {email} erkannt"
-    }
-  },
   "exceptions": {
     "device_not_found": {
       "message": "Gerät {device_id} wurde nicht gefunden oder gehört nicht zu dieser Integration."
