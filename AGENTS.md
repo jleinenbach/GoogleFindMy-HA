@@ -5,8 +5,16 @@
 > **Directory scope:** applies to the entire repository (with continued emphasis on `custom_components/googlefindmy/**` and tests under `tests/**`).
 > **File headers:** Every Python file within scope must include a comment containing its repository-relative path (e.g., `# tests/test_example.py`). When a file has a shebang (`#!`), the shebang stays on the first line and the path comment immediately follows it.
 > **Precedence:** (1) Official **Home Assistant Developer Docs** → (2) this AGENTS.md → (3) repository conventions. This file never overrides security/legal policies.
+> **Language policy:** Keep the project consistently in English for documentation, inline code comments, and docstrings. (Translation files remain multilingual.)
 > **Non-blocking:** Missing optional artifacts (README sections, `quality_scale.yaml`, CODEOWNERS, CI files) **must not block** urgent fixes. The agent proposes a minimal stub or follow-up task instead.
 > **References:** This contract relies on the sources listed below; for a curated, extended list of links, see [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md).
+> **Upstream documentation hierarchy:** When consulting external guidance, prioritize Home Assistant's canonical domains in this order: developer portal (`https://developers.home-assistant.io`), user documentation (`https://www.home-assistant.io`), and the alerts/service bulletins site (`https://alerts.home-assistant.io`). If a required host is unreachable while the connectivity probe still confirms general internet access, pause implementation, request manual approval for that domain, and document the escalation before proceeding.
+>
+> | Domain | Primary use cases |
+> | --- | --- |
+> | `https://developers.home-assistant.io` | Integration architecture, helper APIs, config flow patterns, data update coordinator guidance, and other developer-facing contracts. |
+> | `https://www.home-assistant.io` | User-facing behavior references, feature overviews, release notes, and configuration examples that affect documentation or UX communication. |
+> | `https://alerts.home-assistant.io` | Service advisories, breaking changes, security or outage bulletins that may require mitigation steps or temporary workarounds. |
 
 ## Environment verification
 
@@ -431,6 +439,98 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [`custom_components/googlefindmy/FMDN.md`](custom_components/googlefindmy/FMDN.md) — canonical reference detailing cryptography, provisioning flows, BLE behavior, and failure modes underpinning modules such as [`custom_components/googlefindmy/api.py`](custom_components/googlefindmy/api.py), [`custom_components/googlefindmy/coordinator.py`](custom_components/googlefindmy/coordinator.py), and the BLE parsers in [`custom_components/googlefindmy/ProtoDecoders/`](custom_components/googlefindmy/ProtoDecoders/).
 
 See also: [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md) for additional, curated reference URLs.
+
+## High-confidence & sourcing standard for Codex
+
+This section originates from the maintainer request and governs every answer, patch, refactor, review, commit, diff proposal, and architectural recommendation produced by the AI (“Codex”) inside this repository. It supplements existing quality requirements (for example, mypy strict for touched files, Home Assistant best practices) and is mandatory.
+
+### 0. Scope
+
+The rules apply to the entire repository and every interaction where Codex proposes or reviews code.
+
+### 1. High-confidence mode (≥ 90 %)
+
+*Codex must only deliver concrete code when it is at least 90 % confident that:*
+
+1. the change is syntactically valid;
+2. the change matches the project’s architecture, patterns, and compatibility expectations;
+3. the change respects all known constraints (Home Assistant Core guidelines, existing conventions, runtime behavior).
+
+If confidence drops below 90 %:
+
+* do **not** change code;
+* do **not** invent new function signatures, imports, or APIs;
+* respond with “I do not have reliable information for that—I do not know.”;
+* immediately request the missing evidence from the user (see §4 “User as data source”).
+
+Confidence is < 90 % whenever, for example:
+
+* the relevant API version is unclear;
+* a breaking change is suspected but cannot be demonstrated;
+* project conventions (exception classes, logging patterns, helper utilities) are unknown;
+* backward compatibility requirements are uncertain.
+
+### 2. Mandatory evidence
+
+Every recommendation—code, architecture, migration, best practice—must reference a verifiable source inside the project reality.
+
+Acceptable sources include:
+
+* existing repository code (including tests);
+* previously established project standards (documented in `AGENTS.md`, `CONTRIBUTING.md`, docstrings, comments);
+* explicit, user-confirmed instructions (for example, “Use `homeassistant.helpers.network.get_url(self.hass)` instead of the deprecated `async_get_url()`”);
+* official upstream interfaces (Home Assistant helpers, `DataUpdateCoordinator`, config flow contracts) **when** Codex has direct access to them.
+
+When the evidence lives inside this repository, cite the exact file and symbol. If the evidence only exists upstream (Home Assistant developer docs, changelog, breaking changes) and is not available here, name it explicitly and refrain from modifying code until the user supplies the relevant excerpt (see §4).
+
+Assertions without sources imply confidence < 90 % → no code changes.
+
+### 3. Workflow for code changes
+
+Before proposing a change Codex must:
+
+1. **Analyze the problem.** Summarize what must change (bug fix, refactor, API migration, new test) and highlight the affected files or sections.
+2. **Compare with project standards.** Identify existing patterns to reuse and ensure no established rule is violated (for example, deprecated helpers, translation handling, config flow ordering).
+3. **Propose only with ≥ 90 % confidence.** Provide a full, executable patch backed by the cited evidence.
+4. **Verify consistency.** Explain how the patch remains backward compatible and why it should pass mypy strict for the modified files.
+
+### 4. User as data source
+
+When external information is missing (for example, an up-to-date Home Assistant helper signature, a breaking change notice, an upstream commit), Codex must:
+
+1. Explicitly request the missing snippet from the user (“Please provide the current definition of `homeassistant.helpers.network.get_url`”, etc.).
+2. Treat user-supplied excerpts as valid sources once delivered.
+3. Resume high-confidence mode only after receiving the evidence.
+4. If the user cannot provide the evidence, stay below 90 % confidence and avoid speculative code.
+
+### 5. Communicate uncertainty
+
+State uncertainty early and precisely: “I am <90 % confident because I lack the signature of `X` in your target Home Assistant version. I do not have reliable information—please provide the definition of `X`.” Do **not** rely on guesses or invented APIs.
+
+### 6. Consequences for commits, diffs, and reviews
+
+*With ≥ 90 % confidence:* Codex may deliver complete diffs, refactors, tests, migrations—always citing the supporting evidence.
+
+*With < 90 % confidence:* Codex must not supply diffs. Instead, list the open information gaps and label any hypotheses as unverified. Do not commit or rely on speculative changes.
+
+### 7. Review obligations
+
+All critiques of existing code must also cite evidence. If a concern depends on an unverified deprecation or breaking change, immediately request the source instead of rewriting code blindly.
+
+### 8. Required workflow summary
+
+1. **Confidence check.** Confirm ≥ 90 % certainty for syntax, semantics, compatibility. If not, state the lack of information and request sources.
+2. **Cite evidence.** Every change references a concrete repository location or confirmed directive.
+3. **Deliver patch.** Provide a complete, runnable patch that follows all conventions (type hints, English docstrings, no deprecated APIs, mypy strict readiness).
+4. **Post-verification.** Tell the user which commands to run locally (for example, `pytest -q`, `mypy --strict`, `ruff check`).
+
+### 9. Rationale
+
+The objective is reliability and auditability: every change must document its source, justification, and any unresolved assumptions. This protects code quality, compatibility, and long-term maintainability.
+
+### 10. Post-task feedback obligations
+
+After completing each task, Codex must finish with a brief, constructive note proposing improvements to this environment—preferably actionable suggestions for refining `AGENTS.md` or adjacent tooling—based on the experience gained during the most recent assignment.
 
 ## pip-audit workflow guidance (CORRECTION — April 2025)
 
