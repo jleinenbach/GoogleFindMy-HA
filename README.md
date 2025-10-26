@@ -109,9 +109,12 @@ The integration provides a couple of Home Assistant Actions for use with automat
 
 | Action | Attribute | Description |
 | :---: | :---: | --- |
-| googlefindmy.locate_device | Device ID | Request fresh location data for a specific device. |
-| googlefindmy.play_sound | Device ID | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. |
+| googlefindmy.locate_device | Device ID (required) | Request fresh location data for a specific device. |
+| googlefindmy.play_sound | Device ID (required) | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. |
+| googlefindmy.stop_sound | Device ID (required) | Stop the active sound on the selected device. |
+| googlefindmy.locate_external | Device ID (required), Device Name (optional) | Trigger the locate flow via the external helper while optionally labeling logs with a human-readable device name. |
 | googlefindmy.refresh_device_urls | - | Refreshes all device Map View URLs.  Useful if you are having problems with accessing Map View pages. |
+| googlefindmy.rebuild_registry | Mode (optional), Device IDs (optional) | Maintenance: defaults to rebuilding all entities/devices; choose **Migrate** to re-run the soft data→options migration or target specific devices. |
 
 ## Supported devices and functions
 
