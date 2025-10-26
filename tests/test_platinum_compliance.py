@@ -35,18 +35,8 @@ def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
     assert "recorder" in manifest.get("after_dependencies", [])
     assert "http" in manifest.get("dependencies", [])
     assert "custom_components.googlefindmy" in manifest.get("loggers", [])
-    discovery = manifest.get("discovery")
-    assert isinstance(discovery, list)
-    channel_names = {channel.get("name") for channel in discovery}
-    assert {"cloud_scan", "auth_file"} <= channel_names
-    for channel in discovery:
-        assert channel.get("version") == 1
-    discovery_update = manifest.get("discovery_update_info")
-    assert isinstance(discovery_update, list)
-    update_channels = {channel.get("name") for channel in discovery_update}
-    assert {"cloud_scan", "auth_file"} <= update_channels
-    for channel in discovery_update:
-        assert channel.get("version") == 1
+    assert "discovery" not in manifest
+    assert "discovery_update_info" not in manifest
 
 
 @pytest.fixture(name="quality_scale_text")

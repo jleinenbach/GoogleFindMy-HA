@@ -425,14 +425,6 @@
       "description": "Esta cuenta de Google (**{email}**) ya está configurada en otro registro:\n\n{entries}\n\nDesactiva o elimina las entradas duplicadas para que solo quede activa una por cuenta y, después, vuelve a cargar la integración (o reinicia Home Assistant)."
     }
   },
-  "discovery": {
-    "secrets_json": {
-      "title": "Se detectó Auth/secrets.json para {email}"
-    },
-    "secrets_json_update": {
-      "title": "Se detectaron nuevas credenciales para {email}"
-    }
-  },
   "exceptions": {
     "device_not_found": {
       "message": "El dispositivo {device_id} no se encontró o no pertenece a esta integración."

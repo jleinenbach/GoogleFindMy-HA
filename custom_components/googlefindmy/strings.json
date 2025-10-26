@@ -423,14 +423,6 @@
       "description": "This Google account (**{email}**) is already configured by another entry:\n\n{entries}\n\nDisable or remove the duplicate entry so that only one entry per account remains active, then reload the integration (or restart Home Assistant)."
     }
   },
-  "discovery": {
-    "secrets_json": {
-      "title": "Auth/secrets.json detected for {email}"
-    },
-    "secrets_json_update": {
-      "title": "New credentials detected for {email}"
-    }
-  },
   "exceptions": {
     "device_not_found": {
       "message": "Device {device_id} could not be found or is not part of this integration."
