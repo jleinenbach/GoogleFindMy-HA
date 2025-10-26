@@ -43,8 +43,6 @@
         "description": "Les identifiants de **{email}** semblent invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nAstuce : vous pouvez soit coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail.",
         "data": {
           "secrets_json": "Nouveau secrets.json (contenu complet)",
-          "oauth_token": "Nouveau jeton OAuth",
-          "google_email": "Adresse e-mail Google",
           "new_oauth_token": "Nouveau jeton OAuth"
         }
       }
@@ -429,6 +427,9 @@
     "device_not_found": {
       "message": "L’appareil {device_id} est introuvable ou ne fait pas partie de cette intégration."
     },
+    "no_active_entry": {
+      "message": "Aucune entrée Google Find My Device active n'est disponible. Entrées actives : {active_count}/{total_count}. Activez l'une des entrées configurées ({entries}) ou ajoutez un nouveau compte, puis réessayez."
+    },
     "locate_failed": {
       "message": "Échec de la localisation de l’appareil {device_id} : {error}"
     },
@@ -443,9 +444,6 @@
     },
     "missing_namespace": {
       "message": "Espace de noms manquant. Transmettez l’espace de noms spécifique à l’entrée ou l’ID de ConfigEntry pour isoler les métadonnées mises en cache."
-    },
-    "no_active_entry": {
-      "message": "Aucune entrée Google Find My Device active n'est disponible. Entrées actives : {active_count}/{total_count}. Activez l'une des entrées configurées ({entries}) ou ajoutez un nouveau compte, puis réessayez."
     }
   },
   "system_health": {

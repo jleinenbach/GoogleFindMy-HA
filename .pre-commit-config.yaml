@@ -35,3 +35,9 @@ repos:
           - pyi
         additional_dependencies:
           - ruff==0.14.1
+      - id: translations-sync-check
+        name: Ensure translations are up to date
+        entry: python script/sync_translations.py --check
+        language: python
+        pass_filenames: false
+        always_run: true

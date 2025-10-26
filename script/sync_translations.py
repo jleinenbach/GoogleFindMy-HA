@@ -58,7 +58,9 @@ def _merge_structure(base: Any, current: Any) -> Any:
     return base
 
 
-def _find_extra_keys(base: Any, candidate: Any, path: tuple[str, ...] = tuple()) -> list[str]:
+def _find_extra_keys(
+    base: Any, candidate: Any, path: tuple[str, ...] = tuple()
+) -> list[str]:
     """Return a list of JSON pointer-like paths present only in ``candidate``."""
     if isinstance(candidate, Mapping):
         if not isinstance(base, Mapping):
@@ -72,10 +74,11 @@ def _find_extra_keys(base: Any, candidate: Any, path: tuple[str, ...] = tuple())
             extras.extend(_find_extra_keys(base[key], value, next_path))
         return extras
 
-    if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
+    if isinstance(candidate, Sequence) and not isinstance(
+        candidate, (str, bytes, bytearray)
+    ):
         if not (
-            isinstance(base, Sequence)
-            and not isinstance(base, (str, bytes, bytearray))
+            isinstance(base, Sequence) and not isinstance(base, (str, bytes, bytearray))
         ):
             return ["/".join(path) if path else "<root>"]
         extras: list[str] = []
