@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 
 import importlib
 
-from custom_components.googlefindmy import config_flow
+from custom_components.googlefindmy import config_flow, discovery
 from custom_components.googlefindmy.const import DOMAIN
 
 integration = importlib.import_module("custom_components.googlefindmy.__init__")
@@ -183,3 +183,69 @@ def test_results_append_triggers_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(_drain())
     helper.assert_awaited_once()
     assert hass.config_entries.flow.async_init.await_count == 0
+
+
+def test_results_append_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Appending duplicate payloads should only launch one flow at a time."""
+
+    hass = _make_hass()
+    calls: list[dict] = []
+
+    gate_holder = [asyncio.Event()]
+
+    async def _helper(*args, **kwargs):
+        calls.append(kwargs.get("data") or args[3])
+        await gate_holder[0].wait()
+        return None
+
+    monkeypatch.setattr(config_flow, "async_create_discovery_flow", _helper)
+
+    scheduled: list[asyncio.Task] = []
+
+    def _async_create_task(coro):  # type: ignore[no-untyped-def]
+        task = asyncio.create_task(coro)
+        scheduled.append(task)
+        return task
+
+    hass.async_create_task = _async_create_task  # type: ignore[attr-defined]
+
+    stable_key = discovery._cloud_discovery_stable_key(
+        "dedup@example.com",
+        "aas_et/DUP",
+        {"oauth_token": "aas_et/DUP"},
+    )
+    payload = discovery._assemble_cloud_discovery_payload(
+        email="dedup@example.com",
+        token="aas_et/DUP",
+        secrets_bundle={"oauth_token": "aas_et/DUP"},
+        discovery_ns=discovery.CLOUD_DISCOVERY_NAMESPACE,
+        discovery_stable_key=stable_key,
+        title=None,
+        source=None,
+    )
+
+    async def _exercise() -> None:
+        results = integration._cloud_discovery_runtime(hass)["results"]
+
+        results.append(payload)
+        results.append(payload)
+
+        await asyncio.sleep(0)
+        assert len(calls) == 1
+
+        gate_holder[0].set()
+        await asyncio.sleep(0)
+
+        gate_holder[0] = asyncio.Event()
+
+        results.append(payload)
+        await asyncio.sleep(0)
+        assert len(calls) == 2
+
+        gate_holder[0].set()
+        await asyncio.sleep(0)
+
+        for task in scheduled:
+            await task
+
+    asyncio.run(_exercise())

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -77,18 +78,24 @@ def test_secrets_watcher_triggers_new_discovery(
         discovery.translation, "async_get_translations", _fake_translations
     )
 
-    _write_secrets(temp_secrets_path, "user@example.com", token="aas_et/NEW")
-    watcher = discovery.SecretsJSONWatcher(
-        hass, path=temp_secrets_path, namespace="test.ns"
-    )
+    async def _exercise() -> None:
+        watcher = discovery.SecretsJSONWatcher(
+            hass, path=temp_secrets_path, namespace="test.ns"
+        )
 
-    asyncio.run(watcher.async_start())
-    assert len(triggered) == 1
-    first = triggered[0]
-    assert first["source"] == config_flow.SOURCE_DISCOVERY
-    assert first["discovery_ns"] == "test.ns"
-    assert first["email"] == "user@example.com"
-    asyncio.run(watcher.async_stop())
+        await watcher.async_start()
+        await asyncio.sleep(0)
+
+        assert len(triggered) == 1
+        first = triggered[0]
+        assert first["source"] == config_flow.SOURCE_DISCOVERY
+        assert first["discovery_ns"] == "test.ns"
+        assert first["email"] == "user@example.com"
+
+        await watcher.async_stop()
+
+    _write_secrets(temp_secrets_path, "user@example.com", token="aas_et/NEW")
+    asyncio.run(_exercise())
 
 
 def test_secrets_watcher_updates_existing_entry(
@@ -124,21 +131,54 @@ def test_secrets_watcher_updates_existing_entry(
         discovery.translation, "async_get_translations", _fake_translations
     )
 
+    async def _exercise() -> None:
+        watcher = discovery.SecretsJSONWatcher(
+            hass, path=temp_secrets_path, namespace="test.ns"
+        )
+        await watcher.async_start()
+        await asyncio.sleep(0)
+
+        triggered.clear()
+
+        _write_secrets(temp_secrets_path, "owner@example.com", token="aas_et/FRESH")
+        monkeypatch.setattr(discovery.cf, "_find_entry_by_email", _fake_find_entry)
+        await watcher.async_force_scan()
+        await asyncio.sleep(0)
+
+        assert len(triggered) == 1
+        update = triggered[0]
+        assert update["source"] == config_flow.SOURCE_DISCOVERY_UPDATE
+        assert update["discovery_ns"] == "test.ns"
+        assert update["email"] == "owner@example.com"
+        assert update.get("title") == "Updated owner@example.com"
+
+        await watcher.async_stop()
+
     _write_secrets(temp_secrets_path, "owner@example.com", token="aas_et/OLD")
-    watcher = discovery.SecretsJSONWatcher(
-        hass, path=temp_secrets_path, namespace="test.ns"
+    asyncio.run(_exercise())
+
+
+def test_cloud_discovery_results_suppress_task_exceptions(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Queued discovery tasks should not leak unhandled exceptions."""
+
+    hass = _FakeHass()
+    caplog.set_level(logging.DEBUG)
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> bool:
+        raise RuntimeError("discovery explosion")
+
+    monkeypatch.setattr(discovery, "_trigger_cloud_discovery", _boom)
+
+    async def _exercise() -> None:
+        results = discovery._CloudDiscoveryResults(hass)
+        results.append({"email": "boom@example.com"})
+        await asyncio.sleep(0)
+
+    asyncio.run(_exercise())
+
+    assert any(
+        "Suppressed cloud discovery task exception" in record.getMessage()
+        for record in caplog.records
     )
-    asyncio.run(watcher.async_start())
-    triggered.clear()
-
-    _write_secrets(temp_secrets_path, "owner@example.com", token="aas_et/FRESH")
-    monkeypatch.setattr(discovery.cf, "_find_entry_by_email", _fake_find_entry)
-    asyncio.run(watcher.async_force_scan())
-
-    assert len(triggered) == 1
-    update = triggered[0]
-    assert update["source"] == config_flow.SOURCE_DISCOVERY_UPDATE
-    assert update["discovery_ns"] == "test.ns"
-    assert update["email"] == "owner@example.com"
-    assert update.get("title") == "Updated owner@example.com"
-    asyncio.run(watcher.async_stop())
