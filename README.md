@@ -81,15 +81,16 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 
 | **Option** | **Default** | **Units** | **Description** |
 | :---: | :---: | :---: | --- |
-| tracked_devices | - | - | Select which devices from your account are tracked with the integration. |
+| ignored_devices | none | - | Devices hidden from tracking. Use the **Manage ignored devices** step to restore them. |
 | location_poll_interval | 300 | seconds | How often the integration runs a poll cycle for all devices |
 | device_poll_delay | 5 | seconds | How much time to wait between polling devices during a poll cycle |
-| min_accuract_threshold | 100 | meters | Distance beyond which location data will be rejected from writing to logbook/recorder |
+| min_accuracy_threshold | 100 | meters | Distance beyond which location data will be rejected from writing to logbook/recorder |
 | movement_threshold | 50 | meters | Distance a device must travel to show an update in device location |
 | google_home_filter_enabled | true | toggle | Enables/disables Google Home device location update filtering |
-| google_home_filter_keywords | various | text input | Keywords, separated by commas, that are used in filtering out location data from Google Home devices |
+| google_home_filter_keywords | nest,google,home,mini,hub,display,chromecast,speaker | text input | Keywords, separated by commas, that are used in filtering out location data from Google Home devices |
 | enable_stats_entities | true | toggle | Enables/disables "Google Find My Integration" statistics entity, which displays various useful statistics, including when polling is active |
-| map_vew_token_expiration | false | toggle | Enables/disables expiration of generated API token for accessing recorder history, used in Map View location data queries |
+| map_view_token_expiration | false | toggle | Enables/disables expiration of generated API token for accessing recorder history, used in Map View location data queries |
+| contributor_mode | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
 
 ## Subentries and feature groups
 
