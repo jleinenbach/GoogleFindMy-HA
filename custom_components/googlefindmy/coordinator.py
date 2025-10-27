@@ -70,8 +70,10 @@ if TYPE_CHECKING:
     from homeassistant.core import Event
 
     from . import ConfigEntrySubEntryManager
+    from .google_home_filter import GoogleHomeFilter as GoogleHomeFilterProtocol
 else:  # pragma: no cover - typing fallback for runtime imports
     Event = Any
+    GoogleHomeFilterProtocol = Any
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
@@ -1092,6 +1094,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._dr_unsub = self.hass.bus.async_listen(
                 EVENT_DEVICE_REGISTRY_UPDATED, self._handle_dr_event
             )
+
+    def _get_google_home_filter(self) -> GoogleHomeFilterProtocol | None:
+        """Return the Google Home filter associated with this coordinator."""
+
+        entry = self.config_entry or getattr(self, "entry", None)
+        runtime_data = getattr(entry, "runtime_data", None)
+        google_home_filter = getattr(runtime_data, "google_home_filter", None)
+        return cast("GoogleHomeFilterProtocol | None", google_home_filter)
 
     async def async_shutdown(self) -> None:
         """Clean up listeners and timers on entry unload to avoid leaks."""
@@ -2591,6 +2601,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self.safe_update_metric("last_poll_start_mono", time.monotonic())
             _LOGGER.debug("Starting sequential poll of %d devices", len(devices))
 
+            google_home_filter = self._get_google_home_filter()
+
             try:
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
@@ -2621,12 +2633,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         # --- Apply Google Home filter (keep parity with FCM push path) ---
                         # Consume coordinate substitution from the filter when needed.
                         semantic_name = location.get("semantic_name")
-                        if semantic_name and hasattr(self, "google_home_filter"):
+                        if semantic_name and google_home_filter is not None:
                             try:
                                 (
                                     should_filter,
                                     replacement_attrs,
-                                ) = self.google_home_filter.should_filter_detection(
+                                ) = google_home_filter.should_filter_detection(
                                     dev_id, semantic_name
                                 )
                             except Exception as gf_err:
@@ -3828,6 +3840,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         )
         self.async_set_updated_data(self.data)
 
+        google_home_filter = self._get_google_home_filter()
+
         try:
             location_data = await self.api.async_get_device_location(device_id, name)
 
@@ -3840,10 +3854,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # --- Parity with polling path: Google Home semantic spam filter --------
             # Consume coordinate substitution from the filter when needed.
             semantic_name = location_data.get("semantic_name")
-            if semantic_name and hasattr(self, "google_home_filter"):
+            if semantic_name and google_home_filter is not None:
                 try:
                     (should_filter, replacement_attrs) = (
-                        self.google_home_filter.should_filter_detection(
+                        google_home_filter.should_filter_detection(
                             device_id, semantic_name
                         )
                     )
