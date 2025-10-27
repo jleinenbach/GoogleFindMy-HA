@@ -35,7 +35,8 @@ import json
 import logging
 import re
 from binascii import Error as BinasciiError, unhexlify
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
@@ -103,7 +104,12 @@ def _decode_base64_like_32(s: str) -> bytes:
     return b
 
 
-async def _run_in_executor(func, *args):
+_ExecutorReturn = TypeVar("_ExecutorReturn")
+
+
+async def _run_in_executor(
+    func: Callable[..., _ExecutorReturn], *args: object
+) -> _ExecutorReturn:
     """Run a blocking callable in a thread pool."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, func, *args)
@@ -274,10 +280,15 @@ async def _get_or_generate_shared_key_hex(
             return legacy_user_key
 
     # Generate fresh and persist
-    return await cache.get_or_set(
+    generated = await cache.get_or_set(
         _CACHE_KEY_BASE,
         lambda: _retrieve_shared_key_hex(cache=cache),
     )
+
+    if not isinstance(generated, str):
+        raise RuntimeError("Shared key generator returned non-string value")
+
+    return generated
 
 
 # -----------------------------------------------------------------------------

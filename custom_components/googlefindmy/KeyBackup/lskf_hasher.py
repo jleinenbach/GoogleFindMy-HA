@@ -3,16 +3,20 @@
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
+from __future__ import annotations
+
 import hashlib
+import time
 from binascii import unhexlify
 from concurrent.futures import ProcessPoolExecutor
-import time
+from typing import cast
+
 import pyscrypt
 
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
 
-def ascii_to_bytes(string):
+def ascii_to_bytes(string: str) -> bytes:
     return string.encode("ascii")
 
 
@@ -26,19 +30,22 @@ def get_lskf_hash(pin: str, salt: bytes) -> bytes:
     key_length = 32  # Length of the derived key in bytes
 
     # Perform Scrypt hashing
-    hashed = pyscrypt.hash(
-        password=data_to_hash,
-        salt=salt,
-        N=log_n_cost,
-        r=block_size,
-        p=parallelization,
-        dkLen=key_length,
+    hashed = cast(
+        bytes,
+        pyscrypt.hash(
+            password=data_to_hash,
+            salt=salt,
+            N=log_n_cost,
+            r=block_size,
+            p=parallelization,
+            dkLen=key_length,
+        ),
     )
 
     return hashed
 
 
-def hash_pin(pin):
+def hash_pin(pin: str) -> tuple[str, str]:
     sample_pin_salt = unhexlify(get_example_data("sample_pin_salt"))
 
     hash_object = hashlib.sha256(get_lskf_hash(pin, sample_pin_salt))
