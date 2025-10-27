@@ -11,6 +11,14 @@ package-relative imports (for example, `from tests.helpers import foo`)
 when sharing utilities across modules so mypy resolves the canonical
 module paths consistently.
 
+## Async tests
+
+`pytest-asyncio` ships with the repository and `pytest` is configured to
+run in [`asyncio_mode = "strict"`](../pyproject.toml). Prefer decorating
+new coroutine tests with `@pytest.mark.asyncio` instead of wrapping them
+in `asyncio.run(...)`; this keeps event-loop handling centralized and
+avoids duplicated scaffolding in each test module.
+
 ## Home Assistant stubs overview
 
 The fixtures in `tests/conftest.py` provide lightweight stand-ins for key
