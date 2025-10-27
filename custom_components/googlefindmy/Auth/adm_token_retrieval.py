@@ -47,7 +47,7 @@ import asyncio
 import logging
 import time
 from typing import Any
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
 import gpsoauth
 
@@ -87,16 +87,16 @@ def _mask_email(email: str | None) -> str:
     return f"{masked_local}@{domain}"
 
 
-def _clip(s: Any, limit: int = 200) -> str:
+def _clip(value: object, limit: int = 200) -> str:
     """Clip long strings to a safe length for logs."""
-    s = str(s)
+    s = str(value)
     return s if len(s) <= limit else (s[: limit - 1] + "…")
 
 
-def _summarize_response(obj: Any) -> str:
+def _summarize_response(obj: Mapping[str, Any] | object) -> str:
     """Summarize a gpsoauth response without leaking sensitive data."""
-    if isinstance(obj, dict):
-        keys = ", ".join(sorted(obj.keys()))
+    if isinstance(obj, Mapping):
+        keys = ", ".join(sorted(map(str, obj.keys())))
         return f"dict(keys=[{keys}])"
     return f"{type(obj).__name__}"
 
@@ -312,7 +312,7 @@ async def async_get_adm_token(
         for attempt in range(attempts):
             try:
                 # Only generates if not cached; avoids multiple token exchanges under load
-                token = await cache.get_or_set(cache_key, _generator)
+                token: str = await cache.get_or_set(cache_key, _generator)
 
                 # Persist TTL metadata (best-effort; entry-scoped if possible)
                 issued_key = f"adm_token_issued_at_{user}"

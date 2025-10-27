@@ -26,7 +26,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Mapping, TypedDict, cast
+from typing import Any, Mapping, TypedDict, TypeVar, cast
 from collections.abc import Awaitable, Callable
 
 from homeassistant.core import HomeAssistant
@@ -38,6 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 CacheState = dict[str, Any]
+_ValueT = TypeVar("_ValueT")
 
 
 class CacheData(TypedDict, total=False):
@@ -212,23 +213,24 @@ class TokenCache:
             )
 
     async def get_or_set(
-        self, name: str, generator: Callable[[], Awaitable[Any] | Any]
-    ) -> Any:
+        self, name: str, generator: Callable[[], Awaitable[_ValueT] | _ValueT]
+    ) -> _ValueT:
         """Return existing value or compute/store it, avoiding thundering herds via per-key lock."""
         if (existing := self._data.get(name)) is not None:
-            return existing
+            return cast(_ValueT, existing)
 
         lock = self._per_key_locks.setdefault(name, asyncio.Lock())
         async with lock:
             if (existing := self._data.get(name)) is not None:
-                return existing
+                return cast(_ValueT, existing)
 
-            new_value = generator()
-            if asyncio.iscoroutine(new_value):
-                new_value = await new_value
+            candidate = generator()
+            if asyncio.iscoroutine(candidate):
+                candidate = await candidate
 
-            await self.set(name, new_value)
-            return new_value
+            result = cast(_ValueT, candidate)
+            await self.set(name, result)
+            return result
 
     async def all(self) -> CacheData:
         """Return a shallow copy of the entire cache snapshot."""
