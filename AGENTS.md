@@ -84,6 +84,8 @@
 ## Scoped guidance index
 
 * [`tests/AGENTS.md`](tests/AGENTS.md) — Home Assistant config flow test stubs, helpers, discovery/update scaffolding details, **and** the package-layout note that requires package-relative imports now that `tests/` ships with an `__init__.py`. Also documents the coordinator device-registry expectations for `via_device` tuple handling so future stub updates remain aligned with Home Assistant 2025.10.
+* [`custom_components/googlefindmy/ProtoDecoders/AGENTS.md`](custom_components/googlefindmy/ProtoDecoders/AGENTS.md) — Protobuf overlay structure requirements, including the mandate that generated message classes remain nominal subclasses of `google.protobuf.message.Message` so helper utilities typed against the concrete base keep accepting them.
+* `google/protobuf/**` — Local type stub overlays that model the minimal subset of `google.protobuf` used by the integration. These stubs unblock strict mypy runs without depending on the upstream package’s incomplete type hints. Update them when generated protobuf code begins to reference additional APIs or when upstream ships first-party stubs that supersede these local helpers.
 
 >
 > | Domain | Primary use cases |
