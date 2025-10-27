@@ -39,6 +39,7 @@
   * **Mypy override ordering.** Append new strictly-typed modules to the override list in `pyproject.toml` in alphabetical order so future reviews can spot additions quickly.
   * **Test scaffolding reference.** The Home Assistant config flow stubs and helper behaviors for tests are documented in [`tests/AGENTS.md`](tests/AGENTS.md); point future contributors there whenever discovery/update helpers change.
   * **Task scheduling helpers.** Home Assistant-style test doubles for `async_create_task` may accept only `(coro)` without keyword arguments like `name`. Design scheduling wrappers so they gracefully handle both signatures and still attach error-handling callbacks when a task object is returned.
+  * **Discovery callbacks.** Reuse `ha_typing.callback` for new discovery helper callbacks so strict mypy keeps enforcing the typed decorator instead of drifting back to untyped shims.
 * **pre-commit.ci automation.** The GitHub App is enabled with permission to push formatting fixes to PR branches whenever the configured hooks (e.g., `ruff`, `ruff-format`) report autofixable issues; keep `.pre-commit-config.yaml` aligned with the enforced checks.
 * **Hassfest auto-sort workflow.** `.github/workflows/hassfest-auto-fix.yml` must remain present and operational so manifest key ordering issues are auto-corrected and pushed back to PR branches; update the workflow when hassfest or `git-auto-commit-action` inputs change upstream.
 * **Purpose & scope.** PR title/description state *what* changes and *why*, and which user scenarios are affected.

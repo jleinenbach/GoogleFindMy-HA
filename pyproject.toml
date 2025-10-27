@@ -65,14 +65,16 @@ exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/go
 
 [[tool.mypy.overrides]]
 module = [
+    "custom_components.googlefindmy.__init__",
     "custom_components.googlefindmy.api",
     "custom_components.googlefindmy.binary_sensor",
     "custom_components.googlefindmy.button",
     "custom_components.googlefindmy.chrome_driver",
     "custom_components.googlefindmy.const",
+    "custom_components.googlefindmy.coordinator",
     "custom_components.googlefindmy.device_tracker",
-    "custom_components.googlefindmy.discovery",
     "custom_components.googlefindmy.diagnostics",
+    "custom_components.googlefindmy.discovery",
     "custom_components.googlefindmy.entity",
     "custom_components.googlefindmy.example_data_provider",
     "custom_components.googlefindmy.exceptions",
@@ -92,20 +94,18 @@ ignore_errors = false
 module = [
     "custom_components.googlefindmy.Auth",
     "custom_components.googlefindmy.Auth.*",
+    "custom_components.googlefindmy.config_flow",
     "custom_components.googlefindmy.FMDNCrypto",
     "custom_components.googlefindmy.FMDNCrypto.*",
     "custom_components.googlefindmy.KeyBackup",
     "custom_components.googlefindmy.KeyBackup.*",
-    "custom_components.googlefindmy.SpotApi",
-    "custom_components.googlefindmy.SpotApi.*",
     "custom_components.googlefindmy.NovaApi",
     "custom_components.googlefindmy.NovaApi.*",
     "custom_components.googlefindmy.ProtoDecoders",
     "custom_components.googlefindmy.ProtoDecoders.*",
+    "custom_components.googlefindmy.SpotApi",
+    "custom_components.googlefindmy.SpotApi.*",
     "custom_components.googlefindmy",
-    "custom_components.googlefindmy.__init__",
-    "custom_components.googlefindmy.config_flow",
-    "custom_components.googlefindmy.coordinator",
 ]
 ignore_errors = true
 

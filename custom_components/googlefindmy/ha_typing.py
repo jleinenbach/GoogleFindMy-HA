@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, TypeVar, cast, Generic
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+
+import logging
 
 from homeassistant.core import callback as ha_callback
 
@@ -22,6 +25,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
     _CoordinatorT = TypeVar("_CoordinatorT")
+    _DataT = TypeVar("_DataT")
 
     class HomeAssistantView:
         """Structural type for views served through the HTTP component."""
@@ -53,6 +57,35 @@ if TYPE_CHECKING:
         coordinator: _CoordinatorT
 
         def __init__(self, coordinator: _CoordinatorT) -> None: ...
+
+    class DataUpdateCoordinator(Generic[_DataT]):
+        """Structural type for Home Assistant's data coordinator."""
+
+        hass: HomeAssistant
+        data: _DataT
+        logger: logging.Logger
+        update_interval: timedelta | None
+
+        def __init__(
+            self,
+            hass: HomeAssistant,
+            logger: logging.Logger,
+            *,
+            name: str | None = None,
+            update_interval: timedelta | None = None,
+        ) -> None: ...
+
+        def async_set_updated_data(self, data: _DataT) -> None: ...
+
+        def async_update_listeners(self) -> None: ...
+
+        def async_add_listener(
+            self, update_callback: Callable[[], None]
+        ) -> Callable[[], None]: ...
+
+        async def async_request_refresh(self) -> None: ...
+
+        async def async_config_entry_first_refresh(self) -> None: ...
 
     class ButtonEntity(_EntityBase):
         """Structural type for button platform entities."""
@@ -87,3 +120,4 @@ else:
     )
     from homeassistant.helpers.restore_state import RestoreEntity  # noqa: F401
     from homeassistant.helpers.update_coordinator import CoordinatorEntity  # noqa: F401
+    from homeassistant.helpers.update_coordinator import DataUpdateCoordinator  # noqa: F401
