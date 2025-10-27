@@ -73,24 +73,27 @@ def rx_to_ry(Rx: int, curve: CurveFp) -> int:
     Raises:
         ValueError: If the provided X does not yield a valid point on the curve.
     """
-    p = int(curve.p())
-    a = int(curve.a())
-    b = int(curve.b())
+    p: int = int(curve.p())
+    a: int = int(curve.a())
+    b: int = int(curve.b())
+
+    Rx_mod: int = Rx % p
 
     # Compute y^2 = x^3 + a·x + b (mod p)
-    Ryy = (Rx**3 + a * Rx + b) % p
+    Ryy: int = (pow(Rx_mod, 3, p) + (a * Rx_mod) + b) % p
 
     # For p ≡ 3 (mod 4): y = (y^2)^((p+1)//4) mod p is a square root
-    Ry: int = pow(Ryy, (p + 1) // 4, p)
+    sqrt_candidate: int = pow(Ryy, (p + 1) // 4, p)
 
     # Verify root
-    if (Ry * Ry) % p != Ryy:
+    if (sqrt_candidate * sqrt_candidate) % p != Ryy:
         raise ValueError("The provided X coordinate is not on the curve.")
 
     # Ensure even y (standardized choice)
-    if Ry % 2 != 0:
-        Ry = p - Ry
+    if sqrt_candidate % 2 != 0:
+        sqrt_candidate = p - sqrt_candidate
 
+    Ry: int = int(sqrt_candidate)
     return Ry
 
 
