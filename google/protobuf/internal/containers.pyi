@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import (
+    Any as _Any,
     Generic as _Generic,
     Iterable as _Iterable,
     Iterator as _Iterator,
@@ -44,7 +45,7 @@ class _BaseRepeatedContainer(_MutableSequence[_T], _Generic[_T]):
 
 
 class RepeatedCompositeFieldContainer(_BaseRepeatedContainer[_T], _Generic[_T]):
-    ...
+    def add(self, **kwargs: _Any) -> _T: ...
 
 
 class RepeatedScalarFieldContainer(_BaseRepeatedContainer[_T], _Generic[_T]):
