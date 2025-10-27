@@ -1975,7 +1975,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     else:
         _LOGGER.debug("GoogleHomeFilter not available; continuing without it")
 
-    features = sorted(_feature_name_from_platform(platform) for platform in PLATFORMS)
+    features: list[str] = []
+    for platform in PLATFORMS:
+        platform_value = getattr(platform, "value", None)
+        if isinstance(platform_value, str):
+            features.append(platform_value)
+        else:
+            features.append(_feature_name_from_platform(platform))
+    features.sort()
     await subentry_manager.async_sync(
         [
             ConfigEntrySubentryDefinition(

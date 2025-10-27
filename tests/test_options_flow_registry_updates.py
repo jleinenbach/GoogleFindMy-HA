@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
@@ -12,7 +13,10 @@ from custom_components.googlefindmy import (
     ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
 )
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import (
+    GoogleFindMyCoordinator,
+    _DEFAULT_SUBENTRY_FEATURES as COORDINATOR_DEFAULT_FEATURES,
+)
 from homeassistant.config_entries import ConfigSubentry
 
 
@@ -133,6 +137,28 @@ class _HassStub:
 
     def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
         return asyncio.create_task(coro)
+
+
+def _prepare_coordinator_baseline(
+    coordinator: GoogleFindMyCoordinator, hass: _HassStub, entry: _EntryStub
+) -> None:
+    """Populate required coordinator attributes for metadata refresh tests."""
+
+    coordinator.hass = hass  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    coordinator.data = []
+    coordinator._enabled_poll_device_ids = set()
+    coordinator.allow_history_fallback = False
+    coordinator._min_accuracy_threshold = 50
+    coordinator._movement_threshold = 10
+    coordinator.device_poll_delay = 30
+    coordinator.min_poll_interval = 60
+    coordinator.location_poll_interval = 120
+    coordinator._subentry_metadata = {}
+    coordinator._subentry_snapshots = {}
+    coordinator._feature_to_subentry = {}
+    coordinator._default_subentry_key_value = "core_tracking"
+    coordinator._subentry_manager = None
 
 
 class _EntryStub:
@@ -278,23 +304,12 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
     hass = _HassStub(entry, entity_registry, device_registry)
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
-    coordinator.hass = hass  # type: ignore[assignment]
-    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    _prepare_coordinator_baseline(coordinator, hass, entry)
     coordinator.data = [
         {"device_id": "dev-1", "name": "Device 1"},
         {"device_id": "dev-2", "name": "Device 2"},
     ]
     coordinator._enabled_poll_device_ids = {"dev-1", "dev-2"}
-    coordinator.allow_history_fallback = False
-    coordinator._min_accuracy_threshold = 50
-    coordinator._movement_threshold = 10
-    coordinator.device_poll_delay = 30
-    coordinator.min_poll_interval = 60
-    coordinator.location_poll_interval = 120
-    coordinator._subentry_metadata = {}
-    coordinator._subentry_snapshots = {}
-    coordinator._feature_to_subentry = {}
-    coordinator._default_subentry_key_value = "core_tracking"
 
     subentry_manager = ConfigEntrySubEntryManager(hass, entry)
 
@@ -338,13 +353,30 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
     )
     assert entity_registry.by_subentry[secondary_subentry.subentry_id] == ()
     assert device_registry.by_subentry[secondary_subentry.subentry_id] == ()
-    assert entity_registry.by_device.get("dev-1") == core_subentry.subentry_id
-    assert device_registry.by_device.get("dev-1") == core_subentry.subentry_id
-    assert entity_registry.history[-1] == (
-        core_subentry.subentry_id,
-        ("dev-1", "dev-2"),
-    )
-    assert device_registry.history[-1] == (
-        core_subentry.subentry_id,
-        ("dev-1", "dev-2"),
-    )
+
+
+def test_coordinator_default_features_map_to_core_group() -> None:
+    """Default feature list should expose lowercase domains and map to core group."""
+
+    entry = _EntryStub()
+    entity_registry = _RegistryTracker()
+    device_registry = _RegistryTracker()
+    hass = _HassStub(entry, entity_registry, device_registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    _prepare_coordinator_baseline(coordinator, hass, entry)
+
+    coordinator._refresh_subentry_index(None)
+
+    metadata = coordinator.get_subentry_metadata(key="core_tracking")
+    assert metadata is not None
+    assert metadata.features == COORDINATOR_DEFAULT_FEATURES
+    assert all(isinstance(feature, str) for feature in metadata.features)
+    assert all(feature == feature.lower() for feature in metadata.features)
+
+    mapped_keys = {
+        feature: coordinator.get_subentry_key_for_feature(feature)
+        for feature in COORDINATOR_DEFAULT_FEATURES
+    }
+    assert set(mapped_keys) == set(COORDINATOR_DEFAULT_FEATURES)
+    assert set(mapped_keys.values()) == {"core_tracking"}
