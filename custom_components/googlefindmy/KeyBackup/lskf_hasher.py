@@ -9,8 +9,6 @@ import hashlib
 import time
 from binascii import unhexlify
 from concurrent.futures import ProcessPoolExecutor
-from typing import cast
-
 import pyscrypt
 
 from custom_components.googlefindmy.example_data_provider import get_example_data
@@ -32,16 +30,13 @@ def get_lskf_hash(pin: str, salt: bytes) -> bytes:
     key_length = 32  # Length of the derived key in bytes
 
     # Perform Scrypt hashing
-    hashed = cast(
-        bytes,
-        pyscrypt.hash(
-            password=data_to_hash,
-            salt=salt,
-            N=log_n_cost,
-            r=block_size,
-            p=parallelization,
-            dkLen=key_length,
-        ),
+    hashed = pyscrypt.hash(
+        password=data_to_hash,
+        salt=salt,
+        N=log_n_cost,
+        r=block_size,
+        p=parallelization,
+        dkLen=key_length,
     )
 
     return hashed
