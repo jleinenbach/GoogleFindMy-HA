@@ -207,7 +207,10 @@ def coerce_ignored_mapping(raw: object) -> tuple[IgnoredMapping, bool]:
     elif isinstance(raw, Mapping):
         # str->str ? (v1)
         mapping = raw
-        if all(isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()):
+        if all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in mapping.items()
+        ):
             changed = True
             for dev_id, name in mapping.items():
                 out[dev_id] = {
@@ -227,7 +230,9 @@ def coerce_ignored_mapping(raw: object) -> tuple[IgnoredMapping, bool]:
                 name = dev_id
                 if isinstance(meta, Mapping):
                     str_meta: Mapping[str, object] = {
-                        key: value for key, value in meta.items() if isinstance(key, str)
+                        key: value
+                        for key, value in meta.items()
+                        if isinstance(key, str)
                     }
                     name_value = str_meta.get(_IGN_KEY_NAME)
                     if isinstance(name_value, str) and name_value:
@@ -252,7 +257,9 @@ def coerce_ignored_mapping(raw: object) -> tuple[IgnoredMapping, bool]:
     return out, changed
 
 
-def ignored_choices_for_ui(ignored_map: Mapping[str, Mapping[str, object]]) -> dict[str, str]:
+def ignored_choices_for_ui(
+    ignored_map: Mapping[str, Mapping[str, object]],
+) -> dict[str, str]:
     """Build UI labels 'Name (id)' directly from the stored mapping."""
     return {
         dev_id: f"{str(meta.get(_IGN_KEY_NAME) or dev_id)} ({dev_id})"

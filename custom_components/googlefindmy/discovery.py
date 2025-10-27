@@ -49,7 +49,7 @@ from .const import CONF_GOOGLE_EMAIL, CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, DOMA
 _LOGGER = logging.getLogger(__name__)
 
 
-def _log_task_exception(task: "asyncio.Future[Any]") -> None:
+def _log_task_exception(task: asyncio.Future[Any]) -> None:
     """Log and suppress exceptions raised by cloud discovery tasks."""
 
     try:

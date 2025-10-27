@@ -41,4 +41,3 @@ closely enough for regression coverage.
 Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
-
