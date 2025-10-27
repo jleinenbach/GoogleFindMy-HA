@@ -55,7 +55,10 @@ def request_oauth_account_token_flow(headless: bool = False) -> str:
             raise RuntimeError(msg)
 
         oauth_token_cookie: dict[str, Any] = cast(dict[str, Any], cookie)
-        oauth_token_value = oauth_token_cookie["value"]
+        oauth_token_value = oauth_token_cookie.get("value")
+        if not isinstance(oauth_token_value, str):
+            msg = "OAuth token cookie value is missing or not a string"
+            raise RuntimeError(msg)
 
         # Print the value of the "oauth_token" cookie
         if not is_home_assistant:
