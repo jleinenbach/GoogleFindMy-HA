@@ -54,8 +54,10 @@ from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 
 if TYPE_CHECKING:
     from bs4 import BeautifulSoup as _BeautifulSoupType
+    from homeassistant.core import HomeAssistant
 else:
     _BeautifulSoupType = Any
+    HomeAssistant = Any
 
 _beautiful_soup_factory: Callable[[str, str], _BeautifulSoupType] | None
 try:
@@ -189,7 +191,7 @@ class NovaHTTPError(NovaError):
 _HASS_REF = None
 
 
-def register_hass(hass) -> None:
+def register_hass(hass: HomeAssistant) -> None:
     """Register a Home Assistant instance to provide a shared ClientSession."""
     global _HASS_REF
     _HASS_REF = hass
@@ -280,7 +282,7 @@ class TTLPolicy:
     def __init__(
         self,
         username: str,
-        logger,
+        logger: logging.Logger,
         get_value: Callable[[str], float | int | str | None],
         set_value: Callable[[str, object | None], None],
         refresh_fn: Callable[[], str | None],
@@ -310,23 +312,23 @@ class TTLPolicy:
 
     # Cache keys for this username (optionally namespaced)
     @property
-    def k_issued(self):
+    def k_issued(self) -> str:
         return f"{self._ns}adm_token_issued_at_{self.username}"
 
     @property
-    def k_bestttl(self):
+    def k_bestttl(self) -> str:
         return f"{self._ns}adm_best_ttl_sec_{self.username}"
 
     @property
-    def k_startleft(self):
+    def k_startleft(self) -> str:
         return f"{self._ns}adm_probe_startup_left_{self.username}"
 
     @property
-    def k_probenext(self):
+    def k_probenext(self) -> str:
         return f"{self._ns}adm_probe_next_at_{self.username}"
 
     @property
-    def k_armed(self):
+    def k_armed(self) -> str:
         return f"{self._ns}adm_probe_armed_{self.username}"
 
     def _key_variants(self, base: str) -> set[str]:
