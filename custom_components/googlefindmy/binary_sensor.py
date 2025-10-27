@@ -28,12 +28,11 @@ import logging
 from collections.abc import Callable
 
 from homeassistant.components.binary_sensor import (
-    BinarySensorEntity,
     BinarySensorEntityDescription,
     BinarySensorDeviceClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers import issue_registry as ir
@@ -47,6 +46,7 @@ from .const import (
 )
 from .coordinator import GoogleFindMyCoordinator, format_epoch_utc
 from .entity import GoogleFindMyEntity, resolve_coordinator
+from .ha_typing import BinarySensorEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
 
