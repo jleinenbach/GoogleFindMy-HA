@@ -17,6 +17,8 @@ from custom_components.googlefindmy.example_data_provider import get_example_dat
 
 
 def ascii_to_bytes(string: str) -> bytes:
+    """Return the ASCII-encoded representation of ``string``."""
+
     return string.encode("ascii")
 
 
@@ -46,9 +48,16 @@ def get_lskf_hash(pin: str, salt: bytes) -> bytes:
 
 
 def hash_pin(pin: str) -> tuple[str, str]:
+    """Return the original ``pin`` together with its LSKF SHA-256 hash."""
+
     sample_pin_salt = unhexlify(get_example_data("sample_pin_salt"))
 
-    hash_object = hashlib.sha256(get_lskf_hash(pin, sample_pin_salt))
+    hash_input = get_lskf_hash(pin, sample_pin_salt)
+    if not isinstance(hash_input, bytes):  # Safety net for unexpected library changes.
+        msg = "get_lskf_hash must return bytes"
+        raise TypeError(msg)
+
+    hash_object = hashlib.sha256(hash_input)
     hash_hex = hash_object.hexdigest()
 
     print(f"PIN: {pin}, Hash: {hash_hex}")
