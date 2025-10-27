@@ -53,7 +53,7 @@ async def _async_generate_spot_token(
     """
     try:
         # Prefer native async implementation if available.
-        from .token_retrieval import async_request_token  # type: ignore[attr-defined]
+        from .token_retrieval import async_request_token
 
         _LOGGER.debug("Using async_request_token for Spot token generation")
         token = await async_request_token(

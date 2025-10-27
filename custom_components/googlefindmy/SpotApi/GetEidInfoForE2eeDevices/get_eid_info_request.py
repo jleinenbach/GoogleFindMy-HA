@@ -76,27 +76,51 @@ async def _spot_call_async(scope: str, payload: bytes, *, cache: TokenCache) -> 
     """
     # Try native async helper first
     try:
-        from custom_components.googlefindmy.SpotApi.spot_request import (  # type: ignore
-            async_spot_request,
+        from custom_components.googlefindmy.SpotApi.spot_request import (
             SpotTrailersOnlyError,
+            async_spot_request,
+            spot_request,
         )
-
-        if callable(async_spot_request):
-            try:
-                return await async_spot_request(scope, payload, cache=cache)
-            except SpotTrailersOnlyError as e:
-                # Map to integration-level error expected by callers
-                raise SpotApiEmptyResponseError(
-                    "Empty gRPC body (trailers-only) for GetEidInfoForE2eeDevices"
-                ) from e
-            except TypeError as exc:
-                raise RuntimeError(
-                    "async_spot_request() implementation is outdated; missing cache= support."
-                ) from exc
     except Exception as import_error:  # pragma: no cover - defensive
         raise RuntimeError(
             "Async SPOT request helper is unavailable; update integration dependencies."
         ) from import_error
+
+    if callable(async_spot_request):
+        try:
+            return await async_spot_request(scope, payload, cache=cache)
+        except SpotTrailersOnlyError as e:
+            # Map to integration-level error expected by callers
+            raise SpotApiEmptyResponseError(
+                "Empty gRPC body (trailers-only) for GetEidInfoForE2eeDevices"
+            ) from e
+        except TypeError as exc:
+            raise RuntimeError(
+                "async_spot_request() implementation is outdated; missing cache= support."
+            ) from exc
+
+    loop = asyncio.get_running_loop()
+
+    def _call_sync() -> bytes:
+        return spot_request(scope, payload)
+
+    try:
+        response_bytes = await loop.run_in_executor(None, _call_sync)
+    except SpotTrailersOnlyError as e:
+        raise SpotApiEmptyResponseError(
+            "Empty gRPC body (trailers-only) for GetEidInfoForE2eeDevices"
+        ) from e
+    except Exception as exc:  # pragma: no cover - defensive
+        raise RuntimeError("Synchronous SPOT request helper failed.") from exc
+
+    if isinstance(response_bytes, bytearray):
+        return bytes(response_bytes)
+    if not isinstance(response_bytes, bytes):
+        raise RuntimeError(
+            "Synchronous SPOT request helper returned a non-bytes response."
+        )
+
+    return response_bytes
 
 
 async def async_get_eid_info(
@@ -169,7 +193,7 @@ def get_eid_info() -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesResponse:
 
     # Keep the historical synchronous behavior (used by CLI/dev tools),
     # but the integration should migrate to the async API.
-    from custom_components.googlefindmy.SpotApi.spot_request import spot_request  # type: ignore
+    from custom_components.googlefindmy.SpotApi.spot_request import spot_request
 
     serialized_request = _build_request_bytes()
     response_bytes = spot_request("GetEidInfoForE2eeDevices", serialized_request)
