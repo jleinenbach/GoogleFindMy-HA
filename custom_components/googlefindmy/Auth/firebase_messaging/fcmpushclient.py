@@ -39,8 +39,8 @@ import random
 from base64 import urlsafe_b64decode
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
-from collections.abc import Callable, Mapping, MutableMapping
+from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Mapping
 
 from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
@@ -61,6 +61,13 @@ from .const import (
     MCS_VERSION,
 )
 from .fcmregister import FcmRegister, FcmRegisterConfig
+from ._typing import (
+    CredentialsUpdatedCallable,
+    JSONDict,
+    MutableJSONMapping,
+    NotificationContextT,
+    OnNotificationCallable,
+)
 from .proto.mcs_pb2 import (  # pylint: disable=no-name-in-module
     Close,
     DataMessageStanza,
@@ -74,12 +81,6 @@ from .proto.mcs_pb2 import (  # pylint: disable=no-name-in-module
 )
 
 _logger = logging.getLogger(__name__)
-
-JSONDict: TypeAlias = dict[str, Any]
-MutableJSONMapping: TypeAlias = MutableMapping[str, Any]
-
-OnNotificationCallable = Callable[[JSONDict, str, Any | None], None]
-CredentialsUpdatedCallable = Callable[[MutableJSONMapping], None]
 
 # MCS Message Types and Tags
 MCS_MESSAGE_TAG = {
@@ -163,22 +164,26 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     def __init__(
         self,
-        callback: OnNotificationCallable,
+        callback: OnNotificationCallable[JSONDict, NotificationContextT],
         fcm_config: FcmRegisterConfig,
         credentials: MutableJSONMapping | None = None,
-        credentials_updated_callback: CredentialsUpdatedCallable | None = None,
+        credentials_updated_callback: (
+            CredentialsUpdatedCallable[MutableJSONMapping] | None
+        ) = None,
         *,
-        callback_context: object | None = None,
+        callback_context: NotificationContextT | None = None,
         received_persistent_ids: list[str] | None = None,
         config: FcmPushClientConfig | None = None,
         http_client_session: ClientSession | None = None,
     ):
         """Initializes the receiver."""
-        self.callback: OnNotificationCallable = callback
-        self.callback_context = callback_context
+        self.callback: OnNotificationCallable[JSONDict, NotificationContextT] = callback
+        self.callback_context: NotificationContextT | None = callback_context
         self.fcm_config = fcm_config
         self.credentials: MutableJSONMapping | None = credentials
-        self.credentials_updated_callback = credentials_updated_callback
+        self.credentials_updated_callback: (
+            CredentialsUpdatedCallable[MutableJSONMapping] | None
+        ) = credentials_updated_callback
         self.persistent_ids: list[str] = (
             list(received_persistent_ids)
             if received_persistent_ids is not None
