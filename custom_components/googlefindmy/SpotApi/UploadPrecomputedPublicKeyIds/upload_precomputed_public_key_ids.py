@@ -54,10 +54,12 @@ def refresh_custom_trackers(device_list: DevicesList) -> None:
                     f"{exc}"
                 )
                 return
+            start_timestamp = int(time.time() - hours_to_seconds(3))
+
             next_eids = get_next_eids(
                 identity_key,
                 new_truncated_ids.pairDate,
-                int(time.time() - hours_to_seconds(3)),
+                start_timestamp,
                 duration_seconds=max_truncated_eid_seconds_server,
             )
 
