@@ -67,7 +67,10 @@ async def async_setup_entry(
     entities: list[GoogleFindMyDeviceTracker] = []
     known_ids: set[str] = set()
 
-    # Startup population from coordinator snapshot (if already present)
+    # Startup population from coordinator snapshot (if already present).
+    # Pointer for maintainers: coordinator.py documents the "Subentry awareness"
+    # section (see GoogleFindMyCoordinator._refresh_subentry_index /
+    # _store_subentry_snapshots) that drives this scanner's snapshot source.
     initial_snapshot = coordinator.get_subentry_snapshot(subentry_key)
     for device in initial_snapshot:
         dev_id = device.get("id")
