@@ -168,11 +168,13 @@ class _CallbackContext:
     """
 
     __slots__ = ("event", "data")
+    event: asyncio.Event
+    data: list[dict[str, Any]] | None
 
     def __init__(self) -> None:
         """Initialize the callback context."""
         self.event: asyncio.Event = asyncio.Event()
-        self.data: list | None = None
+        self.data: list[dict[str, Any]] | None = None
 
 
 def _make_location_callback(
@@ -229,7 +231,7 @@ def _make_location_callback(
                     name,
                     import_error,
                 )
-                ctx.data = []
+                ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
                 return
 
@@ -240,7 +242,7 @@ def _make_location_callback(
                 _LOGGER.error(
                     "Failed to parse device update for %s: %s", name, parse_exc
                 )
-                ctx.data = []
+                ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
                 return
 
@@ -253,10 +255,10 @@ def _make_location_callback(
                 )
                 return
 
-            async def _decrypt_and_store():
+            async def _decrypt_and_store() -> None:
                 """Asynchronous part of the callback to decrypt and store data."""
                 try:
-                    location_data = await async_decrypt_location_response_locations(
+                    location_data: list[dict[str, Any]] = await async_decrypt_location_response_locations(
                         device_update, cache=cache
                     )
                 except (
@@ -267,7 +269,7 @@ def _make_location_callback(
                     _LOGGER.error(
                         "Failed to process location data for %s: %s", name, err
                     )
-                    ctx.data = []
+                    ctx.data = cast(list[dict[str, Any]], [])
                     ctx.event.set()
                     return
                 except Exception as err:
@@ -275,7 +277,7 @@ def _make_location_callback(
                         "Unexpected error during async decryption for %s: %s", name, err
                     )
                     _LOGGER.debug("Traceback: %s", traceback.format_exc())
-                    ctx.data = []
+                    ctx.data = cast(list[dict[str, Any]], [])
                     ctx.event.set()
                     return
 
@@ -292,7 +294,7 @@ def _make_location_callback(
                     _LOGGER.warning(
                         "No location data found after decryption for %s", name
                     )
-                    ctx.data = []
+                    ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
 
             # Hand off to the HA event loop; do not block this worker thread.
@@ -303,7 +305,7 @@ def _make_location_callback(
                 "Error processing FCM callback for %s: %s", name, callback_error
             )
             _LOGGER.debug("FCM callback traceback: %s", traceback.format_exc())
-            ctx.data = []
+            ctx.data = cast(list[dict[str, Any]], [])
             ctx.event.set()
 
     return location_callback
