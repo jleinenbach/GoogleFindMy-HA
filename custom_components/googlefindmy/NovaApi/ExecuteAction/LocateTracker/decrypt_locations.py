@@ -12,7 +12,7 @@ import logging
 import math
 import time
 from itertools import zip_longest
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from google.protobuf.message import DecodeError
 
@@ -611,8 +611,10 @@ def decrypt_location_response_locations(
 
 
 if __name__ == "__main__":  # Developer self-check only; not used by Home Assistant
-    res = parse_device_update_protobuf("")  # type: ignore[arg-type]
+    res = parse_device_update_protobuf("")
     try:
-        decrypt_location_response_locations(res, cache=None)  # type: ignore[arg-type]
+        decrypt_location_response_locations(
+            res, cache=cast("TokenCache", None)
+        )
     except Exception as exc:
         print(f"Self-check encountered exception (expected outside HA runtime): {exc}")

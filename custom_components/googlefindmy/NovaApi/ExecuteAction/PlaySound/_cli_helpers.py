@@ -87,7 +87,7 @@ async def _async_load_token_from_cache(
         return None
 
     receiver = FcmReceiverHA()
-    receiver.creds[entry_id] = creds  # type: ignore[assignment]
+    receiver.creds[entry_id] = creds
     return receiver.get_fcm_token(entry_id)
 
 

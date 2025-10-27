@@ -33,19 +33,26 @@ import re
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from collections.abc import Awaitable, Callable
 
 import aiohttp
 
+if TYPE_CHECKING:
+    from bs4 import BeautifulSoup as _BeautifulSoupType
+else:
+    _BeautifulSoupType = Any
+
+_beautiful_soup_factory: Callable[[str, str], _BeautifulSoupType] | None
 try:
-    from bs4 import BeautifulSoup
-except (
-    ImportError
-):  # pragma: no cover - optional dependency, covered via fallback branch
-    BeautifulSoup = None  # type: ignore[assignment]
+    from bs4 import BeautifulSoup as _bs_factory
+except ImportError:  # pragma: no cover - optional dependency, covered via fallback branch
+    _beautiful_soup_factory = None
     _BS4_AVAILABLE = False
 else:
+    _beautiful_soup_factory = cast(
+        "Callable[[str, str], _BeautifulSoupType]", _bs_factory
+    )
     _BS4_AVAILABLE = True
 
 from custom_components.googlefindmy.Auth.username_provider import (
@@ -130,9 +137,9 @@ def _beautify_text(resp_text: str) -> str:
     if not resp_text:
         return ""
 
-    if _BS4_AVAILABLE and BeautifulSoup is not None:
+    if _BS4_AVAILABLE and _beautiful_soup_factory is not None:
         try:
-            text = BeautifulSoup(resp_text, "html.parser").get_text(
+            text = _beautiful_soup_factory(resp_text, "html.parser").get_text(
                 separator=" ", strip=True
             )
         except Exception as err:  # pragma: no cover - defensive logging path
@@ -442,6 +449,11 @@ class TTLPolicy:
             except (ValueError, TypeError) as e:
                 self.log.debug("Threshold check failed: %s", e)
 
+    async def async_pre_request(self) -> None:
+        """Async wrapper for compatibility with AsyncTTLPolicy."""
+
+        self.pre_request()
+
     def on_401(self, adaptive_downshift: bool = True) -> str | None:
         """Handle 401: measure TTL, adapt quickly on unexpected short TTLs, then refresh."""
         now = time.time()
@@ -485,17 +497,46 @@ class TTLPolicy:
         # Always refresh after a 401 to resume normal operation.
         return self._do_refresh(now)
 
+    async def async_on_401(self, adaptive_downshift: bool = True) -> str | None:
+        """Async wrapper delegating to the synchronous policy."""
+
+        return self.on_401(adaptive_downshift=adaptive_downshift)
+
 
 class AsyncTTLPolicy(TTLPolicy):
     """Native async version of the TTL policy (no blocking calls)."""
 
+    def __init__(
+        self,
+        *,
+        username: str,
+        logger: logging.Logger,
+        get_value: Callable[[str], Awaitable[Any]],
+        set_value: Callable[[str, Any], Awaitable[None]],
+        refresh_fn: Callable[[], Awaitable[str | None]],
+        set_auth_header_fn: Callable[[str], None],
+        ns_prefix: str = "",
+    ) -> None:
+        super().__init__(
+            username=username,
+            logger=logger,
+            get_value=lambda _: None,
+            set_value=lambda _key, _value: None,
+            refresh_fn=lambda: None,
+            set_auth_header_fn=set_auth_header_fn,
+            ns_prefix=ns_prefix,
+        )
+        self._aget: Callable[[str], Awaitable[Any]] = get_value
+        self._aset: Callable[[str, Any], Awaitable[None]] = set_value
+        self._arefresh: Callable[[], Awaitable[str | None]] = refresh_fn
+
     async def _arm_probe_if_due_async(self, now: float) -> bool:
-        startup_left = await self._get(self.k_startleft)
-        probenext = await self._get(self.k_probenext)
+        startup_left = await self._aget(self.k_startleft)
+        probenext = await self._aget(self.k_probenext)
         do_arm = bool(startup_left and int(startup_left) > 0)
         if not do_arm:
             if probenext is None:
-                await self._set(
+                await self._aset(
                     self.k_probenext,
                     now
                     + self._jitter_pct(
@@ -504,7 +545,7 @@ class AsyncTTLPolicy(TTLPolicy):
                 )
             elif now >= float(probenext):
                 do_arm = True
-                await self._set(
+                await self._aset(
                     self.k_probenext,
                     now
                     + self._jitter_pct(
@@ -512,9 +553,9 @@ class AsyncTTLPolicy(TTLPolicy):
                     ),
                 )
         if do_arm:
-            await self._set(self.k_armed, 1)
+            await self._aset(self.k_armed, 1)
             return True
-        return bool(await self._get(self.k_armed))
+        return bool(await self._aget(self.k_armed))
 
     async def _do_refresh_async(self, now: float) -> str | None:
         bases_to_clear = (
@@ -524,18 +565,18 @@ class AsyncTTLPolicy(TTLPolicy):
         for base in bases_to_clear:
             for key in self._key_variants(base):
                 try:
-                    await self._set(key, None)
+                    await self._aset(key, None)
                 except Exception:
                     pass
         try:
-            tok = await self._refresh()  # async callable
+            tok = await self._arefresh()  # async callable
         except InvalidAasTokenError as err:
             self.log.error(
                 "ADM token refresh failed because the cached AAS token was rejected; re-authentication is required."
             )
             for key in self._key_variants(DATA_AAS_TOKEN):
                 try:
-                    await self._set(key, None)
+                    await self._aset(key, None)
                 except Exception:
                     pass
             raise NovaAuthError(401, "AAS token invalid during ADM refresh") from err
@@ -543,7 +584,7 @@ class AsyncTTLPolicy(TTLPolicy):
             token_base = f"adm_token_{self.username}"
             for key in self._key_variants(token_base):
                 try:
-                    await self._set(key, tok)
+                    await self._aset(key, tok)
                 except Exception:
                     pass
 
@@ -551,23 +592,23 @@ class AsyncTTLPolicy(TTLPolicy):
             issued_base = f"adm_token_issued_at_{self.username}"
             for key in self._key_variants(issued_base):
                 try:
-                    await self._set(key, now)
+                    await self._aset(key, now)
                 except Exception:
                     pass
-            if await self._get(self.k_startleft) is None:
+            if await self._aget(self.k_startleft) is None:
                 probe_base = f"adm_probe_startup_left_{self.username}"
                 for key in self._key_variants(probe_base):
                     try:
-                        if await self._get(key) is None:
-                            await self._set(key, 3)
+                        if await self._aget(key) is None:
+                            await self._aset(key, 3)
                     except Exception:
                         pass
         return tok
 
-    async def pre_request(self) -> None:
+    async def async_pre_request(self) -> None:
         now = time.time()
-        issued_at = await self._get(self.k_issued)
-        best_ttl = await self._get(self.k_bestttl)
+        issued_at = await self._aget(self.k_issued)
+        best_ttl = await self._aget(self.k_bestttl)
         armed = await self._arm_probe_if_due_async(now)
         if (not armed) and issued_at and best_ttl:
             try:
@@ -582,14 +623,14 @@ class AsyncTTLPolicy(TTLPolicy):
             except (ValueError, TypeError) as e:
                 self.log.debug("Threshold check failed (async): %s", e)
 
-    async def on_401(self, adaptive_downshift: bool = True) -> str | None:
+    async def async_on_401(self, adaptive_downshift: bool = True) -> str | None:
         """Async 401 handling with stampede guard and async cache I/O."""
         lock = _get_async_refresh_lock()
         async with lock:
             now = time.time()
 
             # Skip duplicate refresh if someone just refreshed recently.
-            issued_raw = await self._get(self.k_issued)
+            issued_raw = await self._aget(self.k_issued)
             issued: float | None
             try:
                 issued = float(issued_raw) if issued_raw is not None else None
@@ -608,7 +649,7 @@ class AsyncTTLPolicy(TTLPolicy):
                 token_base = f"adm_token_{self.username}"
                 for key in self._key_variants(token_base):
                     try:
-                        candidate = await self._get(key)
+                        candidate = await self._aget(key)
                     except Exception as err:  # noqa: BLE001 - defensive cache read
                         self.log.debug(
                             "Failed to read cached token from key '%s': %s", key, err
@@ -637,32 +678,32 @@ class AsyncTTLPolicy(TTLPolicy):
 
             age_sec = now - float(issued)
             age_min = age_sec / 60.0
-            planned_probe = bool(await self._get(self.k_armed))
+            planned_probe = bool(await self._aget(self.k_armed))
 
             if planned_probe:
                 self.log.info(
                     "Got 401 (forced probe) – measured TTL: %.1f min.", age_min
                 )
-                await self._set(self.k_bestttl, age_sec)
-                await self._set(self.k_armed, 0)
-                left = await self._get(self.k_startleft)
+                await self._aset(self.k_bestttl, age_sec)
+                await self._aset(self.k_armed, 0)
+                left = await self._aget(self.k_startleft)
                 if left and int(left) > 0:
                     try:
-                        await self._set(self.k_startleft, int(left) - 1)
+                        await self._aset(self.k_startleft, int(left) - 1)
                     except (ValueError, TypeError):
-                        await self._set(self.k_startleft, 0)
+                        await self._aset(self.k_startleft, 0)
             else:
                 self.log.info(
                     "Got 401 – token expired after %.1f min (unplanned).", age_min
                 )
                 if adaptive_downshift:
-                    best = await self._get(self.k_bestttl)
+                    best = await self._aget(self.k_bestttl)
                     try:
                         if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
                             self.log.warning(
                                 "Unexpected short TTL – recalibrating best known TTL (async)."
                             )
-                            await self._set(self.k_bestttl, age_sec)
+                            await self._aset(self.k_bestttl, age_sec)
                     except (ValueError, TypeError) as e:
                         self.log.debug("Recalibration check failed (async): %s", e)
             return await self._do_refresh_async(now)
@@ -747,14 +788,16 @@ async def async_nova_request(
             return
         await cache.set(key, value)
 
-    if username:
-        user = username
+    user: str | None
+    if isinstance(username, str) and username.strip():
+        user = username.strip()
     else:
         val = await cache.get(username_string)
-        user = str(val) if isinstance(val, str) and val else None
+        user = str(val).strip() if isinstance(val, str) and val else None
         if not user:
-            user = await async_get_username(cache=cache)  # type: ignore[arg-type]
-    if not user:
+            fetched = await async_get_username(cache=cache)
+            user = fetched.strip() if isinstance(fetched, str) and fetched else None
+    if user is None:
         raise ValueError("Username is not available for async_nova_request.")
 
     if (
@@ -802,7 +845,7 @@ async def async_nova_request(
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
         ns_prefix=(namespace or ""),
     )
-    await policy.pre_request()
+    await policy.async_pre_request()
 
     ephemeral_session = False
     if session is None:
@@ -852,7 +895,7 @@ async def async_nova_request(
                             "Nova API async request to %s: 401 Unauthorized. Refreshing token.",
                             api_scope,
                         )
-                        await policy.on_401()
+                        await policy.async_on_401()
                         if not refreshed_once:
                             refreshed_once = True
                             continue  # Free retry
