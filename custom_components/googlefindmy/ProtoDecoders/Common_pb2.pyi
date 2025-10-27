@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from google.protobuf import descriptor as _descriptor
+from google.protobuf import message as _message
 from typing import ClassVar as _ClassVar, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 from custom_components.googlefindmy.protobuf_typing import EnumTypeWrapperMeta as _EnumTypeWrapperMeta
-from custom_components.googlefindmy.protobuf_typing import MessageProto as _MessageProto
 
 EnumTypeWrapper = _EnumTypeWrapperMeta[int]
-Message = _MessageProto
+Message = _message.Message
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
