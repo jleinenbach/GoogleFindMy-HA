@@ -69,10 +69,12 @@ ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = [
+    "custom_components.googlefindmy.chrome_driver",
     "custom_components.googlefindmy.const",
     "custom_components.googlefindmy.diagnostics",
     "custom_components.googlefindmy.example_data_provider",
     "custom_components.googlefindmy.exceptions",
+    "custom_components.googlefindmy.get_oauth_token",
     "custom_components.googlefindmy.google_home_filter",
     "custom_components.googlefindmy.location_recorder",
     "custom_components.googlefindmy.services",

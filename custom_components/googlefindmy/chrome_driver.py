@@ -7,6 +7,8 @@ import logging
 import os
 import platform
 import shutil
+from typing import cast
+
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.webdriver import WebDriver
 
@@ -101,7 +103,7 @@ def create_driver(*, headless: bool = False) -> WebDriver:
 
     try:
         chrome_options = get_options(headless=headless)
-        driver = uc.Chrome(options=chrome_options)
+        driver = cast(WebDriver, uc.Chrome(options=chrome_options))
         LOGGER.info("ChromeDriver started with bundled binary")
         return driver
     except Exception:  # pragma: no cover - relies on external binary availability
@@ -114,7 +116,7 @@ def create_driver(*, headless: bool = False) -> WebDriver:
             chrome_options = get_options(headless=headless)
             chrome_options.binary_location = chrome_path
             try:
-                driver = uc.Chrome(options=chrome_options)
+                driver = cast(WebDriver, uc.Chrome(options=chrome_options))
                 LOGGER.info(
                     "ChromeDriver started using system binary at %s", chrome_path
                 )
