@@ -9,7 +9,7 @@ from custom_components.googlefindmy.protobuf_typing import (
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from typing import Any as _Any, ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 EnumTypeWrapper = _EnumTypeWrapperMeta[int]
 Message = _message.Message
@@ -126,7 +126,7 @@ class GetEidInfoForE2eeDevicesResponse(Message, _MessageProto):
     __slots__ = ("encryptedOwnerKeyAndMetadata",)
     ENCRYPTEDOWNERKEYANDMETADATA_FIELD_NUMBER: _ClassVar[int]
     encryptedOwnerKeyAndMetadata: EncryptedOwnerKeyAndMetadata
-    def __init__(self, encryptedOwnerKeyAndMetadata: _Optional[_Union[EncryptedOwnerKeyAndMetadata, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, encryptedOwnerKeyAndMetadata: _Optional[_Union[EncryptedOwnerKeyAndMetadata, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class EncryptedOwnerKeyAndMetadata(Message, _MessageProto):
     __slots__ = ("encryptedOwnerKey", "ownerKeyVersion", "securityDomain")
@@ -142,13 +142,13 @@ class DevicesList(Message, _MessageProto):
     __slots__ = ("deviceMetadata",)
     DEVICEMETADATA_FIELD_NUMBER: _ClassVar[int]
     deviceMetadata: _containers.RepeatedCompositeFieldContainer[DeviceMetadata]
-    def __init__(self, deviceMetadata: _Optional[_Iterable[_Union[DeviceMetadata, _Mapping[str, object]]]] = ...) -> None: ...
+    def __init__(self, deviceMetadata: _Optional[_Iterable[_Union[DeviceMetadata, _Mapping[str, _Any]]]] = ...) -> None: ...
 
 class DevicesListRequest(Message, _MessageProto):
     __slots__ = ("deviceListRequestPayload",)
     DEVICELISTREQUESTPAYLOAD_FIELD_NUMBER: _ClassVar[int]
     deviceListRequestPayload: DevicesListRequestPayload
-    def __init__(self, deviceListRequestPayload: _Optional[_Union[DevicesListRequestPayload, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, deviceListRequestPayload: _Optional[_Union[DevicesListRequestPayload, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class DevicesListRequestPayload(Message, _MessageProto):
     __slots__ = ("type", "id")
@@ -166,7 +166,7 @@ class ExecuteActionRequest(Message, _MessageProto):
     scope: ExecuteActionScope
     action: ExecuteActionType
     requestMetadata: ExecuteActionRequestMetadata
-    def __init__(self, scope: _Optional[_Union[ExecuteActionScope, _Mapping[str, object]]] = ..., action: _Optional[_Union[ExecuteActionType, _Mapping[str, object]]] = ..., requestMetadata: _Optional[_Union[ExecuteActionRequestMetadata, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, scope: _Optional[_Union[ExecuteActionScope, _Mapping[str, _Any]]] = ..., action: _Optional[_Union[ExecuteActionType, _Mapping[str, _Any]]] = ..., requestMetadata: _Optional[_Union[ExecuteActionRequestMetadata, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class ExecuteActionRequestMetadata(Message, _MessageProto):
     __slots__ = ("type", "requestUuid", "fmdClientUuid", "gcmRegistrationId", "unknown")
@@ -180,7 +180,7 @@ class ExecuteActionRequestMetadata(Message, _MessageProto):
     fmdClientUuid: str
     gcmRegistrationId: GcmCloudMessagingIdProtobuf
     unknown: bool
-    def __init__(self, type: _Optional[_Union[DeviceType, str]] = ..., requestUuid: _Optional[str] = ..., fmdClientUuid: _Optional[str] = ..., gcmRegistrationId: _Optional[_Union[GcmCloudMessagingIdProtobuf, _Mapping[str, object]]] = ..., unknown: bool = ...) -> None: ...
+    def __init__(self, type: _Optional[_Union[DeviceType, str]] = ..., requestUuid: _Optional[str] = ..., fmdClientUuid: _Optional[str] = ..., gcmRegistrationId: _Optional[_Union[GcmCloudMessagingIdProtobuf, _Mapping[str, _Any]]] = ..., unknown: bool = ...) -> None: ...
 
 class GcmCloudMessagingIdProtobuf(Message, _MessageProto):
     __slots__ = ("id",)
@@ -196,7 +196,7 @@ class ExecuteActionType(Message, _MessageProto):
     locateTracker: ExecuteActionLocateTrackerType
     startSound: ExecuteActionSoundType
     stopSound: ExecuteActionSoundType
-    def __init__(self, locateTracker: _Optional[_Union[ExecuteActionLocateTrackerType, _Mapping[str, object]]] = ..., startSound: _Optional[_Union[ExecuteActionSoundType, _Mapping[str, object]]] = ..., stopSound: _Optional[_Union[ExecuteActionSoundType, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, locateTracker: _Optional[_Union[ExecuteActionLocateTrackerType, _Mapping[str, _Any]]] = ..., startSound: _Optional[_Union[ExecuteActionSoundType, _Mapping[str, _Any]]] = ..., stopSound: _Optional[_Union[ExecuteActionSoundType, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class ExecuteActionLocateTrackerType(Message, _MessageProto):
     __slots__ = ("lastHighTrafficEnablingTime", "contributorType")
@@ -204,7 +204,7 @@ class ExecuteActionLocateTrackerType(Message, _MessageProto):
     CONTRIBUTORTYPE_FIELD_NUMBER: _ClassVar[int]
     lastHighTrafficEnablingTime: _Common_pb2.Time
     contributorType: SpotContributorType
-    def __init__(self, lastHighTrafficEnablingTime: _Optional[_Union[_Common_pb2.Time, _Mapping[str, object]]] = ..., contributorType: _Optional[_Union[SpotContributorType, str]] = ...) -> None: ...
+    def __init__(self, lastHighTrafficEnablingTime: _Optional[_Union[_Common_pb2.Time, _Mapping[str, _Any]]] = ..., contributorType: _Optional[_Union[SpotContributorType, str]] = ...) -> None: ...
 
 class ExecuteActionSoundType(Message, _MessageProto):
     __slots__ = ("component",)
@@ -218,13 +218,13 @@ class ExecuteActionScope(Message, _MessageProto):
     DEVICE_FIELD_NUMBER: _ClassVar[int]
     type: DeviceType
     device: ExecuteActionDeviceIdentifier
-    def __init__(self, type: _Optional[_Union[DeviceType, str]] = ..., device: _Optional[_Union[ExecuteActionDeviceIdentifier, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, type: _Optional[_Union[DeviceType, str]] = ..., device: _Optional[_Union[ExecuteActionDeviceIdentifier, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class ExecuteActionDeviceIdentifier(Message, _MessageProto):
     __slots__ = ("canonicId",)
     CANONICID_FIELD_NUMBER: _ClassVar[int]
     canonicId: CanonicId
-    def __init__(self, canonicId: _Optional[_Union[CanonicId, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, canonicId: _Optional[_Union[CanonicId, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class DeviceUpdate(Message, _MessageProto):
     __slots__ = ("fcmMetadata", "deviceMetadata", "requestMetadata")
@@ -234,7 +234,7 @@ class DeviceUpdate(Message, _MessageProto):
     fcmMetadata: ExecuteActionRequestMetadata
     deviceMetadata: DeviceMetadata
     requestMetadata: RequestMetadata
-    def __init__(self, fcmMetadata: _Optional[_Union[ExecuteActionRequestMetadata, _Mapping[str, object]]] = ..., deviceMetadata: _Optional[_Union[DeviceMetadata, _Mapping[str, object]]] = ..., requestMetadata: _Optional[_Union[RequestMetadata, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, fcmMetadata: _Optional[_Union[ExecuteActionRequestMetadata, _Mapping[str, _Any]]] = ..., deviceMetadata: _Optional[_Union[DeviceMetadata, _Mapping[str, _Any]]] = ..., requestMetadata: _Optional[_Union[RequestMetadata, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class DeviceMetadata(Message, _MessageProto):
     __slots__ = ("identifierInformation", "information", "userDefinedDeviceName", "imageInformation")
@@ -246,7 +246,7 @@ class DeviceMetadata(Message, _MessageProto):
     information: DeviceInformation
     userDefinedDeviceName: str
     imageInformation: ImageInformation
-    def __init__(self, identifierInformation: _Optional[_Union[IdentitfierInformation, _Mapping[str, object]]] = ..., information: _Optional[_Union[DeviceInformation, _Mapping[str, object]]] = ..., userDefinedDeviceName: _Optional[str] = ..., imageInformation: _Optional[_Union[ImageInformation, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, identifierInformation: _Optional[_Union[IdentitfierInformation, _Mapping[str, _Any]]] = ..., information: _Optional[_Union[DeviceInformation, _Mapping[str, _Any]]] = ..., userDefinedDeviceName: _Optional[str] = ..., imageInformation: _Optional[_Union[ImageInformation, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class ImageInformation(Message, _MessageProto):
     __slots__ = ("imageUrl",)
@@ -262,19 +262,19 @@ class IdentitfierInformation(Message, _MessageProto):
     phoneInformation: PhoneInformation
     type: IdentifierInformationType
     canonicIds: CanonicIds
-    def __init__(self, phoneInformation: _Optional[_Union[PhoneInformation, _Mapping[str, object]]] = ..., type: _Optional[_Union[IdentifierInformationType, str]] = ..., canonicIds: _Optional[_Union[CanonicIds, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, phoneInformation: _Optional[_Union[PhoneInformation, _Mapping[str, _Any]]] = ..., type: _Optional[_Union[IdentifierInformationType, str]] = ..., canonicIds: _Optional[_Union[CanonicIds, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class PhoneInformation(Message, _MessageProto):
     __slots__ = ("canonicIds",)
     CANONICIDS_FIELD_NUMBER: _ClassVar[int]
     canonicIds: CanonicIds
-    def __init__(self, canonicIds: _Optional[_Union[CanonicIds, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, canonicIds: _Optional[_Union[CanonicIds, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class CanonicIds(Message, _MessageProto):
     __slots__ = ("canonicId",)
     CANONICID_FIELD_NUMBER: _ClassVar[int]
     canonicId: _containers.RepeatedCompositeFieldContainer[CanonicId]
-    def __init__(self, canonicId: _Optional[_Iterable[_Union[CanonicId, _Mapping[str, object]]]] = ...) -> None: ...
+    def __init__(self, canonicId: _Optional[_Iterable[_Union[CanonicId, _Mapping[str, _Any]]]] = ...) -> None: ...
 
 class CanonicId(Message, _MessageProto):
     __slots__ = ("id",)
@@ -290,7 +290,7 @@ class DeviceInformation(Message, _MessageProto):
     deviceRegistration: DeviceRegistration
     locationInformation: LocationInformation
     accessInformation: _containers.RepeatedCompositeFieldContainer[AccessInformation]
-    def __init__(self, deviceRegistration: _Optional[_Union[DeviceRegistration, _Mapping[str, object]]] = ..., locationInformation: _Optional[_Union[LocationInformation, _Mapping[str, object]]] = ..., accessInformation: _Optional[_Iterable[_Union[AccessInformation, _Mapping[str, object]]]] = ...) -> None: ...
+    def __init__(self, deviceRegistration: _Optional[_Union[DeviceRegistration, _Mapping[str, _Any]]] = ..., locationInformation: _Optional[_Union[LocationInformation, _Mapping[str, _Any]]] = ..., accessInformation: _Optional[_Iterable[_Union[AccessInformation, _Mapping[str, _Any]]]] = ...) -> None: ...
 
 class DeviceTypeInformation(Message, _MessageProto):
     __slots__ = ("deviceType",)
@@ -312,7 +312,7 @@ class DeviceRegistration(Message, _MessageProto):
     fastPairModelId: str
     pairDate: int
     model: str
-    def __init__(self, deviceTypeInformation: _Optional[_Union[DeviceTypeInformation, _Mapping[str, object]]] = ..., encryptedUserSecrets: _Optional[_Union[EncryptedUserSecrets, _Mapping[str, object]]] = ..., manufacturer: _Optional[str] = ..., fastPairModelId: _Optional[str] = ..., pairDate: _Optional[int] = ..., model: _Optional[str] = ...) -> None: ...
+    def __init__(self, deviceTypeInformation: _Optional[_Union[DeviceTypeInformation, _Mapping[str, _Any]]] = ..., encryptedUserSecrets: _Optional[_Union[EncryptedUserSecrets, _Mapping[str, _Any]]] = ..., manufacturer: _Optional[str] = ..., fastPairModelId: _Optional[str] = ..., pairDate: _Optional[int] = ..., model: _Optional[str] = ...) -> None: ...
 
 class EncryptedUserSecrets(Message, _MessageProto):
     __slots__ = ("encryptedIdentityKey", "ownerKeyVersion", "encryptedAccountKey", "creationDate", "encryptedSha256AccountKeyPublicAddress")
@@ -326,19 +326,19 @@ class EncryptedUserSecrets(Message, _MessageProto):
     encryptedAccountKey: bytes
     creationDate: _Common_pb2.Time
     encryptedSha256AccountKeyPublicAddress: bytes
-    def __init__(self, encryptedIdentityKey: _Optional[bytes] = ..., ownerKeyVersion: _Optional[int] = ..., encryptedAccountKey: _Optional[bytes] = ..., creationDate: _Optional[_Union[_Common_pb2.Time, _Mapping[str, object]]] = ..., encryptedSha256AccountKeyPublicAddress: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, encryptedIdentityKey: _Optional[bytes] = ..., ownerKeyVersion: _Optional[int] = ..., encryptedAccountKey: _Optional[bytes] = ..., creationDate: _Optional[_Union[_Common_pb2.Time, _Mapping[str, _Any]]] = ..., encryptedSha256AccountKeyPublicAddress: _Optional[bytes] = ...) -> None: ...
 
 class LocationInformation(Message, _MessageProto):
     __slots__ = ("reports",)
     REPORTS_FIELD_NUMBER: _ClassVar[int]
     reports: LocationsAndTimestampsWrapper
-    def __init__(self, reports: _Optional[_Union[LocationsAndTimestampsWrapper, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, reports: _Optional[_Union[LocationsAndTimestampsWrapper, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class LocationsAndTimestampsWrapper(Message, _MessageProto):
     __slots__ = ("recentLocationAndNetworkLocations",)
     RECENTLOCATIONANDNETWORKLOCATIONS_FIELD_NUMBER: _ClassVar[int]
     recentLocationAndNetworkLocations: RecentLocationAndNetworkLocations
-    def __init__(self, recentLocationAndNetworkLocations: _Optional[_Union[RecentLocationAndNetworkLocations, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, recentLocationAndNetworkLocations: _Optional[_Union[RecentLocationAndNetworkLocations, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class RecentLocationAndNetworkLocations(Message, _MessageProto):
     __slots__ = ("recentLocation", "recentLocationTimestamp", "networkLocations", "networkLocationTimestamps", "minLocationsNeededForAggregation")
@@ -352,7 +352,7 @@ class RecentLocationAndNetworkLocations(Message, _MessageProto):
     networkLocations: _containers.RepeatedCompositeFieldContainer[_Common_pb2.LocationReport]
     networkLocationTimestamps: _containers.RepeatedCompositeFieldContainer[_Common_pb2.Time]
     minLocationsNeededForAggregation: int
-    def __init__(self, recentLocation: _Optional[_Union[_Common_pb2.LocationReport, _Mapping[str, object]]] = ..., recentLocationTimestamp: _Optional[_Union[_Common_pb2.Time, _Mapping[str, object]]] = ..., networkLocations: _Optional[_Iterable[_Union[_Common_pb2.LocationReport, _Mapping[str, object]]]] = ..., networkLocationTimestamps: _Optional[_Iterable[_Union[_Common_pb2.Time, _Mapping[str, object]]]] = ..., minLocationsNeededForAggregation: _Optional[int] = ...) -> None: ...
+    def __init__(self, recentLocation: _Optional[_Union[_Common_pb2.LocationReport, _Mapping[str, _Any]]] = ..., recentLocationTimestamp: _Optional[_Union[_Common_pb2.Time, _Mapping[str, _Any]]] = ..., networkLocations: _Optional[_Iterable[_Union[_Common_pb2.LocationReport, _Mapping[str, _Any]]]] = ..., networkLocationTimestamps: _Optional[_Iterable[_Union[_Common_pb2.Time, _Mapping[str, _Any]]]] = ..., minLocationsNeededForAggregation: _Optional[int] = ...) -> None: ...
 
 class AccessInformation(Message, _MessageProto):
     __slots__ = ("email", "hasAccess", "isOwner", "thisAccount")
@@ -370,7 +370,7 @@ class RequestMetadata(Message, _MessageProto):
     __slots__ = ("responseTime",)
     RESPONSETIME_FIELD_NUMBER: _ClassVar[int]
     responseTime: _Common_pb2.Time
-    def __init__(self, responseTime: _Optional[_Union[_Common_pb2.Time, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, responseTime: _Optional[_Union[_Common_pb2.Time, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class EncryptionUnlockRequestExtras(Message, _MessageProto):
     __slots__ = ("operation", "securityDomain", "sessionId")
@@ -380,7 +380,7 @@ class EncryptionUnlockRequestExtras(Message, _MessageProto):
     operation: int
     securityDomain: SecurityDomain
     sessionId: str
-    def __init__(self, operation: _Optional[int] = ..., securityDomain: _Optional[_Union[SecurityDomain, _Mapping[str, object]]] = ..., sessionId: _Optional[str] = ...) -> None: ...
+    def __init__(self, operation: _Optional[int] = ..., securityDomain: _Optional[_Union[SecurityDomain, _Mapping[str, _Any]]] = ..., sessionId: _Optional[str] = ...) -> None: ...
 
 class SecurityDomain(Message, _MessageProto):
     __slots__ = ("name", "unknown")
@@ -420,7 +420,7 @@ class RegisterBleDeviceRequest(Message, _MessageProto):
     recoveryKey: bytes
     unwantedTrackingKey: bytes
     modelName: str
-    def __init__(self, fastPairModelId: _Optional[str] = ..., description: _Optional[_Union[DeviceDescription, _Mapping[str, object]]] = ..., capabilities: _Optional[_Union[DeviceCapabilities, _Mapping[str, object]]] = ..., e2eePublicKeyRegistration: _Optional[_Union[E2EEPublicKeyRegistration, _Mapping[str, object]]] = ..., manufacturerName: _Optional[str] = ..., ringKey: _Optional[bytes] = ..., recoveryKey: _Optional[bytes] = ..., unwantedTrackingKey: _Optional[bytes] = ..., modelName: _Optional[str] = ...) -> None: ...
+    def __init__(self, fastPairModelId: _Optional[str] = ..., description: _Optional[_Union[DeviceDescription, _Mapping[str, _Any]]] = ..., capabilities: _Optional[_Union[DeviceCapabilities, _Mapping[str, _Any]]] = ..., e2eePublicKeyRegistration: _Optional[_Union[E2EEPublicKeyRegistration, _Mapping[str, _Any]]] = ..., manufacturerName: _Optional[str] = ..., ringKey: _Optional[bytes] = ..., recoveryKey: _Optional[bytes] = ..., unwantedTrackingKey: _Optional[bytes] = ..., modelName: _Optional[str] = ...) -> None: ...
 
 class E2EEPublicKeyRegistration(Message, _MessageProto):
     __slots__ = ("rotationExponent", "encryptedUserSecrets", "publicKeyIdList", "pairingDate")
@@ -432,7 +432,7 @@ class E2EEPublicKeyRegistration(Message, _MessageProto):
     encryptedUserSecrets: EncryptedUserSecrets
     publicKeyIdList: PublicKeyIdList
     pairingDate: int
-    def __init__(self, rotationExponent: _Optional[int] = ..., encryptedUserSecrets: _Optional[_Union[EncryptedUserSecrets, _Mapping[str, object]]] = ..., publicKeyIdList: _Optional[_Union[PublicKeyIdList, _Mapping[str, object]]] = ..., pairingDate: _Optional[int] = ...) -> None: ...
+    def __init__(self, rotationExponent: _Optional[int] = ..., encryptedUserSecrets: _Optional[_Union[EncryptedUserSecrets, _Mapping[str, _Any]]] = ..., publicKeyIdList: _Optional[_Union[PublicKeyIdList, _Mapping[str, _Any]]] = ..., pairingDate: _Optional[int] = ...) -> None: ...
 
 class PublicKeyIdList(Message, _MessageProto):
     __slots__ = ("publicKeyIdInfo",)
@@ -444,10 +444,10 @@ class PublicKeyIdList(Message, _MessageProto):
         timestamp: _Common_pb2.Time
         publicKeyId: TruncatedEID
         trackableComponent: int
-        def __init__(self, timestamp: _Optional[_Union[_Common_pb2.Time, _Mapping[str, object]]] = ..., publicKeyId: _Optional[_Union[TruncatedEID, _Mapping[str, object]]] = ..., trackableComponent: _Optional[int] = ...) -> None: ...
+        def __init__(self, timestamp: _Optional[_Union[_Common_pb2.Time, _Mapping[str, _Any]]] = ..., publicKeyId: _Optional[_Union[TruncatedEID, _Mapping[str, _Any]]] = ..., trackableComponent: _Optional[int] = ...) -> None: ...
     PUBLICKEYIDINFO_FIELD_NUMBER: _ClassVar[int]
     publicKeyIdInfo: _containers.RepeatedCompositeFieldContainer[PublicKeyIdList.PublicKeyIdInfo]
-    def __init__(self, publicKeyIdInfo: _Optional[_Iterable[_Union[PublicKeyIdList.PublicKeyIdInfo, _Mapping[str, object]]]] = ...) -> None: ...
+    def __init__(self, publicKeyIdInfo: _Optional[_Iterable[_Union[PublicKeyIdList.PublicKeyIdInfo, _Mapping[str, _Any]]]] = ...) -> None: ...
 
 class TruncatedEID(Message, _MessageProto):
     __slots__ = ("truncatedEid",)
@@ -465,10 +465,10 @@ class UploadPrecomputedPublicKeyIdsRequest(Message, _MessageProto):
         canonicId: CanonicId
         clientList: PublicKeyIdList
         pairDate: int
-        def __init__(self, canonicId: _Optional[_Union[CanonicId, _Mapping[str, object]]] = ..., clientList: _Optional[_Union[PublicKeyIdList, _Mapping[str, object]]] = ..., pairDate: _Optional[int] = ...) -> None: ...
+        def __init__(self, canonicId: _Optional[_Union[CanonicId, _Mapping[str, _Any]]] = ..., clientList: _Optional[_Union[PublicKeyIdList, _Mapping[str, _Any]]] = ..., pairDate: _Optional[int] = ...) -> None: ...
     DEVICEEIDS_FIELD_NUMBER: _ClassVar[int]
     deviceEids: _containers.RepeatedCompositeFieldContainer[UploadPrecomputedPublicKeyIdsRequest.DevicePublicKeyIds]
-    def __init__(self, deviceEids: _Optional[_Iterable[_Union[UploadPrecomputedPublicKeyIdsRequest.DevicePublicKeyIds, _Mapping[str, object]]]] = ...) -> None: ...
+    def __init__(self, deviceEids: _Optional[_Iterable[_Union[UploadPrecomputedPublicKeyIdsRequest.DevicePublicKeyIds, _Mapping[str, _Any]]]] = ...) -> None: ...
 
 class DeviceCapabilities(Message, _MessageProto):
     __slots__ = ("isAdvertising", "capableComponents", "trackableComponents")
@@ -488,7 +488,7 @@ class DeviceDescription(Message, _MessageProto):
     userDefinedName: str
     deviceType: SpotDeviceType
     deviceComponentsInformation: _containers.RepeatedCompositeFieldContainer[DeviceComponentInformation]
-    def __init__(self, userDefinedName: _Optional[str] = ..., deviceType: _Optional[_Union[SpotDeviceType, str]] = ..., deviceComponentsInformation: _Optional[_Iterable[_Union[DeviceComponentInformation, _Mapping[str, object]]]] = ...) -> None: ...
+    def __init__(self, userDefinedName: _Optional[str] = ..., deviceType: _Optional[_Union[SpotDeviceType, str]] = ..., deviceComponentsInformation: _Optional[_Iterable[_Union[DeviceComponentInformation, _Mapping[str, _Any]]]] = ...) -> None: ...
 
 class DeviceComponentInformation(Message, _MessageProto):
     __slots__ = ("imageUrl",)
