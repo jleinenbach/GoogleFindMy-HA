@@ -19,6 +19,8 @@ Notes:
   y = a^((p+1)/4) mod p (used by rx_to_ry).  See references in docs.
 """
 
+# custom_components/googlefindmy/FMDNCrypto/foreign_tracker_cryptor.py
+
 from __future__ import annotations
 
 import asyncio
@@ -27,7 +29,7 @@ from binascii import unhexlify
 
 from Cryptodome.Cipher import AES
 from ecdsa import SECP160r1
-from ecdsa.ellipticcurve import Point
+from ecdsa.ellipticcurve import CurveFp, Point
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
@@ -54,7 +56,7 @@ _NONCE_LEN: int = 16
 # ---------------------------------------------------------------------------
 
 
-def rx_to_ry(Rx: int, curve) -> int:
+def rx_to_ry(Rx: int, curve: CurveFp) -> int:
     """Recover the even Y coordinate for a given X on a short Weierstrass curve.
 
     This reconstructs a point from a compressed representation by solving
@@ -200,16 +202,17 @@ def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
 
     # Derive AES-256 key via HKDF-SHA256 over (s·R).x (20 bytes)
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
-    k = hkdf.derive((s * R).x().to_bytes(_COORD_LEN, "big"))
+    k: bytes = hkdf.derive((s * R).x().to_bytes(_COORD_LEN, "big"))
 
     # Nonce = LRx(8) || LSx(8)
     LRx = Rx.to_bytes(_COORD_LEN, "big")[-8:]
     LSx = S.x().to_bytes(_COORD_LEN, "big")[-8:]
-    nonce = LRx + LSx  # 16 bytes
+    nonce: bytes = LRx + LSx  # 16 bytes
 
     # Encrypt (AES-EAX-256) → m' || tag
     m_dash, tag = encrypt_aes_eax(message, nonce, k)
-    return m_dash + tag, S.x().to_bytes(_COORD_LEN, "big")
+    encrypted_with_tag: bytes = m_dash + tag
+    return encrypted_with_tag, S.x().to_bytes(_COORD_LEN, "big")
 
 
 def decrypt(
@@ -243,8 +246,8 @@ def decrypt(
         raise ValueError("encryptedAndTag must be at least 16 bytes (contains tag).")
 
     # Split ciphertext and tag
-    m_dash = encryptedAndTag[:-_AES_TAG_LEN]
-    tag = encryptedAndTag[-_AES_TAG_LEN:]
+    m_dash: bytes = encryptedAndTag[:-_AES_TAG_LEN]
+    tag: bytes = encryptedAndTag[-_AES_TAG_LEN:]
 
     # Curve and scalar r
     curve = SECP160r1
@@ -260,12 +263,12 @@ def decrypt(
 
     # Derive AES-256 key via HKDF-SHA256 over (r·S).x
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
-    k = hkdf.derive((r * S).x().to_bytes(_COORD_LEN, "big"))
+    k: bytes = hkdf.derive((r * S).x().to_bytes(_COORD_LEN, "big"))
 
     # Nonce = LRx(8) || LSx(8)
     LRx = R.x().to_bytes(_COORD_LEN, "big")[-8:]
     LSx = S.x().to_bytes(_COORD_LEN, "big")[-8:]
-    nonce = LRx + LSx  # 16 bytes
+    nonce: bytes = LRx + LSx  # 16 bytes
 
     # AES-EAX-256 decrypt & verify
     return decrypt_aes_eax(m_dash, tag, nonce, k)
