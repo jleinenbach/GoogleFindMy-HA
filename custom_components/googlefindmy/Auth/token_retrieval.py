@@ -121,11 +121,13 @@ def _perform_oauth_sync(
     request_app = (
         "com.google.android.gms" if play_services else "com.google.android.apps.adm"
     )
+    android_id_str = str(android_id)
+
     try:
-        auth_response = gpsoauth.perform_oauth(
+        auth_response: dict[str, Any] = gpsoauth.perform_oauth(
             username,
             aas_token,
-            android_id,
+            android_id_str,
             service="oauth2:https://www.googleapis.com/auth/" + scope,
             app=request_app,
             client_sig=_CLIENT_SIG,
@@ -150,13 +152,13 @@ def _perform_oauth_sync(
         raise KeyError("Neither 'Token' nor 'Auth' found in gpsoauth response")
     except InvalidAasTokenError:
         raise
-    except Exception as e:  # noqa: BLE001
-        message = str(e)
+    except Exception as err:  # noqa: BLE001
+        message: str = str(err)
         if message and _is_invalid_aas_error_text(message):
             raise InvalidAasTokenError(
                 f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
-            ) from e
-        raise RuntimeError(f"Failed to get auth token for scope '{scope}': {e}") from e
+            ) from err
+        raise RuntimeError(f"Failed to get auth token for scope '{scope}': {err}") from err
 
 
 def request_token(
