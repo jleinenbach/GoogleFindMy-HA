@@ -196,6 +196,22 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
 ]
 
+
+def _feature_name_from_platform(platform: Platform) -> str:
+    """Return the Home Assistant domain string for a platform enum."""
+
+    value = getattr(platform, "value", None)
+    if isinstance(value, str):
+        return value
+
+    if isinstance(platform, str):  # pragma: no cover - defensive fallback
+        return platform
+
+    candidate = str(platform)
+    if "." in candidate:
+        _, candidate = candidate.split(".", 1)
+    return candidate.lower()
+
 # Latest config entry schema version handled by this integration
 CONFIG_ENTRY_VERSION: int = 2
 
@@ -1959,7 +1975,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     else:
         _LOGGER.debug("GoogleHomeFilter not available; continuing without it")
 
-    features = sorted(str(platform) for platform in PLATFORMS)
+    features = sorted(_feature_name_from_platform(platform) for platform in PLATFORMS)
     await subentry_manager.async_sync(
         [
             ConfigEntrySubentryDefinition(

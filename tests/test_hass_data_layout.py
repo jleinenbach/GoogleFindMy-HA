@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import json
 import sys
+
 from contextlib import suppress
 from pathlib import Path
 from types import MappingProxyType, ModuleType, SimpleNamespace
@@ -522,12 +523,15 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             assert "core_tracking" in managed
             core_subentry = managed["core_tracking"]
             assert core_subentry.data["group_key"] == "core_tracking"
-            assert core_subentry.data["features"] == [
+            features = core_subentry.data["features"]
+            assert features == [
                 "binary_sensor",
                 "button",
                 "device_tracker",
                 "sensor",
             ]
+            assert all(isinstance(feature, str) for feature in features)
+            assert all(feature == feature.lower() for feature in features)
             assert core_subentry.data["fcm_push_enabled"] is True
             assert core_subentry.data["has_google_home_filter"] is False
             assert core_subentry.unique_id.endswith("core_tracking")
