@@ -63,35 +63,6 @@ from homeassistant.helpers import (
     issue_registry as ir,
 )
 
-if TYPE_CHECKING:
-    try:  # pragma: no cover - type-checking fallback for stripped test envs
-        from homeassistant.helpers.entity_registry import (
-            RegistryEntryDisabler as RegistryEntryDisablerType,
-        )
-    except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
-        from enum import StrEnum
-
-        class RegistryEntryDisablerType(StrEnum):
-            """Minimal fallback matching the Home Assistant enum interface."""
-
-            INTEGRATION = "integration"
-else:
-    from typing import Any as RegistryEntryDisablerType
-
-try:  # pragma: no cover - compatibility shim for stripped test envs
-    from homeassistant.helpers.entity_registry import (
-        RegistryEntryDisabler as _RegistryEntryDisabler,
-    )
-except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
-    from types import SimpleNamespace
-
-    _RegistryEntryDisabler = SimpleNamespace(INTEGRATION="integration")
-
-RegistryEntryDisabler = cast(
-    "RegistryEntryDisablerType", _RegistryEntryDisabler
-)
-
-
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
 from .Auth.token_cache import (
     TokenCache,
@@ -158,6 +129,34 @@ from . import diagnostics  # noqa: F401
 # Service registration has been moved to a dedicated module (clean separation of concerns)
 from .services import async_register_services
 from . import system_health as system_health_module
+
+if TYPE_CHECKING:
+    try:  # pragma: no cover - type-checking fallback for stripped test envs
+        from homeassistant.helpers.entity_registry import (
+            RegistryEntryDisabler as RegistryEntryDisablerType,
+        )
+    except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
+        from enum import StrEnum
+
+        class RegistryEntryDisablerType(StrEnum):
+            """Minimal fallback matching the Home Assistant enum interface."""
+
+            INTEGRATION = "integration"
+else:
+    from typing import Any as RegistryEntryDisablerType
+
+try:  # pragma: no cover - compatibility shim for stripped test envs
+    from homeassistant.helpers.entity_registry import (
+        RegistryEntryDisabler as _RegistryEntryDisabler,
+    )
+except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
+    from types import SimpleNamespace
+
+    _RegistryEntryDisabler = SimpleNamespace(INTEGRATION="integration")
+
+RegistryEntryDisabler = cast(
+    "RegistryEntryDisablerType", _RegistryEntryDisabler
+)
 
 # Optional feature: GoogleHomeFilter (guard import to avoid hard dependency)
 if TYPE_CHECKING:
