@@ -8,7 +8,8 @@ from pathlib import Path
 import asyncio
 import importlib
 import inspect
-from collections.abc import Mapping
+from collections.abc import Mapping, Callable
+from typing import Any
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from datetime import datetime, timezone
 import json
@@ -663,6 +664,27 @@ def _stub_homeassistant() -> None:
     sys.modules["homeassistant.components.recorder"] = recorder_module
     sys.modules["homeassistant.components.recorder.history"] = history_module
     setattr(components_pkg, "recorder", recorder_module)
+
+
+@pytest.fixture(name="record_flow_forms")
+def fixture_record_flow_forms() -> Callable[[Any], list[str | None]]:
+    """Instrument a config flow to record the step IDs shown to the user."""
+
+    def _apply(flow: Any) -> list[str | None]:
+        recorded: list[str | None] = []
+
+        async def _show_form(*_: Any, **kwargs: Any) -> dict[str, Any]:
+            step_id = kwargs.get("step_id")
+            recorded.append(step_id)
+            response: dict[str, Any] = {"type": "form"}
+            if step_id is not None:
+                response["step_id"] = step_id
+            return response
+
+        flow.async_show_form = _show_form  # type: ignore[attr-defined]
+        return recorded
+
+    return _apply
 
 
 @pytest.fixture(scope="session", name="integration_root")
