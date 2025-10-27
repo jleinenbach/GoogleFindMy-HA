@@ -50,10 +50,11 @@ def calculate_r(identity_key: bytes, timestamp: int) -> int:
 
     # SECP160R1 parameters
     curve = SECP160r1
-    n = curve.order
+    n: int = int(curve.order)
 
     # r' is now projected to the finite field Fp by calculating r = r' mod n
-    return r_dash_int % n
+    r_mod: int = r_dash_int % n
+    return r_mod
 
 
 def get_masked_timestamp(timestamp: int, K: int) -> bytes:
