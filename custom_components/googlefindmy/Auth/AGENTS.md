@@ -6,8 +6,8 @@
 
 ## gpsoauth stub expectations
 
-* `gpsoauth.perform_oauth` requires the third positional argument (`android_id`) to be a **string**. Convert integer IDs with `str(android_id)` before invoking the API. The stub exports the signature `perform_oauth(email: str, aas_token: str, android_id: str, *, service: str, app: str, client_sig: str) -> dict[str, Any]`.
-* `gpsoauth.perform_master_login` mirrors the same positional types (`email: str`, `password: str`, `android_id: str`). Ensure any helper that resolves an integer device identifier also casts to `str` before calling the function.
+* `gpsoauth.perform_oauth` requires the third positional argument (`android_id`) to be an **integer**. Helpers must resolve or convert IDs into the numeric representation (for example, `int(hex_value, 16)` for cached values stored as hexadecimal strings) before invoking the API. Regression tests (for example, `tests/test_adm_token_retrieval.py::test_async_request_token_uses_cached_android_id`) assert this behavior. When editing `gpsoauth.pyi`, update the stub signature to `perform_oauth(email: str, aas_token: str, android_id: int, *, service: str, app: str, client_sig: str) -> dict[str, Any]` so type checkers reflect the runtime and test contract.
+* `gpsoauth.perform_master_login` mirrors the same positional types (`email: str`, `password: str`, `android_id: int`). Provide the integer form of the identifier directly—do **not** stringify the value. Stored `"0x"`-prefixed IDs must be normalized into their integer value ahead of time so downstream helpers stay consistent, and mirror the signature change in the stub when updating it.
 * Both functions return a `dict[str, Any]` containing response keys like `"Token"`, `"Auth"`, and `"Error"`. Persist this annotation so mypy strict remains satisfied when parsing the response payload.
 
 When the upstream stubs change, update this file and adjust the affected call sites so that future type-checking runs remain stable.
