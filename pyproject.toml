@@ -53,6 +53,7 @@ extend-exclude = [
 [tool.pytest.ini_options]
 addopts = ["-q"]
 testpaths = ["tests"]
+asyncio_mode = "strict"
 
 [tool.mypy]
 python_version = "3.12"
