@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 import asyncio
+import importlib
 import inspect
 from collections.abc import Mapping
 from types import MappingProxyType, ModuleType, SimpleNamespace
@@ -610,13 +611,8 @@ def fixture_manifest(integration_root: Path) -> dict[str, object]:
 
 _stub_homeassistant()
 
-components_pkg = sys.modules.setdefault(
-    "custom_components", ModuleType("custom_components")
-)
+components_pkg = importlib.import_module("custom_components")
 components_pkg.__path__ = [str(ROOT / "custom_components")]
 
-gf_pkg = sys.modules.setdefault(
-    "custom_components.googlefindmy", ModuleType("custom_components.googlefindmy")
-)
-gf_pkg.__path__ = [str(ROOT / "custom_components/googlefindmy")]
+gf_pkg = importlib.import_module("custom_components.googlefindmy")
 setattr(components_pkg, "googlefindmy", gf_pkg)

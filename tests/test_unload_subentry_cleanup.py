@@ -7,7 +7,7 @@ import asyncio
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
-from custom_components.googlefindmy import __init__ as integration
+import custom_components.googlefindmy as integration
 from custom_components.googlefindmy.const import DOMAIN
 from homeassistant.config_entries import ConfigSubentry
 

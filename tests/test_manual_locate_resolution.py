@@ -28,7 +28,7 @@ if "custom_components.googlefindmy.map_view" not in sys.modules:
     map_module.GoogleFindMyMapView = _DummyView
     sys.modules["custom_components.googlefindmy.map_view"] = map_module
 
-gfm = importlib.import_module("custom_components.googlefindmy.__init__")
+gfm = importlib.import_module("custom_components.googlefindmy")
 
 
 class _StubDeviceRegistry:

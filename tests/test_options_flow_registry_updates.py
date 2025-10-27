@@ -7,8 +7,8 @@ import asyncio
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
-from custom_components.googlefindmy import config_flow
-from custom_components.googlefindmy.__init__ import (
+from custom_components.googlefindmy import (
+    config_flow,
     ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
 )
