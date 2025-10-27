@@ -43,17 +43,17 @@ from typing import Any
 
 import gpsoauth
 
-gpsoauth_exceptions: ModuleType | None
-try:  # pragma: no cover - defensive optional import layout
-    from gpsoauth import exceptions as gpsoauth_exceptions
-except Exception:  # noqa: BLE001
-    gpsoauth_exceptions = None
-
 from .token_cache import TokenCache
 from .username_provider import username_string
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 
 _LOGGER = logging.getLogger(__name__)
+
+gpsoauth_exceptions: ModuleType | None = None
+try:  # pragma: no cover - defensive optional import layout
+    from gpsoauth import exceptions as gpsoauth_exceptions
+except Exception:  # noqa: BLE001
+    gpsoauth_exceptions = None
 
 # Legacy fallback Android ID for gpsoauth exchange when FCM credentials are missing.
 _ANDROID_ID: int = 0x38918A453D071993
