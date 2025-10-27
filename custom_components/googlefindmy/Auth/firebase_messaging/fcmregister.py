@@ -37,8 +37,8 @@ import time
 import uuid
 from base64 import b64encode, urlsafe_b64encode
 from dataclasses import dataclass
-from typing import Any, TypeAlias, cast
-from collections.abc import Callable, Mapping, MutableMapping
+from typing import Any, cast
+from collections.abc import Mapping
 
 from aiohttp import ClientSession, ClientTimeout
 from cryptography.hazmat.primitives import serialization
@@ -65,12 +65,13 @@ from .proto.checkin_pb2 import (
     AndroidCheckinRequest,
     AndroidCheckinResponse,
 )
+from ._typing import (
+    CredentialsUpdatedCallable,
+    JSONDict,
+    MutableJSONMapping,
+)
 
 _logger = logging.getLogger(__name__)
-
-
-JSONDict: TypeAlias = dict[str, Any]
-MutableJSONMapping: TypeAlias = MutableMapping[str, Any]
 
 
 @dataclass
@@ -124,7 +125,9 @@ class FcmRegister:
         self,
         config: FcmRegisterConfig,
         credentials: MutableJSONMapping | None = None,
-        credentials_updated_callback: Callable[[MutableJSONMapping], None] | None = None,
+        credentials_updated_callback: (
+            CredentialsUpdatedCallable[MutableJSONMapping] | None
+        ) = None,
         *,
         http_client_session: ClientSession | None = None,
         log_debug_verbose: bool = False,
@@ -141,7 +144,9 @@ class FcmRegister:
         """
         self.config = config
         self.credentials: MutableJSONMapping | None = credentials
-        self.credentials_updated_callback = credentials_updated_callback
+        self.credentials_updated_callback: (
+            CredentialsUpdatedCallable[MutableJSONMapping] | None
+        ) = credentials_updated_callback
 
         self._log_debug_verbose = log_debug_verbose
 
