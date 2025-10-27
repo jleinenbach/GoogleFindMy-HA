@@ -483,13 +483,11 @@ async def _perform_oauth_with_provided_aas(
         RuntimeError: If the OAuth response is invalid or missing the expected fields.
     """
 
-    android_id_str = str(android_id)
-
     def _run() -> str:
         resp = gpsoauth.perform_oauth(
             username,
             aas_token,
-            android_id_str,
+            str(android_id),
             service="oauth2:https://www.googleapis.com/auth/android_device_manager",
             app=_APP_ID,
             client_sig=_CLIENT_SIG,
