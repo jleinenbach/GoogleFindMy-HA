@@ -5,10 +5,14 @@ from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from typing import ClassVar as _ClassVar, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
-from custom_components.googlefindmy.protobuf_typing import EnumTypeWrapperMeta as _EnumTypeWrapperMeta
+from custom_components.googlefindmy.protobuf_typing import (
+    EnumTypeWrapperMeta as _EnumTypeWrapperMeta,
+    MessageProto as _MessageProto,
+)
 
 EnumTypeWrapper = _EnumTypeWrapperMeta[int]
 Message = _message.Message
+MessageProto = _MessageProto
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -23,7 +27,7 @@ LAST_KNOWN: Status
 CROWDSOURCED: Status
 AGGREGATED: Status
 
-class Time(Message):
+class Time(Message, _MessageProto):
     __slots__ = ("seconds", "nanos")
     SECONDS_FIELD_NUMBER: _ClassVar[int]
     NANOS_FIELD_NUMBER: _ClassVar[int]
@@ -31,7 +35,7 @@ class Time(Message):
     nanos: int
     def __init__(self, seconds: _Optional[int] = ..., nanos: _Optional[int] = ...) -> None: ...
 
-class LocationReport(Message):
+class LocationReport(Message, _MessageProto):
     __slots__ = ("semanticLocation", "geoLocation", "status")
     SEMANTICLOCATION_FIELD_NUMBER: _ClassVar[int]
     GEOLOCATION_FIELD_NUMBER: _ClassVar[int]
@@ -41,13 +45,13 @@ class LocationReport(Message):
     status: Status
     def __init__(self, semanticLocation: _Optional[_Union[SemanticLocation, _Mapping[str, object]]] = ..., geoLocation: _Optional[_Union[GeoLocation, _Mapping[str, object]]] = ..., status: _Optional[_Union[Status, str]] = ...) -> None: ...
 
-class SemanticLocation(Message):
+class SemanticLocation(Message, _MessageProto):
     __slots__ = ("locationName",)
     LOCATIONNAME_FIELD_NUMBER: _ClassVar[int]
     locationName: str
     def __init__(self, locationName: _Optional[str] = ...) -> None: ...
 
-class GeoLocation(Message):
+class GeoLocation(Message, _MessageProto):
     __slots__ = ("encryptedReport", "deviceTimeOffset", "accuracy")
     ENCRYPTEDREPORT_FIELD_NUMBER: _ClassVar[int]
     DEVICETIMEOFFSET_FIELD_NUMBER: _ClassVar[int]
@@ -57,7 +61,7 @@ class GeoLocation(Message):
     accuracy: float
     def __init__(self, encryptedReport: _Optional[_Union[EncryptedReport, _Mapping[str, object]]] = ..., deviceTimeOffset: _Optional[int] = ..., accuracy: _Optional[float] = ...) -> None: ...
 
-class EncryptedReport(Message):
+class EncryptedReport(Message, _MessageProto):
     __slots__ = ("publicKeyRandom", "encryptedLocation", "isOwnReport")
     PUBLICKEYRANDOM_FIELD_NUMBER: _ClassVar[int]
     ENCRYPTEDLOCATION_FIELD_NUMBER: _ClassVar[int]
@@ -67,7 +71,7 @@ class EncryptedReport(Message):
     isOwnReport: bool
     def __init__(self, publicKeyRandom: _Optional[bytes] = ..., encryptedLocation: _Optional[bytes] = ..., isOwnReport: bool = ...) -> None: ...
 
-class GetEidInfoForE2eeDevicesRequest(Message):
+class GetEidInfoForE2eeDevicesRequest(Message, _MessageProto):
     __slots__ = ("ownerKeyVersion", "hasOwnerKeyVersion")
     OWNERKEYVERSION_FIELD_NUMBER: _ClassVar[int]
     HASOWNERKEYVERSION_FIELD_NUMBER: _ClassVar[int]

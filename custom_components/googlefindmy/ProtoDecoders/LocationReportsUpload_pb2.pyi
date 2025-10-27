@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2 as _Common_pb2
+from custom_components.googlefindmy.protobuf_typing import MessageProto as _MessageProto
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 Message = _message.Message
+MessageProto = _MessageProto
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
-class LocationReportsUpload(Message):
+class LocationReportsUpload(Message, _MessageProto):
     __slots__ = ("reports", "clientMetadata", "random1", "random2")
     REPORTS_FIELD_NUMBER: _ClassVar[int]
     CLIENTMETADATA_FIELD_NUMBER: _ClassVar[int]
@@ -23,7 +25,7 @@ class LocationReportsUpload(Message):
     random2: int
     def __init__(self, reports: _Optional[_Iterable[_Union[Report, _Mapping[str, object]]]] = ..., clientMetadata: _Optional[_Union[ClientMetadata, _Mapping[str, object]]] = ..., random1: _Optional[int] = ..., random2: _Optional[int] = ...) -> None: ...
 
-class Report(Message):
+class Report(Message, _MessageProto):
     __slots__ = ("advertisement", "time", "location")
     ADVERTISEMENT_FIELD_NUMBER: _ClassVar[int]
     TIME_FIELD_NUMBER: _ClassVar[int]
@@ -33,7 +35,7 @@ class Report(Message):
     location: _Common_pb2.LocationReport
     def __init__(self, advertisement: _Optional[_Union[Advertisement, _Mapping[str, object]]] = ..., time: _Optional[_Union[_Common_pb2.Time, _Mapping[str, object]]] = ..., location: _Optional[_Union[_Common_pb2.LocationReport, _Mapping[str, object]]] = ...) -> None: ...
 
-class Advertisement(Message):
+class Advertisement(Message, _MessageProto):
     __slots__ = ("identifier", "unwantedTrackingModeEnabled")
     IDENTIFIER_FIELD_NUMBER: _ClassVar[int]
     UNWANTEDTRACKINGMODEENABLED_FIELD_NUMBER: _ClassVar[int]
@@ -41,7 +43,7 @@ class Advertisement(Message):
     unwantedTrackingModeEnabled: int
     def __init__(self, identifier: _Optional[_Union[Identifier, _Mapping[str, object]]] = ..., unwantedTrackingModeEnabled: _Optional[int] = ...) -> None: ...
 
-class Identifier(Message):
+class Identifier(Message, _MessageProto):
     __slots__ = ("truncatedEid", "canonicDeviceId")
     TRUNCATEDEID_FIELD_NUMBER: _ClassVar[int]
     CANONICDEVICEID_FIELD_NUMBER: _ClassVar[int]
@@ -49,13 +51,13 @@ class Identifier(Message):
     canonicDeviceId: bytes
     def __init__(self, truncatedEid: _Optional[bytes] = ..., canonicDeviceId: _Optional[bytes] = ...) -> None: ...
 
-class ClientMetadata(Message):
+class ClientMetadata(Message, _MessageProto):
     __slots__ = ("version",)
     VERSION_FIELD_NUMBER: _ClassVar[int]
     version: ClientVersionInformation
     def __init__(self, version: _Optional[_Union[ClientVersionInformation, _Mapping[str, object]]] = ...) -> None: ...
 
-class ClientVersionInformation(Message):
+class ClientVersionInformation(Message, _MessageProto):
     __slots__ = ("playServicesVersion",)
     PLAYSERVICESVERSION_FIELD_NUMBER: _ClassVar[int]
     playServicesVersion: str
