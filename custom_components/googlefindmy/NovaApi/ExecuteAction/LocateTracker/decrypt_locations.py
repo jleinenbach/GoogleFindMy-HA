@@ -70,7 +70,8 @@ class StaleOwnerKeyError(DecryptionError):
 def _status_name_safe(code: Any) -> str:
     """Safely get the string representation of an enum, with a robust fallback."""
     try:
-        return cast(str, Common_pb2.Status.Name(int(code)))
+        status_name: str = Common_pb2.Status.Name(int(code))
+        return status_name
     except Exception:
         try:
             return str(int(code))
