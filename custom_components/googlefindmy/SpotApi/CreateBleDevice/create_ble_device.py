@@ -31,14 +31,14 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
 from custom_components.googlefindmy.SpotApi.spot_request import spot_request
 
 
-def register_esp32():
-    owner_key = get_owner_key()
+def register_esp32() -> None:
+    owner_key: bytes = get_owner_key()
 
-    eik = secrets.token_bytes(32)
-    eid = generate_eid(eik, 0)
-    pair_date = int(time.time())
+    eik: bytes = secrets.token_bytes(32)
+    eid: bytes = generate_eid(eik, 0)
+    pair_date: int = int(time.time())
 
-    register_request = RegisterBleDeviceRequest()
+    register_request: RegisterBleDeviceRequest = RegisterBleDeviceRequest()
     register_request.fastPairModelId = mcu_fast_pair_model_id
 
     # Description
@@ -46,7 +46,7 @@ def register_esp32():
     register_request.description.deviceType = SpotDeviceType.DEVICE_TYPE_BEACON
 
     # Device Components Information
-    component_information = DeviceComponentInformation()
+    component_information: DeviceComponentInformation = DeviceComponentInformation()
     component_information.imageUrl = "https://docs.espressif.com/projects/esp-idf/en/v4.3/esp32/_images/esp32-DevKitM-1-isometric.png"
     register_request.description.deviceComponentsInformation.append(
         component_information
@@ -78,8 +78,8 @@ def register_esp32():
     register_request.e2eePublicKeyRegistration.encryptedUserSecrets.ownerKeyVersion = 1
     register_request.e2eePublicKeyRegistration.encryptedUserSecrets.creationDate.seconds = pair_date
 
-    time_counter = pair_date
-    truncated_eid = eid[:10]
+    time_counter: int = pair_date
+    truncated_eid: bytes = eid[:10]
 
     # announce advertisements
     for _ in range(int(max_truncated_eid_seconds_server / ROTATION_PERIOD)):
@@ -96,12 +96,20 @@ def register_esp32():
     register_request.manufacturerName = "GoogleFindMyTools"
     register_request.modelName = f"{MICRO}C"
 
-    ownerKeys = FMDNOwnerOperations()
-    ownerKeys.generate_keys(identity_key=eik)
+    owner_keys = FMDNOwnerOperations()
+    owner_keys.generate_keys(identity_key=eik)
 
-    register_request.ringKey = ownerKeys.ringing_key
-    register_request.recoveryKey = ownerKeys.recovery_key
-    register_request.unwantedTrackingKey = ownerKeys.tracking_key
+    ringing_key: bytes | None = owner_keys.ringing_key
+    recovery_key: bytes | None = owner_keys.recovery_key
+    tracking_key: bytes | None = owner_keys.tracking_key
+
+    if ringing_key is None or recovery_key is None or tracking_key is None:
+        msg = "Failed to derive owner operation keys"
+        raise RuntimeError(msg)
+
+    register_request.ringKey = ringing_key
+    register_request.recoveryKey = recovery_key
+    register_request.unwantedTrackingKey = tracking_key
 
     bytes_data = register_request.SerializeToString()
     spot_request("CreateBleDevice", bytes_data)
