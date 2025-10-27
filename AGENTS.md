@@ -454,6 +454,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * **Network guards**: sane timeouts, retry with backoff/jitter, TLS verification enabled.
 * **Deserialization guards**: format allow-list, schemas, safe loaders.
 * **Error messages**: specific cause + actionable hint; no vague “failed”.
+* **Runtime payload invariants**: crypto helpers (`_ensure_bytes`, `WrappedLocation`) must enforce decrypted payloads remain `bytes`; coerce `bytearray` and drop non-byte responses before instantiating wrappers so downstream protobuf parsing stays type-safe.
 
 ### 11.6 Performance without feature loss
 

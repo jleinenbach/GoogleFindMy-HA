@@ -16,9 +16,17 @@ class WrappedLocation:
         is_own_report: bool,
         name: str,
     ) -> None:
+        if isinstance(decrypted_location, bytearray):
+            decrypted_payload = bytes(decrypted_location)
+        elif isinstance(decrypted_location, bytes):
+            decrypted_payload = decrypted_location
+        else:
+            msg = "decrypted_location must be bytes"
+            raise TypeError(msg)
+
         self.time: float = time
         self.status: int = status
-        self.decrypted_location: bytes = decrypted_location
+        self.decrypted_location: bytes = decrypted_payload
         self.is_own_report: bool = is_own_report
         self.accuracy: float = accuracy
         self.name: str = name
