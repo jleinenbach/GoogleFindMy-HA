@@ -23,7 +23,7 @@ Public API (stable)
 - `get_home_zone_attributes() -> dict[str, float] | None`   # latitude/longitude[/radius]
 - `is_device_at_home(device_id) -> bool`
 - `reset_spam_tracking(device_id) -> None`
-- `should_filter_detection(device_id, location_name) -> tuple[bool, dict | None]`
+- `should_filter_detection(device_id, location_name) -> tuple[bool, dict[str, float] | None]`
 
 Behavioral note
 ---------------
@@ -38,13 +38,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
-from collections.abc import Mapping, Callable
+from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable as TypingCallable
+from collections.abc import Callable, Mapping
 
 from homeassistant.components.zone import DOMAIN as ZONE_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
-from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.core import Event, HomeAssistant, State, callback as ha_callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 
@@ -57,6 +58,21 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.entity_registry import EntityRegistry
+
+
+def callback(
+    func: TypingCallable[[GoogleHomeFilter, Event | None], None],
+) -> TypingCallable[[GoogleHomeFilter, Event | None], None]:
+    """Typed wrapper around Home Assistant's callback decorator."""
+
+    return cast(
+        TypingCallable[["GoogleHomeFilter", Event | None], None],
+        ha_callback(func),
+    )
+
 
 # Keep local names for zone attributes to avoid fragile imports.
 ZONE_ATTR_RADIUS = "radius"
@@ -226,7 +242,7 @@ class GoogleHomeFilter:
     # ---------------------------------------------------------------------
 
     @callback
-    def _on_home_zone_changed(self, _event) -> None:
+    def _on_home_zone_changed(self, _event: Event | None) -> None:
         """Refresh cached Home-zone attributes when `zone.home` changes."""
         self._refresh_home_zone()
 
@@ -254,10 +270,12 @@ class GoogleHomeFilter:
             # 'radius' is optional; keep as float if present and valid
             if ZONE_ATTR_RADIUS in attrs and attrs[ZONE_ATTR_RADIUS] is not None:
                 try:
-                    self._home_zone_attrs["radius"] = float(attrs[ZONE_ATTR_RADIUS])  # type: ignore[index]
+                    radius = float(attrs[ZONE_ATTR_RADIUS])
                 except (TypeError, ValueError):
                     # Ignore malformed radius
                     pass
+                else:
+                    self._home_zone_attrs["radius"] = radius
         else:
             self._home_zone_attrs = None
 
@@ -283,14 +301,16 @@ class GoogleHomeFilter:
             # Prefer zone.home
             st = self.hass.states.get("zone.home")
             if st:
-                return st.attributes.get("friendly_name", "Home")
+                friendly_name = st.attributes.get("friendly_name", "Home")
+                return str(friendly_name)
 
             # Fallback: scan all zone.* states
             zone_states: list[State] = self.hass.states.async_all(ZONE_DOMAIN)
             for zst in zone_states:
                 fn = str(zst.attributes.get("friendly_name", "")).lower()
                 if "home" in zst.entity_id.lower() or "home" in fn:
-                    return zst.attributes.get("friendly_name", "Home")
+                    friendly_name = zst.attributes.get("friendly_name", "Home")
+                    return str(friendly_name)
             return "Home"
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Failed to resolve Home zone name: %s", err)
@@ -313,10 +333,12 @@ class GoogleHomeFilter:
         Uses the unique_id shape: f"{DOMAIN}_{device_id}" via registry shortcut.
         """
         try:
-            reg = er.async_get(self.hass)
+            reg: EntityRegistry = er.async_get(self.hass)
             unique_id = f"{DOMAIN}_{device_id}"
-            entity_id = reg.async_get_entity_id("device_tracker", DOMAIN, unique_id)
-            if entity_id:
+            entity_id: str | None = reg.async_get_entity_id(
+                "device_tracker", DOMAIN, unique_id
+            )
+            if entity_id is not None:
                 return entity_id
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Entity registry lookup failed for %s: %s", device_id, err)
@@ -374,7 +396,7 @@ class GoogleHomeFilter:
 
     def should_filter_detection(
         self, device_id: str, location_name: str | None
-    ) -> tuple[bool, dict | None]:
+    ) -> tuple[bool, dict[str, float] | None]:
         """Return (should_filter, replacement_attributes).
 
         Semantics:

@@ -75,6 +75,7 @@ module = [
     "custom_components.googlefindmy.util_services",
     "custom_components.googlefindmy.diagnostics",
     "custom_components.googlefindmy.system_health",
+    "custom_components.googlefindmy.google_home_filter",
 ]
 ignore_errors = false
 
