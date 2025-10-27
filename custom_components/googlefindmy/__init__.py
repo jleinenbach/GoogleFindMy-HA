@@ -2109,17 +2109,31 @@ async def async_remove_config_entry_device(
 
         name_to_store = device_entry.name_by_user or device_entry.name or canonical_id
 
-        alias_sources: list[Iterable[Any] | None] = []
-        name_sources: list[list[Any] | None] = []
+        alias_sources: list[list[str]] = []
+        name_sources: list[list[str]] = []
         for meta in (canonical_meta, legacy_meta):
-            if isinstance(meta, Mapping):
-                alias_sources.append(meta.get("aliases"))
-                name_sources.append([meta.get("name")])
-            else:
-                alias_sources.append(None)
-                name_sources.append(None)
+            if not isinstance(meta, Mapping):
+                continue
 
-        aliases = _dedupe_aliases(
+            raw_aliases = meta.get("aliases")
+            if isinstance(raw_aliases, Iterable) and not isinstance(
+                raw_aliases, (str, bytes, bytearray)
+            ):
+                sanitized_aliases = [
+                    alias
+                    for alias in raw_aliases
+                    if isinstance(alias, str) and alias
+                ]
+                if sanitized_aliases:
+                    alias_sources.append(sanitized_aliases)
+            elif isinstance(raw_aliases, str) and raw_aliases:
+                alias_sources.append([raw_aliases])
+
+            raw_name = meta.get("name")
+            if isinstance(raw_name, str) and raw_name:
+                name_sources.append([raw_name])
+
+        aliases: list[str] = _dedupe_aliases(
             name_to_store,
             *alias_sources,
             *name_sources,
