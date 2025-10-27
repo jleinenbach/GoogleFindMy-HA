@@ -85,7 +85,26 @@
 
 * [`tests/AGENTS.md`](tests/AGENTS.md) — Home Assistant config flow test stubs, helpers, discovery/update scaffolding details, **and** the package-layout note that requires package-relative imports now that `tests/` ships with an `__init__.py`. Also documents the coordinator device-registry expectations for `via_device` tuple handling so future stub updates remain aligned with Home Assistant 2025.10.
 * [`custom_components/googlefindmy/ProtoDecoders/AGENTS.md`](custom_components/googlefindmy/ProtoDecoders/AGENTS.md) — Protobuf overlay structure requirements, including the mandate that generated message classes remain nominal subclasses of `google.protobuf.message.Message` so helper utilities typed against the concrete base keep accepting them.
-* `custom_components/googlefindmy/Auth/firebase_messaging/**` — Firebase messaging modules share the `JSONDict` and `MutableJSONMapping` aliases defined alongside the implementations. Prefer these aliases over ad-hoc `dict[str, Any]`/`Mapping[str, object]` annotations when describing payloads, responses, or task metadata. When new helpers consume nested JSON, extend the aliases or introduce additional `TypeAlias` definitions in the same module so every constructor or attribute keeps explicit container parameters for mypy strict runs.
+* `custom_components/googlefindmy/Auth/firebase_messaging/**` — Firebase messaging modules share the `JSONDict` and `MutableJSONMapping` aliases defined alongside the implementations. Prefer these aliases over ad-hoc `dict[str, Any]`/`Mapping[str, object]` annotations when describing payloads, responses, or task metadata. When new helpers consume nested JSON, extend the aliases or introduce additional `TypeAlias` definitions in the same module so every constructor or attribute keeps explicit container parameters for mypy strict runs. When referencing stub-only overlays (for example, `protobuf_typing`), wrap the import inside an `if TYPE_CHECKING:` guard and alias to the runtime class otherwise so production code never depends on non-existent modules.
+
+### Runtime vs. type-checking import quick reference
+
+Use the following patterns whenever a module only exists as a `.pyi` stub or when the runtime dependency must stay optional:
+
+1. **Guard the stub import** so production code never tries to import the missing module:
+
+   ```python
+   from typing import TYPE_CHECKING
+
+   if TYPE_CHECKING:
+       from custom_components.googlefindmy.protobuf_typing import MessageProto
+   else:
+       from google.protobuf.message import Message as MessageProto
+   ```
+
+2. **Provide a runtime alias** to the concrete implementation (or a graceful fallback) so the rest of the module can use the shared name (`MessageProto` above) without knowing whether it came from the stub or the runtime module.
+
+3. **Avoid work in the `TYPE_CHECKING` block.** Limit the guarded section to imports and type-only definitions; execute all runtime logic outside the guard so mypy and the interpreter share the same behavior.
 * `google/protobuf/**` — Local type stub overlays that model the minimal subset of `google.protobuf` used by the integration. These stubs unblock strict mypy runs without depending on the upstream package’s incomplete type hints. Update them when generated protobuf code begins to reference additional APIs or when upstream ships first-party stubs that supersede these local helpers.
 
 >
