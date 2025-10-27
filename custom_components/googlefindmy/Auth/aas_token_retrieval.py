@@ -137,11 +137,9 @@ async def _exchange_oauth_for_aas(
         RuntimeError: If the exchange fails or returns an invalid response.
     """
 
-    android_id_str = str(android_id)
-
     def _run() -> dict[str, Any]:
         # gpsoauth.exchange_token(username, oauth_token, android_id) is blocking.
-        return gpsoauth.exchange_token(username, oauth_token, android_id_str)
+        return gpsoauth.exchange_token(username, oauth_token, android_id)
 
     loop = asyncio.get_running_loop()
     from .adm_token_retrieval import _mask_email as _mask_email_for_logs

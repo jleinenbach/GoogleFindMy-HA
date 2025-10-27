@@ -487,7 +487,7 @@ async def _perform_oauth_with_provided_aas(
         resp = gpsoauth.perform_oauth(
             username,
             aas_token,
-            str(android_id),
+            android_id,
             service="oauth2:https://www.googleapis.com/auth/android_device_manager",
             app=_APP_ID,
             client_sig=_CLIENT_SIG,
