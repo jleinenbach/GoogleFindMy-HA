@@ -13,8 +13,7 @@ import binascii
 import logging
 import os
 from typing import Any
-from collections.abc import Callable, Awaitable
-
+from collections.abc import Awaitable, Callable
 from aiohttp import ClientSession
 
 from custom_components.googlefindmy.NovaApi.nova_request import async_nova_request
@@ -22,8 +21,8 @@ from custom_components.googlefindmy.NovaApi.scopes import NOVA_LIST_DEVICES_API_
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
-    parse_device_list_protobuf,
     get_canonic_ids,
+    parse_device_list_protobuf,
 )
 from custom_components.googlefindmy.Auth.token_cache import (
     TokenCache,  # entry-scoped cache
@@ -34,6 +33,9 @@ from custom_components.googlefindmy.exceptions import (
     MissingNamespaceError,
     MissingTokenCacheError,
 )
+
+AsyncCacheGetter = Callable[[str], Awaitable[Any]]
+AsyncCacheSetter = Callable[[str, Any], Awaitable[None]]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,8 +71,8 @@ async def async_request_device_list(
     cache: TokenCache | None = None,
     # Flow-local / entry-scoped overrides (all optional):
     token: str | None = None,
-    cache_get: Callable[[str], Awaitable[Any]] | None = None,
-    cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+    cache_get: AsyncCacheGetter | None = None,
+    cache_set: AsyncCacheSetter | None = None,
     refresh_override: Callable[[], Awaitable[str | None]] | None = None,
     namespace: str | None = None,
 ) -> str:
@@ -128,8 +130,8 @@ async def async_request_device_list(
     hex_payload = create_device_list_request()
 
     # Optionally wrap flow-local cache I/O with a namespace (only if overrides are supplied).
-    ns_get = cache_get
-    ns_set = cache_set
+    ns_get: AsyncCacheGetter | None = cache_get
+    ns_set: AsyncCacheSetter | None = cache_set
 
     if namespace:
         ns_prefix = f"{namespace}:"

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 from collections.abc import Callable
 
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
@@ -34,8 +34,10 @@ def _resolve_receiver_provider() -> Callable[[], Any] | None:
     for module in candidate_modules:
         if module is None:
             continue
-        getter = getattr(module, "_FCM_ReceiverGetter", None)
-        if callable(getter):
+        getter = cast(
+            Callable[[], Any] | None, getattr(module, "_FCM_ReceiverGetter", None)
+        )
+        if getter is not None and callable(getter):
             return getter
     return None
 
@@ -46,21 +48,23 @@ def _extract_token_from_receiver(receiver: Any, entry_id: str | None) -> str | N
     if receiver is None:
         return None
 
+    token_candidate: Any
     try:
-        if entry_id is not None:
-            token = receiver.get_fcm_token(entry_id)
-        else:
-            token = receiver.get_fcm_token()
+        token_candidate = (
+            receiver.get_fcm_token(entry_id)
+            if entry_id is not None
+            else receiver.get_fcm_token()
+        )
     except TypeError:
         try:
-            token = receiver.get_fcm_token()
+            token_candidate = receiver.get_fcm_token()
         except Exception:  # noqa: BLE001 - compatibility fallback
             return None
     except Exception:  # noqa: BLE001 - compatibility fallback
         return None
 
-    if isinstance(token, str) and token:
-        return token
+    if isinstance(token_candidate, str) and token_candidate:
+        return token_candidate
     return None
 
 
@@ -73,19 +77,20 @@ async def _async_load_token_from_cache(
         return None
 
     try:
-        creds: Any = await cache.async_get_cached_value("fcm_credentials")
+        cached_value = await cache.async_get_cached_value("fcm_credentials")
     except Exception:  # pragma: no cover - defensive log noise avoided
         return None
 
-    if isinstance(creds, str):
+    if isinstance(cached_value, str):
         try:
-            creds = json.loads(creds)
+            cached_value = json.loads(cached_value)
         except json.JSONDecodeError:
             pass
 
-    if not isinstance(creds, dict):
+    if not isinstance(cached_value, dict):
         return None
 
+    creds: dict[str, Any] = cast(dict[str, Any], cached_value)
     receiver = FcmReceiverHA()
     receiver.creds[entry_id] = creds
     return receiver.get_fcm_token(entry_id)

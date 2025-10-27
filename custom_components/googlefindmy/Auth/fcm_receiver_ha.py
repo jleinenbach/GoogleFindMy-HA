@@ -62,7 +62,7 @@ import logging
 import math
 import random
 import time
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, cast
 from collections.abc import Callable, Mapping, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
 
@@ -71,6 +71,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
+    from custom_components.googlefindmy.google_home_filter import (
+        GoogleHomeFilter as GoogleHomeFilterProtocol,
+    )
+else:
+    GoogleHomeFilterProtocol = Any
 
 # Integration-level tunables (safe fallbacks if missing)
 try:
@@ -131,6 +136,19 @@ async def _call_in_executor(func: Callable[..., _T], /, *args: Any) -> _T:
             return future.result()
 
     return await loop.run_in_executor(None, func, *args)
+
+
+def _coordinator_google_home_filter(
+    coordinator: Any,
+) -> GoogleHomeFilterProtocol | None:
+    """Return the Google Home filter for a coordinator if present."""
+
+    entry = getattr(coordinator, "config_entry", None) or getattr(
+        coordinator, "entry", None
+    )
+    runtime_data = getattr(entry, "runtime_data", None)
+    google_home_filter = getattr(runtime_data, "google_home_filter", None)
+    return cast("GoogleHomeFilterProtocol | None", google_home_filter)
 
 
 class FcmReceiverHA:
@@ -974,7 +992,7 @@ class FcmReceiverHA:
 
                 # Apply Google Home filter per coordinator (if available)
                 semantic_name = coordinator_payload.get("semantic_name")
-                ghf = getattr(coordinator, "google_home_filter", None)
+                ghf = _coordinator_google_home_filter(coordinator)
                 if semantic_name and ghf is not None:
                     try:
                         should_filter, replacement_attrs = ghf.should_filter_detection(
