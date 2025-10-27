@@ -510,7 +510,7 @@ class GoogleFindMyAPI:
 
         try:
             if isinstance(self._cache, TokenCache):
-                return cast(TokenCache, self._cache)
+                return self._cache
         except Exception:
             return None
         return None
