@@ -20,6 +20,16 @@ new coroutine tests with `@pytest.mark.asyncio` instead of wrapping them
 in `asyncio.run(...)`; this keeps event-loop handling centralized and
 avoids duplicated scaffolding in each test module.
 
+## ADM token retrieval contract
+
+The ADM token helpers (`custom_components/googlefindmy/Auth/adm_token_retrieval.py`)
+expect an **integer** `android_id`, matching the gpsoauth runtime contract. The
+isolated config-flow path under test mirrors this requirement, so regression
+tests (for example `tests/test_adm_token_retrieval.py::test_async_get_adm_token_isolated_*`)
+must assert integer IDs sourced from secrets bundles, cache reads, or the
+fallback constant. Keep expectations synchronized with the production helpers
+to avoid drift between config-flow coverage and runtime behavior.
+
 ## Home Assistant stubs overview
 
 The fixtures in `tests/conftest.py` provide lightweight stand-ins for key
