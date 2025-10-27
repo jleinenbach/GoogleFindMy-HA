@@ -37,14 +37,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
+from types import ModuleType
 from typing import Any
 
 import gpsoauth
 
+gpsoauth_exceptions: ModuleType | None
 try:  # pragma: no cover - defensive optional import layout
     from gpsoauth import exceptions as gpsoauth_exceptions
 except Exception:  # noqa: BLE001
-    gpsoauth_exceptions = None  # type: ignore[assignment]
+    gpsoauth_exceptions = None
 
 from .token_cache import TokenCache
 from .username_provider import username_string
@@ -61,16 +64,16 @@ _ANDROID_ID: int = 0x38918A453D071993
 # ---------------------------------------------------------------------------
 
 
-def _clip(s: Any, limit: int = 200) -> str:
+def _clip(value: object, limit: int = 200) -> str:
     """Clip long strings to a safe length for logs."""
-    s = str(s)
+    s = str(value)
     return s if len(s) <= limit else (s[: limit - 1] + "…")
 
 
-def _summarize_response(obj: Any) -> str:
+def _summarize_response(obj: Mapping[str, Any] | object) -> str:
     """Summarize a gpsoauth response without leaking sensitive data."""
-    if isinstance(obj, dict):
-        keys = ", ".join(sorted(obj.keys()))
+    if isinstance(obj, Mapping):
+        keys = ", ".join(sorted(map(str, obj.keys())))
         return f"dict(keys=[{keys}])"
     return f"{type(obj).__name__}"
 
@@ -382,7 +385,8 @@ async def async_get_aas_token(
         assert last_exc is not None
         raise last_exc
 
-    return await cache.get_or_set(DATA_AAS_TOKEN, _gen_with_retries)
+    token: str = await cache.get_or_set(DATA_AAS_TOKEN, _gen_with_retries)
+    return token
 
 
 # ----------------------- Legacy sync wrapper (unsupported) -----------------------
