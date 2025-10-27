@@ -50,10 +50,10 @@ def calculate_r(identity_key: bytes, timestamp: int) -> int:
 
     # SECP160R1 parameters
     curve = SECP160r1
-    n: int = int(curve.order)
+    curve_order: int = int(curve.order)
 
     # r' is now projected to the finite field Fp by calculating r = r' mod n
-    r_mod: int = r_dash_int % n
+    r_mod: int = r_dash_int % curve_order
     return r_mod
 
 
