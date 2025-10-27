@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from typing import Any, cast
+from typing import Any
 from collections.abc import Awaitable, Callable
 
 import aiohttp
@@ -101,7 +101,7 @@ async def async_submit_stop_sound_request(
     if cache is None:
         raise MissingTokenCacheError()
 
-    cache_ref = cast(TokenCache, cache)
+    cache_ref: TokenCache = cache
 
     resolved_namespace = namespace or getattr(cache_ref, "entry_id", None)
 
