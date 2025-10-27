@@ -25,6 +25,10 @@ closely enough for regression coverage.
   `self.unique_id` and `self._unique_id` to match the attribute layout Home
   Assistant uses in production flows. This mirrors the real helper so tests can
   inspect either attribute without diverging from upstream behavior.
+* `ConfigFlow.async_create_entry()` captures the created entry payload so tests
+  can assert both the `title` and `data` returned by a flow. The helper records
+  each call in order and returns the provided value unchanged to mimic Home
+  Assistant's behavior.
 * `_abort_if_unique_id_configured(*, updates: Mapping[str, Any] | None = None)`
   updates the matched config entry and triggers `hass.config_entries`
   `async_update_entry` followed by `async_reload`. When an entry is updated, the

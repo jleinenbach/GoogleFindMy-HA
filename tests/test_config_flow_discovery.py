@@ -46,7 +46,7 @@ def test_async_step_discovery_new_entry(
     monkeypatch: pytest.MonkeyPatch,
     record_flow_forms: Callable[[config_flow.ConfigFlow], list[str | None]],
 ) -> None:
-    """Discovery for a new account should prepare auth data and skip manual forms."""
+    """Discovery for a new account should confirm before creating an entry."""
 
     async def _fake_pick(
         email: str,
@@ -69,7 +69,7 @@ def test_async_step_discovery_new_entry(
         def __init__(self) -> None:
             self.config_entries = _ConfigEntries()
 
-    async def _exercise() -> dict[str, Any]:
+    async def _exercise() -> tuple[dict[str, Any], dict[str, Any], list[str | None]]:
         hass = _FlowHass()
         flow = config_flow.ConfigFlow()
         flow.hass = hass  # type: ignore[assignment]
@@ -93,29 +93,44 @@ def test_async_step_discovery_new_entry(
             "secrets_json": {"aas_token": "aas_et/VALID_TOKEN_VALUE"},
         }
 
-        result = await flow.async_step_discovery(payload)
-        if inspect.isawaitable(result):
-            result = await result
-        assert result["type"] == "form"
-        assert result.get("step_id") == "discovery"
+        discovery_form = await flow.async_step_discovery(payload)
+        if inspect.isawaitable(discovery_form):
+            discovery_form = await discovery_form
+        assert discovery_form["type"] == "form"
+        assert discovery_form.get("step_id") == "discovery"
         assert flow.context.get("confirm_only") is True
         placeholders = flow.context.get("title_placeholders", {})
         assert placeholders.get("email") == "new.user@example.com"
 
-        result = await flow.async_step_discovery({})
-        if inspect.isawaitable(result):
-            result = await result
+        device_form = await flow.async_step_discovery({})
+        if inspect.isawaitable(device_form):
+            device_form = await device_form
         assert flow._auth_data.get(CONF_GOOGLE_EMAIL) == "new.user@example.com"  # type: ignore[attr-defined]
         assert flow._auth_data.get(DATA_AUTH_METHOD) == config_flow._AUTH_METHOD_SECRETS  # type: ignore[attr-defined]
         assert flow._auth_data.get(DATA_AAS_TOKEN) == "aas_et/VALID_TOKEN_VALUE"  # type: ignore[attr-defined]
         assert flow._auth_data.get(DATA_SECRET_BUNDLE) == {  # type: ignore[attr-defined]
             "aas_token": "aas_et/VALID_TOKEN_VALUE"
         }
-        return result, recorded_forms
+        assert device_form["type"] == "form"
+        assert device_form.get("step_id") == "device_selection"
 
-    result, recorded_forms = asyncio.run(_exercise())
-    assert result["type"] == "form"
-    assert result.get("step_id") == "device_selection"
+        created_entry = await flow.async_step_device_selection({})
+        if inspect.isawaitable(created_entry):
+            created_entry = await created_entry
+
+        return device_form, created_entry, recorded_forms
+
+    device_form, created_entry, recorded_forms = asyncio.run(_exercise())
+    assert device_form["type"] == "form"
+    assert device_form.get("step_id") == "device_selection"
+    assert created_entry["type"] == "create_entry"
+    assert created_entry["data"][CONF_GOOGLE_EMAIL] == "new.user@example.com"
+    assert created_entry["data"][CONF_OAUTH_TOKEN] == "aas_et/VALID_TOKEN_VALUE"
+    assert created_entry["data"][DATA_AUTH_METHOD] == config_flow._AUTH_METHOD_SECRETS
+    assert created_entry["data"][DATA_AAS_TOKEN] == "aas_et/VALID_TOKEN_VALUE"
+    assert created_entry["data"][DATA_SECRET_BUNDLE] == {
+        "aas_token": "aas_et/VALID_TOKEN_VALUE"
+    }
     assert recorded_forms == ["discovery", "device_selection"]
 
 
@@ -153,7 +168,12 @@ def test_async_step_discovery_existing_entry_updates(
         def __init__(self) -> None:
             self.config_entries = _ConfigEntries()
 
-    async def _exercise() -> dict[str, Any]:
+    async def _exercise() -> tuple[
+        dict[str, Any],
+        dict[str, Any],
+        list[dict[str, Any] | None],
+        list[str | None],
+    ]:
         hass = _FlowHass()
         flow = config_flow.ConfigFlow()
         flow.hass = hass  # type: ignore[assignment]
@@ -191,16 +211,16 @@ def test_async_step_discovery_existing_entry_updates(
 
         flow._abort_if_unique_id_configured = _abort_helper  # type: ignore[attr-defined]
 
-        result = await flow.async_step_discovery(payload)
-        if inspect.isawaitable(result):
-            result = await result
-        assert result["type"] == "form"
-        assert result.get("step_id") == "discovery"
+        discovery_form = await flow.async_step_discovery(payload)
+        if inspect.isawaitable(discovery_form):
+            discovery_form = await discovery_form
+        assert discovery_form["type"] == "form"
+        assert discovery_form.get("step_id") == "discovery"
         assert not abort_calls, "abort helper should not run before confirmation"
 
-        result = await flow.async_step_discovery({})
-        if inspect.isawaitable(result):
-            result = await result
+        abort_result = await flow.async_step_discovery({})
+        if inspect.isawaitable(abort_result):
+            abort_result = await abort_result
         assert flow._auth_data.get(CONF_OAUTH_TOKEN) == "aas_et/NEW_TOKEN_VALUE"  # type: ignore[attr-defined]
         assert len(abort_calls) == 1
         payload = abort_calls[0]
@@ -208,11 +228,14 @@ def test_async_step_discovery_existing_entry_updates(
         data_updates = payload.get("data", {}) if isinstance(payload, dict) else {}
         assert data_updates.get(CONF_OAUTH_TOKEN) == "aas_et/NEW_TOKEN_VALUE"
         assert recorded_forms == ["discovery"]
-        return result
+        return discovery_form, abort_result, abort_calls, recorded_forms
 
-    result = asyncio.run(_exercise())
-    assert result["type"] == "abort"
-    assert result["reason"] == "already_configured"
+    discovery_form, abort_result, abort_calls, recorded_forms = asyncio.run(_exercise())
+    assert discovery_form["type"] == "form"
+    assert discovery_form.get("step_id") == "discovery"
+    assert len(abort_calls) == 1
+    assert abort_result["type"] == "abort"
+    assert abort_result["reason"] == "already_configured"
 
 
 def test_async_step_discovery_update_info_existing_entry(
