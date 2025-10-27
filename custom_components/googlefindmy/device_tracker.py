@@ -20,7 +20,7 @@ Entry-scope guarantees (C2):
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Mapping
 
 from homeassistant.components.device_tracker import SourceType
 from homeassistant.config_entries import ConfigEntry
@@ -32,10 +32,17 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from .const import OPT_MIN_ACCURACY_THRESHOLD
+from . import _extract_email_from_entry
+from .const import CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, OPT_MIN_ACCURACY_THRESHOLD
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
 from .entity import GoogleFindMyDeviceEntity, resolve_coordinator, _entry_option
 from .ha_typing import RestoreEntity, TrackerEntity, callback
+from .discovery import (
+    CLOUD_DISCOVERY_NAMESPACE,
+    _cloud_discovery_stable_key,
+    _redact_account_for_log,
+    _trigger_cloud_discovery,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,7 +103,7 @@ async def async_setup_entry(
 
     # Dynamically add new trackers when the coordinator learns about more devices
     @callback
-    def _sync_entities_from_coordinator() -> None:
+    def _scan_available_trackers_from_coordinator() -> None:
         snapshot = coordinator.get_subentry_snapshot(subentry_key)
         if not snapshot:
             return
@@ -123,9 +130,50 @@ async def async_setup_entry(
             _LOGGER.info("Adding %d newly discovered Find My tracker(s)", len(to_add))
             async_add_entities(to_add, True)
 
-    unsub = coordinator.async_add_listener(_sync_entities_from_coordinator)
+            email = _extract_email_from_entry(config_entry) or None
+            token = config_entry.data.get(CONF_OAUTH_TOKEN)
+            token_value = token if isinstance(token, str) and token else None
+            secrets_raw = config_entry.data.get(DATA_SECRET_BUNDLE)
+            secrets_bundle: Mapping[str, Any] | None
+            if isinstance(secrets_raw, Mapping):
+                secrets_bundle = secrets_raw
+            else:
+                secrets_bundle = None
+
+            discovery_ns = f"{CLOUD_DISCOVERY_NAMESPACE}.{config_entry.entry_id}" if config_entry.entry_id else CLOUD_DISCOVERY_NAMESPACE
+            stable_key = _cloud_discovery_stable_key(
+                email,
+                token_value,
+                secrets_bundle,
+            )
+
+            async def _async_trigger_cloud_scan(new_count: int) -> None:
+                triggered = await _trigger_cloud_discovery(
+                    hass,
+                    email=email,
+                    token=token_value,
+                    secrets_bundle=secrets_bundle,
+                    discovery_ns=discovery_ns,
+                    discovery_stable_key=stable_key,
+                    source="cloud_scanner",
+                )
+                account_ref = _redact_account_for_log(email, stable_key)
+                if triggered:
+                    _LOGGER.info(
+                        "Cloud tracker scanner queued discovery for %s after %d newly available tracker(s)",
+                        account_ref,
+                        new_count,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Cloud tracker scanner deduplicated discovery for %s", account_ref
+                    )
+
+            hass.async_create_task(_async_trigger_cloud_scan(len(to_add)))
+
+    unsub = coordinator.async_add_listener(_scan_available_trackers_from_coordinator)
     config_entry.async_on_unload(unsub)
-    _sync_entities_from_coordinator()  # run once after registration to catch races
+    _scan_available_trackers_from_coordinator()  # run once after registration to catch races
 
 
 # ---------------------------------------------------------------------------

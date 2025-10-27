@@ -249,7 +249,7 @@ def _assemble_cloud_discovery_payload(
 ) -> dict[str, Any]:
     """Prepare the payload forwarded to the config flow discovery handler."""
 
-    clean_email = email.strip() if isinstance(email, str) else ""
+    clean_email = _normalize_email(email if isinstance(email, str) else None)
     payload: dict[str, Any] = {
         "email": clean_email,
         CONF_GOOGLE_EMAIL: clean_email,
@@ -366,6 +366,19 @@ async def _trigger_cloud_discovery(
                 data=payload,
             )
             triggered = True
+
+        if triggered:
+            _LOGGER.info(
+                "Cloud discovery flow queued for %s (namespace=%s)",
+                _redact_account_for_log(email, stable_key),
+                ns,
+            )
+        else:
+            _LOGGER.debug(
+                "Cloud discovery flow skipped for %s (namespace=%s)",
+                _redact_account_for_log(email, stable_key),
+                ns,
+            )
 
         return triggered
     finally:

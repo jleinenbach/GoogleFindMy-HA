@@ -29,7 +29,9 @@ def _make_hass() -> SimpleNamespace:
     return SimpleNamespace(data={}, config_entries=config_entries)
 
 
-def test_trigger_cloud_discovery_uses_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_trigger_cloud_discovery_uses_helper(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """The helper should prefer async_create_discovery_flow when available."""
 
     hass = _make_hass()
@@ -49,6 +51,7 @@ def test_trigger_cloud_discovery_uses_helper(monkeypatch: pytest.MonkeyPatch) ->
             secrets_bundle={"aas_token": "aas_et/TOKEN"},
         )
 
+    caplog.set_level(logging.INFO, "custom_components.googlefindmy.discovery")
     assert asyncio.run(_exercise()) is True
     assert hass.config_entries.flow.async_init.await_count == 0
     assert len(captured) == 1
@@ -63,7 +66,7 @@ def test_trigger_cloud_discovery_uses_helper(monkeypatch: pytest.MonkeyPatch) ->
 
     assert domain == DOMAIN
     assert context["source"] == config_flow.SOURCE_DISCOVERY
-    assert data["email"] == "User@Example.com"
+    assert data["email"] == "user@example.com"
     assert data["token"] == "aas_et/TOKEN"
     assert data["secrets_bundle"] == {"aas_token": "aas_et/TOKEN"}
     assert data["discovery_ns"] == f"{DOMAIN}.cloud_scan"
@@ -73,8 +76,16 @@ def test_trigger_cloud_discovery_uses_helper(monkeypatch: pytest.MonkeyPatch) ->
     runtime = integration._cloud_discovery_runtime(hass)
     assert runtime["results"], "discovery payload should be recorded"
 
+    assert any(
+        "use***@example.com" in record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+    ), "trigger log should redact identifiers"
 
-def test_trigger_cloud_discovery_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+
+def test_trigger_cloud_discovery_falls_back(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """Missing helper should fall back to config_entries.flow.async_init."""
 
     hass = _make_hass()
@@ -92,12 +103,19 @@ def test_trigger_cloud_discovery_falls_back(monkeypatch: pytest.MonkeyPatch) -> 
             secrets_bundle=None,
         )
 
+    caplog.set_level(logging.INFO, "custom_components.googlefindmy.discovery")
+
     assert asyncio.run(_exercise()) is True
     hass.config_entries.flow.async_init.assert_awaited_once()
     _, kwargs = hass.config_entries.flow.async_init.call_args
     assert kwargs["context"]["source"] == config_flow.SOURCE_DISCOVERY
     assert kwargs["data"]["email"] == "fallback@example.com"
     assert kwargs["data"]["discovery_ns"] == f"{DOMAIN}.cloud_scan"
+    assert any(
+        "fal***@example.com" in record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+    ), "fallback trigger log should redact identifiers"
 
 
 def test_trigger_cloud_discovery_deduplicates(
