@@ -26,6 +26,7 @@ class _FakeDeviceEntry:
         config_entry_id: str,
         name: str | None,
         via_device_id: str | None = None,
+        via_device: tuple[str, str] | None = None,
         manufacturer: str | None = None,
         model: str | None = None,
         sw_version: str | None = None,
@@ -40,6 +41,7 @@ class _FakeDeviceEntry:
         self.name_by_user = None
         self.disabled_by = None
         self.via_device_id = via_device_id
+        self.via_device = via_device
         self.manufacturer = manufacturer
         self.model = model
         self.sw_version = sw_version
@@ -72,6 +74,7 @@ class _FakeDeviceRegistry:
         model: str,
         name: str | None,
         via_device_id: str | None = None,
+        via_device: tuple[str, str] | None = None,
         **kwargs: Any,
     ) -> _FakeDeviceEntry:
         entry = _FakeDeviceEntry(
@@ -79,6 +82,7 @@ class _FakeDeviceRegistry:
             config_entry_id=config_entry_id,
             name=name,
             via_device_id=via_device_id,
+            via_device=via_device,
             manufacturer=manufacturer,
             model=model,
             sw_version=kwargs.get("sw_version"),
@@ -94,6 +98,7 @@ class _FakeDeviceRegistry:
                 "model": model,
                 "name": name,
                 "via_device_id": via_device_id,
+                "via_device": via_device,
                 "sw_version": kwargs.get("sw_version"),
                 "entry_type": kwargs.get("entry_type"),
                 "configuration_url": kwargs.get("configuration_url"),
@@ -184,8 +189,11 @@ def test_devices_link_to_service_device(fake_registry: _FakeDeviceRegistry) -> N
     )
 
     assert created == 1
+    service_ident = service_device_identifier("entry-42")
     assert fake_registry.created[0]["identifiers"] == {(DOMAIN, "entry-42:abc123")}
-    assert fake_registry.created[0]["via_device_id"] == "svc-device-1"
+    assert fake_registry.created[0]["via_device"] == service_ident
+    assert fake_registry.created[0]["via_device_id"] is None
+    assert fake_registry.updated[0]["via_device_id"] == "svc-device-1"
 
 
 def test_legacy_device_migrates_to_service_parent(
@@ -264,6 +272,9 @@ def test_service_device_backfills_via_links(
     created = coordinator._ensure_registry_for_devices(devices, set())
 
     assert created == 2
+    service_ident = service_device_identifier("entry-42")
+    assert fake_registry.created[0]["via_device"] == service_ident
+    assert fake_registry.created[1]["via_device"] == service_ident
     for entry in fake_registry.devices:
         assert entry.via_device_id is None
 
@@ -281,3 +292,32 @@ def test_service_device_backfills_via_links(
         assert entry.via_device_id == service_id
 
     assert getattr(coordinator, "_pending_via_updates") == set()
+
+
+def test_rebuild_flow_creates_devices_with_via_parent(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Safe-mode rebuild path should recreate devices using via_device linkage."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-77")
+    coordinator.hass = object()
+
+    # Simulate a safe-mode rebuild: service device removed, pending queue cleared.
+    coordinator._service_device_ready = False
+    coordinator._service_device_id = None
+    coordinator._pending_via_updates = set()
+    coordinator._dr_supports_via_device_kw = True
+
+    created = coordinator._ensure_registry_for_devices(
+        devices=[{"id": "ghi789", "name": "Phone"}],
+        ignored=set(),
+    )
+
+    assert created == 1
+    metadata = fake_registry.created[0]
+    parent_identifier = service_device_identifier("entry-77")
+    assert metadata["via_device"] == parent_identifier
+    assert metadata["via_device_id"] is None
+    pending = getattr(coordinator, "_pending_via_updates")
+    assert pending == {fake_registry.devices[0].id}
