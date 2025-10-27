@@ -41,7 +41,9 @@ def test_process_device_list_response_merges_duplicate_ids(
         api_module, "parse_device_list_protobuf", lambda hex_blob: parsed
     )
     monkeypatch.setattr(
-        api_module, "_build_can_ring_index", lambda message: {"shared-id": True}
+        api_module,
+        "_build_can_ring_index",
+        lambda message, *, cache=None: {"shared-id": True},
     )
     monkeypatch.setattr(
         api_module,

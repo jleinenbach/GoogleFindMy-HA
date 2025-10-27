@@ -178,7 +178,7 @@ def test_async_nova_request_refreshes_token_after_initial_401(
         refresh_calls.append(None)
         return "adm-new"
 
-    original_on_401 = AsyncTTLPolicy.on_401
+    original_on_401 = AsyncTTLPolicy.async_on_401
 
     async def _spy_on_401(self: AsyncTTLPolicy, adaptive_downshift: bool = True) -> Any:
         on_401_calls.append(adaptive_downshift)
@@ -189,7 +189,7 @@ def test_async_nova_request_refreshes_token_after_initial_401(
         _fake_get_adm_token,
     )
     monkeypatch.setattr(
-        "custom_components.googlefindmy.NovaApi.nova_request.AsyncTTLPolicy.on_401",
+        "custom_components.googlefindmy.NovaApi.nova_request.AsyncTTLPolicy.async_on_401",
         _spy_on_401,
     )
 
@@ -461,7 +461,7 @@ def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:
             assert await cache.get(policy.k_startleft) == 1
             assert await cache.get(probe_bare_key) == 1
 
-            result = await policy.on_401()
+            result = await policy.async_on_401()
 
             assert result == "fresh-token"
             assert not minted_tokens

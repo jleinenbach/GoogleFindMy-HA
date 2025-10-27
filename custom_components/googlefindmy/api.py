@@ -27,16 +27,14 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from typing import Any, Protocol, TYPE_CHECKING, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 from collections.abc import Awaitable, Callable
 
 from aiohttp import ClientError, ClientSession
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
-if TYPE_CHECKING:
-    from .Auth.token_cache import TokenCache
-
+from .Auth.token_cache import TokenCache
 from .Auth.username_provider import username_string
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
     get_location_data_for_device,
@@ -190,18 +188,23 @@ def _infer_can_ring_slot(device: dict[str, Any]) -> bool | None:
     return None
 
 
-def _build_can_ring_index(parsed_device_list: Any) -> dict[str, bool]:
+def _build_can_ring_index(
+    parsed_device_list: Any,
+    *,
+    cache: TokenCache | None = None,
+) -> dict[str, bool]:
     """Build a mapping canonical_id -> can_ring (where determinable).
 
     Args:
         parsed_device_list: The parsed protobuf message from the device list response.
+        cache: Optional entry-scoped TokenCache for decrypting location payloads.
 
     Returns:
         A dictionary mapping canonical device IDs to a boolean indicating if they can ring.
     """
     index: dict[str, bool] = {}
     try:
-        devices = get_devices_with_location(parsed_device_list)
+        devices = get_devices_with_location(parsed_device_list, cache=cache)
     except Exception:
         devices = []
 
@@ -497,6 +500,21 @@ class GoogleFindMyAPI:
             pass
         return None
 
+    def _decoder_token_cache(self) -> TokenCache | None:
+        """Return the concrete TokenCache instance when available.
+
+        The decoder helpers expect the full TokenCache implementation to resolve
+        owner keys and usernames. During config flows the API uses an ephemeral
+        cache, so we only forward the cache when it is the real TokenCache.
+        """
+
+        try:
+            if isinstance(self._cache, TokenCache):
+                return cast(TokenCache, self._cache)
+        except Exception:
+            return None
+        return None
+
     # ------------------------ Internal processing helpers ------------------------
     def _process_device_list_response(self, result_hex: str) -> list[dict[str, Any]]:
         """Parse protobuf, update capability cache, and build basic device list.
@@ -508,7 +526,10 @@ class GoogleFindMyAPI:
             A list of dictionaries, each representing a device with its basic info.
         """
         parsed = parse_device_list_protobuf(result_hex)
-        cap_index = _build_can_ring_index(parsed)
+        cap_index = _build_can_ring_index(
+            parsed,
+            cache=self._decoder_token_cache(),
+        )
         if cap_index:
             self._device_capabilities.update(cap_index)
 

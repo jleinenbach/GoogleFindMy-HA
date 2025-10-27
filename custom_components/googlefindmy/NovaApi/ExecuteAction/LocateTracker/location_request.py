@@ -10,7 +10,6 @@ import time
 import logging
 import traceback
 from typing import (
-    TYPE_CHECKING,
     Protocol,
     runtime_checkable,
     Any,
@@ -46,6 +45,7 @@ from custom_components.googlefindmy.const import (
     DEFAULT_CONTRIBUTOR_MODE,
     LOCATION_REQUEST_TIMEOUT_S,
 )
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -324,7 +324,7 @@ async def get_location_data_for_device(
     cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
     refresh_override: Callable[[], Awaitable[str | None]] | None = None,
     namespace: str | None = None,
-    cache: TokenCache | None = None,  # type: ignore[name-defined]
+    cache: TokenCache | None = None,
     contributor_mode: str | None = None,
     last_mode_switch: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -375,7 +375,7 @@ async def get_location_data_for_device(
     if cache is None:
         raise MissingTokenCacheError()
 
-    cache_ref = cast("TokenCache", cache)
+    cache_ref = cache
 
     resolved_namespace = namespace or getattr(cache_ref, "entry_id", None)
     if not resolved_namespace:
@@ -430,6 +430,9 @@ async def get_location_data_for_device(
         if ns_set is None:
             ns_set = _cache_set_raw
 
+    if ns_get is None or ns_set is None:
+        raise RuntimeError("Cache accessors could not be initialized.")
+
     mode = _normalize_contributor_mode(contributor_mode)
     resolved_last_mode_switch: int | None = (
         int(last_mode_switch)
@@ -438,7 +441,7 @@ async def get_location_data_for_device(
     )
 
     try:
-        cached_mode = await ns_get(CACHE_KEY_CONTRIBUTOR_MODE)  # type: ignore[misc]
+        cached_mode = await ns_get(CACHE_KEY_CONTRIBUTOR_MODE)
     except Exception as err:  # pragma: no cover - defensive logging
         _LOGGER.debug("Failed to load contributor mode from cache: %s", err)
         cached_mode = None
@@ -447,13 +450,13 @@ async def get_location_data_for_device(
         mode = _normalize_contributor_mode(cached_mode)
     elif contributor_mode is not None:
         try:
-            await ns_set(CACHE_KEY_CONTRIBUTOR_MODE, mode)  # type: ignore[misc]
+            await ns_set(CACHE_KEY_CONTRIBUTOR_MODE, mode)
         except Exception as err:  # pragma: no cover - defensive logging
             _LOGGER.debug("Failed to persist contributor mode override: %s", err)
 
     if resolved_last_mode_switch is None:
         try:
-            cached_switch = await ns_get(CACHE_KEY_LAST_MODE_SWITCH)  # type: ignore[misc]
+            cached_switch = await ns_get(CACHE_KEY_LAST_MODE_SWITCH)
         except Exception as err:  # pragma: no cover - defensive logging
             _LOGGER.debug("Failed to load contributor mode timestamp: %s", err)
         else:
@@ -464,7 +467,7 @@ async def get_location_data_for_device(
         resolved_last_mode_switch = int(time.time())
 
     try:
-        await ns_set(  # type: ignore[misc]
+        await ns_set(
             CACHE_KEY_LAST_MODE_SWITCH, resolved_last_mode_switch
         )
     except Exception as err:  # pragma: no cover - defensive logging
@@ -617,8 +620,6 @@ if __name__ == "__main__":
         get_location_data_for_device(
             get_example_data("sample_canonic_device_id"),
             "Test",
-            cache=_CliTokenCache(),
+            cache=cast(TokenCache, _CliTokenCache()),
         )
     )
-if TYPE_CHECKING:
-    from custom_components.googlefindmy.Auth.token_cache import TokenCache
