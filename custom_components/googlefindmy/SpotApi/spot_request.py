@@ -9,6 +9,7 @@ import asyncio
 import datetime
 import logging
 import random
+from typing import cast
 
 import httpx
 
@@ -121,6 +122,8 @@ async def _pick_auth_token_async(
     if not user:
         raise RuntimeError("Username is not configured; cannot select auth token.")
 
+    tok: str | None = None
+
     # Prefer SPOT unless explicitly preferring ADM
     if not prefer_adm:
         try:
@@ -134,7 +137,7 @@ async def _pick_auth_token_async(
             )
 
     # Try ADM for the same user
-    tok = await cache.get(f"adm_token_{user}")
+    tok = cast(str | None, await cache.get(f"adm_token_{user}"))
 
     if not tok:
         try:
