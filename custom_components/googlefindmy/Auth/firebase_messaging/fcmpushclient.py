@@ -46,8 +46,9 @@ from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 from google.protobuf.json_format import MessageToJson
-from google.protobuf.message import Message
 from http_ece import decrypt as http_decrypt
+
+from custom_components.googlefindmy.protobuf_typing import MessageProto
 
 from .const import (
     MCS_HOST,
@@ -210,7 +211,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     # ---- Logging helpers ----
 
-    def _msg_str(self, msg: Message) -> str:
+    def _msg_str(self, msg: MessageProto) -> str:
         if self.config.log_debug_verbose:
             pretty_json = cast(str, MessageToJson(msg, indent=4))
             return f"{type(msg).__name__}\n{pretty_json}"
@@ -307,14 +308,14 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         return bytes(res)
 
     @staticmethod
-    def _make_packet(msg: Message, include_version: bool) -> bytes:
+    def _make_packet(msg: MessageProto, include_version: bool) -> bytes:
         tag = MCS_MESSAGE_TAG[type(msg)]
         header = bytearray([MCS_VERSION, tag]) if include_version else bytearray([tag])
         payload = msg.SerializeToString()
         buf = bytes(header) + FcmPushClient._encode_varint32(len(payload)) + payload
         return buf
 
-    async def _send_msg(self, msg: Message) -> None:
+    async def _send_msg(self, msg: MessageProto) -> None:
         self._log_verbose("Sending packet to server: %s", self._msg_str(msg))
         buf = FcmPushClient._make_packet(msg, self.first_message)
         writer = self.writer
@@ -322,7 +323,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         writer.write(buf)
         await writer.drain()
 
-    async def _receive_msg(self) -> Message | None:
+    async def _receive_msg(self) -> MessageProto | None:
         reader = self.reader
         assert reader is not None, "StreamReader is not initialized"
 
@@ -353,7 +354,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self._log_warn_with_limit("Unconfigured message class %s", msg_class)
             return None
 
-        msg_type = cast(type[Message], msg_class)
+        msg_type = cast(type[MessageProto], msg_class)
         payload = msg_type()
         payload.ParseFromString(buf)
         self._log_verbose("Received payload: %s", self._msg_str(payload))
@@ -619,7 +620,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             return False
         return True
 
-    async def _handle_message(self, msg: Message) -> None:
+    async def _handle_message(self, msg: MessageProto) -> None:
         self.last_message_time = time.time()
         self.input_stream_id += 1
 
