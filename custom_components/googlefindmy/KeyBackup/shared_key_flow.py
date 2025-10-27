@@ -14,7 +14,7 @@ from custom_components.googlefindmy.KeyBackup.shared_key_request import (
 from custom_components.googlefindmy.chrome_driver import create_driver
 
 
-def request_shared_key_flow():
+def request_shared_key_flow() -> str | None:
     driver = create_driver()
     try:
         # Open Google accounts sign-in page
@@ -75,6 +75,8 @@ def request_shared_key_flow():
         print(f"An error occurred: {e}")
     finally:
         driver.quit()
+
+    return None
 
 
 if __name__ == "__main__":
