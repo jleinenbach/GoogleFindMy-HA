@@ -849,7 +849,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovery_confirm_pending = False
 
     def _clear_discovery_confirmation_state(self) -> None:
-        """Reset cached discovery confirmation state."""
+        """Reset cached discovery confirmation state.
+
+        The base `ConfigFlow` helper `_set_confirm_only()` toggles the
+        `context["confirm_only"]` flag so the UI renders a confirmation form.
+        This reset helper must clear the same flag whenever we dismiss the
+        prompt to keep the state machine in sync with subsequent submissions.
+        """
 
         self._discovery_confirm_pending = False
         self._pending_discovery_payload = None
