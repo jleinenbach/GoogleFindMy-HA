@@ -1,5 +1,13 @@
 # AGENTS.md — Operating Contract for `googlefindmy` (Home Assistant custom integration)
 
+* [Scoped guidance index](#scoped-guidance-index)
+* [Environment verification](#environment-verification)
+* [What must be in every PR](#1-what-must-be-in-every-pr-lean-checklist)
+* [Mandatory evidence](#2-mandatory-evidence)
+* [Workflow for code changes](#3-workflow-for-code-changes)
+* [Communicate uncertainty](#5-communicate-uncertainty)
+* [Type checking (mypy)](#7-type-checking-mypy)
+
 > **Scope & authority**
 >
 > **Directory scope:** applies to the entire repository (with continued emphasis on `custom_components/googlefindmy/**` and tests under `tests/**`).
