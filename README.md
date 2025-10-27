@@ -168,6 +168,48 @@ The integration respects Google's rate limits by:
 - Minimum poll interval enforcement
 - Automatic retry with exponential backoff
 
+### Running pip-audit behind TLS inspection
+
+Corporate proxies that intercept HTTPS often replace the default certificate
+authority chain, which breaks tools such as `pip-audit`. Use
+`python script/bootstrap_truststore.py` to merge your organization's CA bundle
+with the upstream [``certifi``](https://pypi.org/project/certifi/) trust store
+and (optionally) generate a `pip.conf` that points at an internal PyPI mirror.
+
+1. Collect your proxy or internal PKI certificate in PEM format and save it as
+   `company-ca.pem` in the repository root.
+2. Run
+   `python script/bootstrap_truststore.py --ca-file company-ca.pem --emit-exports`.
+   The helper creates `.truststore/ca-bundle.pem` and prints the environment
+   overrides required by both `pip` and `pip-audit`.
+3. Export the recommended variables in the shell that will run security checks:
+   ```bash
+   export REQUESTS_CA_BUNDLE="$(pwd)/.truststore/ca-bundle.pem"
+   export PIP_CERT="$(pwd)/.truststore/ca-bundle.pem"
+   ```
+4. (Optional) Provide an internal package index while generating the trust
+   store, for example:
+   ```bash
+   python script/bootstrap_truststore.py \
+       --ca-file company-ca.pem \
+       --pip-config .truststore/pip.conf \
+       --index-url https://pypi.internal.example/simple \
+       --emit-exports
+   export PIP_CONFIG_FILE="$(pwd)/.truststore/pip.conf"
+   ```
+5. Invoke `pip-audit` using the normal repository instructions. The tool now
+   trusts the injected certificates and can reach either the public index or
+   your internal mirror without disabling TLS verification.
+
+The generated artifacts remain in `.truststore/` so developers can refresh
+them whenever certificates rotate without committing secrets to version
+control. The helper always creates this directory in the repository root, and
+the `.gitignore` entry ensures the resulting bundle, optional `pip.conf`, and
+any exported environment snippets never land in commits. It is safe to delete
+the folder between runs; a subsequent invocation of
+`script/bootstrap_truststore.py` recreates it with the latest certificates and
+configuration.
+
 ### 401 Unauthorized responses
 - When Google's Nova endpoint returns 401, the integration now clears both the
   entry-scoped and global ADM token cache entries before refreshing. This
