@@ -663,7 +663,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._enabled_poll_device_ids: set[str] = set()
         self._devices_with_entry: set[str] = set()
         self._dr_unsub: Callable[[], None] | None = None
-        # Deferred via_device_id linking for end devices awaiting the service anchor
+        # Deferred service-device linking for end devices awaiting the anchor
         self._pending_via_updates: set[str] = set()
 
         # Subentry awareness (feature groups / platform scoping)
@@ -1083,7 +1083,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         except Exception:
             pass
 
-        # Make sure the service device exists early to anchor end devices via `via_device_id`.
+        # Make sure the service device exists early so end devices can link to it promptly.
         self._ensure_service_device_exists()
 
         # Initial index (works even if config_entry is not yet bound; will re-run on DR event)
@@ -1202,6 +1202,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 "Service-device ensure skipped: ConfigEntry not available on coordinator."
             )
             return
+
+        setattr(
+            self,
+            "_service_device_identifier",
+            service_device_identifier(entry.entry_id),
+        )
 
         # Fast-path: already ensured in this runtime
         if getattr(self, "_service_device_ready", False) and getattr(
@@ -1467,6 +1473,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         - If a legacy device is associated with a *different* entry, we **do not merge**.
           We create a fresh device with the namespaced identifier to avoid cross-account
           collisions.
+        - Prefer linking devices to the service anchor via the identifier-based
+          `via_device` kwarg when supported. Older cores fall back to `via_device_id`
+          once the service device has been created.
 
         Returns:
             Count of devices that were created or updated.
@@ -1475,8 +1484,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not entry_id:
             return 0
 
+        parent_identifier = service_device_identifier(entry_id)
+        setattr(self, "_service_device_identifier", parent_identifier)
+
         dev_reg = dr.async_get(self.hass)
-        if not hasattr(dev_reg, "async_get_or_create"):
+        async_get_or_create = getattr(dev_reg, "async_get_or_create", None)
+        if not callable(async_get_or_create):
             _LOGGER.debug(
                 "Skipping Device Registry ensure: registry stub missing async_get_or_create."
             )
@@ -1484,12 +1497,24 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         update_device = getattr(dev_reg, "async_update_device", None)
         get_device = getattr(dev_reg, "async_get_device", None)
         created_or_updated = 0
-        service_device_id = getattr(self, "_service_device_id", None)
+
+        supports_via_kw = getattr(self, "_dr_supports_via_device_kw", None)
+        if supports_via_kw is None:
+            supports_via_kw = False
+            try:
+                params = inspect.signature(async_get_or_create).parameters
+            except (TypeError, ValueError):
+                supports_via_kw = False
+            else:
+                supports_via_kw = "via_device" in params
+            setattr(self, "_dr_supports_via_device_kw", supports_via_kw)
 
         for d in devices:
             dev_id = d.get("id")
             if not isinstance(dev_id, str) or dev_id in ignored:
                 continue
+
+            service_device_id = getattr(self, "_service_device_id", None)
 
             # Build identifiers
             ns_ident = (DOMAIN, f"{entry_id}:{dev_id}")
@@ -1563,14 +1588,35 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     else None
                 )
 
-                dev = dev_reg.async_get_or_create(
-                    config_entry_id=entry_id,
-                    identifiers={ns_ident},
-                    manufacturer="Google",
-                    model="Find My Device",
-                    name=use_name,
-                    via_device_id=getattr(self, "_service_device_id", None),
-                )
+                create_kwargs: dict[str, Any] = {
+                    "config_entry_id": entry_id,
+                    "identifiers": {ns_ident},
+                    "manufacturer": "Google",
+                    "model": "Find My Device",
+                    "name": use_name,
+                }
+
+                if parent_identifier and supports_via_kw:
+                    create_kwargs["via_device"] = parent_identifier
+                elif service_device_id is not None:
+                    create_kwargs["via_device_id"] = service_device_id
+
+                try:
+                    dev = async_get_or_create(**create_kwargs)
+                except TypeError as err:
+                    if create_kwargs.pop("via_device", None) is not None:
+                        # Older HA core without via_device kwarg support.
+                        if service_device_id is not None:
+                            create_kwargs["via_device_id"] = service_device_id
+                        supports_via_kw = False
+                        setattr(self, "_dr_supports_via_device_kw", False)
+                        _LOGGER.debug(
+                            "Device Registry create fell back to via_device_id linkage: %s",
+                            err,
+                        )
+                        dev = async_get_or_create(**create_kwargs)
+                    else:
+                        raise
                 created_or_updated += 1
                 if service_device_id is None:
                     self._note_pending_via_update(getattr(dev, "id", None))
