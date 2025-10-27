@@ -1,7 +1,7 @@
 # google/protobuf/descriptor.pyi
 from __future__ import annotations
 
-from typing import Any as _Any, Iterable as _Iterable, Mapping as _Mapping, Sequence as _Sequence
+from typing import Iterable as _Iterable, Mapping as _Mapping, Sequence as _Sequence
 
 class DescriptorBase:
     """Minimal structural stub for protobuf descriptor types."""

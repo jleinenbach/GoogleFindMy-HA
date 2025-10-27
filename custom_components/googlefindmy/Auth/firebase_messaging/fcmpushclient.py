@@ -463,7 +463,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
     ) -> str:
         for x in p.app_data:
             if x.key == key:
-                return cast(str, x.value)
+                return x.value
 
         if do_not_raise:
             return ""
