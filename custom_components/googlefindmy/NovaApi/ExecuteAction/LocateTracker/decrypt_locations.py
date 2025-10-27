@@ -70,7 +70,7 @@ class StaleOwnerKeyError(DecryptionError):
 def _status_name_safe(code: Any) -> str:
     """Safely get the string representation of an enum, with a robust fallback."""
     try:
-        return Common_pb2.Status.Name(int(code))
+        return cast(str, Common_pb2.Status.Name(int(code)))
     except Exception:
         try:
             return str(int(code))
@@ -290,6 +290,16 @@ async def _offload_decrypt_foreign(
 
 
 # ----------------------------- Validation helpers -----------------------------
+def _ensure_bytes(value: object) -> bytes | None:
+    """Return a ``bytes`` instance when the value can be losslessly coerced."""
+
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    return None
+
+
 def _is_valid_latlon(lat: float, lon: float) -> bool:
     """Validate latitude/longitude are finite and within geographic bounds.
 
@@ -443,17 +453,24 @@ async def async_decrypt_location_response_locations(
             public_key_random: bytes = enc.publicKeyRandom
 
             if public_key_random == b"":  # Own report
-                decrypted_location = await _offload_decrypt_aes(
+                decrypted_location_raw = await _offload_decrypt_aes(
                     identity_key, encrypted_location
                 )
             else:
                 time_offset = 0 if is_mcu else loc.geoLocation.deviceTimeOffset
-                decrypted_location = await _offload_decrypt_foreign(
+                decrypted_location_raw = await _offload_decrypt_foreign(
                     identity_key,
                     encrypted_location,
                     public_key_random,
                     time_offset,
                 )
+
+            decrypted_location = _ensure_bytes(decrypted_location_raw)
+            if decrypted_location is None:
+                _LOGGER.debug(
+                    "Decrypted location payload is not bytes; dropping one report"
+                )
+                continue
 
             wrapped.append(
                 WrappedLocation(
