@@ -788,6 +788,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         hass = getattr(self, "hass", None)
         canonical_to_registry_id: dict[str, str] = {}
+        registry_to_canonical_id: dict[str, str] = {}
         if hass is not None:
             try:
                 device_registry = dr.async_get(hass)
@@ -822,6 +823,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     if ident is None:
                         continue
                     canonical_to_registry_id.setdefault(ident, registry_id)
+                    registry_to_canonical_id.setdefault(registry_id, ident)
 
         def _register_device(candidate: Mapping[str, Any]) -> None:
             dev_id = candidate.get("id")
@@ -892,6 +894,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 }
                 if not allowed_ids:
                     allowed_ids = None
+                elif registry_to_canonical_id:
+                    allowed_ids = {
+                        registry_to_canonical_id.get(item, item) for item in allowed_ids
+                    }
 
             if device_index:
                 base_ids = [
