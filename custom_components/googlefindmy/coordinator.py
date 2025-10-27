@@ -170,6 +170,9 @@ _COOLDOWN_MIN_HIGH_TRAFFIC_S = 5 * 60  # 5 minutes
 _COOLDOWN_OWNER_MIN_S = 60  # at least 1 minute
 _COOLDOWN_OWNER_MAX_S = 15 * 60  # at most 15 minutes
 
+# Maximum delay before falling back to polling even when push is unavailable.
+_FCM_FALLBACK_POLL_AFTER_S = 5 * 60
+
 # Altitude adjustments smaller than 1 m are considered noise for significance checks.
 _ALTITUDE_SIGNIFICANT_DELTA_M = 1.0
 
@@ -2479,20 +2482,43 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             due = (now_mono - self._last_poll_mono) >= effective_interval
             if due and not self._is_polling and devices_to_poll:
-                if not self._is_fcm_ready_soft():
+                force_poll = False
+                fcm_ready = self._is_fcm_ready_soft()
+                if not fcm_ready:
                     # No baseline jump; schedule a short retry and escalate politely.
                     self._note_fcm_deferral(now_mono)
-                    self._schedule_short_retry(min(5.0, effective_interval / 2.0))
+                    defer_started = self._fcm_defer_started_mono or 0.0
+                    if defer_started:
+                        elapsed = now_mono - defer_started
+                        if elapsed >= _FCM_FALLBACK_POLL_AFTER_S:
+                            force_poll = True
+                        else:
+                            self._schedule_short_retry(
+                                min(5.0, effective_interval / 2.0)
+                            )
+                    else:
+                        self._schedule_short_retry(
+                            min(5.0, effective_interval / 2.0)
+                        )
                 else:
                     if self._fcm_defer_started_mono:
                         self._clear_fcm_deferral()
+
+                if fcm_ready or force_poll:
+                    if force_poll:
+                        _LOGGER.warning(
+                            "Push transport unavailable for %ds; forcing poll cycle.",
+                            _FCM_FALLBACK_POLL_AFTER_S,
+                        )
                     _LOGGER.debug(
                         "Scheduling background polling cycle (devices=%d, interval=%ds)",
                         len(devices_to_poll),
                         effective_interval,
                     )
                     self.hass.async_create_task(
-                        self._async_start_poll_cycle(devices_to_poll),
+                        self._async_start_poll_cycle(
+                            devices_to_poll, force=force_poll
+                        ),
                         name=f"{DOMAIN}.poll_cycle",
                     )
             else:
@@ -2564,7 +2590,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             ) from exc
 
     # ---------------------------- Polling Cycle -----------------------------
-    async def _async_start_poll_cycle(self, devices: list[dict[str, Any]]) -> None:
+    async def _async_start_poll_cycle(
+        self, devices: list[dict[str, Any]], *, force: bool = False
+    ) -> None:
         """Run a full sequential polling cycle in a background task.
 
         This runs with a lock to avoid overlapping cycles, updates the
@@ -2588,16 +2616,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return
 
             # Double-check FCM readiness inside the lock to avoid a narrow race:
-            # if readiness regressed between scheduling and execution, skip cleanly.
+            # if readiness regressed between scheduling and execution, skip cleanly
+            # unless we are explicitly forcing the cycle after a prolonged outage.
             if not self._is_fcm_ready_soft():
-                # No baseline jump; schedule a short retry and keep escalation ticking.
-                self._note_fcm_deferral(time.monotonic())
-                self._schedule_short_retry(5.0)
-                return
-            else:
+                if not force:
+                    # No baseline jump; schedule a short retry and keep escalation ticking.
+                    self._note_fcm_deferral(time.monotonic())
+                    self._schedule_short_retry(5.0)
+                    return
+                _LOGGER.warning(
+                    "Starting poll cycle without push transport; continuing in degraded mode."
+                )
+            elif self._fcm_defer_started_mono:
                 # If we were deferring previously, clear the escalation timeline.
-                if self._fcm_defer_started_mono:
-                    self._clear_fcm_deferral()
+                self._clear_fcm_deferral()
 
             self._is_polling = True
             self.safe_update_metric("last_poll_start_mono", time.monotonic())
@@ -3635,8 +3667,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # 2) Short-circuit if push transport is not ready.
         ready = self._api_push_ready()
         if ready is False:
-            _LOGGER.debug("can_play_sound(%s) -> False (push not ready)", device_id)
-            return False
+            # Respect explicit cooldowns triggered after recent failures, but do not
+            # hide the action solely because push transport appears disconnected.
+            if time.monotonic() < self._push_cooldown_until:
+                _LOGGER.debug(
+                    "can_play_sound(%s) -> False (push cooldown active)", device_id
+                )
+                return False
+            _LOGGER.debug(
+                "can_play_sound(%s): push not ready, keeping entity available", device_id
+            )
 
         # 3) Optimistic final decision based on whether we know the device.
         is_known = (

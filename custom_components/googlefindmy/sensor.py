@@ -362,16 +362,26 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
             return False
         if not self.coordinator_has_device():
             return False
-        is_fcm_connected = getattr(self.coordinator, "is_fcm_connected", None)
-        if is_fcm_connected is False:
-            return False
+
+        present: bool | None = None
         try:
             if hasattr(self.coordinator, "is_device_present"):
-                return self.coordinator.is_device_present(dev_id)
+                raw = self.coordinator.is_device_present(dev_id)
+                if isinstance(raw, bool):
+                    present = raw
+                else:
+                    present = bool(raw)
         except Exception:
             # Be tolerant if a different coordinator build is used.
-            pass
-        # Fallback: consider available if we have any known last_seen value
+            present = None
+
+        if present is True:
+            return True
+        if present is False:
+            # Presence expired; fall back to restored values if available.
+            return self._attr_native_value is not None
+
+        # Unknown presence: consider available if we have any known last_seen value
         return self._attr_native_value is not None
 
     @callback
