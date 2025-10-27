@@ -121,13 +121,11 @@ def _perform_oauth_sync(
     request_app = (
         "com.google.android.gms" if play_services else "com.google.android.apps.adm"
     )
-    android_id_str = str(android_id)
-
     try:
         auth_response: dict[str, Any] = gpsoauth.perform_oauth(
             username,
             aas_token,
-            android_id_str,
+            android_id,
             service="oauth2:https://www.googleapis.com/auth/" + scope,
             app=request_app,
             client_sig=_CLIENT_SIG,

@@ -29,7 +29,7 @@ exceptions: _ExceptionsModule
 def exchange_token(
     email: str,
     master_token: str,
-    android_id: str,
+    android_id: int,
     service: str = ...,
     app: str = ...,
     client_sig: str = ...,
@@ -42,7 +42,7 @@ def exchange_token(
 def perform_oauth(
     email: str,
     aas_token: str,
-    android_id: str,
+    android_id: int,
     service: str,
     app: str = ...,
     client_sig: str = ...,
@@ -55,7 +55,7 @@ def perform_oauth(
 def perform_master_login(
     email: str,
     password: str,
-    android_id: str,
+    android_id: int,
     service: str = ...,
     app: str = ...,
     client_sig: str = ...,
