@@ -28,6 +28,8 @@ This module aims to be self-documenting. All public functions include precise do
 (purpose, parameters, errors, security considerations). Keep comments/docstrings in English.
 """
 
+# custom_components/googlefindmy/__init__.py
+
 from __future__ import annotations
 
 import asyncio
@@ -377,8 +379,7 @@ class RuntimeData:
 
         return self.token_cache
 
-
-MyConfigEntry = ConfigEntry
+type MyConfigEntry = ConfigEntry
 
 
 def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> str:
