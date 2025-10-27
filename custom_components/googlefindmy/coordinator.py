@@ -786,6 +786,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         ignored = self._get_ignored_set()
         device_index: dict[str, dict[str, Any]] = {}
 
+        registry_lookup: Callable[[str], dr.DeviceEntry | None] | None = None
+        hass_obj = getattr(self, "hass", None)
+        if hass_obj is not None:
+            try:
+                device_registry = dr.async_get(hass_obj)
+            except Exception:  # defensive: registry helpers may not be patched in tests
+                device_registry = None
+            else:
+                candidate_lookup = getattr(device_registry, "async_get", None)
+                if callable(candidate_lookup):
+                    registry_lookup = candidate_lookup
+
         def _register_device(candidate: Mapping[str, Any]) -> None:
             dev_id = candidate.get("id")
             if not isinstance(dev_id, str) or not dev_id:
@@ -848,28 +860,50 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 feature_flags = dict[str, Any]()
 
             raw_allowed = data.get("visible_device_ids")
-            allowed_ids: set[str] | None = None
+            normalized_allowed: set[str] | None = None
             if isinstance(raw_allowed, (list, tuple, set)):
-                allowed_ids = {
+                collected = {
                     str(item) for item in raw_allowed if isinstance(item, str) and item
                 }
-                if not allowed_ids:
-                    allowed_ids = None
+                if collected:
+                    normalized_allowed = set(collected)
+                    if registry_lookup is not None:
+                        resolved: set[str] = set()
+                        for candidate in collected:
+                            try:
+                                device_entry = registry_lookup(candidate)
+                            except Exception:  # defensive against stub mismatches
+                                device_entry = None
+                            if device_entry is None:
+                                continue
+                            canonical = self._extract_our_identifier(device_entry)
+                            if canonical:
+                                resolved.add(canonical)
+                        if resolved:
+                            normalized_allowed.update(resolved)
+                else:
+                    normalized_allowed = None
+
+            allow_filter = normalized_allowed
 
             if device_index:
                 base_ids = [
                     dev_id
                     for dev_id in device_index
-                    if allowed_ids is None or dev_id in allowed_ids
+                    if allow_filter is None or dev_id in allow_filter
                 ]
             else:
                 base_ids = [
                     dev_id
                     for dev_id in previous_visible.get(group_key, ())
-                    if allowed_ids is None or dev_id in allowed_ids
+                    if allow_filter is None or dev_id in allow_filter
                 ]
 
-            visible_ids = tuple(sorted(dict.fromkeys(base_ids)))
+            visibility_candidates: list[str] = list(base_ids)
+            if normalized_allowed:
+                visibility_candidates.extend(normalized_allowed)
+
+            visible_ids = tuple(sorted(dict.fromkeys(visibility_candidates)))
             enabled_ids = tuple(
                 sorted(
                     dev_id
