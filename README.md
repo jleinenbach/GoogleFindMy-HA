@@ -191,7 +191,7 @@ To contribute, please:
 1. Fork the repository
 2. Create a feature branch
 3. Install the development dependencies with `python -m pip install -r requirements-dev.txt`
-4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes
+4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes. If the CLI entry points are unavailable, use the `python -m` fallbacks from the [module invocation primer](AGENTS.md#module-invocation-primer) to run the same commands reliably.
 5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments).
 6. When running pytest (either through the helper script or directly) fix any failures and address every `DeprecationWarning` you encounter—rerun with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings.
 7. Test thoroughly with your Find My devices
