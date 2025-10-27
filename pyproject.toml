@@ -71,6 +71,7 @@ module = [
     "custom_components.googlefindmy.chrome_driver",
     "custom_components.googlefindmy.const",
     "custom_components.googlefindmy.device_tracker",
+    "custom_components.googlefindmy.discovery",
     "custom_components.googlefindmy.diagnostics",
     "custom_components.googlefindmy.entity",
     "custom_components.googlefindmy.example_data_provider",
@@ -105,7 +106,6 @@ module = [
     "custom_components.googlefindmy.__init__",
     "custom_components.googlefindmy.config_flow",
     "custom_components.googlefindmy.coordinator",
-    "custom_components.googlefindmy.discovery",
 ]
 ignore_errors = true
 
