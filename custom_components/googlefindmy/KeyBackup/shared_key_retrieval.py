@@ -280,9 +280,12 @@ async def _get_or_generate_shared_key_hex(
             return legacy_user_key
 
     # Generate fresh and persist
-    generated = await cache.get_or_set(
+    async def _generate_shared_key_hex() -> str:
+        return await _retrieve_shared_key_hex(cache=cache)
+
+    generated: str = await cache.get_or_set(
         _CACHE_KEY_BASE,
-        lambda: _retrieve_shared_key_hex(cache=cache),
+        _generate_shared_key_hex,
     )
 
     if not isinstance(generated, str):

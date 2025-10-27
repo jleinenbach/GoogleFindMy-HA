@@ -33,7 +33,7 @@ import base64
 import logging
 import re
 from binascii import Error as BinasciiError, unhexlify
-from typing import Any
+from typing import Any, TypeVar
 from collections.abc import Awaitable, Callable
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -109,7 +109,12 @@ def _try_base64_like(s: str) -> bytes:
         return base64.b64decode(v_padded)
 
 
-async def _run_in_executor(func, *args):
+_ExecutorReturn = TypeVar("_ExecutorReturn")
+
+
+async def _run_in_executor(
+    func: Callable[..., _ExecutorReturn], *args: object
+) -> _ExecutorReturn:
     """Run a blocking callable in a thread executor."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, func, *args)
@@ -157,12 +162,14 @@ async def _retrieve_owner_key(
 
     # 2) Shared key (allow async getter injection)
     if shared_key_getter is not None:
-        shared_key: Any = await shared_key_getter()
+        shared_key_candidate = await shared_key_getter()
     else:
-        shared_key = await async_get_shared_key(cache=cache)
+        shared_key_candidate = await async_get_shared_key(cache=cache)
 
-    if not isinstance(shared_key, (bytes, bytearray)) or not shared_key:
+    if not isinstance(shared_key_candidate, (bytes, bytearray)) or not shared_key_candidate:
         raise RuntimeError("Shared key is missing or empty; cannot decrypt owner key")
+
+    shared_key = bytes(shared_key_candidate)
 
     # 3) Guards for presence and non-empty encrypted owner key
     metadata = getattr(eid_info, "encryptedOwnerKeyAndMetadata", None)
@@ -179,13 +186,15 @@ async def _retrieve_owner_key(
         )
 
     # 4) Crypto is CPU-bound -> run in executor
-    owner_key: Any = await _run_in_executor(
+    owner_key_candidate = await _run_in_executor(
         decrypt_owner_key, shared_key, encrypted_owner_key
     )
     owner_key_version = getattr(metadata, "ownerKeyVersion", None)
 
-    if not isinstance(owner_key, (bytes, bytearray)) or len(owner_key) == 0:
+    if not isinstance(owner_key_candidate, (bytes, bytearray)) or len(owner_key_candidate) == 0:
         raise RuntimeError("Decrypted owner_key is empty or invalid type")
+
+    owner_key = bytes(owner_key_candidate)
 
     _LOGGER.info(
         "Retrieved owner key (version=%s, len=%s) for user=%s",
@@ -194,7 +203,7 @@ async def _retrieve_owner_key(
         username,
     )
 
-    return bytes(owner_key).hex()
+    return owner_key.hex()
 
 
 async def _get_or_generate_user_owner_key_hex(
@@ -274,12 +283,13 @@ async def async_get_owner_key(
         raise ValueError("TokenCache instance is required for multi-account safety.")
 
     # Resolve username (prefer entry-scoped cache).
-    if username:
+    user: str | None
+    if isinstance(username, str) and username:
         user = username
     else:
-        val = await cache.get(username_string)
-        user = str(val) if isinstance(val, str) and val else None
-        if not user:
+        cached_value = await cache.get(username_string)
+        user = cached_value if isinstance(cached_value, str) and cached_value else None
+        if user is None:
             user = await async_get_username(cache=cache)
 
     if not isinstance(user, str) or not user:
