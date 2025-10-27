@@ -27,7 +27,7 @@ from custom_components.googlefindmy.SpotApi.CreateBleDevice.util import hours_to
 from custom_components.googlefindmy.SpotApi.spot_request import spot_request
 
 
-def refresh_custom_trackers(device_list: DevicesList):
+def refresh_custom_trackers(device_list: DevicesList) -> None:
     request = UploadPrecomputedPublicKeyIdsRequest()
     needs_upload = False
 
@@ -85,7 +85,7 @@ def get_next_eids(
     eik: bytes, pair_date: int, start_date: int, duration_seconds: int
 ) -> list[PublicKeyIdList.PublicKeyIdInfo]:
     duration_seconds = int(duration_seconds)
-    public_key_id_list = []
+    public_key_id_list: list[PublicKeyIdList.PublicKeyIdInfo] = []
 
     start_offset = start_date - pair_date
     current_time_offset = start_offset - (start_offset % ROTATION_PERIOD)
@@ -93,10 +93,10 @@ def get_next_eids(
     static_eid = generate_eid(eik, 0)
 
     while current_time_offset <= start_offset + duration_seconds:
-        time = pair_date + current_time_offset
+        timestamp = pair_date + current_time_offset
 
         info = PublicKeyIdList.PublicKeyIdInfo()
-        info.timestamp.seconds = time
+        info.timestamp.seconds = timestamp
         info.publicKeyId.truncatedEid = static_eid[:10]
 
         public_key_id_list.append(info)
