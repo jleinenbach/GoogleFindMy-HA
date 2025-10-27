@@ -297,12 +297,19 @@ def _stub_homeassistant() -> None:
         def __init__(self, data=None):
             self.data = data or {}
 
+    class Event(SimpleNamespace):
+        """Minimal Event stub carrying type and data payload."""
+
+        def __init__(self, event_type: str, data: Mapping[str, Any] | None = None) -> None:
+            super().__init__(event_type=event_type, data=data or {})
+
     class HomeAssistant:  # minimal HomeAssistant placeholder
         state = CoreState.running
 
     core_module.CoreState = CoreState
     core_module.HomeAssistant = HomeAssistant
     core_module.ServiceCall = ServiceCall
+    core_module.Event = Event
     core_module.callback = lambda func: func
     sys.modules["homeassistant.core"] = core_module
 

@@ -850,6 +850,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 allowed_ids = {
                     str(item) for item in raw_allowed if isinstance(item, str) and item
                 }
+                if not allowed_ids:
+                    allowed_ids = None
 
             if device_index:
                 base_ids = [
