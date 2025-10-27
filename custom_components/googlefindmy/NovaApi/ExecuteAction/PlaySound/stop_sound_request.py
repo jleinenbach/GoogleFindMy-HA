@@ -101,9 +101,7 @@ async def async_submit_stop_sound_request(
     if cache is None:
         raise MissingTokenCacheError()
 
-    cache_ref: TokenCache = cache
-
-    resolved_namespace = namespace or getattr(cache_ref, "entry_id", None)
+    resolved_namespace = namespace or getattr(cache, "entry_id", None)
 
     ns_get = cache_get
     ns_set = cache_set
@@ -114,21 +112,21 @@ async def async_submit_stop_sound_request(
         if ns_get is None:
 
             async def _ns_get(key: str) -> Any:
-                return await cache_ref.async_get_cached_value(f"{ns_prefix}{key}")
+                return await cache.async_get_cached_value(f"{ns_prefix}{key}")
 
             ns_get = _ns_get
 
         if ns_set is None:
 
             async def _ns_set(key: str, value: Any) -> None:
-                await cache_ref.async_set_cached_value(f"{ns_prefix}{key}", value)
+                await cache.async_set_cached_value(f"{ns_prefix}{key}", value)
 
             ns_set = _ns_set
     else:
         if ns_get is None:
-            ns_get = cache_ref.async_get_cached_value
+            ns_get = cache.async_get_cached_value
         if ns_set is None:
-            ns_set = cache_ref.async_set_cached_value
+            ns_set = cache.async_set_cached_value
 
     try:
         return await async_nova_request(
@@ -141,7 +139,7 @@ async def async_submit_stop_sound_request(
             cache_set=ns_set,
             refresh_override=refresh_override,
             namespace=resolved_namespace,
-            cache=cache_ref,
+            cache=cache,
         )
     except asyncio.CancelledError:
         raise
