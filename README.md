@@ -203,7 +203,12 @@ and (optionally) generate a `pip.conf` that points at an internal PyPI mirror.
 
 The generated artifacts remain in `.truststore/` so developers can refresh
 them whenever certificates rotate without committing secrets to version
-control.
+control. The helper always creates this directory in the repository root, and
+the `.gitignore` entry ensures the resulting bundle, optional `pip.conf`, and
+any exported environment snippets never land in commits. It is safe to delete
+the folder between runs; a subsequent invocation of
+`script/bootstrap_truststore.py` recreates it with the latest certificates and
+configuration.
 
 ### 401 Unauthorized responses
 - When Google's Nova endpoint returns 401, the integration now clears both the
