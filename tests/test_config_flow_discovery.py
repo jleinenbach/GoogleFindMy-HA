@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import types
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -41,7 +42,10 @@ def test_normalize_and_validate_discovery_payload() -> None:
     assert result.secrets_bundle is not None
 
 
-def test_async_step_discovery_new_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_async_step_discovery_new_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    record_flow_forms: Callable[[config_flow.ConfigFlow], list[str | None]],
+) -> None:
     """Discovery for a new account should prepare auth data and skip manual forms."""
 
     async def _fake_pick(
@@ -73,6 +77,8 @@ def test_async_step_discovery_new_entry(monkeypatch: pytest.MonkeyPatch) -> None
         flow.unique_id = None  # type: ignore[attr-defined]
         flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
 
+        recorded_forms = record_flow_forms(flow)
+
         async def _set_unique_id(
             value: str, *, raise_on_progress: bool = False
         ) -> None:
@@ -90,23 +96,32 @@ def test_async_step_discovery_new_entry(monkeypatch: pytest.MonkeyPatch) -> None
         result = await flow.async_step_discovery(payload)
         if inspect.isawaitable(result):
             result = await result
+        assert result["type"] == "form"
+        assert result.get("step_id") == "discovery"
+        assert flow.context.get("confirm_only") is True
+        placeholders = flow.context.get("title_placeholders", {})
+        assert placeholders.get("email") == "new.user@example.com"
+
+        result = await flow.async_step_discovery({})
+        if inspect.isawaitable(result):
+            result = await result
         assert flow._auth_data.get(CONF_GOOGLE_EMAIL) == "new.user@example.com"  # type: ignore[attr-defined]
         assert flow._auth_data.get(DATA_AUTH_METHOD) == config_flow._AUTH_METHOD_SECRETS  # type: ignore[attr-defined]
         assert flow._auth_data.get(DATA_AAS_TOKEN) == "aas_et/VALID_TOKEN_VALUE"  # type: ignore[attr-defined]
         assert flow._auth_data.get(DATA_SECRET_BUNDLE) == {  # type: ignore[attr-defined]
             "aas_token": "aas_et/VALID_TOKEN_VALUE"
         }
-        assert flow.context.get("confirm_only") is True
-        placeholders = flow.context.get("title_placeholders", {})
-        assert placeholders.get("email") == "new.user@example.com"
-        return result
+        return result, recorded_forms
 
-    result = asyncio.run(_exercise())
+    result, recorded_forms = asyncio.run(_exercise())
     assert result["type"] == "form"
+    assert result.get("step_id") == "device_selection"
+    assert recorded_forms == ["discovery", "device_selection"]
 
 
 def test_async_step_discovery_existing_entry_updates(
     monkeypatch: pytest.MonkeyPatch,
+    record_flow_forms: Callable[[config_flow.ConfigFlow], list[str | None]],
 ) -> None:
     """Discovery for an existing entry should update data via abort helper."""
 
@@ -168,11 +183,31 @@ def test_async_step_discovery_existing_entry_updates(
         assert updates["data"][CONF_OAUTH_TOKEN] == "aas_et/NEW_TOKEN_VALUE"
         assert updates["data"].get(DATA_SECRET_BUNDLE) is None
 
-        flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
+        abort_calls: list[dict[str, Any] | None] = []
+        recorded_forms = record_flow_forms(flow)
+
+        def _abort_helper(*, updates: dict[str, Any] | None = None, **_: Any) -> None:
+            abort_calls.append(updates)
+
+        flow._abort_if_unique_id_configured = _abort_helper  # type: ignore[attr-defined]
+
         result = await flow.async_step_discovery(payload)
         if inspect.isawaitable(result):
             result = await result
+        assert result["type"] == "form"
+        assert result.get("step_id") == "discovery"
+        assert not abort_calls, "abort helper should not run before confirmation"
+
+        result = await flow.async_step_discovery({})
+        if inspect.isawaitable(result):
+            result = await result
         assert flow._auth_data.get(CONF_OAUTH_TOKEN) == "aas_et/NEW_TOKEN_VALUE"  # type: ignore[attr-defined]
+        assert len(abort_calls) == 1
+        payload = abort_calls[0]
+        assert payload is not None
+        data_updates = payload.get("data", {}) if isinstance(payload, dict) else {}
+        assert data_updates.get(CONF_OAUTH_TOKEN) == "aas_et/NEW_TOKEN_VALUE"
+        assert recorded_forms == ["discovery"]
         return result
 
     result = asyncio.run(_exercise())

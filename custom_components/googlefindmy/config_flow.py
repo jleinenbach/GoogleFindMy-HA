@@ -658,6 +658,23 @@ class CloudDiscoveryData:
     title: str | None = None
 
 
+def _discovery_payload_equivalent(
+    first: CloudDiscoveryData, second: CloudDiscoveryData
+) -> bool:
+    """Return True when two normalized discovery payloads are equivalent."""
+
+    if first.unique_id != second.unique_id or first.email != second.email:
+        return False
+
+    if first.candidates != second.candidates:
+        return False
+
+    if first.secrets_bundle is None or second.secrets_bundle is None:
+        return first.secrets_bundle is None and second.secrets_bundle is None
+
+    return dict(first.secrets_bundle) == dict(second.secrets_bundle)
+
+
 def _normalize_and_validate_discovery_payload(
     payload: Mapping[str, Any] | None,
 ) -> CloudDiscoveryData:
@@ -826,6 +843,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._auth_data: dict[str, Any] = {}
         self._available_devices: list[tuple[str, str]] = []
         self._subentry_key_core_tracking = "core_tracking"
+        self._pending_discovery_payload: CloudDiscoveryData | None = None
+        self._pending_discovery_updates: dict[str, Any] | None = None
+        self._pending_discovery_existing_entry: ConfigEntry | None = None
+        self._discovery_confirm_pending = False
+
+    def _clear_discovery_confirmation_state(self) -> None:
+        """Reset cached discovery confirmation state."""
+
+        self._discovery_confirm_pending = False
+        self._pending_discovery_payload = None
+        self._pending_discovery_updates = None
+        self._pending_discovery_existing_entry = None
+        context = getattr(self, "context", None)
+        if isinstance(context, dict):
+            context.pop("confirm_only", None)
 
     @staticmethod
     @callback
@@ -837,6 +869,38 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, discovery_info: Mapping[str, Any] | None
     ) -> FlowResult:
         """Handle cloud-triggered discovery payloads."""
+
+        if self._discovery_confirm_pending:
+            pending_payload = self._pending_discovery_payload
+            is_submission = not discovery_info
+            if (
+                not is_submission
+                and isinstance(discovery_info, Mapping)
+                and pending_payload is not None
+            ):
+                try:
+                    normalized_candidate = _normalize_and_validate_discovery_payload(
+                        discovery_info
+                    )
+                except Exception:  # noqa: BLE001
+                    is_submission = False
+                else:
+                    is_submission = _discovery_payload_equivalent(
+                        normalized_candidate, pending_payload
+                    )
+
+            if not is_submission:
+                self._clear_discovery_confirmation_state()
+            else:
+                updates = self._pending_discovery_updates
+                existing_entry = self._pending_discovery_existing_entry
+                self._clear_discovery_confirmation_state()
+
+                if existing_entry and updates is not None:
+                    self._abort_if_unique_id_configured(updates=updates)
+                    return await self.async_abort(reason="already_configured")
+
+                return await self.async_step_device_selection()
 
         try:
             normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
@@ -866,15 +930,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             return await self.async_abort(reason=reason)
 
-        if existing_entry and updates is not None:
-            self._abort_if_unique_id_configured(updates=updates)
-            return await self.async_abort(reason="already_configured")
-
         placeholders = dict(self.context.get("title_placeholders", {}) or {})
         placeholders.setdefault("email", normalized.email)
         self.context["title_placeholders"] = placeholders
+        self._pending_discovery_payload = normalized
+        self._pending_discovery_updates = updates
+        self._pending_discovery_existing_entry = existing_entry
+        self._discovery_confirm_pending = True
         self._set_confirm_only()
-        return await self.async_step_device_selection()
+        return self.async_show_form(
+            step_id="discovery",
+            description_placeholders=placeholders,
+        )
 
     async def async_step_discovery_update_info(
         self, discovery_info: Mapping[str, Any] | None
