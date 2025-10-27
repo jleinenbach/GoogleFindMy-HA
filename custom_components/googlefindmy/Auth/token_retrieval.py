@@ -48,6 +48,12 @@ _ANDROID_ID: int = 0x38918A453D071993
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 
 
+def _format_android_id(android_id: int) -> str:
+    """Return a canonical hex string for an Android ID."""
+
+    return f"0x{android_id:016x}"
+
+
 def _extract_android_id_from_credentials(fcm_creds: Any) -> int | None:
     """Parse the android_id from an FCM credential bundle."""
 
@@ -86,8 +92,9 @@ async def _resolve_android_id(*, cache: TokenCache) -> int:
     android_id = _extract_android_id_from_credentials(fcm_creds)
     if android_id is None:
         _LOGGER.warning(
-            "FCM credentials missing android_id; falling back to static identifier. "
-            "Generate fresh secrets.json if authentication fails."
+            "FCM credentials missing android_id; falling back to static identifier %s. "
+            "Generate fresh secrets.json if authentication fails.",
+            _format_android_id(_ANDROID_ID),
         )
         return _ANDROID_ID
 
@@ -102,7 +109,7 @@ def _perform_oauth_sync(
     *,
     android_id: int = _ANDROID_ID,
 ) -> str:
-    """Blocking gpsoauth.perform_oauth call, factored for reuse.
+    f"""Blocking gpsoauth.perform_oauth call, factored for reuse.
 
     Args:
         username: Google account email (for request context).
@@ -110,6 +117,7 @@ def _perform_oauth_sync(
         scope: OAuth scope suffix (e.g., "android_device_manager").
         play_services: If True, use the Play Services app id; else ADM app id.
         android_id: Device-specific Android ID used for the OAuth exchange.
+            Defaults to {_format_android_id(_ANDROID_ID)}.
 
     Returns:
         The OAuth access token (string) for the requested scope.
@@ -121,13 +129,12 @@ def _perform_oauth_sync(
     request_app = (
         "com.google.android.gms" if play_services else "com.google.android.apps.adm"
     )
-    android_id_str = str(android_id)
 
     try:
         auth_response: dict[str, Any] = gpsoauth.perform_oauth(
             username,
             aas_token,
-            android_id_str,
+            android_id,
             service="oauth2:https://www.googleapis.com/auth/" + scope,
             app=request_app,
             client_sig=_CLIENT_SIG,
