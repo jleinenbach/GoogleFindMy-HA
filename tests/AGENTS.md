@@ -52,3 +52,12 @@ closely enough for regression coverage.
 Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
+
+## Device registry expectations
+
+The coordinator device-registry tests exercise Home Assistant's 2025.10
+`via_device` tuple support. When extending the `_FakeDeviceRegistry`
+implementation or adding new tests in `tests/test_coordinator_device_registry.py`,
+ensure the helper continues to accept both the legacy `via_device_id` keyword
+and the newer tuple form, recording the tuple in created-device metadata so the
+tests can assert the parent linkage accurately.
