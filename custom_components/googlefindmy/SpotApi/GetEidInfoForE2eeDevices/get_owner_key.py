@@ -3,17 +3,16 @@
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
-"""
-Owner key retrieval and normalization for Google Find My Device (async-first, entry-scoped).
+"""Owner key retrieval and normalization for Google Find My Device.
 
-This module provides an asynchronous API to obtain the per-user *owner key* that is
-required to decrypt location payloads.
+This module provides an asynchronous API to obtain the per-user *owner key*
+that is required to decrypt location payloads.
 
 Multi-account design (entry-scoped):
 - Callers **must** provide the entry-scoped TokenCache. All reads/writes are
   performed strictly against that cache; global facades have been removed.
-- Keys are stored per user under `owner_key_<username>`. A legacy non-scoped
-  `owner_key` is migrated *within the same cache scope* (if present).
+- Keys are stored per user under ``owner_key_<username>``. A legacy non-scoped
+  ``owner_key`` is migrated *within the same cache scope* (if present).
 - Username resolution uses the same entry-scoped cache.
 
 Normalization & validation:
@@ -22,19 +21,18 @@ Normalization & validation:
 - Potentially blocking calls (network/crypto/CPU-bound) are offloaded to an executor.
 
 Injection points (optional):
-- `eid_info_getter`: async callable that returns EID info (for tests/flows).
-- `shared_key_getter`: async callable that returns the shared key bytes.
+- ``eid_info_getter``: async callable that returns EID info (for tests/flows).
+- ``shared_key_getter``: async callable that returns the shared key bytes.
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 import re
 from binascii import Error as BinasciiError, unhexlify
-from typing import Any, TypeVar
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.Auth.username_provider import (
@@ -51,6 +49,7 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_inf
     SpotApiEmptyResponseError,
     async_get_eid_info,
 )
+from custom_components.googlefindmy.typing_utils import run_in_executor as _run_in_executor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -108,17 +107,6 @@ def _try_base64_like(s: str) -> bytes:
     except (ValueError, TypeError):
         decoded = base64.b64decode(v_padded)
     return bytes(decoded)
-
-
-_ExecutorReturn = TypeVar("_ExecutorReturn")
-
-
-async def _run_in_executor(
-    func: Callable[..., _ExecutorReturn], *args: object
-) -> _ExecutorReturn:
-    """Run a blocking callable in a thread executor."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, func, *args)
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +341,7 @@ async def async_get_owner_key(
 
 
 def get_owner_key() -> bytes:  # pragma: no cover - kept for import compatibility
-    """Legacy sync facade — intentionally unsupported inside Home Assistant.
+    """Legacy sync facade - intentionally unsupported inside Home Assistant.
 
     This function exists only to preserve import compatibility for external/CLI scripts.
     It **must not** be used from within the HA event loop and intentionally raises to

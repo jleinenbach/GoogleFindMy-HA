@@ -28,17 +28,16 @@ Retrieval strategy (when not cached):
 """
 
 from __future__ import annotations
-
-import asyncio
 import base64
 import json
 import logging
 import re
 from binascii import Error as BinasciiError, unhexlify
-from collections.abc import Callable
-from typing import Any, TypeVar
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.typing_utils import run_in_executor as _run_in_executor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,18 +101,6 @@ def _decode_base64_like_32(s: str) -> bytes:
             f"shared_key (base64) has invalid length {len(b)} bytes (expected 32)"
         )
     return b
-
-
-_ExecutorReturn = TypeVar("_ExecutorReturn")
-
-
-async def _run_in_executor(
-    func: Callable[..., _ExecutorReturn], *args: object
-) -> _ExecutorReturn:
-    """Run a blocking callable in a thread pool."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, func, *args)
-
 
 # -----------------------------------------------------------------------------
 # Retrieval strategies (cache-aware)
@@ -280,9 +267,17 @@ async def _get_or_generate_shared_key_hex(
             return legacy_user_key
 
     # Generate fresh and persist
+    async def _generate() -> str:
+        return await _retrieve_shared_key_hex(cache=cache)
+
+    generator = cast(
+        Callable[[], Awaitable[str] | str],
+        _generate,
+    )
+
     generated: str = await cache.get_or_set(
         _CACHE_KEY_BASE,
-        lambda: _retrieve_shared_key_hex(cache=cache),
+        generator,
     )
 
     if not isinstance(generated, str):
