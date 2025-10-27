@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from homeassistant.exceptions import HomeAssistantError
+from typing import TYPE_CHECKING
+
+from homeassistant.exceptions import HomeAssistantError as HassHomeAssistantError
 
 from .const import DOMAIN
 
@@ -19,6 +21,17 @@ _MISSING_NAMESPACE = (
     "Namespace missing. Pass the entry-specific namespace or ConfigEntry ID "
     "to keep cached metadata isolated."
 )
+
+
+if TYPE_CHECKING:
+
+    class HomeAssistantError(Exception):
+        """Type checker placeholder matching the Home Assistant error base."""
+
+        ...
+
+else:
+    HomeAssistantError = HassHomeAssistantError
 
 
 class MissingTokenCacheError(HomeAssistantError):

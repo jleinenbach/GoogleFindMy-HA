@@ -414,7 +414,7 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 
             update_coordinator_module.UpdateFailed = _UpdateFailed
 
-        integration = importlib.import_module("custom_components.googlefindmy.__init__")
+        integration = importlib.import_module("custom_components.googlefindmy")
         config_entries_module = importlib.import_module("homeassistant.config_entries")
         state_cls = config_entries_module.ConfigEntryState
         if not hasattr(state_cls, "SETUP_IN_PROGRESS"):
@@ -604,7 +604,7 @@ def test_setup_entry_reactivates_disabled_button_entities(
     asyncio.set_event_loop(loop)
 
     try:
-        integration = importlib.import_module("custom_components.googlefindmy.__init__")
+        integration = importlib.import_module("custom_components.googlefindmy")
 
         entry = _StubConfigEntry()
         hass = _StubHass(entry, loop)
@@ -744,7 +744,7 @@ def test_setup_entry_failure_does_not_register_cache(
     asyncio.set_event_loop(loop)
 
     try:
-        integration = importlib.import_module("custom_components.googlefindmy.__init__")
+        integration = importlib.import_module("custom_components.googlefindmy")
 
         entry = _StubConfigEntry()
         hass = _StubHass(entry, loop)
@@ -820,7 +820,7 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
     asyncio.set_event_loop(loop)
 
     try:
-        integration = importlib.import_module("custom_components.googlefindmy.__init__")
+        integration = importlib.import_module("custom_components.googlefindmy")
 
         existing_entry = _StubConfigEntry()
         existing_entry.entry_id = "entry-existing"

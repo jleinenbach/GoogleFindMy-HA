@@ -28,7 +28,7 @@ def test_async_save_secrets_data_preserves_gcm_identifiers() -> None:
         loader_module.async_get_integration = lambda *_args, **_kwargs: None
         sys.modules["homeassistant.loader"] = loader_module
 
-    integration_init = import_module("custom_components.googlefindmy.__init__")
+    integration_init = import_module("custom_components.googlefindmy")
 
     cache = _CapturingCache()
     secrets_bundle = {

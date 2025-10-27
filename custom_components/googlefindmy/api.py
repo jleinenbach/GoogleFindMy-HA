@@ -27,16 +27,15 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from typing import (
-    Any,
-    Protocol,
-    runtime_checkable,
-)
+from typing import Any, Protocol, TYPE_CHECKING, cast, runtime_checkable
 from collections.abc import Awaitable, Callable
 
 from aiohttp import ClientError, ClientSession
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
+
+if TYPE_CHECKING:
+    from .Auth.token_cache import TokenCache
 
 from .Auth.username_provider import username_string
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -184,8 +183,8 @@ def _infer_can_ring_slot(device: dict[str, Any]) -> bool | None:
             lowered = {str(x).lower() for x in caps}
             return ("ring" in lowered) or ("play_sound" in lowered)
         if isinstance(caps, dict):
-            lowered = {str(k).lower(): v for k, v in caps.items()}
-            return bool(lowered.get("ring")) or bool(lowered.get("play_sound"))
+            lowered_map = {str(k).lower(): v for k, v in caps.items()}
+            return bool(lowered_map.get("ring")) or bool(lowered_map.get("play_sound"))
     except Exception:
         return None
     return None
@@ -424,18 +423,24 @@ class GoogleFindMyAPI:
         """Return the event loop the sync helpers should execute on."""
 
         if self._session is not None:
-            loop = getattr(self._session, "_loop", None) or getattr(
-                self._session, "loop", None
+            session_loop = cast(
+                asyncio.AbstractEventLoop | None,
+                getattr(self._session, "_loop", None),
             )
-            if loop is None:
+            if session_loop is None:
+                session_loop = cast(
+                    asyncio.AbstractEventLoop | None,
+                    getattr(self._session, "loop", None),
+                )
+            if session_loop is None:
                 raise RuntimeError(
                     "Unable to determine the event loop for the provided session"
                 )
-            if loop.is_closed():
+            if session_loop.is_closed():
                 raise RuntimeError(
                     "The event loop bound to the provided session is closed"
                 )
-            return loop
+            return session_loop
 
         loop = self._sync_loop
         if loop is None or loop.is_closed():
@@ -520,7 +525,7 @@ class GoogleFindMyAPI:
                     existing["name"] = device_name
                 continue
 
-            item = {
+            item: dict[str, Any] = {
                 "name": device_name,
                 "id": canonical_id,
                 "device_id": canonical_id,
@@ -738,8 +743,8 @@ class GoogleFindMyAPI:
             sess = self._session
 
             # Provide defaults for TTL metadata I/O if the caller didn't override.
-            cg = cache_get or self._cache.async_get_cached_value  # type: ignore[attr-defined]
-            cs = cache_set or self._cache.async_set_cached_value  # type: ignore[attr-defined]
+            cg = cache_get or self._cache.async_get_cached_value
+            cs = cache_set or self._cache.async_set_cached_value
 
             # Forward flow/local knobs to the Nova ListDevices helper. If the installed
             # helper is older and does not support these kwargs, gracefully fall back.
@@ -747,7 +752,7 @@ class GoogleFindMyAPI:
                 result_hex = await async_request_device_list(
                     username,
                     session=sess,
-                    cache=self._cache,
+                    cache=cast("TokenCache | None", self._cache),
                     token=token,
                     cache_get=cg,
                     cache_set=cs,
@@ -756,15 +761,14 @@ class GoogleFindMyAPI:
                 )
             except TypeError:
                 # Older helper signature (no pass-through); best-effort fallback matrix.
+                legacy_request = cast(Any, async_request_device_list)
                 if sess is not None:
                     try:
-                        result_hex = await async_request_device_list(
-                            username, session=sess
-                        )  # type: ignore[misc]
+                        result_hex = await legacy_request(username, session=sess)
                     except TypeError:
-                        result_hex = await async_request_device_list(username)  # type: ignore[misc]
+                        result_hex = await legacy_request(username)
                 else:
-                    result_hex = await async_request_device_list(username)  # type: ignore[misc]
+                    result_hex = await legacy_request(username)
 
             return self._process_device_list_response(result_hex)
 
@@ -854,7 +858,7 @@ class GoogleFindMyAPI:
         Returns:
             A list of device dictionaries.
         """
-        return self._run_sync_helper(
+        result = self._run_sync_helper(
             self.async_get_basic_device_list,
             guard_message=(
                 "get_basic_device_list() called inside an active event loop; use async_get_basic_device_list()."
@@ -862,6 +866,7 @@ class GoogleFindMyAPI:
             context="get basic device list",
             default=[],
         )
+        return cast(list[dict[str, Any]], result)
 
     def get_devices(self) -> list[dict[str, Any]]:
         """Return devices with basic info only; no up-front location fetch (sync wrapper).
@@ -909,7 +914,7 @@ class GoogleFindMyAPI:
                     device_name,
                     session=self._session,
                     namespace=self._namespace(),
-                    cache=self._cache,
+                    cache=cast("TokenCache | None", self._cache),
                     contributor_mode=self._contributor_mode,
                     last_mode_switch=self._contributor_mode_switch_epoch,
                 )
@@ -919,7 +924,7 @@ class GoogleFindMyAPI:
                         device_id,
                         device_name,
                         session=self._session,
-                        cache=self._cache,
+                        cache=cast("TokenCache | None", self._cache),
                         contributor_mode=self._contributor_mode,
                         last_mode_switch=self._contributor_mode_switch_epoch,
                     )
@@ -929,10 +934,11 @@ class GoogleFindMyAPI:
                             device_id,
                             device_name,
                             session=self._session,
-                            cache=self._cache,
+                            cache=cast("TokenCache | None", self._cache),
                         )
                     except TypeError:
-                        records = await get_location_data_for_device(
+                        legacy_location = cast(Any, get_location_data_for_device)
+                        records = await legacy_location(
                             device_id, device_name, session=self._session
                         )
             best = self._select_best_location(records)
@@ -1031,7 +1037,7 @@ class GoogleFindMyAPI:
         Returns:
             A dictionary containing location data, or an empty dictionary on failure.
         """
-        return self._run_sync_helper(
+        result = self._run_sync_helper(
             lambda: self.async_get_device_location(device_id, device_name),
             guard_message=(
                 "get_device_location() called inside an active event loop; use async_get_device_location()."
@@ -1039,6 +1045,7 @@ class GoogleFindMyAPI:
             context=f"get location for {device_name} ({device_id})",
             default={},
         )
+        return cast(dict[str, Any], result)
 
     def locate_device(self, device_id: str) -> dict[str, Any]:
         """Compatibility sync entrypoint for location (uses sync wrapper).
@@ -1127,7 +1134,7 @@ class GoogleFindMyAPI:
         Returns:
             True if the command was sent successfully, False otherwise.
         """
-        return self._run_sync_helper(
+        result = self._run_sync_helper(
             lambda: self.async_play_sound(device_id),
             guard_message=(
                 "play_sound() called inside an active event loop; use async_play_sound()."
@@ -1135,6 +1142,7 @@ class GoogleFindMyAPI:
             context=f"play sound on {device_id}",
             default=False,
         )
+        return cast(bool, result)
 
     def stop_sound(self, device_id: str) -> bool:
         """Thin sync wrapper around async_stop_sound for non-HA contexts.
@@ -1145,7 +1153,7 @@ class GoogleFindMyAPI:
         Returns:
             True if the command was sent successfully, False otherwise.
         """
-        return self._run_sync_helper(
+        result = self._run_sync_helper(
             lambda: self.async_stop_sound(device_id),
             guard_message=(
                 "stop_sound() called inside an active event loop; use async_stop_sound()."
@@ -1153,6 +1161,7 @@ class GoogleFindMyAPI:
             context=f"stop sound on {device_id}",
             default=False,
         )
+        return cast(bool, result)
 
     # ---------- Play/Stop Sound (async; HA-first) ----------
     async def async_play_sound(self, device_id: str) -> bool:
@@ -1181,7 +1190,7 @@ class GoogleFindMyAPI:
                 token,
                 session=self._session,
                 namespace=self._namespace(),
-                cache=self._cache,
+                cache=cast("TokenCache | None", self._cache),
             )
             ok = result_hex is not None
             if ok:
@@ -1260,7 +1269,7 @@ class GoogleFindMyAPI:
                 token,
                 session=self._session,
                 namespace=self._namespace(),
-                cache=self._cache,
+                cache=cast("TokenCache | None", self._cache),
             )
             ok = result_hex is not None
             if ok:
@@ -1325,4 +1334,4 @@ if (
         if _attr in {"__dict__", "__weakref__", "__annotations__"}:
             continue
         setattr(_PREVIOUS_GOOGLEFINDMYAPI, _attr, _value)
-    GoogleFindMyAPI = _PREVIOUS_GOOGLEFINDMYAPI
+    GoogleFindMyAPI = cast("type[GoogleFindMyAPI]", _PREVIOUS_GOOGLEFINDMYAPI)  # type: ignore[misc]

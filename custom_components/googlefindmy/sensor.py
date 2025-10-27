@@ -19,14 +19,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.sensor import (
-    RestoreSensor,  # stores native_value
     SensorDeviceClass,
-    SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -37,6 +35,7 @@ from .const import (
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
 from .entity import GoogleFindMyDeviceEntity, GoogleFindMyEntity, resolve_coordinator
+from .ha_typing import RestoreSensor, SensorEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,17 +123,11 @@ async def async_setup_entry(
     known_ids: set[str] = set()
 
     # Options-first toggle for diagnostic counters (single source of truth)
-    try:
-        from . import _opt  # type: ignore
-
-        enable_stats = _opt(
-            entry, OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES
-        )
-    except Exception:
-        enable_stats = entry.options.get(
-            OPT_ENABLE_STATS_ENTITIES,
-            entry.data.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES),
-        )
+    enable_stats_raw = entry.options.get(
+        OPT_ENABLE_STATS_ENTITIES,
+        entry.data.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES),
+    )
+    enable_stats = bool(enable_stats_raw)
 
     if enable_stats:
         created_stats: list[str] = []
@@ -265,7 +258,12 @@ class GoogleFindMyStatsSensor(GoogleFindMyEntity, SensorEntity):
         stats = getattr(self.coordinator, "stats", None)
         if stats is None:
             return None
-        return stats.get(self._stat_key, 0)
+        raw = stats.get(self._stat_key)
+        if isinstance(raw, bool):
+            return int(raw)
+        if isinstance(raw, (int, float)):
+            return int(raw)
+        return None
 
     @property
     def available(self) -> bool:
@@ -502,7 +500,7 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
         self.async_write_ha_state()
 
     @property
-    def device_info(self):  # type: ignore[override]
+    def device_info(self) -> DeviceInfo:
         """Expose DeviceInfo using the shared entity helper."""
 
         return super().device_info

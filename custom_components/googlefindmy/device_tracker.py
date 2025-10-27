@@ -22,20 +22,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.device_tracker import SourceType, TrackerEntity
+from homeassistant.components.device_tracker import SourceType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_GPS_ACCURACY,
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
-
+from .const import OPT_MIN_ACCURACY_THRESHOLD
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
-from .entity import GoogleFindMyDeviceEntity, resolve_coordinator
+from .entity import GoogleFindMyDeviceEntity, resolve_coordinator, _entry_option
+from .ha_typing import RestoreEntity, TrackerEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -255,11 +255,14 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
         dev_id = self.device_id
         try:
-            return self.coordinator.get_device_location_data_for_subentry(
+            data = self.coordinator.get_device_location_data_for_subentry(
                 self.subentry_key, dev_id
             )
         except (AttributeError, TypeError):
             return None
+        if isinstance(data, dict):
+            return data
+        return None
 
     @property
     def available(self) -> bool:
@@ -358,7 +361,8 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         - Includes source labeling (`source_label`/`source_rank`) for transparency.
         """
         row = self._current_row()
-        return _as_ha_attributes(row) or {}
+        attributes = _as_ha_attributes(row)
+        return attributes if attributes is not None else {}
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -384,13 +388,15 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             self._attr_name = desired_display
 
         config_entry = getattr(self.coordinator, "config_entry", None)
-        if config_entry:
-            # Helper defined in __init__.py for options-first reading.
-            from . import _opt
-
-            min_accuracy_threshold = _opt(config_entry, "min_accuracy_threshold", 0)
-        else:
-            min_accuracy_threshold = 0  # fallback if entry is not available
+        min_accuracy_raw = _entry_option(
+            config_entry,
+            OPT_MIN_ACCURACY_THRESHOLD,
+            0,
+        )
+        try:
+            min_accuracy_threshold = float(min_accuracy_raw)
+        except (TypeError, ValueError):
+            min_accuracy_threshold = 0.0
 
         device_data = self._current_row()
         if not device_data:

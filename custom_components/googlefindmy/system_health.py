@@ -4,20 +4,45 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Collection
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-try:  # pragma: no cover - exercised in integration runtime, patched in tests
-    from homeassistant.components import system_health as system_health_component
-except ImportError:  # pragma: no cover - fallback for stripped test environments
-    system_health_component = None  # type: ignore[assignment]
-
 from .const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN, INTEGRATION_VERSION
-from .coordinator import format_epoch_utc
+
+# Module-level override for tests (patched by unit tests to capture registrations).
+system_health_component: Any | None = None
+
+
+def _normalize_epoch_seconds(value: Any) -> float | None:
+    """Return epoch seconds as float; accept seconds or milliseconds."""
+
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(timestamp):
+        return None
+    if timestamp > 1_000_000_000_000:
+        timestamp = timestamp / 1000.0
+    return timestamp
+
+
+def _format_epoch_utc(value: Any) -> str | None:
+    """Return an ISO 8601 UTC timestamp for epoch values."""
+
+    timestamp = _normalize_epoch_seconds(value)
+    if timestamp is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return dt.isoformat().replace("+00:00", "Z")
 
 
 def _normalize_email(value: str | None) -> str:
@@ -127,7 +152,7 @@ def _get_fcm_snapshot(coordinator: Any) -> dict[str, Any] | None:
         data["state"] = state
     if reason is not None:
         data["reason"] = reason
-    changed_at_iso = format_epoch_utc(changed_at)
+    changed_at_iso = _format_epoch_utc(changed_at)
     if changed_at_iso is not None:
         data["changed_at"] = changed_at_iso
     return data
@@ -135,13 +160,27 @@ def _get_fcm_snapshot(coordinator: Any) -> dict[str, Any] | None:
 
 async def async_register(hass: HomeAssistant) -> None:
     """Register the system health info handler for this integration."""
-    component = system_health_component
-    if component is None:
-        component = getattr(getattr(hass, "components", None), "system_health", None)
-        if component is None or not hasattr(component, "async_register_info"):
-            raise RuntimeError("system_health component not available")
+    resolved_component = system_health_component
+    if resolved_component is None:
+        try:
+            from homeassistant.components import system_health as hass_system_health
+        except ImportError:
+            resolved_component = getattr(
+                getattr(hass, "components", None), "system_health", None
+            )
+            if resolved_component is None or not hasattr(
+                resolved_component, "async_register_info"
+            ):
+                raise RuntimeError("system_health component not available")
+        else:
+            resolved_component = hass_system_health
 
-    component.async_register_info(hass, DOMAIN, async_get_system_health_info)
+    if resolved_component is None or not hasattr(
+        resolved_component, "async_register_info"
+    ):
+        raise RuntimeError("system_health component not available")
+
+    resolved_component.async_register_info(hass, DOMAIN, async_get_system_health_info)
 
 
 def _entry_state(entry: ConfigEntry) -> str | None:
@@ -214,10 +253,11 @@ async def async_get_system_health_info(hass: HomeAssistant) -> dict[str, Any]:
         try:
             config_entries = list(manager.async_entries(DOMAIN))
         except TypeError:
+            fallback_entries = manager.async_entries()
             config_entries = [
                 entry
-                for entry in manager.async_entries()
-                if entry.domain == DOMAIN  # type: ignore[attr-defined]
+                for entry in fallback_entries
+                if getattr(entry, "domain", None) == DOMAIN
             ]
         except Exception:  # pragma: no cover - defensive guard
             config_entries = []

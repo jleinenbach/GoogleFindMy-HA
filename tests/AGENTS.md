@@ -4,6 +4,13 @@
 >
 > Applies to the entire `tests/` tree.
 
+## Package layout
+
+The test suite is a Python package (`tests/__init__.py`). Use
+package-relative imports (for example, `from tests.helpers import foo`)
+when sharing utilities across modules so mypy resolves the canonical
+module paths consistently.
+
 ## Home Assistant stubs overview
 
 The fixtures in `tests/conftest.py` provide lightweight stand-ins for key
@@ -41,4 +48,3 @@ closely enough for regression coverage.
 Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
-

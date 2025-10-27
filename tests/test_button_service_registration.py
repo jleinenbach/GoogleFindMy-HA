@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 import pytest
 
-from test_button_setup import _ensure_button_dependencies
+from .test_button_setup import _ensure_button_dependencies
 
 
 class _StubConfigEntry:
