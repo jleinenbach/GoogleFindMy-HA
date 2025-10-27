@@ -53,7 +53,8 @@ extend-exclude = [
 [tool.pytest.ini_options]
 addopts = ["-q"]
 testpaths = ["tests"]
-asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
 
 [tool.mypy]
 python_version = "3.12"

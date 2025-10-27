@@ -13,8 +13,9 @@ module paths consistently.
 
 ## Async tests
 
-`pytest-asyncio` ships with the repository and `pytest` is configured to
-run in [`asyncio_mode = "strict"`](../pyproject.toml). Prefer decorating
+`pytest-asyncio` ships with the repository and `pytest` keeps the event
+loop scoped per test via the
+[`asyncio_default_*_loop_scope`](../pyproject.toml) settings. Prefer decorating
 new coroutine tests with `@pytest.mark.asyncio` instead of wrapping them
 in `asyncio.run(...)`; this keeps event-loop handling centralized and
 avoids duplicated scaffolding in each test module.
