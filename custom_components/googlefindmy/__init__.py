@@ -412,9 +412,30 @@ def _strip_entry_namespace(entry_id: str, ident: str) -> str:
     return ident
 
 
+def _coerce_alias_iterable(value: Any) -> list[str] | None:
+    """Return a sanitized list of alias strings or ``None`` when unavailable."""
+
+    if isinstance(value, str):
+        candidate = value.strip()
+        return [candidate] if candidate else None
+
+    if isinstance(value, Iterable) and not isinstance(
+        value, (str, bytes, bytearray, Mapping)
+    ):
+        sanitized = [
+            alias.strip()
+            for alias in value
+            if isinstance(alias, str) and alias.strip()
+        ]
+        if sanitized:
+            return sanitized
+
+    return None
+
+
 def _dedupe_aliases(
     exclude: str | None,
-    *sources: Iterable[Any] | None,
+    *sources: Iterable[str] | None,
 ) -> list[str]:
     """Return a deduplicated alias list excluding the active name."""
 
@@ -448,14 +469,20 @@ def _sanitize_ignored_meta(device_id: str, meta: Mapping[str, Any]) -> dict[str,
     """Return sanitized metadata for ignored device bookkeeping."""
 
     raw_name = meta.get("name") if isinstance(meta, Mapping) else None
-    if isinstance(raw_name, str) and raw_name.strip():
-        name = raw_name.strip()
-    else:
-        name = device_id
+    name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else device_id
 
-    aliases = _dedupe_aliases(
-        name, meta.get("aliases") if isinstance(meta, Mapping) else None, [raw_name]
-    )
+    alias_sources: list[Iterable[str]] = []
+    if isinstance(meta, Mapping):
+        coerced_aliases = _coerce_alias_iterable(meta.get("aliases"))
+        if coerced_aliases:
+            alias_sources.append(coerced_aliases)
+
+    if isinstance(raw_name, str):
+        raw_name_aliases = _coerce_alias_iterable(raw_name)
+        if raw_name_aliases:
+            alias_sources.append(raw_name_aliases)
+
+    aliases = _dedupe_aliases(name, *alias_sources)
 
     ignored_at = _safe_epoch(meta.get("ignored_at")) if isinstance(meta, Mapping) else 0
     if not ignored_at:
@@ -486,12 +513,21 @@ def _merge_sanitized_ignored_meta(
     )
     name = existing_name or incoming_name or ""
 
-    aliases = _dedupe_aliases(
-        name,
-        existing.get("aliases"),
-        incoming.get("aliases"),
-        [existing_name, incoming_name],
-    )
+    alias_sources: list[Iterable[str]] = []
+
+    existing_aliases = _coerce_alias_iterable(existing.get("aliases"))
+    if existing_aliases:
+        alias_sources.append(existing_aliases)
+
+    incoming_aliases = _coerce_alias_iterable(incoming.get("aliases"))
+    if incoming_aliases:
+        alias_sources.append(incoming_aliases)
+
+    name_aliases = [alias for alias in (existing_name, incoming_name) if alias]
+    if name_aliases:
+        alias_sources.append(name_aliases)
+
+    aliases = _dedupe_aliases(name, *alias_sources)
 
     ignored_at = max(
         _safe_epoch(existing.get("ignored_at")), _safe_epoch(incoming.get("ignored_at"))
