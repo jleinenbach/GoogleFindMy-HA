@@ -14,6 +14,7 @@ from custom_components.googlefindmy.coordinator import (
     ApiStatus,
     FcmStatus,
     GoogleFindMyCoordinator,
+    _FCM_FALLBACK_POLL_AFTER_S,
 )
 from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
 from custom_components.googlefindmy.const import (
@@ -349,3 +350,33 @@ def test_poll_snapshot_reuses_cached_name_for_blank_payload(
     follow_up_snapshot = loop.run_until_complete(coordinator._async_update_data())
 
     assert follow_up_snapshot[0]["name"] == "Pixel 9"
+
+
+def test_poll_cycle_forces_after_fcm_timeout(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """After the FCM grace window expires, polling should proceed in degraded mode."""
+
+    loop = coordinator.hass.loop
+    coordinator._async_build_device_snapshot_with_fallbacks.return_value = []
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+
+    coordinator._enabled_poll_device_ids = {"dev-1"}
+    coordinator._is_fcm_ready_soft = lambda: False
+    coordinator._fcm_defer_started_mono = time.monotonic() - (
+        _FCM_FALLBACK_POLL_AFTER_S + 5
+    )
+    coordinator._last_poll_mono = time.monotonic() - (
+        coordinator.location_poll_interval + 1
+    )
+    coordinator._async_start_poll_cycle.reset_mock()
+
+    result = loop.run_until_complete(coordinator._async_update_data())
+
+    assert result == []
+    coordinator._async_start_poll_cycle.assert_awaited()
+    call = coordinator._async_start_poll_cycle.await_args
+    assert call is not None
+    assert call.args and call.args[0][0]["id"] == "dev-1"
+    assert call.kwargs.get("force") is True

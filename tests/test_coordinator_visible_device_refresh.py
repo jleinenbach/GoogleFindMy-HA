@@ -8,7 +8,11 @@ from types import MappingProxyType, SimpleNamespace
 
 from custom_components.googlefindmy.button import GoogleFindMyPlaySoundButton
 from custom_components.googlefindmy.const import DOMAIN
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import (
+    FcmStatus,
+    GoogleFindMyCoordinator,
+    SubentryMetadata,
+)
 from custom_components.googlefindmy.sensor import GoogleFindMyLastSeenSensor
 from homeassistant.config_entries import ConfigSubentry
 
@@ -87,5 +91,72 @@ def test_refresh_recovers_devices_from_empty_visible_list() -> None:
         subentry_identifier=subentry_identifier,
     )
 
+    assert sensor.available is True
+    assert button.available is True
+
+
+def test_entities_remain_available_when_push_disconnected() -> None:
+    """Sensors and buttons stay available if the device remains present without push."""
+
+    entry = _build_entry_with_empty_visible_list()
+    loop_stub = SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None)
+    hass_stub = SimpleNamespace(loop=loop_stub, data={DOMAIN: {}})
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass_stub  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+
+    device = {"id": "device-1", "name": "Device One"}
+    coordinator.data = [device]
+    coordinator._device_names = {"device-1": "Device One"}
+    now_wall = time.time()
+    coordinator._device_location_data = {
+        "device-1": {"last_seen": now_wall, "last_updated": now_wall}
+    }
+    coordinator._present_last_seen = {"device-1": time.monotonic()}
+    coordinator._presence_ttl_s = 300
+    coordinator._push_cooldown_until = 0.0
+    coordinator._push_ready_memo = None
+    coordinator._device_caps = {}
+    coordinator._fcm_status_state = FcmStatus.DISCONNECTED
+    coordinator._fcm_status_reason = "push offline"
+    coordinator._fcm_status_changed_at = now_wall
+    coordinator._feature_to_subentry = {"sensor": "core_tracking", "button": "core_tracking"}
+    coordinator._default_subentry_key_value = "core_tracking"
+    coordinator._subentry_metadata = {
+        "core_tracking": SubentryMetadata(
+            key="core_tracking",
+            subentry_id="entry-empty-visible-core",
+            features=("sensor", "button"),
+            title="Core",
+            poll_intervals={},
+            filters={},
+            feature_flags={},
+            visible_device_ids=("device-1",),
+            enabled_device_ids=("device-1",),
+        )
+    }
+    coordinator._subentry_snapshots = {}
+    coordinator._store_subentry_snapshots(coordinator.data)
+
+    coordinator.api = SimpleNamespace(is_push_ready=lambda: False)
+
+    subentry_identifier = coordinator.stable_subentry_identifier(key="core_tracking")
+    sensor = GoogleFindMyLastSeenSensor(
+        coordinator,
+        device,
+        subentry_key="core_tracking",
+        subentry_identifier=subentry_identifier,
+    )
+    button = GoogleFindMyPlaySoundButton(
+        coordinator,
+        device,
+        "Device One",
+        subentry_key="core_tracking",
+        subentry_identifier=subentry_identifier,
+    )
+
+    assert coordinator.can_play_sound("device-1") is True
     assert sensor.available is True
     assert button.available is True
