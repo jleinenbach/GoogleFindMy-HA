@@ -26,7 +26,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, TypedDict
+from typing import Any, Mapping, TypedDict, cast
 from collections.abc import Awaitable, Callable
 
 from homeassistant.core import HomeAssistant
@@ -37,6 +37,9 @@ from ..const import STORAGE_KEY, STORAGE_VERSION
 _LOGGER = logging.getLogger(__name__)
 
 
+CacheState = dict[str, Any]
+
+
 class CacheData(TypedDict, total=False):
     """Type-safe, JSON-serializable structure for data persisted in the Store.
 
@@ -45,7 +48,7 @@ class CacheData(TypedDict, total=False):
 
     oauth_token: str
     username: str
-    fcm_credentials: dict | str | None
+    fcm_credentials: dict[str, Any] | str | None
     # Other keys historically stored in secrets.json are implicitly allowed.
 
 
@@ -76,7 +79,7 @@ class TokenCache:
         self._store: Store[CacheData] = Store(
             hass, STORAGE_VERSION, f"{STORAGE_KEY}_{normalized_entry_id}"
         )
-        self._data: CacheData = {}
+        self._data: CacheState = {}
         self._write_lock = asyncio.Lock()
         self._per_key_locks: dict[str, asyncio.Lock] = {}
         self._closed = False
@@ -101,11 +104,7 @@ class TokenCache:
 
         data = await instance._store.async_load()
         if isinstance(data, dict):
-            instance._data = data
-            if "fcm_credentials" in instance._data:
-                instance._data["fcm_credentials"] = instance._normalize_fcm(
-                    instance._data["fcm_credentials"]
-                )
+            instance._data = instance._coerce_cache_state(data)
             _LOGGER.debug(
                 "googlefindmy: Cache loaded from Store for entry '%s' (%d keys).",
                 instance.entry_id,
@@ -126,24 +125,28 @@ class TokenCache:
             return
         _LEGACY_MIGRATION_DONE = True
 
-        def _read_legacy() -> CacheData | None:
+        def _read_legacy() -> Mapping[str, Any] | None:
             if not os.path.exists(legacy_path):
                 return None
             try:
                 with open(legacy_path, encoding="utf-8") as f:
                     data = json.load(f)
-                return data if isinstance(data, dict) else None
+                if isinstance(data, dict):
+                    return cast(Mapping[str, Any], data)
+                return None
             except Exception:
                 _LOGGER.exception("Failed to read legacy cache file at %s", legacy_path)
                 return None
 
         legacy_data = await self._hass.async_add_executor_job(_read_legacy)
-        if not isinstance(legacy_data, dict):
+        if legacy_data is None:
             return
+
+        normalized_legacy = self._coerce_cache_state(legacy_data)
 
         async with self._write_lock:
             # Merge strategy: keys already in Store override legacy keys.
-            merged = {**legacy_data, **self._data}
+            merged: CacheState = {**normalized_legacy, **self._data}
             if "fcm_credentials" in merged:
                 merged["fcm_credentials"] = self._normalize_fcm(
                     merged["fcm_credentials"]
@@ -152,7 +155,7 @@ class TokenCache:
             if merged != self._data:
                 self._data = merged
                 if self._is_valid_snapshot():
-                    self._store.async_delay_save(lambda: dict(self._data), 1.0)
+                    self._store.async_delay_save(self._snapshot, 1.0)
                 _LOGGER.info("googlefindmy: Merged legacy cache into the Store.")
 
         def _remove_legacy() -> None:
@@ -202,7 +205,7 @@ class TokenCache:
 
         # Only schedule a save if the snapshot is valid JSON.
         if self._is_valid_snapshot():
-            self._store.async_delay_save(lambda: dict(self._data), 1.2)
+            self._store.async_delay_save(self._snapshot, 1.2)
         else:
             _LOGGER.error(
                 "Aborting deferred save due to non-JSON-serializable snapshot."
@@ -229,7 +232,7 @@ class TokenCache:
 
     async def all(self) -> CacheData:
         """Return a shallow copy of the entire cache snapshot."""
-        return dict(self._data)
+        return self._snapshot()
 
     # ---------- Coordinator/API compatibility aliases (Protocol-friendly) ----------
 
@@ -252,7 +255,7 @@ class TokenCache:
     async def flush(self) -> None:
         """Force an immediate save of any pending changes to disk."""
         if not self._closed and self._is_valid_snapshot():
-            await self._store.async_save(dict(self._data))
+            await self._store.async_save(self._snapshot())
 
     async def close(self) -> None:
         """Mark the cache as closed and perform a final flush; block further writes."""
@@ -287,13 +290,46 @@ class TokenCache:
         return value
 
     @staticmethod
-    def _normalize_fcm(value: Any) -> Any:
+    def _normalize_fcm(value: Any) -> dict[str, Any] | str | None:
+        if value is None:
+            return None
+
         if isinstance(value, str):
             try:
-                return json.loads(value)
+                parsed = json.loads(value)
             except (json.JSONDecodeError, TypeError):
                 return value
-        return value
+            if isinstance(parsed, dict):
+                return cast(dict[str, Any], parsed)
+            return value
+
+        if isinstance(value, dict):
+            return cast(dict[str, Any], value)
+
+        return cast(dict[str, Any] | str | None, value)
+
+    def _snapshot(self) -> CacheData:
+        """Return a serializable snapshot of the cache for Store persistence."""
+
+        return cast(CacheData, dict(self._data))
+
+    @staticmethod
+    def _coerce_cache_state(raw: Mapping[Any, Any]) -> CacheState:
+        """Coerce raw mappings from disk or legacy sources into CacheState."""
+
+        coerced: CacheState = {}
+        for key, value in raw.items():
+            if not isinstance(key, str):
+                _LOGGER.debug("Skipping non-string cache key from persisted data: %r", key)
+                continue
+            coerced[key] = value
+
+        if "fcm_credentials" in coerced:
+            coerced["fcm_credentials"] = TokenCache._normalize_fcm(
+                coerced["fcm_credentials"]
+            )
+
+        return coerced
 
 
 # -------------------------- Global registry & facade --------------------------
