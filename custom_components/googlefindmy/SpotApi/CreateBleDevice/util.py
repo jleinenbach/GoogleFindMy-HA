@@ -13,5 +13,7 @@ def flip_bits(data: bytes, enabled: bool) -> bytes:
     return data
 
 
-def hours_to_seconds(hours):
-    return hours * 3600
+def hours_to_seconds(hours: float | int) -> int:
+    """Convert a number of hours into seconds."""
+
+    return int(hours * 3600)
