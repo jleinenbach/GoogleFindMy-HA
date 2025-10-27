@@ -173,6 +173,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – pre-commit run --all-files *(mandatory, even if pre-commit.ci could supply autofixes)*
 > – ruff format --check *(mandatory; capture the outcome in the "Testing" section)*
 > – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(mandatory for Python changes; capture the outcome)*
+>   *When editing modules under `custom_components/googlefindmy/NovaApi/`, run `python -m mypy <module-path>` (for example, `python -m mypy custom_components/googlefindmy/NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py`) in addition to the command above so the excluded package still receives a strict check. Document the targeted run in the testing summary.*
 > – pytest -q *(mandatory; investigate and resolve every `DeprecationWarning`; capture the outcome)*
 >
 > **Online mode (in addition to the offline steps):**
