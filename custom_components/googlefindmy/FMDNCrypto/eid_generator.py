@@ -3,6 +3,8 @@
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
+from typing import cast
+
 from Cryptodome.Cipher import AES
 from ecdsa import SECP160r1
 
@@ -22,10 +24,10 @@ def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
     R = r * curve.generator
 
     # Return the x coordinate of R as the EID
-    return R.x().to_bytes(20, "big")
+    return cast(bytes, R.x().to_bytes(20, "big"))
 
 
-def calculate_r(identity_key: bytes, timestamp: int):
+def calculate_r(identity_key: bytes, timestamp: int) -> int:
     # ts_bytes is the timestamp in bytes, but the least K significant bits are set to 0
     ts_bytes = get_masked_timestamp(timestamp, K)
     identity_key_bytes = identity_key
@@ -54,7 +56,12 @@ def calculate_r(identity_key: bytes, timestamp: int):
     return r_dash_int % n
 
 
-def get_masked_timestamp(timestamp: int, K: int):
+def get_masked_timestamp(timestamp: int, K: int) -> bytes:
+    """Return the timestamp with the least-significant bits masked.
+
+    Args:
+        timestamp: The original timestamp as an ``int``.
+    """
     # Create a bitmask that has all bits set except for the K least significant bits
     mask = ~((1 << K) - 1)
 
