@@ -7,9 +7,13 @@
 from __future__ import annotations
 
 import binascii
-from typing import Any
+from typing import TYPE_CHECKING
 
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
+
+# Typing-only imports to avoid expensive protobuf imports during runtime startup.
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 
 # Session-stable client UUID (created lazily to avoid import-time side effects)
 _CLIENT_UUID: str | None = None
@@ -29,7 +33,7 @@ def create_action_request(
     *,
     request_uuid: str | None = None,
     fmd_client_uuid: str | None = None,
-) -> Any:
+) -> "DeviceUpdate_pb2.ExecuteActionRequest":
     """Build an ExecuteActionRequest protobuf for Nova (pure builder, no I/O).
 
     Args:
@@ -74,7 +78,9 @@ def create_action_request(
     return action_request
 
 
-def serialize_action_request(action_request: Any) -> str:
+def serialize_action_request(
+    action_request: "DeviceUpdate_pb2.ExecuteActionRequest",
+) -> str:
     """Serialize an ExecuteActionRequest to hex for Nova transport."""
     # Serialize to bytes
     binary_payload = action_request.SerializeToString()
