@@ -27,8 +27,20 @@
 * **Requirement:** Determine the current connectivity status before every implementation cycle.
 * **Preferred check:** Use `python -m pip install --dry-run --no-deps pip` so contributors document a consistent HTTP/HTTPS probe and capture the output in their summaries.
 * **Checks:** Run a quick internet-access probe that exercises the real package channels (for example, `python -m pip install --dry-run --no-deps pip`, `pip index versions pip`, or a package-manager metadata refresh such as `apt-get update`) and record the outcome in the summary. Avoid ICMP-only probes like `ping 8.8.8.8`, which are blocked in the managed environment and do not reflect HTTP/HTTPS reachability. When a tool installs command-line entry points into `~/.pyenv/versions/*/bin`, invoke it as `python -m <module>` so the connectivity probe also confirms module availability despite PATH differences.
+* **Fallback reminder:** If a CLI helper such as `pre-commit` is not yet on the PATH, rerun the command via its module form (for example, `python -m pre_commit run --all-files`) so the initial check still succeeds.
 * **Online mode:** When a network connection is available you may install or update missing development tooling (for example, `pip`, `pip-tools`, `pre-commit`, `rustup`, `node`, `jq`) whenever it is necessary for maintenance or local verification.
 * **Offline mode:** When no connection is available, limit the work to local analysis only and call out any follow-up actions that must happen once connectivity is restored.
+
+### Module invocation primer
+
+Some developer tools register entry points inside isolated Python environments that differ from the shell `PATH`. When a command is missing, rerun it in module form to guarantee it resolves the correct interpreter:
+
+* **Python packaging:** `python -m pip ...` (install, inspect, or run connectivity probes).
+* **Pre-commit hooks:** `python -m pre_commit ...` (install, list, or run hooks when `pre-commit` is not yet on the PATH).
+* **Formatters and linters:** Module-friendly tools (`python -m ruff`, `python -m pytest`, etc.) keep working even when scripts are shadowed by other environments.
+* **Repository utilities:** Project helpers with `__main__` shims (`python -m script.sync_translations`, for example) follow the same pattern.
+
+Prefer the executable name when it is available; fall back to the module form whenever onboarding, switching interpreters, or recovering from environment churn.
 
 ---
 

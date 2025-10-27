@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # script/local_verify.py
-"""Run the canonical local verification commands for Google Find My."""
+"""Run the canonical local verification commands for Google Find My.
+
+If command-line shims such as ``pytest`` are unavailable, use the module
+invocation fallbacks described in ``AGENTS.md`` (for example, ``python -m
+pytest``) to mirror the expected checks.
+"""
 
 from __future__ import annotations
 
@@ -55,7 +60,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=(
             "Run Ruff format --check followed by pytest using the repository\n"
             "defaults so contributors can quickly mirror the required local"
-            " checks."
+            " checks. If the CLI entry points are missing, use the module"
+            " invocation fallbacks documented in AGENTS.md."
         )
     )
     parser.add_argument(
