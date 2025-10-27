@@ -64,11 +64,8 @@ mypy_path = ["."]
 exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
 
 [[tool.mypy.overrides]]
-module = ["custom_components.googlefindmy.*"]
-ignore_errors = true
-
-[[tool.mypy.overrides]]
 module = [
+    "custom_components.googlefindmy.api",
     "custom_components.googlefindmy.binary_sensor",
     "custom_components.googlefindmy.button",
     "custom_components.googlefindmy.chrome_driver",
@@ -89,6 +86,28 @@ module = [
     "custom_components.googlefindmy.util_services",
 ]
 ignore_errors = false
+
+[[tool.mypy.overrides]]
+module = [
+    "custom_components.googlefindmy.Auth",
+    "custom_components.googlefindmy.Auth.*",
+    "custom_components.googlefindmy.FMDNCrypto",
+    "custom_components.googlefindmy.FMDNCrypto.*",
+    "custom_components.googlefindmy.KeyBackup",
+    "custom_components.googlefindmy.KeyBackup.*",
+    "custom_components.googlefindmy.SpotApi",
+    "custom_components.googlefindmy.SpotApi.*",
+    "custom_components.googlefindmy.NovaApi",
+    "custom_components.googlefindmy.NovaApi.*",
+    "custom_components.googlefindmy.ProtoDecoders",
+    "custom_components.googlefindmy.ProtoDecoders.*",
+    "custom_components.googlefindmy",
+    "custom_components.googlefindmy.__init__",
+    "custom_components.googlefindmy.config_flow",
+    "custom_components.googlefindmy.coordinator",
+    "custom_components.googlefindmy.discovery",
+]
+ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]
