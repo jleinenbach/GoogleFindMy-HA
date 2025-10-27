@@ -4,11 +4,19 @@
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, cast
+
 from selenium.webdriver.support.ui import WebDriverWait
+
 from custom_components.googlefindmy.chrome_driver import create_driver
 
+if TYPE_CHECKING:
+    from selenium.webdriver.remote.webdriver import WebDriver
 
-def request_oauth_account_token_flow(headless=False):
+
+def request_oauth_account_token_flow(headless: bool = False) -> str:
     # In Home Assistant context, skip the interactive prompts
     import sys
 
@@ -27,7 +35,7 @@ def request_oauth_account_token_flow(headless=False):
     if not is_home_assistant:
         print("[AuthFlow] Installing ChromeDriver...")
 
-    driver = create_driver(headless=headless)
+    driver: "WebDriver" = create_driver(headless=headless)
 
     try:
         # Open the browser and navigate to the URL
@@ -41,7 +49,12 @@ def request_oauth_account_token_flow(headless=False):
         )
 
         # Get the value of the "oauth_token" cookie
-        oauth_token_cookie = driver.get_cookie("oauth_token")
+        cookie = driver.get_cookie("oauth_token")
+        if cookie is None:
+            msg = "OAuth token cookie missing despite wait completion"
+            raise RuntimeError(msg)
+
+        oauth_token_cookie: dict[str, Any] = cast(dict[str, Any], cookie)
         oauth_token_value = oauth_token_cookie["value"]
 
         # Print the value of the "oauth_token" cookie

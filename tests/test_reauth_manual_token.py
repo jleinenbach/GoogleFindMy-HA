@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable, TypeVar, cast
 
 import pytest
 
@@ -19,6 +19,9 @@ from custom_components.googlefindmy.const import (
     DATA_AUTH_METHOD,
     DOMAIN,
 )
+
+
+_ValueT = TypeVar("_ValueT")
 
 
 class _MemoryCache:
@@ -39,14 +42,17 @@ class _MemoryCache:
     async def async_set_cached_value(self, name: str, value: Any) -> None:
         await self.set(name, value)
 
-    async def get_or_set(self, name: str, generator):  # type: ignore[override]
+    async def get_or_set(
+        self, name: str, generator: Callable[[], Awaitable[_ValueT] | _ValueT]
+    ) -> _ValueT:
         if name in self._data:
-            return self._data[name]
+            return cast(_ValueT, self._data[name])
         result = generator()
         if asyncio.iscoroutine(result):
             result = await result
-        await self.set(name, result)
-        return result
+        result_typed = cast(_ValueT, result)
+        await self.set(name, result_typed)
+        return result_typed
 
     async def all(self) -> dict[str, Any]:  # pragma: no cover - helper for completeness
         return dict(self._data)
