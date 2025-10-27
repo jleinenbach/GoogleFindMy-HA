@@ -87,6 +87,18 @@ def _stub_homeassistant() -> None:
         async def async_abort(self, **kwargs):
             return {"type": "abort", **kwargs}
 
+        def async_create_entry(
+            self, *, title: str, data: Mapping[str, Any], options: Mapping[str, Any] | None = None
+        ) -> dict[str, Any]:
+            entry: dict[str, Any] = {
+                "type": "create_entry",
+                "title": title,
+                "data": dict(data),
+            }
+            if options is not None:
+                entry["options"] = dict(options)
+            return entry
+
         def _set_confirm_only(self) -> None:
             self.context["confirm_only"] = True
 
