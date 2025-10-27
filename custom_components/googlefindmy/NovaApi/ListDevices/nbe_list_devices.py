@@ -306,9 +306,21 @@ async def _async_cli_main(entry_id: str | None = None) -> None:
 
 
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse CLI arguments for entry selection."""
+    """Parse CLI arguments for entry selection.
 
-    parser = argparse.ArgumentParser(description="Google Find My Device CLI helper")
+    When direct CLI entry points are unavailable, follow the ``AGENTS.md``
+    module invocation fallbacks (for example, run
+    ``python -m custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices``).
+    """
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Google Find My Device CLI helper. If the CLI entry point is"
+            " missing, consult AGENTS.md for module invocation fallbacks"
+            " such as python -m"
+            " custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices."
+        )
+    )
     parser.add_argument(
         "--entry",
         help=("Config entry ID to target. Alternatively set GOOGLEFINDMY_ENTRY_ID."),

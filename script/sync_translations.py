@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # script/sync_translations.py
-"""Synchronize translation JSON files with the canonical ``strings.json`` tree."""
+"""Synchronize translation JSON files with the canonical ``strings.json`` tree.
+
+If CLI entry points or helper wrappers are missing, follow the module
+invocation fallbacks documented in ``AGENTS.md`` (for example, invoke this
+script via ``python -m script.sync_translations``).
+"""
 
 from __future__ import annotations
 
@@ -167,7 +172,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         description=(
-            "Synchronize translation files with custom_components/googlefindmy/strings.json"
+            "Synchronize translation files with"
+            " custom_components/googlefindmy/strings.json. If the CLI"
+            " entry point is missing, use the module invocation fallbacks"
+            " described in AGENTS.md (for example, python -m"
+            " script.sync_translations)."
         )
     )
     parser.add_argument(
