@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     create_action_request,
     serialize_action_request,
 )
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 
 
 def create_sound_request(
@@ -50,7 +54,7 @@ def create_sound_request(
         request_uuid = generate_random_uuid()
 
     # Create a base action request envelope
-    action_request = create_action_request(
+    action_request: "DeviceUpdate_pb2.ExecuteActionRequest" = create_action_request(
         canonic_device_id,
         gcm_registration_id,
         request_uuid=request_uuid,
