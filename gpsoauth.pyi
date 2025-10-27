@@ -29,7 +29,7 @@ exceptions: _ExceptionsModule
 def exchange_token(
     email: str,
     master_token: str,
-    android_id: str,
+    android_id: int,
     service: str = ...,
     app: str = ...,
     client_sig: str = ...,
