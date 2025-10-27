@@ -37,8 +37,8 @@ import time
 import uuid
 from base64 import b64encode, urlsafe_b64encode
 from dataclasses import dataclass
-from typing import Any
-from collections.abc import Callable
+from typing import Any, TypeAlias, cast
+from collections.abc import Callable, Mapping, MutableMapping
 
 from aiohttp import ClientSession, ClientTimeout
 from cryptography.hazmat.primitives import serialization
@@ -67,6 +67,10 @@ from .proto.checkin_pb2 import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+JSONDict: TypeAlias = dict[str, Any]
+MutableJSONMapping: TypeAlias = MutableMapping[str, Any]
 
 
 @dataclass
@@ -119,8 +123,8 @@ class FcmRegister:
     def __init__(
         self,
         config: FcmRegisterConfig,
-        credentials: dict | None = None,
-        credentials_updated_callback: Callable[[dict[str, Any]], None] | None = None,
+        credentials: MutableJSONMapping | None = None,
+        credentials_updated_callback: Callable[[MutableJSONMapping], None] | None = None,
         *,
         http_client_session: ClientSession | None = None,
         log_debug_verbose: bool = False,
@@ -136,12 +140,12 @@ class FcmRegister:
             log_debug_verbose: If True, enables verbose debug logging.
         """
         self.config = config
-        self.credentials = credentials
+        self.credentials: MutableJSONMapping | None = credentials
         self.credentials_updated_callback = credentials_updated_callback
 
         self._log_debug_verbose = log_debug_verbose
 
-        self._http_client_session = http_client_session
+        self._http_client_session: ClientSession | None = http_client_session
         self._local_session: ClientSession | None = None
 
     # ---------------------------------------------------------------------
@@ -299,7 +303,7 @@ class FcmRegister:
             msg = MessageToJson(acir, indent=4)
             _logger.debug("GCM check-in response (raw):\n%s", msg)
 
-        return MessageToDict(acir)
+        return cast(JSONDict, MessageToDict(acir))
 
     # ---------------------------------------------------------------------
     # GCM Register (token)
@@ -610,7 +614,7 @@ class FcmRegister:
             }
         return None
 
-    async def fcm_install(self) -> dict | None:
+    async def fcm_install(self) -> JSONDict | None:
         """
         Perform Firebase Installation to get an installation token.
 
@@ -643,7 +647,7 @@ class FcmRegister:
             timeout=self.CLIENT_TIMEOUT,
         ) as resp:
             if resp.status == 200:
-                fcm_install = await resp.json()
+                fcm_install = cast(JSONDict, await resp.json())
                 return {
                     "token": fcm_install["authToken"]["token"],
                     "expires_in": int(
@@ -663,7 +667,7 @@ class FcmRegister:
                 )
                 return None
 
-    async def fcm_refresh_install_token(self) -> dict | None:
+    async def fcm_refresh_install_token(self) -> JSONDict | None:
         """
         Refresh an expired FCM installation token.
 
@@ -704,7 +708,7 @@ class FcmRegister:
             timeout=self.CLIENT_TIMEOUT,
         ) as resp:
             if resp.status == 200:
-                fcm_refresh = await resp.json()
+                fcm_refresh = cast(JSONDict, await resp.json())
                 return {
                     "token": fcm_refresh["token"],
                     "expires_in": int(str(fcm_refresh["expiresIn"]).rstrip("s")),
@@ -720,7 +724,7 @@ class FcmRegister:
                 )
                 return None
 
-    def generate_keys(self) -> dict:
+    def generate_keys(self) -> dict[str, str]:
         """Generate public/private key pair and auth secret for FCM."""
         private_key = ec.generate_private_key(ec.SECP256R1())
         public_key = private_key.public_key()
@@ -743,11 +747,11 @@ class FcmRegister:
 
     async def fcm_register(
         self,
-        gcm_data: dict,
-        installation: dict,
-        keys: dict,
+        gcm_data: Mapping[str, Any],
+        installation: Mapping[str, Any],
+        keys: Mapping[str, Any],
         retries: int = 2,
-    ) -> dict[str, Any] | None:
+    ) -> JSONDict | None:
         """
         Register the client with FCM to get the final FCM token.
 
@@ -799,7 +803,7 @@ class FcmRegister:
                 ) as resp:
                     status = resp.status
                     if status == 200:
-                        fcm = await resp.json()
+                        fcm = cast(JSONDict, await resp.json())
                         return fcm
                     else:
                         text = await resp.text()
@@ -831,7 +835,7 @@ class FcmRegister:
     # ---------------------------------------------------------------------
     # Orchestration
     # ---------------------------------------------------------------------
-    async def checkin_or_register(self) -> dict[str, Any]:
+    async def checkin_or_register(self) -> MutableJSONMapping:
         """Check in if you have credentials otherwise register as a new client.
 
         :return: The full credentials dict containing keys/gcm/fcm/config.
@@ -850,15 +854,18 @@ class FcmRegister:
                 )
 
         self.credentials = await self.register()
-        if self.credentials_updated_callback:
+        credentials = self.credentials
+        if self.credentials_updated_callback and credentials is not None:
             try:
-                self.credentials_updated_callback(self.credentials)
+                self.credentials_updated_callback(credentials)
             except Exception as e:  # avoid caller breaking the flow
                 _logger.debug("credentials_updated_callback raised: %s", e)
 
-        return self.credentials
+        if credentials is None:
+            raise RuntimeError("Registration did not yield credentials")
+        return credentials
 
-    async def register(self) -> dict:
+    async def register(self) -> JSONDict:
         """Register GCM and FCM tokens for configured sender_id/app.
 
         Typically you would call `checkin_or_register()` instead of `register()`,
