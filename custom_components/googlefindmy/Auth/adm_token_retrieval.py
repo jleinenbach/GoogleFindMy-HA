@@ -211,15 +211,12 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
             aas_token_direct = None
             aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
 
-    return cast(
-        str,
-        await async_request_token(
-            username,
-            service,
-            cache=cache,
-            aas_token=aas_token_direct,
-            aas_provider=aas_provider,
-        ),
+    return await async_request_token(
+        username,
+        service,
+        cache=cache,
+        aas_token=aas_token_direct,
+        aas_provider=aas_provider,
     )
 
 

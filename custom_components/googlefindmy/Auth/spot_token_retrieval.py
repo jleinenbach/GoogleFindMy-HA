@@ -29,11 +29,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Awaitable
+from typing import TYPE_CHECKING
 
 from .username_provider import async_get_username
 from .token_cache import TokenCache
 
 _LOGGER = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .token_retrieval import async_request_token as _async_request_token
 
 
 async def _async_generate_spot_token(
@@ -56,7 +60,7 @@ async def _async_generate_spot_token(
         from .token_retrieval import async_request_token
 
         _LOGGER.debug("Using async_request_token for Spot token generation")
-        token = await async_request_token(
+        token: str = await async_request_token(
             username,
             "spot",
             True,  # play_services=True
@@ -145,4 +149,5 @@ async def async_get_spot_token(
             aas_provider=aas_provider,
         )
 
-    return await cache.get_or_set(cache_key, _generator)
+    token: str = await cache.get_or_set(cache_key, _generator)
+    return token
