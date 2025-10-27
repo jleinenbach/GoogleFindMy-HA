@@ -786,6 +786,45 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         ignored = self._get_ignored_set()
         device_index: dict[str, dict[str, Any]] = {}
 
+        hass = getattr(self, "hass", None)
+        canonical_to_registry_id: dict[str, str] = {}
+        registry_to_canonical_id: dict[str, str] = {}
+        if hass is not None:
+            try:
+                device_registry = dr.async_get(hass)
+            except Exception:  # pragma: no cover - defensive registry resolution
+                device_registry = None
+            if device_registry is not None:
+                entry_id = self._entry_id()
+                registry_devices = getattr(device_registry, "devices", None)
+                if isinstance(registry_devices, Mapping):
+                    candidates = list(registry_devices.values())
+                elif isinstance(registry_devices, Sequence):
+                    candidates = list(registry_devices)
+                else:
+                    candidates = []
+                for device in candidates:
+                    if device is None:
+                        continue
+                    try:
+                        registry_id = getattr(device, "id")
+                    except Exception:  # pragma: no cover - defensive attribute access
+                        continue
+                    if not isinstance(registry_id, str) or not registry_id:
+                        continue
+                    config_entries = getattr(device, "config_entries", None)
+                    if entry_id and config_entries:
+                        try:
+                            if entry_id not in config_entries:
+                                continue
+                        except TypeError:
+                            pass
+                    ident = self._extract_our_identifier(device)
+                    if ident is None:
+                        continue
+                    canonical_to_registry_id.setdefault(ident, registry_id)
+                    registry_to_canonical_id.setdefault(registry_id, ident)
+
         def _register_device(candidate: Mapping[str, Any]) -> None:
             dev_id = candidate.get("id")
             if not isinstance(dev_id, str) or not dev_id:
@@ -855,6 +894,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 }
                 if not allowed_ids:
                     allowed_ids = None
+                elif registry_to_canonical_id:
+                    allowed_ids = {
+                        registry_to_canonical_id.get(item, item) for item in allowed_ids
+                    }
 
             if device_index:
                 base_ids = [
@@ -895,6 +938,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 }
             )
 
+            manager_visible_ids = tuple(
+                dict.fromkeys(
+                    canonical_to_registry_id.get(dev_id, dev_id)
+                    for dev_id in visible_ids
+                )
+            )
+
             metadata[group_key] = SubentryMetadata(
                 key=group_key,
                 subentry_id=subentry_id,
@@ -907,7 +957,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 enabled_device_ids=enabled_ids,
             )
 
-            manager_updates.append((group_key, visible_ids))
+            manager_updates.append((group_key, manager_visible_ids))
 
             for feature in features:
                 feature_map[feature] = group_key

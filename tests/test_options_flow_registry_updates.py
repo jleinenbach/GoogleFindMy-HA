@@ -13,11 +13,13 @@ from custom_components.googlefindmy import (
     ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
 )
+from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.coordinator import (
     GoogleFindMyCoordinator,
     _DEFAULT_SUBENTRY_FEATURES as COORDINATOR_DEFAULT_FEATURES,
 )
 from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers import device_registry as dr
 
 
 class _RegistryTracker:
@@ -303,6 +305,26 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
     device_registry = _RegistryTracker()
     hass = _HassStub(entry, entity_registry, device_registry)
 
+    registry_devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(DOMAIN, f"{entry.entry_id}:dev-1")},
+            config_entries={entry.entry_id},
+            name="Device 1",
+            name_by_user=None,
+        ),
+        "ha-dev-2": SimpleNamespace(
+            id="ha-dev-2",
+            identifiers={(DOMAIN, f"{entry.entry_id}:dev-2")},
+            config_entries={entry.entry_id},
+            name="Device 2",
+            name_by_user=None,
+        ),
+    }
+    fake_registry = SimpleNamespace(devices=registry_devices)
+    original_async_get = dr.async_get
+    dr.async_get = lambda _hass=None: fake_registry
+
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     _prepare_coordinator_baseline(coordinator, hass, entry)
     coordinator.data = [
@@ -330,7 +352,10 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
     asyncio.run(subentry_manager.async_sync([core_definition, secondary_definition]))
 
     coordinator.attach_subentry_manager(subentry_manager)
-    coordinator._refresh_subentry_index(coordinator.data)
+    try:
+        coordinator._refresh_subentry_index(coordinator.data)
+    finally:
+        dr.async_get = original_async_get
 
     core_subentry = subentry_manager.get("core_tracking")
     secondary_subentry = subentry_manager.get("secondary")
@@ -338,21 +363,28 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
     assert secondary_subentry is not None
 
     assert tuple(core_subentry.data.get("visible_device_ids", ())) == (
-        "dev-1",
-        "dev-2",
+        "ha-dev-1",
+        "ha-dev-2",
     )
-    assert tuple(secondary_subentry.data.get("visible_device_ids", ())) == ("dev-2",)
+    assert tuple(secondary_subentry.data.get("visible_device_ids", ())) == (
+        "ha-dev-2",
+    )
 
-    assert entity_registry.by_subentry[core_subentry.subentry_id] == (
-        "dev-1",
-        "dev-2",
+    assert entity_registry.by_subentry[core_subentry.subentry_id] == ("ha-dev-1",)
+    assert device_registry.by_subentry[core_subentry.subentry_id] == ("ha-dev-1",)
+    assert entity_registry.by_subentry[secondary_subentry.subentry_id] == (
+        "ha-dev-2",
     )
-    assert device_registry.by_subentry[core_subentry.subentry_id] == (
-        "dev-1",
-        "dev-2",
+    assert device_registry.by_subentry[secondary_subentry.subentry_id] == (
+        "ha-dev-2",
     )
-    assert entity_registry.by_subentry[secondary_subentry.subentry_id] == ()
-    assert device_registry.by_subentry[secondary_subentry.subentry_id] == ()
+
+    core_metadata = coordinator.get_subentry_metadata(key="core_tracking")
+    secondary_metadata = coordinator.get_subentry_metadata(key="secondary")
+    assert core_metadata is not None
+    assert secondary_metadata is not None
+    assert core_metadata.visible_device_ids == ("dev-1", "dev-2")
+    assert secondary_metadata.visible_device_ids == ("dev-2",)
 
 
 def test_coordinator_default_features_map_to_core_group() -> None:
