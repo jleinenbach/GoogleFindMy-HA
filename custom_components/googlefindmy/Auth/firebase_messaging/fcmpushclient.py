@@ -46,9 +46,13 @@ from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 from google.protobuf.json_format import MessageToJson
+from google.protobuf.message import Message as RuntimeMessage
 from http_ece import decrypt as http_decrypt
 
-from custom_components.googlefindmy.protobuf_typing import MessageProto
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.protobuf_typing import MessageProto
+else:
+    MessageProto = RuntimeMessage
 
 from .const import (
     MCS_HOST,
