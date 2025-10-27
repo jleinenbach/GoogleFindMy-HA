@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2 as _Common_pb2
-from custom_components.googlefindmy.protobuf_typing import EnumTypeWrapperMeta as _EnumTypeWrapperMeta
+from custom_components.googlefindmy.protobuf_typing import (
+    EnumTypeWrapperMeta as _EnumTypeWrapperMeta,
+    MessageProto as _MessageProto,
+)
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
-from google.protobuf import message as _message
 from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 EnumTypeWrapper = _EnumTypeWrapperMeta[int]
-Message = _message.Message
+Message = _MessageProto
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
