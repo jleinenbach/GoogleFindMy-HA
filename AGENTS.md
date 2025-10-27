@@ -1,3 +1,67 @@
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
+
+- [AGENTS.md — Operating Contract for `googlefindmy` (Home Assistant custom integration)](#agentsmd--operating-contract-for-googlefindmy-home-assistant-custom-integration)
+  - [Scoped guidance index](#scoped-guidance-index)
+  - [Environment verification](#environment-verification)
+    - [Module invocation primer](#module-invocation-primer)
+  - [1) What must be in **every** PR (lean checklist)](#1-what-must-be-in-every-pr-lean-checklist)
+  - [Home Assistant version & dependencies](#home-assistant-version--dependencies)
+  - [Maintenance mode](#maintenance-mode)
+  - [2) Roles (right-sized)](#2-roles-right-sized)
+    - [2.1 Contributor (implementation) — **accountable for features/fixes/refactors**](#21-contributor-implementation--accountable-for-featuresfixesrefactors)
+    - [2.2 Reviewer (maintainer/agent) — **accountable for correctness**](#22-reviewer-maintaineragent--accountable-for-correctness)
+    - [2.3 History analysis best practices](#23-history-analysis-best-practices)
+  - [3) Test policy — explicit AI actions](#3-test-policy--explicit-ai-actions)
+    - [3.1 Automatic **Test Corrections** (MUST)](#31-automatic-test-corrections-must)
+    - [3.2 Automatic **Regression Tests** for fixes (MUST)](#32-automatic-regression-tests-for-fixes-must)
+    - [3.3 Opportunistic **Test Optimization** (SHOULD SUGGEST)](#33-opportunistic-test-optimization-should-suggest)
+    - [3.4 Definition of Done for tests](#34-definition-of-done-for-tests)
+    - [3.5 Temporary coverage dips](#35-temporary-coverage-dips)
+  - [4) **Token cache handling** (hard requirement; regression-prevention)](#4-token-cache-handling-hard-requirement-regression-prevention)
+  - [5) Security & privacy guards](#5-security--privacy-guards)
+  - [6) Expected **test types & coverage focus**](#6-expected-test-types--coverage-focus)
+  - [7) Quality scale (practical, non-blocking)](#7-quality-scale-practical-non-blocking)
+  - [8) Deprecation check (concise, per PR)](#8-deprecation-check-concise-per-pr)
+  - [9) Docs & i18n (minimal but strict)](#9-docs--i18n-minimal-but-strict)
+  - [10) Local commands (VERIFY)](#10-local-commands-verify)
+    - [10.1 Type-checking policy — mypy strict on edited Python files](#101-type-checking-policy--mypy-strict-on-edited-python-files)
+  - [11) Clean & Secure Coding Standard (Python 3.12 + Home Assistant 2025.10)](#11-clean--secure-coding-standard-python-312--home-assistant-202510)
+    - [11.1 Language & style (self-documenting)](#111-language--style-self-documenting)
+    - [11.2 Security baseline (OWASP / NIST / BSI)](#112-security-baseline-owasp--nist--bsi)
+    - [11.3 Async, concurrency & cancellation](#113-async-concurrency--cancellation)
+    - [11.4 File system & I/O (safe & gentle)](#114-file-system--io-safe--gentle)
+    - [11.5 Guard catalog & error messages](#115-guard-catalog--error-messages)
+    - [11.6 Performance without feature loss](#116-performance-without-feature-loss)
+    - [11.7 Home Assistant specifics (must-haves)](#117-home-assistant-specifics-must-haves)
+    - [11.8 Release & operations](#118-release--operations)
+    - [11.9 Machine-checkable acceptance checklist (for the agent)](#119-machine-checkable-acceptance-checklist-for-the-agent)
+  - [REFERENCES](#references)
+    - [1) Python 3.12 — Language, Style, Typing, Safety](#1-python-312--language-style-typing-safety)
+    - [2) Home Assistant (Developer Docs, 2024–2025)](#2-home-assistant-developer-docs-20242025)
+    - [3) Secure Development — Standards & Guidance](#3-secure-development--standards--guidance)
+      - [OWASP Cheat Sheet Series (selected)](#owasp-cheat-sheet-series-selected)
+    - [4) Software Supply Chain & Reproducibility](#4-software-supply-chain--reproducibility)
+    - [5) Repo & Documentation Hygiene (GitHub/Markdown)](#5-repo--documentation-hygiene-githubmarkdown)
+    - [6) In-repo Find My Device Network protocol reference](#6-in-repo-find-my-device-network-protocol-reference)
+  - [High-confidence & sourcing standard for Codex](#high-confidence--sourcing-standard-for-codex)
+    - [0. Scope](#0-scope)
+    - [1. High-confidence mode (≥ 90 %)](#1-high-confidence-mode-%E2%89%A5-90-%25)
+    - [2. Mandatory evidence](#2-mandatory-evidence)
+    - [3. Workflow for code changes](#3-workflow-for-code-changes)
+    - [4. User as data source](#4-user-as-data-source)
+    - [5. Communicate uncertainty](#5-communicate-uncertainty)
+    - [6. Consequences for commits, diffs, and reviews](#6-consequences-for-commits-diffs-and-reviews)
+    - [7. Review obligations](#7-review-obligations)
+    - [8. Required workflow summary](#8-required-workflow-summary)
+    - [9. Rationale](#9-rationale)
+    - [10. Post-task feedback obligations](#10-post-task-feedback-obligations)
+  - [pip-audit workflow guidance (CORRECTION — April 2025)](#pip-audit-workflow-guidance-correction--april-2025)
+    - [7) Type checking (mypy)](#7-type-checking-mypy)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 # AGENTS.md — Operating Contract for `googlefindmy` (Home Assistant custom integration)
 
 * [Scoped guidance index](#scoped-guidance-index)
@@ -62,6 +126,7 @@ Prefer the executable name when it is available; fall back to the module form wh
   * **Task scheduling helpers.** Home Assistant-style test doubles for `async_create_task` may accept only `(coro)` without keyword arguments like `name`. Design scheduling wrappers so they gracefully handle both signatures and still attach error-handling callbacks when a task object is returned.
   * **Discovery callbacks.** Reuse `ha_typing.callback` for new discovery helper callbacks so strict mypy keeps enforcing the typed decorator instead of drifting back to untyped shims.
 * **pre-commit.ci automation.** The GitHub App is enabled with permission to push formatting fixes to PR branches whenever the configured hooks (e.g., `ruff`, `ruff-format`) report autofixable issues; keep `.pre-commit-config.yaml` aligned with the enforced checks.
+  * **TOC upkeep.** Generate the root `AGENTS.md` overview with `pre-commit run doctoc --files AGENTS.md` whenever headings change so the local Table of Contents stays synchronized.
 * **Hassfest auto-sort workflow.** `.github/workflows/hassfest-auto-fix.yml` must remain present and operational so manifest key ordering issues are auto-corrected and pushed back to PR branches; update the workflow when hassfest or `git-auto-commit-action` inputs change upstream.
 * **Purpose & scope.** PR title/description state *what* changes and *why*, and which user scenarios are affected.
 * **Tests — creation & update (MUST).** Any code change ships unit/integration tests that cover the change; every bug fix includes a **regression test** (§3.2). Never reduce existing coverage without a follow-up to restore it.
