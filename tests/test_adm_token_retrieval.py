@@ -305,7 +305,7 @@ def test_perform_oauth_sync_missing_keys_raises(
     def fake_perform_oauth(
         username: str,
         aas_token: str,
-        android_id: int,
+        android_id: str,
         **kwargs: Any,
     ) -> dict[str, str]:
         return {"Error": "SomeOtherFailure"}
@@ -752,7 +752,7 @@ def test_async_get_adm_token_isolated_uses_bundle_android_id(
     )
 
     assert token == "adm-token"
-    assert recorded["android_id"] == int("0xC0FFEE", 16)
+    assert recorded["android_id"] == str(int("0xC0FFEE", 16))
 
 
 def test_async_get_adm_token_isolated_prefers_cache_android_id(
@@ -765,7 +765,7 @@ def test_async_get_adm_token_isolated_prefers_cache_android_id(
     def fake_perform_oauth(
         username: str,
         aas_token: str,
-        android_id: int,
+        android_id: str,
         **kwargs: Any,
     ) -> dict[str, str]:
         recorded["android_id"] = android_id
@@ -794,7 +794,7 @@ def test_async_get_adm_token_isolated_prefers_cache_android_id(
     )
 
     assert token == "adm-token"
-    assert recorded["android_id"] == int("0xF00D", 16)
+    assert recorded["android_id"] == str(int("0xF00D", 16))
 
 
 def test_async_get_adm_token_isolated_falls_back_without_android_id(
@@ -807,7 +807,7 @@ def test_async_get_adm_token_isolated_falls_back_without_android_id(
     def fake_perform_oauth(
         username: str,
         aas_token: str,
-        android_id: int,
+        android_id: str,
         **kwargs: Any,
     ) -> dict[str, str]:
         recorded["android_id"] = android_id
@@ -834,4 +834,4 @@ def test_async_get_adm_token_isolated_falls_back_without_android_id(
     )
 
     assert token == "adm-token"
-    assert recorded["android_id"] == adm_token_retrieval._ANDROID_ID
+    assert recorded["android_id"] == str(adm_token_retrieval._ANDROID_ID)
