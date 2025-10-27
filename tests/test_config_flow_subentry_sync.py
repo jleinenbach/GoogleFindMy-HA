@@ -150,6 +150,8 @@ def test_device_selection_creates_feature_group_with_flags() -> None:
     payload = manager.created[-1]
     assert payload["group_key"] == "core_tracking"
     assert payload["features"] == sorted(config_flow._CORE_FEATURE_PLATFORMS)
+    assert all(isinstance(feature, str) for feature in payload["features"])
+    assert all(feature == feature.lower() for feature in payload["features"])
     assert payload["has_google_home_filter"] is False
     flags = payload["feature_flags"]
     assert flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] is False
