@@ -33,7 +33,7 @@ import base64
 import logging
 import re
 from binascii import Error as BinasciiError, unhexlify
-from typing import Any
+from typing import Any, TypeVar
 from collections.abc import Awaitable, Callable
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -84,7 +84,7 @@ def _try_hex(s: str) -> bytes:
         raise BinasciiError("String contains non-hexadecimal characters.")
     if len(t) % 2:
         t = "0" + t  # Prepend a zero to make it even-length
-    return unhexlify(t)
+    return bytes(unhexlify(t))
 
 
 def _try_base64_like(s: str) -> bytes:
@@ -104,12 +104,18 @@ def _try_base64_like(s: str) -> bytes:
     pad = (-len(v)) % 4
     v_padded = v + ("=" * pad)
     try:
-        return base64.urlsafe_b64decode(v_padded)
+        decoded = base64.urlsafe_b64decode(v_padded)
     except (ValueError, TypeError):
-        return base64.b64decode(v_padded)
+        decoded = base64.b64decode(v_padded)
+    return bytes(decoded)
 
 
-async def _run_in_executor(func, *args):
+_ExecutorReturn = TypeVar("_ExecutorReturn")
+
+
+async def _run_in_executor(
+    func: Callable[..., _ExecutorReturn], *args: object
+) -> _ExecutorReturn:
     """Run a blocking callable in a thread executor."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, func, *args)
@@ -274,15 +280,21 @@ async def async_get_owner_key(
         raise ValueError("TokenCache instance is required for multi-account safety.")
 
     # Resolve username (prefer entry-scoped cache).
-    if username:
-        user = username
+    user: str | None
+    if username is not None:
+        user = username if isinstance(username, str) and username else None
     else:
-        val = await cache.get(username_string)
-        user = str(val) if isinstance(val, str) and val else None
-        if not user:
-            user = await async_get_username(cache=cache)
+        cached_username = await cache.get(username_string)
+        user = cached_username if isinstance(cached_username, str) and cached_username else None
+        if user is None:
+            resolved_username = await async_get_username(cache=cache)
+            user = (
+                resolved_username
+                if isinstance(resolved_username, str) and resolved_username
+                else None
+            )
 
-    if not isinstance(user, str) or not user:
+    if user is None:
         raise RuntimeError("Username is not configured; cannot retrieve owner key.")
 
     raw_value = await _get_or_generate_user_owner_key_hex(
