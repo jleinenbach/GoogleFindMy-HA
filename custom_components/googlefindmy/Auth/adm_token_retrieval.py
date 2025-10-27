@@ -46,7 +46,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, cast
 from collections.abc import Awaitable, Callable, Mapping
 
 import gpsoauth
@@ -211,12 +211,15 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
             aas_token_direct = None
             aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
 
-    return await async_request_token(
-        username,
-        service,
-        cache=cache,
-        aas_token=aas_token_direct,
-        aas_provider=aas_provider,
+    return cast(
+        str,
+        await async_request_token(
+            username,
+            service,
+            cache=cache,
+            aas_token=aas_token_direct,
+            aas_provider=aas_provider,
+        ),
     )
 
 
@@ -483,11 +486,13 @@ async def _perform_oauth_with_provided_aas(
         RuntimeError: If the OAuth response is invalid or missing the expected fields.
     """
 
+    android_id_str = str(android_id)
+
     def _run() -> str:
         resp = gpsoauth.perform_oauth(
             username,
             aas_token,
-            android_id,
+            android_id_str,
             service="oauth2:https://www.googleapis.com/auth/android_device_manager",
             app=_APP_ID,
             client_sig=_CLIENT_SIG,
@@ -512,7 +517,7 @@ async def _perform_oauth_with_provided_aas(
 
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(None, _run)
+        return cast(str, await loop.run_in_executor(None, _run))
     except Exception as exc:  # noqa: BLE001
         # Summarize without leaking sensitive data
         _LOGGER.debug(
