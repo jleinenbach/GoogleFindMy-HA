@@ -40,7 +40,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from types import MappingProxyType
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -51,7 +51,7 @@ from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
     Platform,
 )
-from homeassistant.core import CoreState, HomeAssistant
+from homeassistant.core import CoreState, Event, HomeAssistant
 from homeassistant.exceptions import (
     ConfigEntryNotReady,
     HomeAssistantError,
@@ -63,15 +63,33 @@ from homeassistant.helpers import (
     issue_registry as ir,
 )
 
+if TYPE_CHECKING:
+    try:  # pragma: no cover - type-checking fallback for stripped test envs
+        from homeassistant.helpers.entity_registry import (
+            RegistryEntryDisabler as RegistryEntryDisablerType,
+        )
+    except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
+        from enum import StrEnum
+
+        class RegistryEntryDisablerType(StrEnum):
+            """Minimal fallback matching the Home Assistant enum interface."""
+
+            INTEGRATION = "integration"
+else:
+    from typing import Any as RegistryEntryDisablerType
+
 try:  # pragma: no cover - compatibility shim for stripped test envs
-    from homeassistant.helpers.entity_registry import RegistryEntryDisabler
+    from homeassistant.helpers.entity_registry import (
+        RegistryEntryDisabler as _RegistryEntryDisabler,
+    )
 except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
-    from enum import StrEnum
+    from types import SimpleNamespace
 
-    class RegistryEntryDisabler(StrEnum):
-        """Minimal fallback matching the Home Assistant enum interface."""
+    _RegistryEntryDisabler = SimpleNamespace(INTEGRATION="integration")
 
-        INTEGRATION = "integration"
+RegistryEntryDisabler = cast(
+    "RegistryEntryDisablerType", _RegistryEntryDisabler
+)
 
 
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
@@ -142,10 +160,19 @@ from .services import async_register_services
 from . import system_health as system_health_module
 
 # Optional feature: GoogleHomeFilter (guard import to avoid hard dependency)
+if TYPE_CHECKING:
+    from .google_home_filter import GoogleHomeFilter as GoogleHomeFilterProtocol
+else:
+    from typing import Any as GoogleHomeFilterProtocol
+
 try:
-    from .google_home_filter import GoogleHomeFilter  # type: ignore
+    from .google_home_filter import GoogleHomeFilter as _GoogleHomeFilterClass
 except Exception:  # pragma: no cover
-    GoogleHomeFilter = None  # type: ignore
+    _GoogleHomeFilterClass = None
+
+GoogleHomeFilter = cast(
+    "type[GoogleHomeFilterProtocol] | None", _GoogleHomeFilterClass
+)
 
 try:
     # Helper name has been `config_entry_only_config_schema` since Core 2023.7
@@ -371,7 +398,7 @@ class RuntimeData:
     token_cache: TokenCache
     subentry_manager: ConfigEntrySubEntryManager
     fcm_receiver: FcmReceiverHA | None = None
-    google_home_filter: GoogleHomeFilter | None = None
+    google_home_filter: GoogleHomeFilterProtocol | None = None
 
     @property
     def cache(self) -> TokenCache:
@@ -680,8 +707,9 @@ async def async_handle_manual_locate(
         await coordinator.async_locate_device(canonical_id)
         _LOGGER.info("Successfully submitted manual locate for %s", friendly)
     except HomeAssistantError as err:
-        if getattr(coordinator, "_diag", None):
-            coordinator._diag.add_error(  # type: ignore[attr-defined]
+        diag_buffer = cast(Any, getattr(coordinator, "_diag", None))
+        if diag_buffer is not None and hasattr(diag_buffer, "add_error"):
+            diag_buffer.add_error(
                 code="manual_locate_resolution_failed",
                 context={
                     "device_id": "",
@@ -851,7 +879,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if unique_id_value and entry.unique_id != unique_id_value:
                 if hasattr(entry, "_unique_id"):
                     try:
-                        entry._unique_id = unique_id_value  # type: ignore[attr-defined]
+                        setattr(entry, "_unique_id", unique_id_value)
                     except Exception as err:  # pragma: no cover - defensive fallback
                         _LOGGER.debug(
                             "Unable to set unique_id on entry '%s': %s",
@@ -1173,29 +1201,33 @@ def _determine_subentry_unique_id(
         return None
 
     if feature == "binary_sensor":
-        valid_suffixes = {"polling", "auth_status"}
+        binary_sensor_suffixes: tuple[str, ...] = ("polling", "auth_status")
         if uid.count(":") >= 2:
             parts = uid.split(":")
             if len(parts) >= 3 and parts[0] == entry_id and parts[1] == identifier:
-                if parts[2] in valid_suffixes:
+                if parts[2] in binary_sensor_suffixes:
                     return uid
-            if len(parts) == 2 and parts[0] == entry_id and parts[1] in valid_suffixes:
+            if (
+                len(parts) == 2
+                and parts[0] == entry_id
+                and parts[1] in binary_sensor_suffixes
+            ):
                 return f"{entry_id}:{identifier}:{parts[1]}"
             return None
         if uid.startswith(f"{entry_id}:"):
             suffix = uid[len(entry_id) + 1 :]
-            if suffix in valid_suffixes:
+            if suffix in binary_sensor_suffixes:
                 return f"{entry_id}:{identifier}:{suffix}"
             return None
         scoped_prefix = f"{DOMAIN}_{entry_id}_"
         if uid.startswith(scoped_prefix):
             suffix = uid[len(scoped_prefix) :]
-            if suffix in valid_suffixes:
+            if suffix in binary_sensor_suffixes:
                 return f"{entry_id}:{identifier}:{suffix}"
         legacy_prefix = f"{DOMAIN}_"
         if uid.startswith(legacy_prefix):
             suffix = uid[len(legacy_prefix) :]
-            if suffix in valid_suffixes:
+            if suffix in binary_sensor_suffixes:
                 return f"{entry_id}:{identifier}:{suffix}"
         return None
 
@@ -1217,13 +1249,17 @@ def _determine_subentry_unique_id(
         return None
 
     if feature == "button":
-        valid_suffixes = ("_play_sound", "_stop_sound", "_locate_device")
+        button_suffixes: tuple[str, ...] = (
+            "_play_sound",
+            "_stop_sound",
+            "_locate_device",
+        )
         scoped_prefix = f"{DOMAIN}_{entry_id}_"
         if uid.startswith(scoped_prefix):
             remainder = uid[len(scoped_prefix) :]
             if remainder.startswith(f"{identifier}_"):
                 return uid
-            if any(remainder.endswith(suffix) for suffix in valid_suffixes):
+            if any(remainder.endswith(suffix) for suffix in button_suffixes):
                 return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
             return None
         legacy_prefix = f"{DOMAIN}_"
@@ -1233,7 +1269,7 @@ def _determine_subentry_unique_id(
                 remainder = remainder[len(entry_id) + 1 :]
             if remainder.startswith(f"{identifier}_"):
                 return uid
-            if any(remainder.endswith(suffix) for suffix in valid_suffixes):
+            if any(remainder.endswith(suffix) for suffix in button_suffixes):
                 return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
         return None
 
@@ -1602,7 +1638,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     cache = await TokenCache.create(hass, entry.entry_id, legacy_path=legacy_path)
 
     # Ensure deferred writes are flushed on HA shutdown
-    async def _flush_on_stop(event) -> None:
+    async def _flush_on_stop(event: Event) -> None:
         """Flush deferred saves on Home Assistant stop."""
         try:
             await cache.flush()
@@ -1878,12 +1914,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     hass.data[DOMAIN].setdefault("device_owner_index", {})
 
     # Optional: attach Google Home filter (options-first configuration)
-    if GoogleHomeFilter:
+    if GoogleHomeFilter is not None:
         try:
-            coordinator.google_home_filter = GoogleHomeFilter(
-                hass, _effective_config(entry)
-            )  # type: ignore[call-arg]
-            runtime_data.google_home_filter = coordinator.google_home_filter
+            google_home_filter = GoogleHomeFilter(hass, _effective_config(entry))
+            runtime_data.google_home_filter = google_home_filter
             _LOGGER.debug("Initialized Google Home filter (options-first)")
         except Exception as err:
             _LOGGER.debug("GoogleHomeFilter attach skipped due to: %s", err)
@@ -1942,8 +1976,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 )
                 coordinator.force_poll_due()
 
-            await coordinator.async_refresh()
-            if not coordinator.last_update_success:
+            await coordinator.async_request_refresh()
+            last_update_success = getattr(coordinator, "last_update_success", None)
+            if last_update_success is False:
                 _LOGGER.warning(
                     "Initial refresh failed; entities will recover on subsequent polls."
                 )
@@ -1985,7 +2020,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     return True
 
 
-async def _async_save_secrets_data(cache: TokenCache, secrets_data: dict) -> None:
+async def _async_save_secrets_data(
+    cache: TokenCache, secrets_data: Mapping[str, Any]
+) -> None:
     """Persist a legacy secrets.json bundle into the entry-scoped token cache.
 
     Notes:
@@ -2109,8 +2146,8 @@ async def async_remove_config_entry_device(
 
         name_to_store = device_entry.name_by_user or device_entry.name or canonical_id
 
-        alias_sources: list[list[str]] = []
-        name_sources: list[list[str]] = []
+        alias_sources: list[list[str] | None] = []
+        name_sources: list[list[str] | None] = []
         for meta in (canonical_meta, legacy_meta):
             if not isinstance(meta, Mapping):
                 continue
@@ -2240,8 +2277,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("Coordinator async_shutdown raised during unload: %s", err)
 
-    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if ok:
+    unloaded = bool(await hass.config_entries.async_unload_platforms(entry, PLATFORMS))
+    if unloaded:
         if entries_bucket is None:
             entries_bucket = hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})
 
@@ -2309,13 +2346,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("Owner-index cleanup failed: %s", err)
 
-    if ok:
+    if unloaded and hasattr(entry, "runtime_data"):
         try:
-            entry.runtime_data = None  # type: ignore[assignment]
+            setattr(entry, "runtime_data", None)
         except Exception:
             pass
 
-    return ok
+    return unloaded
 
 
 def _get_local_ip_sync() -> str:
@@ -2323,6 +2360,6 @@ def _get_local_ip_sync() -> str:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
+            return cast(str, s.getsockname()[0])
     except OSError:
         return ""
