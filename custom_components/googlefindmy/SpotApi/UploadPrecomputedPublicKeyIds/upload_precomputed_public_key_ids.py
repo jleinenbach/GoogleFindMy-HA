@@ -4,7 +4,6 @@
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
 import time
-from typing import cast
 
 from custom_components.googlefindmy.const import MICRO
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
@@ -56,7 +55,7 @@ def refresh_custom_trackers(device_list: DevicesList) -> None:
                 )
                 return
             next_eids = get_next_eids(
-                cast(bytes, identity_key),
+                identity_key,
                 new_truncated_ids.pairDate,
                 int(time.time() - hours_to_seconds(3)),
                 duration_seconds=max_truncated_eid_seconds_server,
