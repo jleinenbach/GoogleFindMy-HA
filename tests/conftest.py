@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 import asyncio
+import importlib
 import inspect
 from collections.abc import Mapping
 from types import MappingProxyType, ModuleType, SimpleNamespace
@@ -548,6 +549,87 @@ def _stub_homeassistant() -> None:
     sys.modules["homeassistant.components.device_tracker"] = device_tracker_module
     setattr(components_pkg, "device_tracker", device_tracker_module)
 
+    def _entity_base() -> type:
+        class _EntityBase:  # pragma: no cover - stub behaviour
+            _attr_has_entity_name = True
+
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.entity_id = None
+                self.hass = None
+
+            async def async_added_to_hass(self) -> None:
+                return None
+
+            async def async_will_remove_from_hass(self) -> None:
+                return None
+
+            def async_write_ha_state(self) -> None:
+                return None
+
+        return _EntityBase
+
+    button_module = ModuleType("homeassistant.components.button")
+
+    class ButtonEntity(_entity_base()):  # pragma: no cover - stub
+        pass
+
+    class ButtonEntityDescription:  # pragma: no cover - stub
+        def __init__(self, **kwargs) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    button_module.ButtonEntity = ButtonEntity
+    button_module.ButtonEntityDescription = ButtonEntityDescription
+    sys.modules["homeassistant.components.button"] = button_module
+    setattr(components_pkg, "button", button_module)
+
+    binary_sensor_module = ModuleType("homeassistant.components.binary_sensor")
+
+    class BinarySensorEntity(_entity_base()):  # pragma: no cover - stub
+        pass
+
+    class BinarySensorEntityDescription:  # pragma: no cover - stub
+        def __init__(self, **kwargs) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class BinarySensorDeviceClass:  # pragma: no cover - stub values
+        PROBLEM = "problem"
+
+    binary_sensor_module.BinarySensorEntity = BinarySensorEntity
+    binary_sensor_module.BinarySensorEntityDescription = BinarySensorEntityDescription
+    binary_sensor_module.BinarySensorDeviceClass = BinarySensorDeviceClass
+    sys.modules["homeassistant.components.binary_sensor"] = binary_sensor_module
+    setattr(components_pkg, "binary_sensor", binary_sensor_module)
+
+    sensor_module = ModuleType("homeassistant.components.sensor")
+
+    class SensorEntity(_entity_base()):  # pragma: no cover - stub
+        pass
+
+    class RestoreSensor(SensorEntity):  # pragma: no cover - stub
+        async def async_get_last_sensor_data(self):
+            return None
+
+    class SensorEntityDescription:  # pragma: no cover - stub
+        def __init__(self, **kwargs) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class SensorDeviceClass:  # pragma: no cover - stub values
+        TIMESTAMP = "timestamp"
+
+    class SensorStateClass:  # pragma: no cover - stub values
+        TOTAL_INCREASING = "total_increasing"
+
+    sensor_module.SensorEntity = SensorEntity
+    sensor_module.RestoreSensor = RestoreSensor
+    sensor_module.SensorEntityDescription = SensorEntityDescription
+    sensor_module.SensorDeviceClass = SensorDeviceClass
+    sensor_module.SensorStateClass = SensorStateClass
+    sys.modules["homeassistant.components.sensor"] = sensor_module
+    setattr(components_pkg, "sensor", sensor_module)
+
     http_module = ModuleType("homeassistant.components.http")
 
     class HomeAssistantView:  # pragma: no cover - stub for imports
@@ -610,13 +692,8 @@ def fixture_manifest(integration_root: Path) -> dict[str, object]:
 
 _stub_homeassistant()
 
-components_pkg = sys.modules.setdefault(
-    "custom_components", ModuleType("custom_components")
-)
+components_pkg = importlib.import_module("custom_components")
 components_pkg.__path__ = [str(ROOT / "custom_components")]
 
-gf_pkg = sys.modules.setdefault(
-    "custom_components.googlefindmy", ModuleType("custom_components.googlefindmy")
-)
-gf_pkg.__path__ = [str(ROOT / "custom_components/googlefindmy")]
+gf_pkg = importlib.import_module("custom_components.googlefindmy")
 setattr(components_pkg, "googlefindmy", gf_pkg)

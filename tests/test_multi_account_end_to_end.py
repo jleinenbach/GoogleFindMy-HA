@@ -291,7 +291,7 @@ def test_multi_account_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
             loader_module.async_get_integration = _async_get_integration  # type: ignore[attr-defined]
             sys.modules["homeassistant.loader"] = loader_module
 
-        integration = importlib.import_module("custom_components.googlefindmy.__init__")
+        integration = importlib.import_module("custom_components.googlefindmy")
         coordinator_module = importlib.import_module(
             "custom_components.googlefindmy.coordinator"
         )

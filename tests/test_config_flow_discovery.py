@@ -310,10 +310,10 @@ def test_async_step_discovery_update_info_existing_entry(
             hass.config_entries.reloaded,
         )
 
-    result, ingest_called, calls, lookups, updates, reloaded = asyncio.run(
-        _exercise()
+    result, ingest_called, calls, lookups, updates, reloaded = asyncio.run(_exercise())
+    assert ingest_called, (
+        f"discovery ingestion helper was not invoked: lookups={lookups!r}, result={result!r}"
     )
-    assert ingest_called, f"discovery ingestion helper was not invoked: lookups={lookups!r}, result={result!r}"
     assert result["type"] == "abort"
     assert result["reason"] == "already_configured"
     assert calls, "abort helper did not inspect current entries"

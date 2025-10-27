@@ -24,9 +24,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
+from homeassistant.components.button import ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 import voluptuous as vol
@@ -37,6 +37,7 @@ from .const import (
 )
 from .coordinator import GoogleFindMyCoordinator
 from .entity import GoogleFindMyDeviceEntity, resolve_coordinator
+from .ha_typing import ButtonEntity, callback
 from .util_services import register_entity_service
 
 _LOGGER = logging.getLogger(__name__)
@@ -283,7 +284,7 @@ class GoogleFindMyPlaySoundButton(GoogleFindMyButtonEntity):
             ) and not self.coordinator.is_device_present(dev_id):
                 return False
             # Capability / push readiness gate
-            return self.coordinator.can_play_sound(dev_id)
+            return bool(self.coordinator.can_play_sound(dev_id))
         except (AttributeError, TypeError) as err:
             _LOGGER.debug(
                 "PlaySound availability check for %s (%s) raised %s; defaulting to True",
@@ -469,7 +470,7 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
             ) and not self.coordinator.is_device_present(dev_id):
                 return False
             # Locate gating
-            return self.coordinator.can_request_location(dev_id)
+            return bool(self.coordinator.can_request_location(dev_id))
         except (AttributeError, TypeError) as err:
             _LOGGER.debug(
                 "Locate availability check for %s (%s) raised %s; defaulting to True",

@@ -11,7 +11,7 @@ from voluptuous import Schema
 def test_config_schema_is_defined() -> None:
     """CONFIG_SCHEMA must be provided for hassfest validation."""
 
-    module = importlib.import_module("custom_components.googlefindmy.__init__")
+    module = importlib.import_module("custom_components.googlefindmy")
 
     assert hasattr(module, "CONFIG_SCHEMA"), "CONFIG_SCHEMA is missing"
     assert isinstance(module.CONFIG_SCHEMA, Schema)

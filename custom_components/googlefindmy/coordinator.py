@@ -62,19 +62,23 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
 if TYPE_CHECKING:
+    from homeassistant.core import Event
+
     from . import ConfigEntrySubEntryManager
+else:  # pragma: no cover - typing fallback for runtime imports
+    Event = Any
 
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
     history as recorder_history,
 )
 from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -82,7 +86,7 @@ from homeassistant.helpers.device_registry import (
     EVENT_DEVICE_REGISTRY_UPDATED,
 )
 from homeassistant.helpers.event import async_call_later
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.helpers import (
     issue_registry as ir,
 )  # Repairs: modern "needs action" UI
@@ -121,7 +125,9 @@ from .const import (
 
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
 # This avoids silent type/name drift and keeps source labels stable.
-from custom_components.googlefindmy.ProtoDecoders import Common_pb2  # type: ignore
+from custom_components.googlefindmy.ProtoDecoders import Common_pb2
+
+from .ha_typing import DataUpdateCoordinator, callback
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -382,12 +388,12 @@ def _as_ha_attributes(row: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
     r = _sanitize_decoder_row(row)
 
-    def _cf(v):
+    def _cf(value: Any) -> float | None:
         try:
-            f = float(v)
-            return f if math.isfinite(f) else None
+            candidate = float(value)
         except (TypeError, ValueError):
             return None
+        return candidate if math.isfinite(candidate) else None
 
     lat = _cf(r.get("latitude"))
     lon = _cf(r.get("longitude"))
@@ -557,14 +563,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
         self.hass = hass
         self._cache = cache
+        self.config_entry: ConfigEntry | None = getattr(self, "config_entry", None)
 
         # Try to ensure entry-scoped namespace on the cache early when possible.
         # This will be finalized in async_setup() once the ConfigEntry is bound.
         try:
-            if not getattr(self._cache, "entry_id", None) and getattr(
-                self, "config_entry", None
+            if (
+                not getattr(self._cache, "entry_id", None)
+                and self.config_entry is not None
             ):
-                setattr(self._cache, "entry_id", self.config_entry.entry_id)  # type: ignore[attr-defined]
+                setattr(self._cache, "entry_id", self.config_entry.entry_id)
         except Exception:
             pass
 
@@ -654,7 +662,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # DR-driven poll targeting
         self._enabled_poll_device_ids: set[str] = set()
         self._devices_with_entry: set[str] = set()
-        self._dr_unsub: Callable | None = None
+        self._dr_unsub: Callable[[], None] | None = None
         # Deferred via_device_id linking for end devices awaiting the service anchor
         self._pending_via_updates: set[str] = set()
 
@@ -690,12 +698,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         # Performance metrics (timestamps, durations) & recent errors (bounded)
         self.performance_metrics: dict[str, float] = {}
-        self.recent_errors = deque(
-            maxlen=5
-        )  # entries: (epoch_ts, error_type, short_message)
+        self.recent_errors: deque[tuple[float, str, str]] = deque(maxlen=5)
 
         # Debounced stats persistence (avoid flushing on every increment)
-        self._stats_save_task: asyncio.Task | None = None
+        self._stats_save_task: asyncio.Task[None] | None = None
         self._stats_debounce_seconds: float = 5.0
 
         # Load persistent statistics asynchronously (name the task for better debugging)
@@ -739,9 +745,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     ) -> None:
         """Refresh internal subentry metadata caches."""
 
-        entry = getattr(self, "config_entry", None)
+        entry = self.config_entry
 
-        raw_entries: list[tuple[str, str | None, Mapping[str, Any], str | None]] = []
+        raw_entries: list[tuple[str, str | None, dict[str, Any], str | None]] = []
         if entry and getattr(entry, "subentries", None):
             for subentry in entry.subentries.values():
                 data = dict(getattr(subentry, "data", {}) or {})
@@ -776,12 +782,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         device_index: dict[str, dict[str, Any]] = {}
 
         def _register_device(candidate: Mapping[str, Any]) -> None:
-            dev_id: str | None
-            if "id" in candidate:
-                dev_id = candidate.get("id")  # type: ignore[assignment]
-            else:
-                dev_id = candidate.get("device_id")  # type: ignore[assignment]
-            if not isinstance(dev_id, str) or not dev_id or dev_id in ignored:
+            dev_id = candidate.get("id")
+            if not isinstance(dev_id, str) or not dev_id:
+                fallback_id = candidate.get("device_id")
+                if isinstance(fallback_id, str) and fallback_id:
+                    dev_id = fallback_id
+                else:
+                    return
+            if dev_id in ignored:
                 return
             name = (
                 candidate.get("name")
@@ -828,10 +836,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 features = _DEFAULT_SUBENTRY_FEATURES
 
             raw_flags = data.get("feature_flags")
+            feature_flags: dict[str, Any]
             if isinstance(raw_flags, Mapping):
                 feature_flags = {str(key): raw_flags[key] for key in raw_flags}
             else:
-                feature_flags = {}
+                feature_flags = dict[str, Any]()
 
             raw_allowed = data.get("visible_device_ids")
             allowed_ids: set[str] | None = None
@@ -862,7 +871,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
             )
 
-            poll_intervals = MappingProxyType(
+            poll_intervals: Mapping[str, int] = MappingProxyType(
                 {
                     "location": int(self.location_poll_interval),
                     "minimum": int(self.min_poll_interval),
@@ -872,7 +881,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 }
             )
 
-            filters = MappingProxyType(
+            filters: Mapping[str, Any] = MappingProxyType(
                 {
                     "ignored_device_ids": tuple(sorted(ignored)),
                     "allow_history_fallback": bool(self.allow_history_fallback),
@@ -934,14 +943,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         for row in snapshot:
             if not isinstance(row, Mapping):
                 continue
-            dev_id = row.get("device_id") or row.get("id")
-            if not isinstance(dev_id, str):
+            dev_id_raw = row.get("device_id") or row.get("id")
+            if not isinstance(dev_id_raw, str):
                 continue
-            key = device_to_key.get(dev_id)
-            if key is None:
-                key = fallback_key
-                grouped.setdefault(key, [])
-            grouped.setdefault(key, []).append(dict(row))
+            target_key = device_to_key.get(dev_id_raw, fallback_key)
+            grouped.setdefault(target_key, []).append(dict(row))
 
         for key in self._subentry_metadata:
             grouped.setdefault(key, [])
@@ -1071,7 +1077,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
         # Ensure the cache carries our entry_id namespace for downstream Nova/API helpers.
         try:
-            entry = getattr(self, "config_entry", None) or getattr(self, "entry", None)
+            entry = self.config_entry or getattr(self, "entry", None)
             if entry and not getattr(self._cache, "entry_id", None):
                 setattr(self._cache, "entry_id", entry.entry_id)
         except Exception:
@@ -1122,7 +1128,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     def _entry_id(self) -> str | None:
         """Small helper to read the bound ConfigEntry ID (None at very early startup)."""
-        entry = getattr(self, "config_entry", None)
+        entry = self.config_entry
         return getattr(entry, "entry_id", None)
 
     def _extract_our_identifier(self, device: dr.DeviceEntry) -> str | None:
@@ -1190,9 +1196,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         # Resolve ConfigEntry (works with either .entry or .config_entry on the coordinator)
-        entry = (
-            entry or getattr(self, "entry", None) or getattr(self, "config_entry", None)
-        )
+        entry = entry or getattr(self, "entry", None) or self.config_entry
         if entry is None:
             _LOGGER.debug(
                 "Service-device ensure skipped: ConfigEntry not available on coordinator."
@@ -1593,9 +1597,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
                 needs_update = False
                 device_id = getattr(dev, "id", "")
-                update_kwargs: dict[str, Any] = {"device_id": device_id}
+                update_existing_kwargs: dict[str, Any] = {"device_id": device_id}
                 if use_name and not dev.name_by_user and dev.name != use_name:
-                    update_kwargs["name"] = use_name
+                    update_existing_kwargs["name"] = use_name
                     needs_update = True
 
                 needs_via_update = (
@@ -1603,18 +1607,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     and getattr(dev, "via_device_id", None) != service_device_id
                 )
                 if needs_via_update:
-                    update_kwargs["via_device_id"] = service_device_id
+                    update_existing_kwargs["via_device_id"] = service_device_id
                     needs_update = True
 
                 if needs_update and callable(update_device) and device_id:
-                    updated = update_device(**update_kwargs)
+                    updated = update_device(**update_existing_kwargs)
                     if updated is not None:
                         dev = updated
                     if (
-                        "name" in update_kwargs
-                        and getattr(dev, "name", None) != update_kwargs["name"]
+                        "name" in update_existing_kwargs
+                        and getattr(dev, "name", None) != update_existing_kwargs["name"]
                     ):
-                        dev.name = update_kwargs["name"]
+                        dev.name = update_existing_kwargs["name"]
                     if (
                         needs_via_update
                         and getattr(dev, "via_device_id", None) != service_device_id
@@ -1631,9 +1635,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     # --- NEW: Repairs + Auth state helpers ---------------------------------
     def _get_account_email(self) -> str:
         """Return the configured Google account email for this entry (empty if unknown)."""
-        entry = getattr(self, "config_entry", None)
-        if entry and isinstance(entry.data.get(CONF_GOOGLE_EMAIL), str):
-            return entry.data[CONF_GOOGLE_EMAIL]
+        entry = self.config_entry
+        if entry is not None:
+            email_value = entry.data.get(CONF_GOOGLE_EMAIL)
+            if isinstance(email_value, str):
+                return email_value
         return ""
 
     def _create_auth_issue(self) -> None:
@@ -1645,7 +1651,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             - translation_key: `ISSUE_AUTH_EXPIRED_KEY` (localizable title/description)
             - placeholders: `email` (shown in repairs UI)
         """
-        entry = getattr(self, "config_entry", None)
+        entry = self.config_entry
         if not entry:
             return
         issue_id = issue_id_for(entry.entry_id)
@@ -1669,7 +1675,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         Returns True when an issue existed and was removed, False otherwise.
         """
 
-        entry = getattr(self, "config_entry", None)
+        entry = self.config_entry
         if not entry:
             return False
 
@@ -1715,12 +1721,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._auth_error_message = (reason or "Authentication failed").strip()
             # Repairs + event
             self._create_auth_issue()
+            entry_id = self.config_entry.entry_id if self.config_entry else ""
             self.hass.bus.async_fire(
                 EVENT_AUTH_ERROR,
                 {
-                    "entry_id": getattr(self, "config_entry", None)
-                    and getattr(self.config_entry, "entry_id", "")
-                    or "",
+                    "entry_id": entry_id,
                     "email": self._get_account_email(),
                     "message": self._auth_error_message,
                 },
@@ -1740,12 +1745,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 state_changed = True
 
             if issue_dismissed or state_changed:
+                entry_id = self.config_entry.entry_id if self.config_entry else ""
                 self.hass.bus.async_fire(
                     EVENT_AUTH_OK,
                     {
-                        "entry_id": getattr(self, "config_entry", None)
-                        and getattr(self.config_entry, "entry_id", "")
-                        or "",
+                        "entry_id": entry_id,
                         "email": self._get_account_email(),
                     },
                 )
@@ -1830,7 +1834,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         except RuntimeError:
             return False
 
-    def _run_on_hass_loop(self, func, *args) -> None:
+    def _run_on_hass_loop(
+        self, func: Callable[..., None], *args: Any, **kwargs: Any
+    ) -> None:
         """Schedule a plain callable to run on the HA loop thread ASAP.
 
         Note:
@@ -1838,7 +1844,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
           return the callable's result to the caller. Only use with functions that
           **return None** and are safe to run on the HA loop.
         """
-        self.hass.loop.call_soon_threadsafe(func, *args)
+        self.hass.loop.call_soon_threadsafe(func, *args, **kwargs)
 
     def _dispatch_async_request_refresh(
         self, *, task_name: str, log_context: str
@@ -1890,7 +1896,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 finally:
                     self._short_retry_cancel = None
 
-            def _cb(_now) -> None:
+            def _cb(_now: datetime) -> None:
                 # Clear handle and request a refresh (non-blocking)
                 self._short_retry_cancel = None
                 self._dispatch_async_request_refresh(
@@ -1908,7 +1914,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._run_on_hass_loop(_do_schedule)
 
     # ---------------------------- Device Registry helpers -------------------
-    async def _handle_dr_event(self, _event) -> None:
+    async def _handle_dr_event(self, _event: Event) -> None:
         """Handle Device Registry changes by rebuilding poll targets (rare)."""
         self._reindex_poll_targets_from_device_registry()
         # After changes, request a refresh so the next tick uses the new target sets.
@@ -2058,7 +2064,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             - Intentionally simple equality (no normalization) to avoid surprises.
         """
         try:
-            entry = getattr(self, "config_entry", None)
+            entry = self.config_entry
             if entry is not None:
                 raw = entry.options.get(
                     OPT_IGNORED_DEVICES, DEFAULT_OPTIONS.get(OPT_IGNORED_DEVICES, {})
@@ -2205,7 +2211,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             # 4) Token as last resort
             try:
-                entry_id = getattr(self.config_entry, "entry_id", None)
+                entry_id = self.config_entry.entry_id if self.config_entry else None
                 token = fcm.get_fcm_token(entry_id)
                 if isinstance(token, str) and len(token) >= 10:
                     return True
@@ -3247,7 +3253,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         ):
             return True
 
-        # Same timestamp? Check for spatial delta and accuracy improvement.
         if (
             n_seen_norm is not None
             and e_seen_norm is not None
@@ -3257,7 +3262,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
             if all(isinstance(v, (int, float)) for v in (n_lat, n_lon, e_lat, e_lon)):
                 try:
-                    dist = self._haversine_distance(e_lat, e_lon, n_lat, n_lon)
+                    e_lat_f = float(cast(float, e_lat))
+                    e_lon_f = float(cast(float, e_lon))
+                    n_lat_f = float(cast(float, n_lat))
+                    n_lon_f = float(cast(float, n_lon))
+                    dist = self._haversine_distance(e_lat_f, e_lon_f, n_lat_f, n_lon_f)
                     if dist > float(self._movement_threshold):
                         return True
                 except Exception:
@@ -3924,7 +3933,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 failed=True, reason=f"Auth failed during manual locate: {auth_exc}"
             )
             try:
-                self.async_request_refresh()
+                await self.async_request_refresh()
             except Exception:
                 pass
             return {}
@@ -3970,7 +3979,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 failed=True, reason=f"Auth failed during play_sound: {auth_exc}"
             )
             try:
-                self.async_request_refresh()
+                await self.async_request_refresh()
             except Exception:
                 pass
             return False
@@ -4009,7 +4018,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 failed=True, reason=f"Auth failed during stop_sound: {auth_exc}"
             )
             try:
-                self.async_request_refresh()
+                await self.async_request_refresh()
             except Exception:
                 pass
             return False

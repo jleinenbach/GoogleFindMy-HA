@@ -8,14 +8,14 @@ import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 
 try:  # pragma: no cover - stripped test environments may lack CALLBACK_TYPE
     from homeassistant.core import CALLBACK_TYPE
@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - provide a minimal fallback for tests
         async def async_get_translations(*_args: Any, **_kwargs: Any) -> dict[str, str]:
             return {}
 
-    translation = _TranslationFallback()  # type: ignore[assignment]
+    translation = cast(Any, _TranslationFallback())
 
 try:  # pragma: no cover - stripped test envs may not provide event helpers
     from homeassistant.helpers.event import async_track_time_interval
@@ -43,13 +43,16 @@ except ImportError:  # pragma: no cover - provide a minimal fallback for tests
         return lambda: None
 
 
-from . import config_flow as cf
+from . import config_flow as config_flow_module
+from .ha_typing import callback
 from .const import CONF_GOOGLE_EMAIL, CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, DOMAIN
+
+cf = cast(Any, config_flow_module)
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _log_task_exception(task: "asyncio.Future[Any]") -> None:
+def _log_task_exception(task: asyncio.Future[Any]) -> None:
     """Log and suppress exceptions raised by cloud discovery tasks."""
 
     try:
@@ -80,7 +83,7 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
         super().__init__()
         self._hass = hass
 
-    def append(  # type: ignore[override]
+    def append(
         self,
         item: Mapping[str, Any],
         *,
@@ -112,13 +115,13 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
         )
         self._schedule(coro)
 
-    def _schedule(self, coro: Awaitable[bool]) -> None:
+    def _schedule(self, coro: Coroutine[Any, Any, object]) -> None:
         create_task = getattr(self._hass, "async_create_task", None)
         if callable(create_task):
             try:
                 task = create_task(
                     coro,
-                    name="googlefindmy.cloud_discovery",  # type: ignore[arg-type]
+                    name="googlefindmy.cloud_discovery",
                 )
             except TypeError:
                 task = create_task(coro)
@@ -126,7 +129,7 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
                 task.add_done_callback(_log_task_exception)
             elif hasattr(task, "add_done_callback"):
                 try:
-                    task.add_done_callback(_log_task_exception)  # type: ignore[call-arg]
+                    task.add_done_callback(_log_task_exception)
                 except Exception:  # noqa: BLE001 - defensive best effort
                     _LOGGER.debug(
                         "Unable to attach discovery task callback", exc_info=True
@@ -134,7 +137,7 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
             return
 
         try:
-            task = asyncio.create_task(coro)
+            task = asyncio.create_task(cast(Coroutine[Any, Any, Any], coro))
         except RuntimeError:
             _LOGGER.debug(
                 "Cloud discovery append scheduling skipped: event loop not running"
@@ -436,7 +439,7 @@ class SecretsJSONWatcher:
         await self._scan(reason="manual")
 
     @callback
-    def _handle_interval(self, _now) -> None:
+    def _handle_interval(self, _now: datetime | None) -> None:
         self._hass.async_create_task(self._scan(reason="interval"))
 
     async def _scan(self, *, reason: str) -> None:
@@ -631,7 +634,7 @@ class DiscoveryManager:
 
         self._started = False
 
-    async def _handle_hass_stop(self, _event) -> None:
+    async def _handle_hass_stop(self, _event: Any) -> None:
         await self.async_stop()
 
     async def async_force_secrets_scan(self) -> None:

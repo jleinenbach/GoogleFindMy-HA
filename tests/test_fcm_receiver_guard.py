@@ -1,4 +1,6 @@
 # tests/test_fcm_receiver_guard.py
+"""Tests for the shared FCM receiver guard logic."""
+
 from __future__ import annotations
 
 import asyncio
@@ -43,7 +45,7 @@ def test_async_acquire_discards_invalid_cached_receiver(
     loader_module.async_get_integration = lambda *_args, **_kwargs: None
     monkeypatch.setitem(sys.modules, "homeassistant.loader", loader_module)
 
-    module = importlib.import_module("custom_components.googlefindmy.__init__")
+    module = importlib.import_module("custom_components.googlefindmy")
     async_acquire_shared_fcm = module._async_acquire_shared_fcm
 
     recorded_getters: dict[str, Callable[[], object]] = {}

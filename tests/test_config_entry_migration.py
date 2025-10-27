@@ -132,7 +132,7 @@ class _StubHass:
 def test_async_migrate_entry_populates_email_and_options() -> None:
     """Legacy entries should gain email metadata and soft-migrate options."""
 
-    integration = import_module("custom_components.googlefindmy.__init__")
+    integration = import_module("custom_components.googlefindmy")
 
     entry = _StubConfigEntry()
     hass = _StubHass(entry)
@@ -156,7 +156,7 @@ def test_unique_id_subentry_migration_updates_existing(
 ) -> None:
     """Existing unique_ids should be upgraded to include the subentry identifier."""
 
-    integration = import_module("custom_components.googlefindmy.__init__")
+    integration = import_module("custom_components.googlefindmy")
 
     entry = _StubConfigEntry()
     entry.entry_id = "entry-1"

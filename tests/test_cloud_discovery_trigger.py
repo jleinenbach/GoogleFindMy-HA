@@ -15,7 +15,7 @@ import importlib
 from custom_components.googlefindmy import config_flow, discovery
 from custom_components.googlefindmy.const import DOMAIN
 
-integration = importlib.import_module("custom_components.googlefindmy.__init__")
+integration = importlib.import_module("custom_components.googlefindmy")
 
 if TYPE_CHECKING:
     import pytest
@@ -106,7 +106,7 @@ def test_trigger_cloud_discovery_deduplicates(
     """Multiple discoveries with the same stable key should deduplicate flows."""
 
     hass = _make_hass()
-    caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.__init__")
+    caplog.set_level(logging.DEBUG, "custom_components.googlefindmy")
     caplog.set_level(logging.DEBUG, "custom_components.googlefindmy.discovery")
 
     gate = asyncio.Event()

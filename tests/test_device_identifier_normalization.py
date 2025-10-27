@@ -7,7 +7,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from custom_components.googlefindmy.__init__ import (
+from custom_components.googlefindmy import (
     ConfigEntrySubEntryManager,
     _migrate_entry_identifier_namespaces,
     async_remove_config_entry_device,
@@ -99,7 +99,7 @@ def test_async_remove_config_entry_device_normalizes_identifier(monkeypatch) -> 
     )
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.__init__.time.time",
+        "custom_components.googlefindmy.time.time",
         lambda: 1234,
     )
 

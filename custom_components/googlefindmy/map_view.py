@@ -13,12 +13,13 @@ from urllib.parse import quote
 
 from aiohttp import web
 
-from homeassistant.components.http import HomeAssistantView
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .coordinator import GoogleFindMyCoordinator
+from .ha_typing import HomeAssistantView
 
 from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -84,7 +85,9 @@ def _entry_accept_tokens(
     return tokens
 
 
-def _resolve_entry_by_token(hass: HomeAssistant, auth_token: str):
+def _resolve_entry_by_token(
+    hass: HomeAssistant, auth_token: str
+) -> tuple[ConfigEntry, set[str]] | tuple[None, None]:
     """Return (entry, accepted_tokens) for the entry that matches the token, else (None, None).
 
     We iterate over all config entries for this DOMAIN and compare the provided token

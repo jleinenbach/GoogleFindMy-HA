@@ -23,7 +23,7 @@ Highlights for contributors:
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 import logging
 import time
 from typing import Any, cast
@@ -33,7 +33,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.network import get_url
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from .ha_typing import CoordinatorEntity
 
 from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -69,6 +69,20 @@ def resolve_coordinator(entry: ConfigEntry) -> GoogleFindMyCoordinator:
             return cast(GoogleFindMyCoordinator, coordinator)
 
     raise HomeAssistantError("googlefindmy coordinator not ready")
+
+
+def _entry_option(entry: ConfigEntry | None, key: str, default: Any) -> Any:
+    """Read an entry option with data fallback (mirrors ``__init__._opt``)."""
+
+    if entry is None:
+        return default
+    options = getattr(entry, "options", {})
+    if isinstance(options, Mapping) and key in options:
+        return options.get(key, default)
+    data = getattr(entry, "data", {})
+    if isinstance(data, Mapping):
+        return data.get(key, default)
+    return default
 
 
 class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
@@ -231,12 +245,15 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         """Return the Home Assistant base URL (fallbacks to a safe default)."""
 
         try:
-            return get_url(
-                self.hass,
-                prefer_external=True,
-                allow_cloud=True,
-                allow_external=True,
-                allow_internal=True,
+            return cast(
+                str,
+                get_url(
+                    self.hass,
+                    prefer_external=True,
+                    allow_cloud=True,
+                    allow_external=True,
+                    allow_internal=True,
+                ),
             )
         except HomeAssistantError as err:  # pragma: no cover - fallback
             _LOGGER.debug("Falling back to default base URL: %s", err)
@@ -247,25 +264,13 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
 
         config_entry = getattr(self.coordinator, "config_entry", None)
 
-        try:
-            from . import _opt  # type: ignore
-
-            token_expiration_enabled = _opt(
+        token_expiration_enabled = bool(
+            _entry_option(
                 config_entry,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION,
                 DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
             )
-        except Exception:  # pragma: no cover - fallback to raw options
-            if config_entry:
-                token_expiration_enabled = config_entry.options.get(
-                    OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                    config_entry.data.get(
-                        OPT_MAP_VIEW_TOKEN_EXPIRATION,
-                        DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-                    ),
-                )
-            else:
-                token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+        )
 
         entry_id = getattr(config_entry, "entry_id", "") if config_entry else ""
         ha_uuid = str(getattr(self.hass, "data", {}).get("core.uuid", "ha"))
