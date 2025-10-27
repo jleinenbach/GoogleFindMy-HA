@@ -38,6 +38,20 @@ from collections.abc import Awaitable, Callable
 
 import aiohttp
 
+from custom_components.googlefindmy.Auth.username_provider import (
+    async_get_username,
+    username_string,
+)
+from custom_components.googlefindmy.Auth.adm_token_retrieval import (
+    async_get_adm_token as async_get_adm_token_api,
+)
+from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
+from custom_components.googlefindmy.Auth.token_cache import (
+    TokenCache,  # NEW: for entry-scoped cache access in async path
+)
+from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
+
+
 if TYPE_CHECKING:
     from bs4 import BeautifulSoup as _BeautifulSoupType
 else:
@@ -54,20 +68,6 @@ else:
         "Callable[[str, str], _BeautifulSoupType]", _bs_factory
     )
     _BS4_AVAILABLE = True
-
-from custom_components.googlefindmy.Auth.username_provider import (
-    async_get_username,
-    username_string,
-)
-from custom_components.googlefindmy.Auth.adm_token_retrieval import (
-    async_get_adm_token as async_get_adm_token_api,
-)
-from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
-from custom_components.googlefindmy.Auth.token_cache import (
-    TokenCache,  # NEW: for entry-scoped cache access in async path
-)
-from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
-
 
 _LOGGER = logging.getLogger(__name__)
 

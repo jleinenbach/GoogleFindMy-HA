@@ -10,7 +10,6 @@ import time
 import logging
 import traceback
 from typing import (
-    TYPE_CHECKING,
     Protocol,
     runtime_checkable,
     Any,
