@@ -66,7 +66,8 @@ def get_masked_timestamp(timestamp: int, K: int):
 
 
 if __name__ == "__main__":
-    sample_identity_key = get_example_data("sample_identity_key")
+    sample_identity_key_hex = get_example_data("sample_identity_key")
+    sample_identity_key = bytes.fromhex(sample_identity_key_hex)
 
     # Generate EIDs
     for i in range(1000):

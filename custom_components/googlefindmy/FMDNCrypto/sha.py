@@ -18,6 +18,8 @@ def calculate_truncated_sha256(identity_key: bytes, operation: int) -> bytes:
     return truncated_hash
 
 
-def calculate_hmac_sha256(key, message):
+def calculate_hmac_sha256(
+    key: bytes | bytearray, message: bytes | bytearray
+) -> str:
     hmac_obj = hmac.new(key, message, hashlib.sha256)
     return hmac_obj.hexdigest()
