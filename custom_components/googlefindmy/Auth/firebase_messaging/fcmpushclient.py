@@ -39,15 +39,15 @@ import random
 from base64 import urlsafe_b64decode
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
-from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from collections.abc import Callable, Mapping, MutableMapping
 
 from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 from google.protobuf.json_format import MessageToJson
 from google.protobuf.message import Message
-from http_ece import decrypt as http_decrypt  # type: ignore[import-untyped]
+from http_ece import decrypt as http_decrypt
 
 from .const import (
     MCS_HOST,
@@ -70,8 +70,11 @@ from .proto.mcs_pb2 import (  # pylint: disable=no-name-in-module
 
 _logger = logging.getLogger(__name__)
 
-OnNotificationCallable = Callable[[dict[str, Any], str, Any], None]
-CredentialsUpdatedCallable = Callable[[dict[str, Any]], None]
+JSONDict: TypeAlias = dict[str, Any]
+MutableJSONMapping: TypeAlias = MutableMapping[str, Any]
+
+OnNotificationCallable = Callable[[JSONDict, str, Any | None], None]
+CredentialsUpdatedCallable = Callable[[MutableJSONMapping], None]
 
 # MCS Message Types and Tags
 MCS_MESSAGE_TAG = {
@@ -155,9 +158,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     def __init__(
         self,
-        callback: Callable[[dict, str, Any | None], None],
+        callback: OnNotificationCallable,
         fcm_config: FcmRegisterConfig,
-        credentials: dict | None = None,
+        credentials: MutableJSONMapping | None = None,
         credentials_updated_callback: CredentialsUpdatedCallable | None = None,
         *,
         callback_context: object | None = None,
@@ -166,14 +169,19 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         http_client_session: ClientSession | None = None,
     ):
         """Initializes the receiver."""
-        self.callback = callback
+        self.callback: OnNotificationCallable = callback
         self.callback_context = callback_context
         self.fcm_config = fcm_config
-        self.credentials = credentials
+        self.credentials: MutableJSONMapping | None = credentials
         self.credentials_updated_callback = credentials_updated_callback
-        self.persistent_ids = received_persistent_ids if received_persistent_ids else []
+        self.persistent_ids: list[str] = (
+            list(received_persistent_ids)
+            if received_persistent_ids is not None
+            else []
+        )
         self.config = config if config else FcmPushClientConfig()
-        self._http_client_session = http_client_session
+        self._http_client_session: ClientSession | None = http_client_session
+        self.register: FcmRegister | None = None
 
         # Instance-specific logger to avoid global side effects; honors log_debug_verbose.
         self.logger = logging.getLogger(f"{__name__}.FcmPushClient.{id(self)}")
@@ -195,7 +203,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         self.last_message_time: float = 0.0
 
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.CREATED
-        self.tasks: list[asyncio.Task] = []
+        self.tasks: list[asyncio.Task[None]] = []
 
         # Locks
         self.stopping_lock: asyncio.Lock = asyncio.Lock()
@@ -204,7 +212,8 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     def _msg_str(self, msg: Message) -> str:
         if self.config.log_debug_verbose:
-            return type(msg).__name__ + "\n" + MessageToJson(msg, indent=4)
+            pretty_json = cast(str, MessageToJson(msg, indent=4))
+            return f"{type(msg).__name__}\n{pretty_json}"
         return type(msg).__name__
 
     def _log_verbose(self, msg: str, *args: object) -> None:
@@ -276,9 +285,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         shift = 0
         while True:
             r = await reader.readexactly(1)
-            (b,) = struct.unpack("B", r)
-            res |= (b & 0x7F) << shift
-            if (b & 0x80) == 0:
+            byte_value = int(struct.unpack("B", r)[0])
+            res |= (byte_value & 0x7F) << shift
+            if (byte_value & 0x80) == 0:
                 break
             shift += 7
         return res
@@ -344,7 +353,8 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self._log_warn_with_limit("Unconfigured message class %s", msg_class)
             return None
 
-        payload = msg_class()  # type: ignore[operator]
+        msg_type = cast(type[Message], msg_class)
+        payload = msg_type()
         payload.ParseFromString(buf)
         self._log_verbose("Received payload: %s", self._msg_str(payload))
 
@@ -408,27 +418,38 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     @staticmethod
     def _decrypt_raw_data(
-        credentials: dict[str, dict[str, str]],
+        credentials: Mapping[str, object],
         crypto_key_str: str,
         salt_str: str,
         raw_data: bytes,
     ) -> bytes:
         crypto_key = urlsafe_b64decode(crypto_key_str.encode("ascii"))
         salt = urlsafe_b64decode(salt_str.encode("ascii"))
-        der_data_str = credentials["keys"]["private"]
-        der_data = urlsafe_b64decode(der_data_str.encode("ascii") + b"========")
-        secret_str = credentials["keys"]["secret"]
-        secret = urlsafe_b64decode(secret_str.encode("ascii") + b"========")
+
+        keys_section = credentials.get("keys")
+        if not isinstance(keys_section, Mapping):
+            raise ValueError("Credentials missing FCM key material")
+
+        private_value = keys_section.get("private")
+        secret_value = keys_section.get("secret")
+        if not (isinstance(private_value, str) and isinstance(secret_value, str)):
+            raise ValueError("Invalid key values in credential payload")
+
+        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"========")
+        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"========")
         privkey = load_der_private_key(
             der_data, password=None, backend=default_backend()
         )
-        decrypted = http_decrypt(
-            raw_data,
-            salt=salt,
-            private_key=privkey,
-            dh=crypto_key,
-            version="aesgcm",
-            auth_secret=secret,
+        decrypted = cast(
+            bytes,
+            http_decrypt(
+                raw_data,
+                salt=salt,
+                private_key=privkey,
+                dh=crypto_key,
+                version="aesgcm",
+                auth_secret=secret,
+            ),
         )
         return decrypted
 
@@ -437,7 +458,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
     ) -> str:
         for x in p.app_data:
             if x.key == key:
-                return x.value
+                return cast(str, x.value)
 
         if do_not_raise:
             return ""
@@ -494,7 +515,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                 decrypted_json = None
 
         if isinstance(decrypted_json, dict):
-            ret_val: dict[str, Any] = decrypted_json
+            ret_val = cast(JSONDict, decrypted_json)
         elif decrypted_json is not None:
             self._log_warn_with_limit(
                 "FCM payload JSON is not an object (%s); wrapping",
@@ -665,9 +686,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     def _exp_backoff_with_jitter(self, trycount: int) -> float:
         """Exponential backoff: 0.5,1,2,4,... capped at 60s, plus 10–20% jitter."""
-        base = min(0.5 * (2 ** (trycount - 1)), 60.0)
-        jitter = base * random.uniform(0.10, 0.20)
-        return base + jitter
+        base: float = min(0.5 * (2 ** (trycount - 1)), 60.0)
+        jitter = base * float(random.uniform(0.10, 0.20))
+        return float(base + jitter)
 
     async def _connect_with_retry(self) -> bool:
         self.run_state = FcmPushClientRunState.STARTING_CONNECTION
@@ -761,20 +782,26 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         )
 
         try:
-            self.credentials = await self.register.checkin_or_register()
-            if not self.credentials:
-                raise RuntimeError("FCM registration did not return credentials.")
+            credentials = await self.register.checkin_or_register()
+            self.credentials = credentials
 
-            registration = (
-                self.credentials.get("fcm", {}).get("registration", {}).get("token")
-            )
-            if not registration:
+            fcm_section = credentials.get("fcm")
+            registration_token: str | None = None
+            if isinstance(fcm_section, Mapping):
+                registration_section = fcm_section.get("registration")
+                if isinstance(registration_section, Mapping):
+                    token_candidate = registration_section.get("token")
+                    if isinstance(token_candidate, str):
+                        registration_token = token_candidate
+
+            if registration_token is None:
                 raise RuntimeError("FCM registration token missing from credentials.")
 
-            return registration
+            return registration_token
         finally:
-            if self.register is not None:
-                await self.register.close()
+            register = self.register
+            if register is not None:
+                await register.close()
                 self.register = None
 
     async def _start_heartbeat_sender(self) -> None:
