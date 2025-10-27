@@ -11,3 +11,7 @@
 * Both functions return a `dict[str, Any]` containing response keys like `"Token"`, `"Auth"`, and `"Error"`. Persist this annotation so mypy strict remains satisfied when parsing the response payload.
 
 When the upstream stubs change, update this file and adjust the affected call sites so that future type-checking runs remain stable.
+
+## Linting reminder
+
+Keep `TYPE_CHECKING` aliases only when the alias is referenced in the module. Remove stale aliases during cleanups so linting runs stay predictable and reviewers can confirm no runtime imports are hidden behind unused guards.
