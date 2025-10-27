@@ -11,7 +11,7 @@
 > **Upstream documentation hierarchy:** When consulting external guidance, prioritize Home Assistant's canonical domains in this order: developer portal (`https://developers.home-assistant.io`), user documentation (`https://www.home-assistant.io`), and the alerts/service bulletins site (`https://alerts.home-assistant.io`). If a required host is unreachable while the connectivity probe still confirms general internet access, pause implementation, request manual approval for that domain, and document the escalation before proceeding.
 ## Scoped guidance index
 
-* [`tests/AGENTS.md`](tests/AGENTS.md) — Home Assistant config flow test stubs, helpers, and discovery/update scaffolding details.
+* [`tests/AGENTS.md`](tests/AGENTS.md) — Home Assistant config flow test stubs, helpers, discovery/update scaffolding details, **and** the package-layout note that requires package-relative imports now that `tests/` ships with an `__init__.py`.
 
 >
 > | Domain | Primary use cases |
