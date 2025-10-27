@@ -6,7 +6,7 @@ from custom_components.googlefindmy.protobuf_typing import MessageProto as _Mess
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from typing import Any as _Any, ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 Message = _message.Message
 MessageProto = _MessageProto
@@ -23,7 +23,7 @@ class LocationReportsUpload(Message, _MessageProto):
     clientMetadata: ClientMetadata
     random1: int
     random2: int
-    def __init__(self, reports: _Optional[_Iterable[_Union[Report, _Mapping[str, object]]]] = ..., clientMetadata: _Optional[_Union[ClientMetadata, _Mapping[str, object]]] = ..., random1: _Optional[int] = ..., random2: _Optional[int] = ...) -> None: ...
+    def __init__(self, reports: _Optional[_Iterable[_Union[Report, _Mapping[str, _Any]]]] = ..., clientMetadata: _Optional[_Union[ClientMetadata, _Mapping[str, _Any]]] = ..., random1: _Optional[int] = ..., random2: _Optional[int] = ...) -> None: ...
 
 class Report(Message, _MessageProto):
     __slots__ = ("advertisement", "time", "location")
@@ -33,7 +33,7 @@ class Report(Message, _MessageProto):
     advertisement: Advertisement
     time: _Common_pb2.Time
     location: _Common_pb2.LocationReport
-    def __init__(self, advertisement: _Optional[_Union[Advertisement, _Mapping[str, object]]] = ..., time: _Optional[_Union[_Common_pb2.Time, _Mapping[str, object]]] = ..., location: _Optional[_Union[_Common_pb2.LocationReport, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, advertisement: _Optional[_Union[Advertisement, _Mapping[str, _Any]]] = ..., time: _Optional[_Union[_Common_pb2.Time, _Mapping[str, _Any]]] = ..., location: _Optional[_Union[_Common_pb2.LocationReport, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class Advertisement(Message, _MessageProto):
     __slots__ = ("identifier", "unwantedTrackingModeEnabled")
@@ -41,7 +41,7 @@ class Advertisement(Message, _MessageProto):
     UNWANTEDTRACKINGMODEENABLED_FIELD_NUMBER: _ClassVar[int]
     identifier: Identifier
     unwantedTrackingModeEnabled: int
-    def __init__(self, identifier: _Optional[_Union[Identifier, _Mapping[str, object]]] = ..., unwantedTrackingModeEnabled: _Optional[int] = ...) -> None: ...
+    def __init__(self, identifier: _Optional[_Union[Identifier, _Mapping[str, _Any]]] = ..., unwantedTrackingModeEnabled: _Optional[int] = ...) -> None: ...
 
 class Identifier(Message, _MessageProto):
     __slots__ = ("truncatedEid", "canonicDeviceId")
@@ -55,7 +55,7 @@ class ClientMetadata(Message, _MessageProto):
     __slots__ = ("version",)
     VERSION_FIELD_NUMBER: _ClassVar[int]
     version: ClientVersionInformation
-    def __init__(self, version: _Optional[_Union[ClientVersionInformation, _Mapping[str, object]]] = ...) -> None: ...
+    def __init__(self, version: _Optional[_Union[ClientVersionInformation, _Mapping[str, _Any]]] = ...) -> None: ...
 
 class ClientVersionInformation(Message, _MessageProto):
     __slots__ = ("playServicesVersion",)

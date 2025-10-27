@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from typing import Any as _Any, ClassVar as _ClassVar, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 from custom_components.googlefindmy.protobuf_typing import (
     EnumTypeWrapperMeta as _EnumTypeWrapperMeta,
@@ -43,7 +43,7 @@ class LocationReport(Message, _MessageProto):
     semanticLocation: SemanticLocation
     geoLocation: GeoLocation
     status: Status
-    def __init__(self, semanticLocation: _Optional[_Union[SemanticLocation, _Mapping[str, object]]] = ..., geoLocation: _Optional[_Union[GeoLocation, _Mapping[str, object]]] = ..., status: _Optional[_Union[Status, str]] = ...) -> None: ...
+    def __init__(self, semanticLocation: _Optional[_Union[SemanticLocation, _Mapping[str, _Any]]] = ..., geoLocation: _Optional[_Union[GeoLocation, _Mapping[str, _Any]]] = ..., status: _Optional[_Union[Status, str]] = ...) -> None: ...
 
 class SemanticLocation(Message, _MessageProto):
     __slots__ = ("locationName",)
@@ -59,7 +59,7 @@ class GeoLocation(Message, _MessageProto):
     encryptedReport: EncryptedReport
     deviceTimeOffset: int
     accuracy: float
-    def __init__(self, encryptedReport: _Optional[_Union[EncryptedReport, _Mapping[str, object]]] = ..., deviceTimeOffset: _Optional[int] = ..., accuracy: _Optional[float] = ...) -> None: ...
+    def __init__(self, encryptedReport: _Optional[_Union[EncryptedReport, _Mapping[str, _Any]]] = ..., deviceTimeOffset: _Optional[int] = ..., accuracy: _Optional[float] = ...) -> None: ...
 
 class EncryptedReport(Message, _MessageProto):
     __slots__ = ("publicKeyRandom", "encryptedLocation", "isOwnReport")
