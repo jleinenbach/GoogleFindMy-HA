@@ -62,8 +62,8 @@ import logging
 import math
 import random
 import time
-from typing import TYPE_CHECKING, Any, TypeVar
-from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
+from collections.abc import Callable, Mapping, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -110,6 +110,9 @@ except Exception:  # pragma: no cover
 
 _LOGGER = logging.getLogger(__name__)
 
+JSONDict: TypeAlias = dict[str, Any]
+MutableJSONMapping: TypeAlias = MutableMapping[str, Any]
+
 _T = TypeVar("_T")
 
 
@@ -154,9 +157,9 @@ class FcmReceiverHA:
         self._hass: HomeAssistant | None = None
 
         # Per-entry in-memory credentials and clients
-        self.creds: dict[str, dict | None] = {}  # entry_id -> credentials dict
+        self.creds: dict[str, MutableJSONMapping | None] = {}  # entry_id -> credentials dict
         self.pcs: dict[str, FcmPushClient] = {}  # entry_id -> FcmPushClient
-        self.supervisors: dict[str, asyncio.Task] = {}  # entry_id -> supervisor task
+        self.supervisors: dict[str, asyncio.Task[None]] = {}  # entry_id -> supervisor task
         self._stop_evts: dict[str, asyncio.Event] = {}  # entry_id -> stop event
 
         # Per-request callbacks awaiting device responses (entry-agnostic)
@@ -171,13 +174,13 @@ class FcmReceiverHA:
 
         # Entry-scoped TokenCache instances (for background decrypt path)
         self._entry_caches: dict[str, TokenCache] = {}
-        self._pending_creds: dict[str, dict | None] = {}
+        self._pending_creds: dict[str, MutableJSONMapping | None] = {}
         self._pending_routing_tokens: dict[str, set[str]] = {}
 
         # Debounce state (push path): keyed by (entry_id, device_id)
-        self._pending: dict[tuple[str, str], dict] = {}
+        self._pending: dict[tuple[str, str], JSONDict] = {}
         self._pending_targets: dict[tuple[str, str], set[str] | None] = {}
-        self._flush_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._flush_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._debounce_ms: int = 250
 
         # Aggregate telemetry
@@ -907,7 +910,7 @@ class FcmReceiverHA:
                 )
                 return
 
-            payload = dict(location_data)
+            payload: JSONDict = dict(location_data)
             payload.setdefault("last_updated", time.time())
 
             key = (
@@ -1047,7 +1050,7 @@ class FcmReceiverHA:
 
     # -------------------- Decode helper --------------------
 
-    def _decode_background_location(self, entry_id: str, hex_string: str) -> dict:
+    def _decode_background_location(self, entry_id: str, hex_string: str) -> JSONDict:
         """Decode background location using protobuf decoders (CPU-bound)."""
         try:
             from custom_components.googlefindmy.ProtoDecoders.decoder import (
@@ -1066,13 +1069,13 @@ class FcmReceiverHA:
                 )
                 return {}
 
-            locations = (
+            locations: list[Mapping[str, Any]] = (
                 decrypt_location_response_locations(device_update, cache=cache) or []
             )
             if not locations:
                 return {}
 
-            best_record: dict | None = None
+            best_record: Mapping[str, Any] | None = None
             best_key: tuple[float, int, int] | None = None
 
             for record in locations:
