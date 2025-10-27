@@ -203,7 +203,9 @@ def test_process_device_list_response_deduplicates_canonic_ids(
         api_module, "parse_device_list_protobuf", lambda hex_str: parsed
     )
     monkeypatch.setattr(
-        api_module, "_build_can_ring_index", lambda msg: {"device-1": True}
+        api_module,
+        "_build_can_ring_index",
+        lambda msg, *, cache=None: {"device-1": True},
     )
     monkeypatch.setattr(
         api_module,

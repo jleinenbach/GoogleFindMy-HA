@@ -11,14 +11,18 @@ import datetime
 import math
 import os
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Protocol
 
 from google.protobuf import text_format
+from google.protobuf.message import Message
 
 try:
     from zoneinfo import ZoneInfo  # stdlib, Python 3.9+
 except ImportError:
     ZoneInfo = None  # type: ignore
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 from custom_components.googlefindmy.ProtoDecoders import (
     Common_pb2,
@@ -27,12 +31,28 @@ from custom_components.googlefindmy.ProtoDecoders import (
 )
 
 
+class _DecryptLocationsCallable(Protocol):
+    """Runtime signature for the decrypt helper imported lazily."""
+
+    def __call__(
+        self,
+        device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
+        *,
+        cache: "TokenCache",
+    ) -> list[dict[str, Any]] | None:
+        ...
+
+
 # --------------------------------------------------------------------------------------
 # Pretty printer helpers (dev tooling)
 # --------------------------------------------------------------------------------------
 
 
-def custom_message_formatter(message, indent, _as_one_line):
+def custom_message_formatter(
+    message: Message,
+    indent: str,
+    _as_one_line: bool,
+) -> str:
     """Format protobuf messages with bytes fields as hex strings (dev convenience).
 
     Note:
@@ -48,8 +68,8 @@ def custom_message_formatter(message, indent, _as_one_line):
 
     # Resolve optional display timezone from env; default to UTC.
     display_tz_name = os.environ.get("GOOGLEFINDMY_DEV_TZ", "UTC")
+    display_tz: datetime.tzinfo = datetime.UTC
     if display_tz_name == "UTC" or ZoneInfo is None:
-        display_tz = datetime.UTC
         display_tz_name = "UTC"
     else:
         try:
@@ -128,21 +148,27 @@ def custom_message_formatter(message, indent, _as_one_line):
 # --------------------------------------------------------------------------------------
 
 
-def parse_location_report_upload_protobuf(hex_string: str):
+def parse_location_report_upload_protobuf(
+    hex_string: str,
+) -> LocationReportsUpload_pb2.LocationReportsUpload:
     """Parse LocationReportsUpload from a hex string."""
     location_reports = LocationReportsUpload_pb2.LocationReportsUpload()
     location_reports.ParseFromString(bytes.fromhex(hex_string))
     return location_reports
 
 
-def parse_device_update_protobuf(hex_string: str):
+def parse_device_update_protobuf(
+    hex_string: str,
+) -> DeviceUpdate_pb2.DeviceUpdate:
     """Parse DeviceUpdate from a hex string."""
     device_update = DeviceUpdate_pb2.DeviceUpdate()
     device_update.ParseFromString(bytes.fromhex(hex_string))
     return device_update
 
 
-def parse_device_list_protobuf(hex_string: str):
+def parse_device_list_protobuf(
+    hex_string: str,
+) -> DeviceUpdate_pb2.DevicesList:
     """Parse DevicesList from a hex string."""
     device_list = DeviceUpdate_pb2.DevicesList()
     device_list.ParseFromString(bytes.fromhex(hex_string))
@@ -154,7 +180,9 @@ def parse_device_list_protobuf(hex_string: str):
 # --------------------------------------------------------------------------------------
 
 
-def get_canonic_ids(device_list) -> list[tuple[str, str]]:
+def get_canonic_ids(
+    device_list: DeviceUpdate_pb2.DevicesList,
+) -> list[tuple[str, str]]:
     """Return (device_name, canonic_id) for all devices in the list.
 
     Defensive policy:
@@ -483,11 +511,18 @@ def _merge_semantics_if_near_ts(
     return out
 
 
-def get_devices_with_location(device_list) -> list[dict[str, Any]]:
+def get_devices_with_location(
+    device_list: DeviceUpdate_pb2.DevicesList,
+    *,
+    cache: "TokenCache" | None = None,
+) -> list[dict[str, Any]]:
     """Extract one consolidated row per canonic device ID from a device list.
 
     This function serves as a robust barrier against data contamination by
-    ensuring its output is always clean, consistent, and predictable.
+    ensuring its output is always clean, consistent, and predictable. When a
+    real TokenCache instance is provided, encrypted location payloads are
+    decrypted; otherwise the function returns sanitized stubs without
+    attempting the decrypt workflow.
 
     Guarantees:
         * **One Row Per ID**: Returns exactly one dictionary per unique canonic ID,
@@ -507,11 +542,13 @@ def get_devices_with_location(device_list) -> list[dict[str, Any]]:
     # Lazy import keeps module import-time light and avoids heavy dependencies if unused.
     try:
         from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (  # noqa: E501
-            decrypt_location_response_locations,
+            decrypt_location_response_locations as _decrypt_locations,
         )
     except Exception:
         # If the decrypt layer is unavailable, return stubs only.
-        decrypt_location_response_locations = None  # type: ignore[assignment]
+        decrypt_location_response_locations: _DecryptLocationsCallable | None = None
+    else:
+        decrypt_location_response_locations = _decrypt_locations
 
     results: list[dict[str, Any]] = []
 
@@ -531,7 +568,7 @@ def get_devices_with_location(device_list) -> list[dict[str, Any]]:
 
         # Try decryption ONCE per device; share across all its canonic IDs
         location_candidates: list[dict[str, Any]] = []
-        if decrypt_location_response_locations is not None:
+        if decrypt_location_response_locations is not None and cache is not None:
             try:
                 if device.HasField("information") and device.information.HasField(
                     "locationInformation"
@@ -552,7 +589,10 @@ def get_devices_with_location(device_list) -> list[dict[str, Any]]:
                         mock_device_update = DeviceUpdate_pb2.DeviceUpdate()
                         mock_device_update.deviceMetadata.CopyFrom(device)
                         location_candidates = (
-                            decrypt_location_response_locations(mock_device_update)
+                            decrypt_location_response_locations(
+                                mock_device_update,
+                                cache=cache,
+                            )
                             or []
                         )
             except Exception:
@@ -595,7 +635,7 @@ def get_devices_with_location(device_list) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------------------
 
 
-def print_location_report_upload_protobuf(hex_string: str):
+def print_location_report_upload_protobuf(hex_string: str) -> None:
     msg = parse_location_report_upload_protobuf(hex_string)
     try:
         s = text_format.MessageToString(msg, message_formatter=custom_message_formatter)
@@ -604,7 +644,7 @@ def print_location_report_upload_protobuf(hex_string: str):
     print(s)
 
 
-def print_device_update_protobuf(hex_string: str):
+def print_device_update_protobuf(hex_string: str) -> None:
     msg = parse_device_update_protobuf(hex_string)
     try:
         s = text_format.MessageToString(msg, message_formatter=custom_message_formatter)
@@ -613,7 +653,7 @@ def print_device_update_protobuf(hex_string: str):
     print(s)
 
 
-def print_device_list_protobuf(hex_string: str):
+def print_device_list_protobuf(hex_string: str) -> None:
     msg = parse_device_list_protobuf(hex_string)
     try:
         s = text_format.MessageToString(msg, message_formatter=custom_message_formatter)

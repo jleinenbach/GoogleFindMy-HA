@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
@@ -11,6 +12,9 @@ from custom_components.googlefindmy.ProtoDecoders.decoder import (
     _select_best_location,
     get_devices_with_location,
 )
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 
 def test_decoder_prefers_newer_coordinates_over_owner_status() -> None:
@@ -87,7 +91,10 @@ def test_decoder_promotes_newer_semantic_only_report() -> None:
         "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations.decrypt_location_response_locations",
         return_value=[coordinate_fix, semantic_only],
     ):
-        rows = get_devices_with_location(devices_list)
+        rows = get_devices_with_location(
+            devices_list,
+            cache=cast("TokenCache", object()),
+        )
 
     assert len(rows) == 1
     row = rows[0]
