@@ -929,6 +929,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 }
             )
 
+            manager_visible_ids = tuple(
+                dict.fromkeys(
+                    canonical_to_registry_id.get(dev_id, dev_id)
+                    for dev_id in visible_ids
+                )
+            )
+
             metadata[group_key] = SubentryMetadata(
                 key=group_key,
                 subentry_id=subentry_id,
@@ -941,7 +948,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 enabled_device_ids=enabled_ids,
             )
 
-            manager_updates.append((group_key, visible_ids))
+            manager_updates.append((group_key, manager_visible_ids))
 
             for feature in features:
                 feature_map[feature] = group_key
