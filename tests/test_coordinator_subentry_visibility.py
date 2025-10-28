@@ -7,7 +7,7 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import device_registry as dr
@@ -65,7 +65,7 @@ def test_refresh_normalizes_registry_allowlist(monkeypatch: pytest.MonkeyPatch) 
                 "visible_device_ids": [registry_id],
             }
         ),
-        subentry_type="googlefindmy_feature_group",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Core",
         unique_id=f"{entry_id}-core",
     )

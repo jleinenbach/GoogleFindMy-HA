@@ -8,7 +8,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import custom_components.googlefindmy as integration
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
 from homeassistant.config_entries import ConfigSubentry
 
 
@@ -136,7 +136,7 @@ class _EntryStub:
     def add_subentry(self, key: str, device_ids: tuple[str, ...]) -> ConfigSubentry:
         subentry = ConfigSubentry(
             data=MappingProxyType({"group_key": key, "visible_device_ids": device_ids}),
-            subentry_type="googlefindmy_feature_group",
+            subentry_type=SUBENTRY_TYPE_TRACKER,
             title=key.title(),
             unique_id=f"{self.entry_id}-{key}",
         )

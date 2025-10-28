@@ -14,6 +14,7 @@ from custom_components.googlefindmy.const import (
     OPT_CONTRIBUTOR_MODE,
     OPT_IGNORED_DEVICES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    SUBENTRY_TYPE_TRACKER,
 )
 from homeassistant.config_entries import ConfigSubentry
 
@@ -87,7 +88,7 @@ class _EntryStub:
             payload["visible_device_ids"] = list(visible_device_ids)
         subentry = ConfigSubentry(
             data=payload,
-            subentry_type="googlefindmy_feature_group",
+            subentry_type=SUBENTRY_TYPE_TRACKER,
             title=title,
             unique_id=f"{self.entry_id}-{key}",
         )

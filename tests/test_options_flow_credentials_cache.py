@@ -19,6 +19,7 @@ from custom_components.googlefindmy.const import (
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
     DOMAIN,
+    SUBENTRY_TYPE_TRACKER,
 )
 from homeassistant.config_entries import ConfigSubentry
 
@@ -71,7 +72,7 @@ class _DummyEntry:
 
         core_subentry = ConfigSubentry(
             data={"group_key": "core_tracking", "feature_flags": {}},
-            subentry_type="googlefindmy_feature_group",
+            subentry_type=SUBENTRY_TYPE_TRACKER,
             title="Google Find My devices",
             unique_id=f"{entry_id}-core_tracking",
         )

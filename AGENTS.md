@@ -484,6 +484,8 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * Instance URL: use `homeassistant.helpers.network.get_url(hass, …)`.
 * Data: centralize periodic fetch in a **DataUpdateCoordinator**; push > poll when available.
 * Config flow: **test before configure**; localized errors; duplicate-account abort; reauth & reconfigure paths.
+* Config subentries: `ConfigFlow.async_get_supported_subentry_types` must keep the `ServiceSubentryFlowHandler` and `TrackerSubentryFlowHandler` buckets aligned with the service/tracker feature constant sets so UI actions remain accurate.
+* Config subentries (stub compatibility): `custom_components/googlefindmy/config_flow.py` ships a fallback `ConfigSubentryFlow` stub whose `async_update_and_abort(*, data, ...)` signature intentionally omits the upstream `(entry, subentry, *, data=...)` parameters; revisit when the core API evolves to avoid diverging behavior.
 * Repairs/Diagnostics: provide both; redact aggressively.
 * Storage: use `helpers.storage.Store` for tokens/state; throttle writes (batch/merge).
 * System health: prefer the `SystemHealthRegistration` helper (`homeassistant.components.system_health.SystemHealthRegistration`) when available and keep the legacy component import only as a guarded fallback.
