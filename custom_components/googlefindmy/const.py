@@ -30,11 +30,20 @@ MICRO: str = "\u03bc"
 SERVICE_DEVICE_NAME: str = "Google Find My Integration"
 SERVICE_DEVICE_MODEL: str = "Find My Device Integration"
 SERVICE_DEVICE_MANUFACTURER: str = "BSkando"
+SERVICE_DEVICE_TRANSLATION_KEY: str = "google_find_hub_service"
 
 # Identifier pattern for the per-entry "integration device"
 SERVICE_DEVICE_IDENTIFIER_PREFIX: str = "integration_"
 # Legacy, pre-namespaced identifier used by older releases (kept for migrations)
 LEGACY_SERVICE_IDENTIFIER: str = "integration"
+
+# --------------------------------------------------------------------------------------
+# Entity registry subentry helpers
+# --------------------------------------------------------------------------------------
+SERVICE_SUBENTRY_KEY: str = "service"
+TRACKER_SUBENTRY_KEY: str = "core_tracking"
+SUBENTRY_TYPE_SERVICE: str = "service"
+SUBENTRY_TYPE_TRACKER: str = "tracker"
 
 
 def service_device_identifier(entry_id: str) -> tuple[str, str]:
@@ -451,8 +460,13 @@ __all__ = [
     "SERVICE_DEVICE_NAME",
     "SERVICE_DEVICE_MODEL",
     "SERVICE_DEVICE_MANUFACTURER",
+    "SERVICE_DEVICE_TRANSLATION_KEY",
     "SERVICE_DEVICE_IDENTIFIER_PREFIX",
     "LEGACY_SERVICE_IDENTIFIER",
+    "SERVICE_SUBENTRY_KEY",
+    "TRACKER_SUBENTRY_KEY",
+    "SUBENTRY_TYPE_SERVICE",
+    "SUBENTRY_TYPE_TRACKER",
     "service_device_identifier",
     "CONF_OAUTH_TOKEN",
     "DATA_AAS_TOKEN",

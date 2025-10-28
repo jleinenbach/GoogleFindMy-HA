@@ -6,7 +6,7 @@
   "config_flow": true,
   "dependencies": ["http"],
   "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
-  "integration_type": "device",
+  "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/BSkando/GoogleFindMy-HA/issues",
   "loggers": ["custom_components.googlefindmy"],
