@@ -29,6 +29,9 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 - 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
 - ❣️ **More to come!**
 
+>[!IMPORTANT]
+>**Home Assistant Core 2025.7 or newer is required.** Older releases do not support the integration's upcoming subentry and service-grouping UX, which causes devices to appear misgrouped or hidden in the UI.
+
 >[!NOTE]
 >**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**
 >

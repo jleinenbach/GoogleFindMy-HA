@@ -6,7 +6,7 @@
   "config_flow": true,
   "dependencies": ["http"],
   "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
-  "integration_type": "device",
+  "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/BSkando/GoogleFindMy-HA/issues",
   "loggers": ["custom_components.googlefindmy"],
@@ -25,5 +25,6 @@
     "selenium>=4.37.0",
     "undetected_chromedriver>=3.5.5"
   ],
+  "homeassistant": "2025.7.0",
   "version": "1.6.0"
 }
