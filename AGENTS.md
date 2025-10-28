@@ -690,3 +690,17 @@ Sources: [pip-audit · PyPI](https://pypi.org/project/pip-audit/), [gh-action-pi
 * mypy — Command line reference: [https://mypy.readthedocs.io/en/stable/command_line.html](https://mypy.readthedocs.io/en/stable/command_line.html)
 * mypy — Configuration reference: [https://mypy.readthedocs.io/en/stable/config_file.html](https://mypy.readthedocs.io/en/stable/config_file.html)
 * mypy — Getting started & strict mode: [https://mypy.readthedocs.io/en/stable/getting_started.html](https://mypy.readthedocs.io/en/stable/getting_started.html)
+
+#### Auto-installed stub packages
+
+Running `mypy --install-types --strict` against the integration will prompt
+pip to fetch a small set of stub distributions automatically. In the hosted
+tooling environment this consistently includes:
+
+* `types-pyOpenSSL`
+* `types-cffi` (pulled in by `types-pyOpenSSL`)
+* `types-setuptools` (pulled in by `types-cffi`)
+
+Contributors working offline can preinstall these packages (alongside
+`types-requests` from `requirements-dev.txt`) to avoid repeated network
+downloads during strict mypy runs.
