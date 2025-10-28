@@ -84,11 +84,11 @@ refresh_device_urls:
 
 rebuild_registry:
   name: Rebuild / Migrate Registry
-  description: "Maintenance: Run a soft data→options migration or rebuild entities/devices for this integration."
+  description: "Maintenance: Run targeted migrations (data→options, unique IDs, button relinking) or rebuild entities/devices for this integration."
   fields:
     mode:
       name: Mode
-      description: "Choose 'Rebuild' to remove entities/devices and reload; 'Migrate' only re-applies the soft data→options migration."
+      description: "Choose 'Rebuild' to remove entities/devices and reload; 'Migrate' reapplies data→options, unique ID, and button relinking migrations."
       required: false
       default: rebuild
       selector:
@@ -96,7 +96,7 @@ rebuild_registry:
           options:
             - label: Rebuild (remove + reload)
               value: rebuild
-            - label: Migrate (data→options only)
+            - label: Migrate (data→options + unique IDs + buttons)
               value: migrate
     device_ids:
       name: Devices (optional)

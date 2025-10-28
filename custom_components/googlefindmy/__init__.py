@@ -111,7 +111,9 @@ from .const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     CACHE_KEY_CONTRIBUTOR_MODE,
     CACHE_KEY_LAST_MODE_SWITCH,
+    LEGACY_SERVICE_IDENTIFIER,
     coerce_ignored_mapping,
+    service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
@@ -439,6 +441,344 @@ def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> st
         return canonical
 
     return ident
+
+
+def _iter_config_entry_entities(
+    entity_registry: er.EntityRegistry, entry_id: str
+) -> tuple[er.RegistryEntry, ...]:
+    """Return entity registry entries belonging to a config entry."""
+
+    helper = getattr(er, "async_entries_for_config_entry", None)
+    if callable(helper):
+        entries_iterable = helper(entity_registry, entry_id)
+    else:
+        registry_helper = getattr(
+            entity_registry, "async_entries_for_config_entry", None
+        )
+        if callable(registry_helper):
+            entries_iterable = registry_helper(entry_id)
+        else:
+            entries_iterable = [
+                entity_entry
+                for entity_entry in getattr(entity_registry, "entities", {}).values()
+                if getattr(entity_entry, "config_entry_id", None) == entry_id
+            ]
+
+    return tuple(entries_iterable)
+
+
+def _default_button_subentry_identifier(subentry_map: Mapping[str, str]) -> str:
+    """Return the preferred subentry identifier for button entities."""
+
+    identifier = subentry_map.get("button")
+    if isinstance(identifier, str) and identifier:
+        return identifier
+
+    identifier = subentry_map.get("device_tracker")
+    if isinstance(identifier, str) and identifier:
+        return identifier
+
+    return _DEFAULT_SUBENTRY_IDENTIFIER
+
+
+@dataclass(slots=True)
+class _ButtonUniqueIdParts:
+    """Container describing the parsed components of a button unique_id."""
+
+    entry_id: str
+    subentry_id: str
+    google_device_id: str
+    action: str
+
+
+_BUTTON_ACTION_SUFFIXES: tuple[str, ...] = (
+    "play_sound",
+    "stop_sound",
+    "locate_device",
+)
+_LEGACY_BUTTON_SUBENTRY_PREFIXES: tuple[str, ...] = ("tracker",)
+
+
+def _normalize_legacy_button_remainder(
+    remainder: str,
+    *,
+    identifier: str,
+    suffixes: tuple[str, ...],
+) -> str:
+    """Strip legacy pseudo-subentry tokens before rebuilding button IDs."""
+
+    action_suffix: str | None = None
+    for suffix in suffixes:
+        if remainder.endswith(suffix):
+            action_suffix = suffix
+            payload = remainder[: -len(suffix)]
+            break
+    else:
+        return remainder
+
+    if payload.startswith(f"{identifier}_"):
+        return remainder
+
+    for legacy_prefix in _LEGACY_BUTTON_SUBENTRY_PREFIXES:
+        token = f"{legacy_prefix}_"
+        if payload.startswith(token):
+            trimmed = payload[len(token) :]
+            if trimmed:
+                return f"{trimmed}{action_suffix}"
+            break
+
+    return remainder
+
+
+def _parse_button_unique_id(
+    unique_id: str,
+    entry: ConfigEntry,
+    subentry_map: Mapping[str, str],
+    fallback_subentry_id: str,
+) -> _ButtonUniqueIdParts | None:
+    """Return parsed button unique_id data for relinking heuristics."""
+
+    if not isinstance(unique_id, str) or not unique_id:
+        return None
+
+    action: str | None = None
+    prefix: str | None = None
+    for candidate_action in _BUTTON_ACTION_SUFFIXES:
+        suffix = f"_{candidate_action}"
+        if unique_id.endswith(suffix):
+            action = candidate_action
+            prefix = unique_id[: -len(suffix)]
+            break
+
+    if action is None or prefix is None:
+        try:
+            prefix, action = unique_id.rsplit("_", 1)
+        except ValueError:
+            return None
+        if not action:
+            return None
+
+    trimmed = prefix
+    domain_prefix = f"{DOMAIN}_"
+    if trimmed.startswith(domain_prefix):
+        trimmed = trimmed[len(domain_prefix) :]
+
+    entry_id = entry.entry_id
+    if not isinstance(entry_id, str) or not entry_id:
+        return None
+
+    remainder = trimmed
+
+    if ":" in trimmed:
+        candidate_entry_id, potential_rest = trimmed.split(":", 1)
+        if candidate_entry_id:
+            if candidate_entry_id != entry_id:
+                return None
+            remainder = potential_rest
+    elif trimmed.startswith(f"{entry_id}_"):
+        remainder = trimmed[len(entry_id) + 1 :]
+    elif trimmed.startswith(entry_id + ":"):
+        remainder = trimmed[len(entry_id) + 1 :]
+    elif trimmed.startswith(entry_id):
+        suffix = trimmed[len(entry_id) :]
+        if suffix.startswith("_") or suffix.startswith(":"):
+            remainder = suffix[1:]
+        elif suffix:
+            remainder = trimmed
+
+    if not remainder:
+        return None
+
+    subentry_id: str | None = None
+    google_device_id = remainder
+
+    if ":" in remainder:
+        maybe_subentry, maybe_device = remainder.split(":", 1)
+        if maybe_device:
+            subentry_id = maybe_subentry or None
+            google_device_id = maybe_device
+        else:
+            google_device_id = maybe_subentry
+    else:
+        known_identifiers = {
+            identifier
+            for identifier in subentry_map.values()
+            if isinstance(identifier, str) and identifier
+        }
+        for candidate in sorted(known_identifiers, key=len, reverse=True):
+            token = f"{candidate}_"
+            if remainder.startswith(token):
+                subentry_id = candidate
+                google_device_id = remainder[len(token) :]
+                break
+
+    if not google_device_id:
+        return None
+
+    if subentry_id is None:
+        subentry_id = fallback_subentry_id
+
+    return _ButtonUniqueIdParts(
+        entry_id=entry_id,
+        subentry_id=subentry_id,
+        google_device_id=google_device_id,
+        action=action,
+    )
+
+
+def _iter_tracker_identifier_candidates(
+    parts: _ButtonUniqueIdParts,
+) -> tuple[tuple[str, str], ...]:
+    """Return identifier candidates for locating the tracker device."""
+
+    primary = (DOMAIN, f"{parts.entry_id}:{parts.subentry_id}:{parts.google_device_id}")
+    secondary = (DOMAIN, f"{parts.entry_id}:{parts.google_device_id}")
+    tertiary = (DOMAIN, parts.google_device_id)
+    return primary, secondary, tertiary
+
+
+def _device_is_service_device(device: dr.DeviceEntry | Any, entry_id: str) -> bool:
+    """Return True if the registry device represents the integration service device."""
+
+    if device is None:
+        return False
+
+    device_entry_type_cls = getattr(dr, "DeviceEntryType", None)
+    if device_entry_type_cls is not None:
+        service_entry_type = getattr(device_entry_type_cls, "SERVICE", "service")
+    else:
+        service_entry_type = "service"
+    entry_type = getattr(device, "entry_type", None)
+    if entry_type == service_entry_type:
+        return True
+    if (
+        isinstance(entry_type, str)
+        and isinstance(service_entry_type, str)
+        and entry_type.lower() == service_entry_type.lower()
+    ):
+        return True
+
+    service_identifiers = {
+        service_device_identifier(entry_id)[1],
+        LEGACY_SERVICE_IDENTIFIER,
+    }
+
+    identifiers = getattr(device, "identifiers", None)
+    if not isinstance(identifiers, Collection):
+        return False
+
+    for item in identifiers:
+        try:
+            domain, ident = item
+        except (TypeError, ValueError):
+            continue
+        if domain != DOMAIN or not isinstance(ident, str) or not ident:
+            continue
+        canonical = _normalize_device_identifier(device, ident)
+        if (
+            canonical in service_identifiers
+            or canonical.endswith(":service")
+        ):
+            return True
+
+    return False
+
+
+async def _async_relink_button_devices(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Ensure button entities are linked to their physical tracker devices."""
+
+    try:
+        entity_registry = er.async_get(hass)
+        device_registry = dr.async_get(hass)
+    except Exception as err:  # noqa: BLE001 - defensive guard
+        _LOGGER.debug(
+            "googlefindmy(%s): registry acquisition failed during button relink: %s",
+            entry.entry_id,
+            err,
+        )
+        return
+
+    subentry_map = _resolve_subentry_identifier_map(entry)
+    fallback_subentry_id = _default_button_subentry_identifier(subentry_map)
+    registry_entries = _iter_config_entry_entities(entity_registry, entry.entry_id)
+
+    fixed = 0
+
+    for entity_entry in registry_entries:
+        try:
+            if entity_entry.domain != "button" or entity_entry.platform != DOMAIN:
+                continue
+
+            current_device_id = getattr(entity_entry, "device_id", None)
+            current_device = (
+                device_registry.async_get(current_device_id)
+                if isinstance(current_device_id, str) and current_device_id
+                else None
+            )
+
+            if current_device and entry.entry_id in getattr(
+                current_device, "config_entries", ()
+            ):
+                if not _device_is_service_device(current_device, entry.entry_id):
+                    continue
+
+            parsed = _parse_button_unique_id(
+                getattr(entity_entry, "unique_id", ""),
+                entry,
+                subentry_map,
+                fallback_subentry_id,
+            )
+            if parsed is None:
+                _LOGGER.debug(
+                    "googlefindmy(%s): unable to parse button unique_id '%s'",
+                    entry.entry_id,
+                    getattr(entity_entry, "unique_id", ""),
+                )
+                continue
+
+            target_device: dr.DeviceEntry | Any | None = None
+            for candidate in _iter_tracker_identifier_candidates(parsed):
+                device = device_registry.async_get_device(identifiers={candidate})
+                if device is None:
+                    continue
+                if entry.entry_id not in getattr(device, "config_entries", ()):  # type: ignore[arg-type]
+                    continue
+                if _device_is_service_device(device, entry.entry_id):
+                    continue
+                target_device = device
+                break
+
+            if target_device is None:
+                _LOGGER.debug(
+                    "googlefindmy(%s): tracker device not found for %s (%s)",
+                    entry.entry_id,
+                    getattr(entity_entry, "entity_id", "<unknown>"),
+                    parsed.google_device_id,
+                )
+                continue
+
+            if current_device and getattr(current_device, "id", None) == getattr(
+                target_device, "id", None
+            ):
+                continue
+
+            entity_registry.async_update_entity(
+                entity_entry.entity_id, device_id=getattr(target_device, "id", None)
+            )
+            fixed += 1
+        except Exception as err:  # noqa: BLE001 - defensive guard
+            _LOGGER.debug(
+                "googlefindmy(%s): relink failed for %s: %s",
+                entry.entry_id,
+                getattr(entity_entry, "entity_id", "<unknown>"),
+                err,
+            )
+
+    _LOGGER.debug(
+        "googlefindmy(%s): relinked %d button entities",
+        entry.entry_id,
+        fixed,
+    )
 
 
 def _strip_entry_namespace(entry_id: str, ident: str) -> str:
@@ -1311,7 +1651,12 @@ def _determine_subentry_unique_id(
             if remainder.startswith(f"{identifier}_"):
                 return uid
             if any(remainder.endswith(suffix) for suffix in button_suffixes):
-                return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+                normalized_remainder = _normalize_legacy_button_remainder(
+                    remainder,
+                    identifier=identifier,
+                    suffixes=button_suffixes,
+                )
+                return f"{DOMAIN}_{entry_id}_{identifier}_{normalized_remainder}"
             return None
         legacy_prefix = f"{DOMAIN}_"
         if uid.startswith(legacy_prefix):
@@ -1321,7 +1666,12 @@ def _determine_subentry_unique_id(
             if remainder.startswith(f"{identifier}_"):
                 return uid
             if any(remainder.endswith(suffix) for suffix in button_suffixes):
-                return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+                normalized_remainder = _normalize_legacy_button_remainder(
+                    remainder,
+                    identifier=identifier,
+                    suffixes=button_suffixes,
+                )
+                return f"{DOMAIN}_{entry_id}_{identifier}_{normalized_remainder}"
         return None
 
     return None
@@ -1613,6 +1963,8 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 "opt_map_view_token_expiration_key": OPT_MAP_VIEW_TOKEN_EXPIRATION,
                 "redact_url_token": _redact_url_token,
                 "soft_migrate_entry": _async_soft_migrate_data_to_options,
+                "migrate_unique_ids": _async_migrate_unique_ids,
+                "relink_button_devices": _async_relink_button_devices,
             }
             await async_register_services(hass, svc_ctx)
             bucket["services_registered"] = True
@@ -1823,6 +2175,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     _migrate_entry_identifier_namespaces(hass, entry)
     await _async_soft_migrate_data_to_options(hass, entry)
     await _async_migrate_unique_ids(hass, entry)
+    await _async_relink_button_devices(hass, entry)
 
     # Acquire shared FCM and create a startup barrier for the first poll cycle.
     fcm_ready_event = asyncio.Event()
@@ -1926,23 +2279,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     hass.data[DOMAIN].setdefault("entries", {})[entry.entry_id] = runtime_data
 
     entity_registry = er.async_get(hass)
-    helper = getattr(er, "async_entries_for_config_entry", None)
-    if helper is not None:
-        registry_entries_iterable: Iterable[Any] = helper(
-            entity_registry, entry.entry_id
-        )
-    else:
-        registry_helper = getattr(
-            entity_registry, "async_entries_for_config_entry", None
-        )
-        if callable(registry_helper):
-            registry_entries_iterable = registry_helper(entry.entry_id)
-        else:
-            registry_entries_iterable = [
-                entity_entry
-                for entity_entry in getattr(entity_registry, "entities", {}).values()
-                if getattr(entity_entry, "config_entry_id", None) == entry.entry_id
-            ]
+    registry_entries_iterable: Iterable[Any] = _iter_config_entry_entities(
+        entity_registry, entry.entry_id
+    )
 
     reactivated = 0
     for entity_entry in registry_entries_iterable:

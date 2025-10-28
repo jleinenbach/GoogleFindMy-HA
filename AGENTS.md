@@ -4,6 +4,7 @@
 
 - [AGENTS.md — Operating Contract for `googlefindmy` (Home Assistant custom integration)](#agentsmd--operating-contract-for-googlefindmy-home-assistant-custom-integration)
   - [Scoped guidance index](#scoped-guidance-index)
+    - [Runtime vs. type-checking import quick reference](#runtime-vs-type-checking-import-quick-reference)
   - [Environment verification](#environment-verification)
     - [Module invocation primer](#module-invocation-primer)
   - [1) What must be in **every** PR (lean checklist)](#1-what-must-be-in-every-pr-lean-checklist)
@@ -19,6 +20,7 @@
     - [3.3 Opportunistic **Test Optimization** (SHOULD SUGGEST)](#33-opportunistic-test-optimization-should-suggest)
     - [3.4 Definition of Done for tests](#34-definition-of-done-for-tests)
     - [3.5 Temporary coverage dips](#35-temporary-coverage-dips)
+    - [3.6 Entity-registry migration checklist (reload-centric fixes)](#36-entity-registry-migration-checklist-reload-centric-fixes)
   - [4) **Token cache handling** (hard requirement; regression-prevention)](#4-token-cache-handling-hard-requirement-regression-prevention)
   - [5) Security & privacy guards](#5-security--privacy-guards)
   - [6) Expected **test types & coverage focus**](#6-expected-test-types--coverage-focus)
@@ -275,6 +277,16 @@ When a change is a bug fix (**commit type** `fix:` or **branch** `fix/...`) and 
 ### 3.5 Temporary coverage dips
 
 If necessary changes reduce coverage below target, **open a follow-up issue** to restore it and reference it in the PR; do not allow repeated dips.
+
+### 3.6 Entity-registry migration checklist (reload-centric fixes)
+
+For any work that migrates entity-registry records during reload/startup flows, validate the following items before shipping:
+
+1. **Device linkage** — assert that migrated entities reference the expected `device_id` and that identifier lookups exercise all candidate formats.
+2. **Service exclusion** — include coverage showing service devices remain excluded (e.g., entries with `entry_type == SERVICE` are not used as targets).
+3. **via_device integrity** — when helpers touch parent linkage, assert the fake registry preserves or updates `via_device` / `via_device_id` appropriately.
+4. **Multi-entry safety** — demonstrate that entities belonging to other config entries stay untouched by the migration helper.
+5. **Idempotence** — run the helper twice or on already-correct data to prove no extra registry updates occur.
 
 ---
 
