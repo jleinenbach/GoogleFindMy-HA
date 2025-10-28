@@ -474,6 +474,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * Config flow: **test before configure**; localized errors; duplicate-account abort; reauth & reconfigure paths.
 * Repairs/Diagnostics: provide both; redact aggressively.
 * Storage: use `helpers.storage.Store` for tokens/state; throttle writes (batch/merge).
+* System health: prefer the `SystemHealthRegistration` helper (`homeassistant.components.system_health.SystemHealthRegistration`) when available and keep the legacy component import only as a guarded fallback.
 
 ### 11.8 Release & operations
 

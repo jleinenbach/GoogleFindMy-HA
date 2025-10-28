@@ -24,6 +24,33 @@ if str(ROOT) not in sys.path:
 INTEGRATION_ROOT = ROOT / "custom_components" / "googlefindmy"
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the asyncio marker for coroutine-based tests."""
+
+    config.addinivalue_line(
+        "markers",
+        "asyncio: execute the coroutine test using an isolated event loop",
+    )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
+    """Execute asyncio-marked coroutine tests without requiring pytest-asyncio."""
+
+    marker = pyfuncitem.get_closest_marker("asyncio")
+    if marker is None or not asyncio.iscoroutinefunction(pyfuncitem.obj):
+        return None
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(pyfuncitem.obj(**pyfuncitem.funcargs))
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+    return True
+
+
 def _stub_homeassistant() -> None:
     """Install lightweight stubs for Home Assistant modules required at import time."""
 
