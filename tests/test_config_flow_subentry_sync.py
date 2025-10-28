@@ -18,9 +18,11 @@ from custom_components.googlefindmy.const import (
     OPT_ENABLE_STATS_ENTITIES,
     OPT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
+    TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
 )
 from homeassistant.config_entries import ConfigSubentry
@@ -182,10 +184,10 @@ def test_device_selection_creates_feature_groups_with_flags() -> None:
     assert service_record["subentry_type"] == SUBENTRY_TYPE_SERVICE
     assert tracker_record["subentry_type"] == SUBENTRY_TYPE_TRACKER
 
-    assert service_payload["features"] == sorted(config_flow._SERVICE_FEATURE_PLATFORMS)
+    assert service_payload["features"] == sorted(SERVICE_FEATURE_PLATFORMS)
     assert "visible_device_ids" not in service_payload
 
-    assert tracker_payload["features"] == sorted(config_flow._TRACKER_FEATURE_PLATFORMS)
+    assert tracker_payload["features"] == sorted(TRACKER_FEATURE_PLATFORMS)
     assert all(isinstance(feature, str) for feature in tracker_payload["features"])
     assert all(feature == feature.lower() for feature in tracker_payload["features"])
     assert tracker_payload["visible_device_ids"] == ["dev-1"]

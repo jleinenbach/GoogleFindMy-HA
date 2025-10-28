@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from collections.abc import Iterable
 
@@ -16,8 +16,13 @@ from custom_components.googlefindmy.const import (
     SERVICE_DEVICE_MANUFACTURER,
     SERVICE_DEVICE_MODEL,
     SERVICE_DEVICE_TRANSLATION_KEY,
+    SERVICE_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
     service_device_identifier,
 )
+from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import device_registry as dr
 
 
@@ -41,6 +46,7 @@ class _FakeDeviceEntry:
         configuration_url: str | None = None,
         translation_key: str | None = None,
         translation_placeholders: dict[str, str] | None = None,
+        config_subentry_id: str | None = None,
     ) -> None:
         self.identifiers: set[tuple[str, str]] = set(identifiers)
         self.config_entries = {config_entry_id}
@@ -58,6 +64,7 @@ class _FakeDeviceEntry:
         self.configuration_url = configuration_url
         self.translation_key = translation_key
         self.translation_placeholders = translation_placeholders
+        self.config_subentry_id = config_subentry_id
 
 
 class _FakeDeviceRegistry:
@@ -101,6 +108,7 @@ class _FakeDeviceRegistry:
             configuration_url=kwargs.get("configuration_url"),
             translation_key=kwargs.get("translation_key"),
             translation_placeholders=kwargs.get("translation_placeholders"),
+            config_subentry_id=kwargs.get("config_subentry_id"),
         )
         self.devices.append(entry)
         self.created.append(
@@ -117,6 +125,7 @@ class _FakeDeviceRegistry:
                 "configuration_url": kwargs.get("configuration_url"),
                 "translation_key": kwargs.get("translation_key"),
                 "translation_placeholders": kwargs.get("translation_placeholders"),
+                "config_subentry_id": kwargs.get("config_subentry_id"),
             }
         )
         return entry
@@ -130,6 +139,7 @@ class _FakeDeviceRegistry:
         name: str | None = None,
         translation_key: str | None = None,
         translation_placeholders: dict[str, str] | None = None,
+        config_subentry_id: str | None = None,
         **kwargs: Any,
     ) -> None:
         for device in self.devices:
@@ -144,6 +154,8 @@ class _FakeDeviceRegistry:
                     device.translation_key = translation_key
                 if translation_placeholders is not None:
                     device.translation_placeholders = translation_placeholders
+                if config_subentry_id is not None:
+                    device.config_subentry_id = config_subentry_id
                 if "manufacturer" in kwargs:
                     device.manufacturer = kwargs["manufacturer"]
                 if "model" in kwargs:
@@ -164,6 +176,7 @@ class _FakeDeviceRegistry:
                         "name": name,
                         "translation_key": translation_key,
                         "translation_placeholders": translation_placeholders,
+                        "config_subentry_id": config_subentry_id,
                         "manufacturer": kwargs.get("manufacturer"),
                         "model": kwargs.get("model"),
                         "sw_version": kwargs.get("sw_version"),
@@ -198,16 +211,75 @@ def fake_registry(monkeypatch: pytest.MonkeyPatch) -> _FakeDeviceRegistry:
     return registry
 
 
+def _build_entry_with_subentries(entry_id: str) -> SimpleNamespace:
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id=f"{entry_id}-service",
+    )
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id=f"{entry_id}-tracker",
+    )
+    return SimpleNamespace(
+        entry_id=entry_id,
+        title="Google Find My",
+        data={},
+        options={},
+        subentries={
+            service_subentry.subentry_id: service_subentry,
+            tracker_subentry.subentry_id: tracker_subentry,
+        },
+        runtime_data=None,
+        service_subentry_id=service_subentry.subentry_id,
+        tracker_subentry_id=tracker_subentry.subentry_id,
+    )
+
+
+def _prepare_coordinator_for_registry(
+    coordinator: GoogleFindMyCoordinator, entry: SimpleNamespace
+) -> None:
+    loop_stub = SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None)
+    hass_stub = SimpleNamespace(loop=loop_stub, data={DOMAIN: {}})
+    coordinator.hass = hass_stub  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    coordinator.data = []
+    coordinator._enabled_poll_device_ids = set()
+    coordinator.allow_history_fallback = False
+    coordinator._min_accuracy_threshold = 50
+    coordinator._movement_threshold = 10
+    coordinator.device_poll_delay = 5
+    coordinator.min_poll_interval = 60
+    coordinator.location_poll_interval = 120
+    coordinator._subentry_metadata = {}
+    coordinator._subentry_snapshots = {}
+    coordinator._feature_to_subentry = {}
+    coordinator._default_subentry_key_value = TRACKER_SUBENTRY_KEY
+    coordinator._subentry_manager = None
+    coordinator._warned_bad_identifier_devices = set()
+    coordinator._diag = SimpleNamespace(
+        add_warning=lambda **kwargs: None,
+        remove_warning=lambda *args, **kwargs: None,
+    )
+    coordinator._pending_via_updates = set()
+
+
 def test_devices_link_to_service_device(fake_registry: _FakeDeviceRegistry) -> None:
     """Newly created devices must reference the service device via `via_device_id`."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
-    coordinator.hass = object()
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
     coordinator._service_device_id = "svc-device-1"
 
+    devices = [{"id": "abc123", "name": "Pixel"}]
+    coordinator.data = devices
     created = coordinator._ensure_registry_for_devices(
-        devices=[{"id": "abc123", "name": "Pixel"}],
+        devices=devices,
         ignored=set(),
     )
 
@@ -217,6 +289,12 @@ def test_devices_link_to_service_device(fake_registry: _FakeDeviceRegistry) -> N
     assert fake_registry.created[0]["via_device"] == service_ident
     assert fake_registry.created[0]["via_device_id"] is None
     assert fake_registry.updated[0]["via_device_id"] == "svc-device-1"
+    assert (
+        fake_registry.created[0]["config_subentry_id"] == entry.tracker_subentry_id
+    )
+    assert (
+        fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
+    )
 
 
 def test_legacy_device_migrates_to_service_parent(
@@ -225,8 +303,8 @@ def test_legacy_device_migrates_to_service_parent(
     """Legacy devices gain the service device parent during migration."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
-    coordinator.hass = object()
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
     coordinator._service_device_id = "svc-device-1"
 
     legacy = _FakeDeviceEntry(
@@ -237,8 +315,10 @@ def test_legacy_device_migrates_to_service_parent(
     )
     fake_registry.devices.append(legacy)
 
+    devices = [{"id": "abc123", "name": "Pixel"}]
+    coordinator.data = devices
     created = coordinator._ensure_registry_for_devices(
-        devices=[{"id": "abc123", "name": "Pixel"}],
+        devices=devices,
         ignored=set(),
     )
 
@@ -246,15 +326,17 @@ def test_legacy_device_migrates_to_service_parent(
     assert legacy.via_device_id == "svc-device-1"
     assert legacy.identifiers == {(DOMAIN, "abc123"), (DOMAIN, "entry-42:abc123")}
     assert fake_registry.updated[0]["via_device_id"] == "svc-device-1"
+    assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
     assert legacy.name == "Pixel"
+    assert legacy.config_subentry_id == entry.tracker_subentry_id
 
 
 def test_existing_device_backfills_via_link(fake_registry: _FakeDeviceRegistry) -> None:
     """Existing namespaced devices gain the service device parent if missing."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
-    coordinator.hass = object()
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
     coordinator._service_device_id = "svc-device-1"
 
     existing = _FakeDeviceEntry(
@@ -265,14 +347,18 @@ def test_existing_device_backfills_via_link(fake_registry: _FakeDeviceRegistry) 
     )
     fake_registry.devices.append(existing)
 
+    devices = [{"id": "abc123", "name": "Pixel"}]
+    coordinator.data = devices
     created = coordinator._ensure_registry_for_devices(
-        devices=[{"id": "abc123", "name": "Pixel"}],
+        devices=devices,
         ignored=set(),
     )
 
     assert created == 1
     assert fake_registry.updated[0]["via_device_id"] == "svc-device-1"
     assert existing.via_device_id == "svc-device-1"
+    assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
+    assert existing.config_subentry_id == entry.tracker_subentry_id
 
 
 def test_service_device_backfills_via_links(
@@ -281,25 +367,25 @@ def test_service_device_backfills_via_links(
     """Devices created before the service device exists are relinked once available."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
-    coordinator.hass = object()
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
     coordinator._service_device_ready = False
     coordinator._service_device_id = None
-    coordinator._pending_via_updates = set()
 
     devices = [
         {"id": "abc123", "name": "Pixel"},
         {"id": "def456", "name": "Tablet"},
     ]
 
+    coordinator.data = devices
     created = coordinator._ensure_registry_for_devices(devices, set())
 
     assert created == 2
     service_ident = service_device_identifier("entry-42")
     assert fake_registry.created[0]["via_device"] == service_ident
     assert fake_registry.created[1]["via_device"] == service_ident
-    for entry in fake_registry.devices:
-        assert entry.via_device_id is None
+    for device_entry in fake_registry.devices:
+        assert device_entry.via_device_id is None
 
     pending = getattr(coordinator, "_pending_via_updates")
     assert len(pending) == 2
@@ -314,14 +400,17 @@ def test_service_device_backfills_via_links(
     )
     assert service_entry.translation_key == SERVICE_DEVICE_TRANSLATION_KEY
     assert service_entry.translation_placeholders == {}
+    assert service_entry.config_subentry_id == entry.service_subentry_id
     metadata = fake_registry.created[-1]
     assert metadata["identifiers"] == {service_ident}
     assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
     assert metadata["translation_placeholders"] == {}
-    for entry in fake_registry.devices:
-        if service_ident in entry.identifiers:
+    assert metadata["config_subentry_id"] == entry.service_subentry_id
+    for device_entry in fake_registry.devices:
+        if service_ident in device_entry.identifiers:
             continue
-        assert entry.via_device_id == service_id
+        assert device_entry.via_device_id == service_id
+        assert device_entry.config_subentry_id == entry.tracker_subentry_id
 
     assert getattr(coordinator, "_pending_via_updates") == set()
 
@@ -332,8 +421,8 @@ def test_service_device_updates_add_translation(
     """Existing service devices gain translation metadata when missing."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
-    coordinator.hass = object()
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
 
     service_ident = service_device_identifier("entry-42")
     legacy_service = _FakeDeviceEntry(
@@ -353,10 +442,50 @@ def test_service_device_updates_add_translation(
 
     assert legacy_service.translation_key == SERVICE_DEVICE_TRANSLATION_KEY
     assert legacy_service.translation_placeholders == {}
+    assert legacy_service.config_subentry_id == entry.service_subentry_id
     assert fake_registry.updated
     metadata = fake_registry.updated[0]
     assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
     assert metadata["translation_placeholders"] == {}
+    assert metadata["config_subentry_id"] == entry.service_subentry_id
+
+
+def test_service_device_preserves_user_defined_name(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """User-defined service device names should not be cleared during updates."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-99")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    service_ident = service_device_identifier("entry-99")
+    legacy_service = _FakeDeviceEntry(
+        identifiers={service_ident},
+        config_entry_id="entry-99",
+        name="Custom Hub",
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        sw_version=INTEGRATION_VERSION,
+        entry_type=dr.DeviceEntryType.SERVICE,
+        translation_key=None,
+        translation_placeholders=None,
+        config_subentry_id=None,
+    )
+    legacy_service.name_by_user = "Custom Hub"
+    fake_registry.devices.append(legacy_service)
+
+    coordinator._ensure_service_device_exists()
+
+    assert legacy_service.name == "Custom Hub"
+    assert legacy_service.translation_key == SERVICE_DEVICE_TRANSLATION_KEY
+    assert legacy_service.translation_placeholders == {}
+    assert legacy_service.config_subentry_id == entry.service_subentry_id
+    assert fake_registry.updated
+    metadata = fake_registry.updated[0]
+    assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
+    assert metadata["translation_placeholders"] == {}
+    assert metadata["config_subentry_id"] == entry.service_subentry_id
 
 
 def test_rebuild_flow_creates_devices_with_via_parent(
@@ -365,17 +494,18 @@ def test_rebuild_flow_creates_devices_with_via_parent(
     """Safe-mode rebuild path should recreate devices using via_device linkage."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-77")
-    coordinator.hass = object()
+    entry = _build_entry_with_subentries("entry-77")
+    _prepare_coordinator_for_registry(coordinator, entry)
 
     # Simulate a safe-mode rebuild: service device removed, pending queue cleared.
     coordinator._service_device_ready = False
     coordinator._service_device_id = None
-    coordinator._pending_via_updates = set()
     coordinator._dr_supports_via_device_kw = True
 
+    devices = [{"id": "ghi789", "name": "Phone"}]
+    coordinator.data = devices
     created = coordinator._ensure_registry_for_devices(
-        devices=[{"id": "ghi789", "name": "Phone"}],
+        devices=devices,
         ignored=set(),
     )
 
@@ -384,5 +514,6 @@ def test_rebuild_flow_creates_devices_with_via_parent(
     parent_identifier = service_device_identifier("entry-77")
     assert metadata["via_device"] == parent_identifier
     assert metadata["via_device_id"] is None
+    assert metadata["config_subentry_id"] == entry.tracker_subentry_id
     pending = getattr(coordinator, "_pending_via_updates")
     assert pending == {fake_registry.devices[0].id}

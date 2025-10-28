@@ -192,9 +192,11 @@ from .const import (
     OPT_IGNORED_DEVICES,
     OPT_CONTRIBUTOR_MODE,
     OPT_ENABLE_STATS_ENTITIES,
+    SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
+    TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
     # Defaults
     DEFAULT_LOCATION_POLL_INTERVAL,
@@ -300,15 +302,9 @@ def _looks_like_jwt(value: str) -> bool:
     return value.count(".") >= 2 and value[:3] == "eyJ"
 
 
-_TRACKER_FEATURE_PLATFORMS: tuple[str, ...] = (
-    "button",
-    "device_tracker",
-    "sensor",
-)
+_TRACKER_FEATURE_PLATFORMS: tuple[str, ...] = TRACKER_FEATURE_PLATFORMS
 
-_SERVICE_FEATURE_PLATFORMS: tuple[str, ...] = (
-    "binary_sensor",
-)
+_SERVICE_FEATURE_PLATFORMS: tuple[str, ...] = SERVICE_FEATURE_PLATFORMS
 
 
 def _normalize_feature_list(features: Iterable[str]) -> list[str]:

@@ -127,7 +127,7 @@ def test_entities_remain_available_when_push_disconnected() -> None:
     coordinator._subentry_metadata = {
         "core_tracking": SubentryMetadata(
             key="core_tracking",
-            subentry_id="entry-empty-visible-core",
+            config_subentry_id="entry-empty-visible-core",
             features=("sensor", "button"),
             title="Core",
             poll_intervals={},
