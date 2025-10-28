@@ -786,6 +786,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         ignored = self._get_ignored_set()
         device_index: dict[str, dict[str, Any]] = {}
 
+        device_registry: dr.DeviceRegistry | None = None
         registry_lookup: Callable[[str], dr.DeviceEntry | None] | None = None
         hass_obj = getattr(self, "hass", None)
         if hass_obj is not None:
@@ -797,6 +798,37 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 candidate_lookup = getattr(device_registry, "async_get", None)
                 if callable(candidate_lookup):
                     registry_lookup = candidate_lookup
+
+        canonical_to_registry_id: dict[str, str] = {}
+        if device_registry is not None:
+            candidate_entries: list[Any] = []
+            raw_devices = getattr(device_registry, "devices", None)
+            if isinstance(raw_devices, Mapping):
+                candidate_entries.extend(raw_devices.values())
+            else:
+                registry_entries = getattr(device_registry, "_entries", None)
+                if isinstance(registry_entries, Mapping):
+                    candidate_entries.extend(registry_entries.values())
+
+            if not candidate_entries:
+                entry_id = self._entry_id()
+                fetch_entries = getattr(dr, "async_entries_for_config_entry", None)
+                if callable(fetch_entries) and entry_id:
+                    try:
+                        candidate_entries.extend(fetch_entries(device_registry, entry_id))
+                    except Exception:  # defensive: stub mismatches / legacy HA versions
+                        candidate_entries = []
+
+            for device_entry in candidate_entries:
+                try:
+                    canonical = self._extract_our_identifier(device_entry)
+                except Exception:  # defensive: tolerate stub deviations
+                    canonical = None
+                if not canonical:
+                    continue
+                device_id_attr = getattr(device_entry, "id", None)
+                if isinstance(device_id_attr, str) and device_id_attr:
+                    canonical_to_registry_id.setdefault(canonical, device_id_attr)
 
         def _register_device(candidate: Mapping[str, Any]) -> None:
             dev_id = candidate.get("id")
