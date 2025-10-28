@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+
 import logging
 import time
 from datetime import datetime, timedelta
@@ -25,6 +26,7 @@ from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    TRACKER_SUBENTRY_KEY,
     WEEK_SECONDS,
     map_token_hex_digest,
     map_token_secret_seed,
@@ -182,7 +184,7 @@ class GoogleFindMyMapView(HomeAssistantView):
 
             entry_id = entry.entry_id
             subentry_identifier = coordinator.stable_subentry_identifier(
-                feature="device_tracker"
+                key=TRACKER_SUBENTRY_KEY
             )
             if entry_id:
                 entry_unique_id_candidates.append(f"{entry_id}:{device_id}")

@@ -34,6 +34,7 @@ import voluptuous as vol
 from .const import (
     DOMAIN,
     SERVICE_LOCATE_DEVICE,
+    TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator
 from .entity import GoogleFindMyDeviceEntity, resolve_coordinator
@@ -102,13 +103,14 @@ async def async_setup_entry(
                 "async_trigger_coordinator_refresh",
             )
 
-    subentry_key = coordinator.get_subentry_key_for_feature("button")
-    subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
+    tracker_subentry_identifier = coordinator.stable_subentry_identifier(
+        key=TRACKER_SUBENTRY_KEY
+    )
     known_ids: set[str] = set()
     entities: list[ButtonEntity] = []
 
     # Initial population from coordinator.data (if already available)
-    for device in coordinator.get_subentry_snapshot(subentry_key):
+    for device in coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY):
         dev_id = device.get("id")
         if not dev_id or dev_id in known_ids:
             continue
@@ -119,8 +121,8 @@ async def async_setup_entry(
                 coordinator,
                 device,
                 label,
-                subentry_key=subentry_key,
-                subentry_identifier=subentry_identifier,
+                subentry_key=TRACKER_SUBENTRY_KEY,
+                subentry_identifier=tracker_subentry_identifier,
             )
         )
         entities.append(
@@ -128,8 +130,8 @@ async def async_setup_entry(
                 coordinator,
                 device,
                 label,
-                subentry_key=subentry_key,
-                subentry_identifier=subentry_identifier,
+                subentry_key=TRACKER_SUBENTRY_KEY,
+                subentry_identifier=tracker_subentry_identifier,
             )
         )
         entities.append(
@@ -137,8 +139,8 @@ async def async_setup_entry(
                 coordinator,
                 device,
                 label,
-                subentry_key=subentry_key,
-                subentry_identifier=subentry_identifier,
+                subentry_key=TRACKER_SUBENTRY_KEY,
+                subentry_identifier=tracker_subentry_identifier,
             )
         )
         known_ids.add(dev_id)
@@ -151,7 +153,7 @@ async def async_setup_entry(
     @callback
     def _add_new_devices() -> None:
         new_entities: list[ButtonEntity] = []
-        for device in coordinator.get_subentry_snapshot(subentry_key):
+        for device in coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY):
             dev_id = device.get("id")
             if not dev_id or dev_id in known_ids:
                 continue
@@ -162,8 +164,8 @@ async def async_setup_entry(
                     coordinator,
                     device,
                     label,
-                    subentry_key=subentry_key,
-                    subentry_identifier=subentry_identifier,
+                    subentry_key=TRACKER_SUBENTRY_KEY,
+                    subentry_identifier=tracker_subentry_identifier,
                 )
             )
             new_entities.append(
@@ -171,8 +173,8 @@ async def async_setup_entry(
                     coordinator,
                     device,
                     label,
-                    subentry_key=subentry_key,
-                    subentry_identifier=subentry_identifier,
+                    subentry_key=TRACKER_SUBENTRY_KEY,
+                    subentry_identifier=tracker_subentry_identifier,
                 )
             )
             new_entities.append(
@@ -180,8 +182,8 @@ async def async_setup_entry(
                     coordinator,
                     device,
                     label,
-                    subentry_key=subentry_key,
-                    subentry_identifier=subentry_identifier,
+                    subentry_key=TRACKER_SUBENTRY_KEY,
+                    subentry_identifier=tracker_subentry_identifier,
                 )
             )
             known_ids.add(dev_id)

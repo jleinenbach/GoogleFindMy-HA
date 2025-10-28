@@ -33,7 +33,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import _extract_email_from_entry
-from .const import CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, OPT_MIN_ACCURACY_THRESHOLD
+from .const import (
+    CONF_OAUTH_TOKEN,
+    DATA_SECRET_BUNDLE,
+    OPT_MIN_ACCURACY_THRESHOLD,
+    TRACKER_SUBENTRY_KEY,
+)
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
 from .entity import GoogleFindMyDeviceEntity, resolve_coordinator, _entry_option
 from .ha_typing import RestoreEntity, TrackerEntity, callback
@@ -69,8 +74,9 @@ async def async_setup_entry(
     """
     coordinator = resolve_coordinator(config_entry)
 
-    subentry_key = coordinator.get_subentry_key_for_feature("device_tracker")
-    subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
+    tracker_subentry_identifier = coordinator.stable_subentry_identifier(
+        key=TRACKER_SUBENTRY_KEY
+    )
     entities: list[GoogleFindMyDeviceTracker] = []
     known_ids: set[str] = set()
 
@@ -78,7 +84,7 @@ async def async_setup_entry(
     # Pointer for maintainers: coordinator.py documents the "Subentry awareness"
     # section (see GoogleFindMyCoordinator._refresh_subentry_index /
     # _store_subentry_snapshots) that drives this scanner's snapshot source.
-    initial_snapshot = coordinator.get_subentry_snapshot(subentry_key)
+    initial_snapshot = coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY)
     for device in initial_snapshot:
         dev_id = device.get("id")
         name = device.get("name")
@@ -93,8 +99,8 @@ async def async_setup_entry(
             GoogleFindMyDeviceTracker(
                 coordinator,
                 device,
-                subentry_key=subentry_key,
-                subentry_identifier=subentry_identifier,
+                subentry_key=TRACKER_SUBENTRY_KEY,
+                subentry_identifier=tracker_subentry_identifier,
             )
         )
 
@@ -104,7 +110,7 @@ async def async_setup_entry(
     # Dynamically add new trackers when the coordinator learns about more devices
     @callback
     def _scan_available_trackers_from_coordinator() -> None:
-        snapshot = coordinator.get_subentry_snapshot(subentry_key)
+        snapshot = coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY)
         if not snapshot:
             return
 
@@ -121,8 +127,8 @@ async def async_setup_entry(
                 GoogleFindMyDeviceTracker(
                     coordinator,
                     device,
-                    subentry_key=subentry_key,
-                    subentry_identifier=subentry_identifier,
+                    subentry_key=TRACKER_SUBENTRY_KEY,
+                    subentry_identifier=tracker_subentry_identifier,
                 )
             )
 

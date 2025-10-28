@@ -414,7 +414,7 @@ def test_coordinator_default_features_map_to_core_group() -> None:
     assert all(feature == feature.lower() for feature in tracker_metadata.features)
 
     mapped_keys = {
-        feature: coordinator.get_subentry_key_for_feature(feature)
+        feature: coordinator._feature_to_subentry.get(feature)
         for feature in tracker_metadata.features
     }
     assert set(mapped_keys) == set(tracker_metadata.features)
@@ -427,4 +427,4 @@ def test_coordinator_default_features_map_to_core_group() -> None:
     )
     assert service_metadata.features == expected_service_features
     for feature in service_metadata.features:
-        assert coordinator.get_subentry_key_for_feature(feature) == SERVICE_SUBENTRY_KEY
+        assert coordinator._feature_to_subentry.get(feature) == SERVICE_SUBENTRY_KEY

@@ -84,6 +84,17 @@ if "homeassistant.helpers.entity_platform" not in sys.modules:
     entity_platform_module.AddEntitiesCallback = AddEntitiesCallback
     sys.modules["homeassistant.helpers.entity_platform"] = entity_platform_module
 
+device_registry_module = sys.modules.get("homeassistant.helpers.device_registry")
+if device_registry_module is None:
+    device_registry_module = ModuleType("homeassistant.helpers.device_registry")
+    sys.modules["homeassistant.helpers.device_registry"] = device_registry_module
+
+if not hasattr(device_registry_module, "DeviceEntryType"):
+    class DeviceEntryType:  # noqa: D401 - stub enum container
+        SERVICE = "service"
+
+    device_registry_module.DeviceEntryType = DeviceEntryType
+
 if "homeassistant.helpers.network" not in sys.modules:
     network_module = ModuleType("homeassistant.helpers.network")
     network_module.get_url = lambda *args, **kwargs: "https://example.invalid"
@@ -135,7 +146,12 @@ if update_module is not None:
         data_coordinator.async_update_listeners = _async_update_listeners  # type: ignore[assignment]
 
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator  # noqa: E402
-from custom_components.googlefindmy.const import CONF_GOOGLE_EMAIL, DOMAIN  # noqa: E402
+from custom_components.googlefindmy.const import (  # noqa: E402
+    CONF_GOOGLE_EMAIL,
+    DOMAIN,
+    SERVICE_SUBENTRY_KEY,
+    service_device_identifier,
+)
 from custom_components.googlefindmy.sensor import (  # noqa: E402
     STATS_DESCRIPTIONS,
     GoogleFindMyStatsSensor,
@@ -217,8 +233,9 @@ def test_increment_stat_notifies_registered_stats_sensor(
             coordinator,
             "background_updates",
             STATS_DESCRIPTIONS["background_updates"],
+            subentry_key=SERVICE_SUBENTRY_KEY,
             subentry_identifier=coordinator.stable_subentry_identifier(
-                feature="sensor"
+                key=SERVICE_SUBENTRY_KEY
             ),
         )
 
@@ -364,8 +381,9 @@ def test_history_fallback_increments_history_stat(
             coordinator,
             "history_fallback_used",
             STATS_DESCRIPTIONS["history_fallback_used"],
+            subentry_key=SERVICE_SUBENTRY_KEY,
             subentry_identifier=coordinator.stable_subentry_identifier(
-                feature="sensor"
+                key=SERVICE_SUBENTRY_KEY
             ),
         )
 
@@ -379,6 +397,45 @@ def test_history_fallback_increments_history_stat(
             assert sensor.native_value == 1
 
         loop.run_until_complete(_exercise())
+    finally:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                loop.run_until_complete(task)
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_stats_sensor_device_info_uses_service_identifiers() -> None:
+    """Stats sensors attach the hub device identifier set with subentry metadata."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        hass = _StubHass(loop)
+        coordinator = GoogleFindMyCoordinator(hass, cache=_StubCache())
+        coordinator.config_entry = _StubConfigEntry()
+        subentry_identifier = coordinator.stable_subentry_identifier(
+            key=SERVICE_SUBENTRY_KEY
+        )
+
+        sensor = GoogleFindMyStatsSensor(
+            coordinator,
+            "background_updates",
+            STATS_DESCRIPTIONS["background_updates"],
+            subentry_key=SERVICE_SUBENTRY_KEY,
+            subentry_identifier=subentry_identifier,
+        )
+
+        expected = {
+            service_device_identifier("entry-stats"),
+            (DOMAIN, f"entry-stats:{subentry_identifier}:service"),
+        }
+
+        assert sensor.device_info.identifiers == expected
     finally:
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
         for task in pending:

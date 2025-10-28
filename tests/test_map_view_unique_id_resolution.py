@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import DOMAIN, TRACKER_SUBENTRY_KEY
 
 
 class _StubCoordinator:
@@ -24,12 +24,11 @@ class _StubCoordinator:
     def __init__(self, devices: list[dict[str, Any]]) -> None:
         self.data = devices
 
-    def get_subentry_key_for_feature(self, feature: str) -> str:
-        return "core_tracking"
-
     def stable_subentry_identifier(
         self, *, key: str | None = None, feature: str | None = None
     ) -> str:
+        if key is not None:
+            return key
         return "core_tracking"
 
     def get_subentry_snapshot(
@@ -219,7 +218,7 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
     )
     entry = _StubEntry("entry-123", coordinator)
 
-    identifier = coordinator.stable_subentry_identifier(feature="device_tracker")
+    identifier = coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
     target_unique_id = f"{entry.entry_id}:{identifier}:{device_id}"
     overlapping_unique_id = f"{entry.entry_id}:{identifier}:{device_id}-shadow"
 
@@ -291,7 +290,7 @@ def test_map_view_uses_iso_last_seen_for_timeline(
     coordinator = _StubCoordinator(devices=[{"id": device_id, "name": "ISO Device"}])
     entry = _StubEntry("entry-iso", coordinator)
 
-    identifier = coordinator.stable_subentry_identifier(feature="device_tracker")
+    identifier = coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
     registry = _StubEntityRegistry(
         [
             _StubEntityEntry(

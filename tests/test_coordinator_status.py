@@ -22,6 +22,7 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
     EVENT_AUTH_OK,
     ISSUE_AUTH_EXPIRED_KEY,
+    TRACKER_SUBENTRY_KEY,
     issue_id_for,
 )
 from homeassistant.helpers import issue_registry as ir
@@ -316,12 +317,13 @@ def test_push_updated_keeps_known_name_for_blank_snapshots(
         raising=False,
     )
 
-    subentry_key = coordinator.get_subentry_key_for_feature("device_tracker")
-    subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
+    subentry_identifier = coordinator.stable_subentry_identifier(
+        key=TRACKER_SUBENTRY_KEY
+    )
     entity = GoogleFindMyDeviceTracker(
         coordinator,
         {"id": "dev-1", "name": "Pixel 9"},
-        subentry_key=subentry_key,
+        subentry_key=TRACKER_SUBENTRY_KEY,
         subentry_identifier=subentry_identifier,
     )
     entity.hass = coordinator.hass

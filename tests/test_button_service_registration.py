@@ -81,13 +81,10 @@ def test_button_setup_skips_service_registration_when_platform_missing(
         ) -> None:  # pragma: no cover - compatibility hook
             return None
 
-        def get_subentry_key_for_feature(self, feature: str) -> str:
-            return self._subentry_key
-
         def stable_subentry_identifier(
             self, *, key: str | None = None, feature: str | None = None
         ) -> str:
-            return "core_tracking"
+            return key or self._subentry_key
 
         def get_subentry_snapshot(
             self, key: str | None = None, *, feature: str | None = None

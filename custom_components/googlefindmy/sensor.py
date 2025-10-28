@@ -29,9 +29,11 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    DEFAULT_ENABLE_STATS_ENTITIES,
     DOMAIN,
     OPT_ENABLE_STATS_ENTITIES,
-    DEFAULT_ENABLE_STATS_ENTITIES,
+    SERVICE_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
 from .entity import GoogleFindMyDeviceEntity, GoogleFindMyEntity, resolve_coordinator
@@ -117,8 +119,12 @@ async def async_setup_entry(
     """
     coordinator = resolve_coordinator(entry)
 
-    subentry_key = coordinator.get_subentry_key_for_feature("sensor")
-    subentry_identifier = coordinator.stable_subentry_identifier(key=subentry_key)
+    service_subentry_identifier = coordinator.stable_subentry_identifier(
+        key=SERVICE_SUBENTRY_KEY
+    )
+    tracker_subentry_identifier = coordinator.stable_subentry_identifier(
+        key=TRACKER_SUBENTRY_KEY
+    )
     entities: list[SensorEntity] = []
     known_ids: set[str] = set()
 
@@ -139,7 +145,8 @@ async def async_setup_entry(
                         coordinator,
                         stat_key,
                         desc,
-                        subentry_identifier=subentry_identifier,
+                        subentry_key=SERVICE_SUBENTRY_KEY,
+                        subentry_identifier=service_subentry_identifier,
                     )
                 )
                 created_stats.append(stat_key)
@@ -151,7 +158,7 @@ async def async_setup_entry(
             )
 
     # Per-device last_seen sensors from current snapshot
-    snapshot = coordinator.get_subentry_snapshot(subentry_key)
+    snapshot = coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY)
     for device in snapshot:
         dev_id = device.get("id")
         dev_name = device.get("name")
@@ -165,8 +172,8 @@ async def async_setup_entry(
             GoogleFindMyLastSeenSensor(
                 coordinator,
                 device,
-                subentry_key=subentry_key,
-                subentry_identifier=subentry_identifier,
+                subentry_key=TRACKER_SUBENTRY_KEY,
+                subentry_identifier=tracker_subentry_identifier,
             )
         )
         known_ids.add(dev_id)
@@ -179,7 +186,7 @@ async def async_setup_entry(
     def _add_new_sensors_on_update() -> None:
         try:
             new_entities: list[SensorEntity] = []
-            for device in coordinator.get_subentry_snapshot(subentry_key):
+            for device in coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY):
                 dev_id = device.get("id")
                 dev_name = device.get("name")
                 if not dev_id or not dev_name or dev_id in known_ids:
@@ -188,8 +195,8 @@ async def async_setup_entry(
                     GoogleFindMyLastSeenSensor(
                         coordinator,
                         device,
-                        subentry_key=subentry_key,
-                        subentry_identifier=subentry_identifier,
+                        subentry_key=TRACKER_SUBENTRY_KEY,
+                        subentry_identifier=tracker_subentry_identifier,
                     )
                 )
                 known_ids.add(dev_id)
@@ -228,6 +235,7 @@ class GoogleFindMyStatsSensor(GoogleFindMyEntity, SensorEntity):
         stat_key: str,
         description: SensorEntityDescription,
         *,
+        subentry_key: str,
         subentry_identifier: str,
     ) -> None:
         """Initialize the stats sensor.
@@ -237,7 +245,11 @@ class GoogleFindMyStatsSensor(GoogleFindMyEntity, SensorEntity):
             stat_key: Name of the counter in coordinator.stats.
             description: Home Assistant entity description (icon, translation_key, etc.).
         """
-        super().__init__(coordinator, subentry_identifier=subentry_identifier)
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
         self._stat_key = stat_key
         self.entity_description = description
         entry_id = self.entry_id or "default"
@@ -283,7 +295,7 @@ class GoogleFindMyStatsSensor(GoogleFindMyEntity, SensorEntity):
 
         All counters live on the per-entry SERVICE device to keep the UI tidy.
         """
-        return self.service_device_info()
+        return self.service_device_info(include_subentry_identifier=True)
 
 
 # ----------------------------- Per-Device Last Seen ---------------------------
