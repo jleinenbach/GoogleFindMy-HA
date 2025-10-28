@@ -13,11 +13,15 @@ from custom_components.googlefindmy import (
     ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
 )
-from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
-from custom_components.googlefindmy.coordinator import (
-    GoogleFindMyCoordinator,
-    _DEFAULT_SUBENTRY_FEATURES as COORDINATOR_DEFAULT_FEATURES,
+from custom_components.googlefindmy.const import (
+    DOMAIN,
+    SERVICE_FEATURE_PLATFORMS,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_TRACKER,
+    TRACKER_FEATURE_PLATFORMS,
+    TRACKER_SUBENTRY_KEY,
 )
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import device_registry as dr
 
@@ -400,15 +404,27 @@ def test_coordinator_default_features_map_to_core_group() -> None:
 
     coordinator._refresh_subentry_index(None)
 
-    metadata = coordinator.get_subentry_metadata(key="core_tracking")
-    assert metadata is not None
-    assert metadata.features == COORDINATOR_DEFAULT_FEATURES
-    assert all(isinstance(feature, str) for feature in metadata.features)
-    assert all(feature == feature.lower() for feature in metadata.features)
+    tracker_metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_metadata is not None
+    expected_tracker_features = tuple(
+        sorted(dict.fromkeys(TRACKER_FEATURE_PLATFORMS))
+    )
+    assert tracker_metadata.features == expected_tracker_features
+    assert all(isinstance(feature, str) for feature in tracker_metadata.features)
+    assert all(feature == feature.lower() for feature in tracker_metadata.features)
 
     mapped_keys = {
         feature: coordinator.get_subentry_key_for_feature(feature)
-        for feature in COORDINATOR_DEFAULT_FEATURES
+        for feature in tracker_metadata.features
     }
-    assert set(mapped_keys) == set(COORDINATOR_DEFAULT_FEATURES)
-    assert set(mapped_keys.values()) == {"core_tracking"}
+    assert set(mapped_keys) == set(tracker_metadata.features)
+    assert set(mapped_keys.values()) == {TRACKER_SUBENTRY_KEY}
+
+    service_metadata = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_metadata is not None
+    expected_service_features = tuple(
+        sorted(dict.fromkeys(SERVICE_FEATURE_PLATFORMS))
+    )
+    assert service_metadata.features == expected_service_features
+    for feature in service_metadata.features:
+        assert coordinator.get_subentry_key_for_feature(feature) == SERVICE_SUBENTRY_KEY
