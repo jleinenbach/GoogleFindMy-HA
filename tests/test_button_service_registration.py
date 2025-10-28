@@ -6,8 +6,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 from collections.abc import Awaitable
-from typing import Any
 from collections.abc import Callable
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -81,13 +82,23 @@ def test_button_setup_skips_service_registration_when_platform_missing(
         ) -> None:  # pragma: no cover - compatibility hook
             return None
 
-        def get_subentry_key_for_feature(self, feature: str) -> str:
-            return self._subentry_key
-
         def stable_subentry_identifier(
             self, *, key: str | None = None, feature: str | None = None
         ) -> str:
-            return "core_tracking"
+            return key or self._subentry_key
+
+        def get_subentry_metadata(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> Any:
+            if key is not None:
+                resolved = key
+            elif feature in {"button", "device_tracker", "sensor"}:
+                resolved = self._subentry_key
+            elif feature == "binary_sensor":
+                resolved = "service"
+            else:
+                resolved = self._subentry_key
+            return SimpleNamespace(key=resolved)
 
         def get_subentry_snapshot(
             self, key: str | None = None, *, feature: str | None = None

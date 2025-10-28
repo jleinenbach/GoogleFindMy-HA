@@ -59,6 +59,7 @@ import inspect
 import logging
 import math
 import time
+import warnings
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1121,6 +1122,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     def get_subentry_key_for_feature(self, feature: str) -> str:
         """Return the subentry key responsible for a platform feature."""
 
+        warnings.warn(
+            "get_subentry_key_for_feature() is deprecated; pass the subentry key "
+            "explicitly when constructing entities.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self._feature_to_subentry.get(feature, self._default_subentry_key())
 
     def get_subentry_metadata(

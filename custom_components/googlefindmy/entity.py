@@ -86,7 +86,15 @@ def _entry_option(entry: ConfigEntry | None, key: str, default: Any) -> Any:
 
 
 class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
-    """Base entity for Google Find My Device platforms."""
+    """Base entity for Google Find My Device platforms.
+
+    Service-scoped diagnostics **must** pass ``SERVICE_SUBENTRY_KEY`` while
+    per-device entities **must** pass ``TRACKER_SUBENTRY_KEY`` when invoking the
+    constructor.  The coordinator and device-registry helpers assume every
+    entity declares its subentry bucket explicitly so Home Assistant can group
+    diagnostics under the shared service device and attach tracker entities to
+    their dedicated device entries.
+    """
 
     _attr_has_entity_name = True
     _attr_should_poll = False
@@ -95,9 +103,11 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
         self,
         coordinator: GoogleFindMyCoordinator,
         *,
+        subentry_key: str | None = None,
         subentry_identifier: str | None = None,
     ) -> None:
         super().__init__(coordinator)
+        self._subentry_key = subentry_key
         self._subentry_identifier = subentry_identifier
 
     @property
@@ -113,6 +123,12 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
         """Return the coordinator-provided subentry identifier (if set)."""
 
         return self._subentry_identifier
+
+    @property
+    def subentry_key(self) -> str | None:
+        """Return the coordinator subentry key for this entity, if known."""
+
+        return getattr(self, "_subentry_key", None)
 
     @staticmethod
     def join_parts(*parts: str | None, separator: str = ":") -> str:
@@ -181,7 +197,13 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
 
 
 class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
-    """Base class for entities representing a concrete Google device."""
+    """Base class for entities representing a concrete Google device.
+
+    Callers must provide ``subentry_key=TRACKER_SUBENTRY_KEY`` so the entity can
+    expose tracker-specific ``DeviceInfo`` identifiers while keeping
+    ``via_device`` linked to the per-entry service device.  Service diagnostics
+    should continue using :class:`GoogleFindMyEntity` directly.
+    """
 
     _DEFAULT_DEVICE_LABEL = "Google Find My Device"
 
@@ -194,9 +216,13 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         subentry_identifier: str,
         fallback_label: str | None = None,
     ) -> None:
-        super().__init__(coordinator, subentry_identifier=subentry_identifier)
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
         self._device = device
-        self._subentry_key = subentry_key
+        self._subentry_key: str = subentry_key
         self._fallback_label = fallback_label
 
     @property

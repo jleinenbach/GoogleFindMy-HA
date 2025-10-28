@@ -63,6 +63,17 @@ if "homeassistant.helpers.entity_platform" not in sys.modules:
     entity_platform_module.AddEntitiesCallback = AddEntitiesCallback
     sys.modules["homeassistant.helpers.entity_platform"] = entity_platform_module
 
+device_registry_module = sys.modules.get("homeassistant.helpers.device_registry")
+if device_registry_module is None:
+    device_registry_module = ModuleType("homeassistant.helpers.device_registry")
+    sys.modules["homeassistant.helpers.device_registry"] = device_registry_module
+
+if not hasattr(device_registry_module, "DeviceEntryType"):
+    class DeviceEntryType:  # noqa: D401 - stub enum container
+        SERVICE = "service"
+
+    device_registry_module.DeviceEntryType = DeviceEntryType
+
 core_module = sys.modules.get("homeassistant.core")
 if core_module is not None and not hasattr(core_module, "Event"):
 
@@ -93,6 +104,12 @@ if update_module is not None and not hasattr(update_module, "CoordinatorEntity")
 
 from custom_components.googlefindmy.binary_sensor import (  # noqa: E402 - import after stubs
     GoogleFindMyAuthStatusSensor,
+    GoogleFindMyPollingSensor,
+)
+from custom_components.googlefindmy.const import (  # noqa: E402 - import after stubs
+    DOMAIN,
+    SERVICE_SUBENTRY_KEY,
+    service_device_identifier,
 )
 
 
@@ -109,7 +126,10 @@ def test_auth_status_sensor_icon(event_state: bool, expected_icon: str) -> None:
     coordinator = SimpleNamespace(api_status=None)
     entry = SimpleNamespace(entry_id="entry-id")
     sensor = GoogleFindMyAuthStatusSensor(
-        coordinator, entry, subentry_identifier="core_tracking"
+        coordinator,
+        entry,
+        subentry_key=SERVICE_SUBENTRY_KEY,
+        subentry_identifier="core_tracking",
     )
 
     # Force the fast-path state without requiring Home Assistant event bus.
@@ -135,7 +155,10 @@ def test_auth_status_sensor_attributes_include_nova_snapshots() -> None:
     )
     entry = SimpleNamespace(entry_id="entry-id")
     sensor = GoogleFindMyAuthStatusSensor(
-        coordinator, entry, subentry_identifier="core_tracking"
+        coordinator,
+        entry,
+        subentry_key=SERVICE_SUBENTRY_KEY,
+        subentry_identifier="core_tracking",
     )
 
     attrs = sensor.extra_state_attributes
@@ -155,7 +178,38 @@ def test_auth_status_sensor_attributes_return_none_when_unavailable() -> None:
     coordinator = SimpleNamespace(api_status=None, fcm_status=None)
     entry = SimpleNamespace(entry_id="entry-id")
     sensor = GoogleFindMyAuthStatusSensor(
-        coordinator, entry, subentry_identifier="core_tracking"
+        coordinator,
+        entry,
+        subentry_key=SERVICE_SUBENTRY_KEY,
+        subentry_identifier="core_tracking",
     )
 
     assert sensor.extra_state_attributes is None
+
+
+def test_service_diagnostic_sensors_share_service_device_identifiers() -> None:
+    """Service diagnostics attach the same identifier set to the hub device."""
+
+    coordinator = SimpleNamespace(api_status=None, fcm_status=None)
+    entry = SimpleNamespace(entry_id="entry-id")
+    coordinator.config_entry = entry
+    polling = GoogleFindMyPollingSensor(
+        coordinator,
+        entry,
+        subentry_key=SERVICE_SUBENTRY_KEY,
+        subentry_identifier="core_tracking",
+    )
+    auth = GoogleFindMyAuthStatusSensor(
+        coordinator,
+        entry,
+        subentry_key=SERVICE_SUBENTRY_KEY,
+        subentry_identifier="core_tracking",
+    )
+
+    expected_identifiers = {
+        service_device_identifier("entry-id"),
+        (DOMAIN, "entry-id:core_tracking:service"),
+    }
+
+    assert polling.device_info.identifiers == expected_identifiers
+    assert auth.device_info.identifiers == expected_identifiers

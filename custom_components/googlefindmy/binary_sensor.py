@@ -39,6 +39,7 @@ from homeassistant.helpers import issue_registry as ir
 
 from .const import (
     DOMAIN,
+    SERVICE_SUBENTRY_KEY,
     TRANSLATION_KEY_AUTH_STATUS,
     EVENT_AUTH_ERROR,
     EVENT_AUTH_OK,
@@ -82,15 +83,25 @@ async def async_setup_entry(
     Registers both diagnostic sensors under the per-entry service device.
     """
     coordinator = resolve_coordinator(entry)
-    subentry_identifier = coordinator.stable_subentry_identifier(
-        feature="binary_sensor"
+    service_meta = coordinator.get_subentry_metadata(feature="binary_sensor")
+    service_subentry_key = (
+        service_meta.key if service_meta is not None else SERVICE_SUBENTRY_KEY
+    )
+    service_subentry_identifier = coordinator.stable_subentry_identifier(
+        key=service_subentry_key
     )
     entities: list[BinarySensorEntity] = [
         GoogleFindMyPollingSensor(
-            coordinator, entry, subentry_identifier=subentry_identifier
+            coordinator,
+            entry,
+            subentry_key=service_subentry_key,
+            subentry_identifier=service_subentry_identifier,
         ),
         GoogleFindMyAuthStatusSensor(
-            coordinator, entry, subentry_identifier=subentry_identifier
+            coordinator,
+            entry,
+            subentry_key=service_subentry_key,
+            subentry_identifier=service_subentry_identifier,
         ),
     ]
     async_add_entities(entities, True)
@@ -116,10 +127,15 @@ class GoogleFindMyPollingSensor(GoogleFindMyEntity, BinarySensorEntity):
         coordinator: GoogleFindMyCoordinator,
         entry: ConfigEntry,
         *,
+        subentry_key: str,
         subentry_identifier: str,
     ) -> None:
         """Initialize the polling sensor."""
-        super().__init__(coordinator, subentry_identifier=subentry_identifier)
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
         self._entry_id = entry.entry_id
         entry_id = self.entry_id
         # Entry-scoped unique_id: "<entry_id>:<subentry_identifier>:polling"
@@ -183,10 +199,15 @@ class GoogleFindMyAuthStatusSensor(GoogleFindMyEntity, BinarySensorEntity):
         coordinator: GoogleFindMyCoordinator,
         entry: ConfigEntry,
         *,
+        subentry_key: str,
         subentry_identifier: str,
     ) -> None:
         """Initialize the authentication status sensor."""
-        super().__init__(coordinator, subentry_identifier=subentry_identifier)
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
         self._entry_id = entry.entry_id
         entry_id = self.entry_id
         # Entry-scoped unique_id: "<entry_id>:<subentry_identifier>:auth_status"

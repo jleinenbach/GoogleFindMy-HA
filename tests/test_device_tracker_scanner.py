@@ -79,16 +79,15 @@ def test_scanner_triggers_cloud_discovery(
             self._listeners.append(listener)
             return lambda: None
 
-        def get_subentry_key_for_feature(self, feature: str) -> str:
-            return feature
-
         def stable_subentry_identifier(
             self,
             *,
             key: str | None = None,
             feature: str | None = None,
         ) -> str:
-            return f"{feature or key}-identifier"
+            resolved = key or feature
+            assert resolved is not None
+            return f"{resolved}-identifier"
 
         def get_subentry_snapshot(
             self,
@@ -100,6 +99,22 @@ def test_scanner_triggers_cloud_discovery(
                 self._bootstrap_consumed = True
                 return []
             return list(self._devices)
+
+        def get_subentry_metadata(
+            self,
+            *,
+            key: str | None = None,
+            feature: str | None = None,
+        ) -> Any:
+            if key is not None:
+                resolved = key
+            elif feature in {"button", "device_tracker", "sensor"}:
+                resolved = "core_tracking"
+            elif feature == "binary_sensor":
+                resolved = "service"
+            else:
+                resolved = "core_tracking"
+            return SimpleNamespace(key=resolved)
 
     class _StubConfigEntry:
         def __init__(self, coordinator: _StubCoordinator) -> None:

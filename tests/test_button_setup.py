@@ -234,13 +234,25 @@ def test_blank_device_name_populates_buttons() -> None:
             self._listeners.append(listener)
             return lambda: None
 
-        def get_subentry_key_for_feature(self, feature: str) -> str:
-            return "core_tracking"
-
         def stable_subentry_identifier(
             self, *, key: str | None = None, feature: str | None = None
         ) -> str:
-            return "core_tracking"
+            resolved = key or feature
+            assert resolved is not None
+            return resolved
+
+        def get_subentry_metadata(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> Any:
+            if key is not None:
+                resolved = key
+            elif feature in {"button", "device_tracker", "sensor"}:
+                resolved = "core_tracking"
+            elif feature == "binary_sensor":
+                resolved = "service"
+            else:
+                resolved = "core_tracking"
+            return SimpleNamespace(key=resolved)
 
         def get_subentry_snapshot(
             self, key: str | None = None, *, feature: str | None = None
