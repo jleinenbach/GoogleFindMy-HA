@@ -108,6 +108,23 @@ Home Assistant's config-entry **subentries** let the integration organize device
 
 Advanced installations that use push notifications or future feature packs may surface additional groups. Each group is fully independent: credentials, options, and repair actions all respect the feature group that you select in the UI.
 
+### Subentry flow abort reasons
+
+Config flows communicate state transitions through **abort reasons**, which power the toast notifications and translation strings surfaced in Home Assistant dialogs. Subentry-related flows use the following reason keys:
+
+| Reason key | Where it appears | Meaning |
+| --- | --- | --- |
+| `invalid_subentry` | Reconfigure handlers, options steps, and repairs forms | The requested feature group could not be resolved or was removed during the flow. |
+| `repairs_no_subentries` | Repairs entry point and move action | No feature groups exist, so the repairs workflow cannot continue. |
+| `repair_no_devices` | Repairs → Move devices | A move operation was attempted without selecting any devices. |
+| `subentry_move_success` | Repairs → Move devices | The selected devices were re-assigned successfully; the flow exits with a success toast. |
+| `subentry_delete_invalid` | Repairs → Delete subentry | There are too few removable feature groups to continue. |
+| `subentry_remove_failed` | Repairs → Delete subentry | Removing the requested feature group failed unexpectedly. |
+| `subentry_delete_success` | Repairs → Delete subentry | A feature group was deleted (after optional device reassignment). |
+| `reconfigure_successful` | Credentials refresh flow | The integration applied new credentials and refreshed the chosen feature group. |
+
+The `strings.json` and translation files under `custom_components/googlefindmy/translations/` provide localized messages for each key so UI notifications remain consistent.
+
 ## Services (Actions)
 
 The integration provides a couple of Home Assistant Actions for use with automations.  Note that Device ID is different than Entity ID.  Device ID is a long, alpha-numeric value that can be obtained from the Device info pages.

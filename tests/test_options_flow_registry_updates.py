@@ -13,7 +13,7 @@ from custom_components.googlefindmy import (
     ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
 )
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
 from custom_components.googlefindmy.coordinator import (
     GoogleFindMyCoordinator,
     _DEFAULT_SUBENTRY_FEATURES as COORDINATOR_DEFAULT_FEATURES,
@@ -186,7 +186,7 @@ class _EntryStub:
             payload["visible_device_ids"] = list(visible_device_ids)
         subentry = ConfigSubentry(
             data=MappingProxyType(payload),
-            subentry_type="googlefindmy_feature_group",
+            subentry_type=SUBENTRY_TYPE_TRACKER,
             title=title,
             unique_id=f"{self.entry_id}-{key}",
         )

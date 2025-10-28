@@ -26,6 +26,8 @@ from custom_components.googlefindmy.const import (
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_MIN_ACCURACY_THRESHOLD,
+    SERVICE_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -401,10 +403,20 @@ def test_device_selection_creates_and_updates_subentry() -> None:
     assert result["type"] == "create_entry"
 
     manager = hass.config_entries
-    assert len(manager.created) == 1
-    created_subentry = manager.created[0]
-    assert created_subentry.data["group_key"] == "core_tracking"
-    assert flow.context["subentry_ids"]["core_tracking"] == created_subentry.subentry_id
+    assert len(manager.created) == 2
+
+    def _subentry_for(key: str) -> ConfigSubentry:
+        for subentry in manager.created:
+            if subentry.data.get("group_key") == key:
+                return subentry
+        raise AssertionError(f"Subentry with key {key} missing")
+
+    tracker_subentry = _subentry_for(TRACKER_SUBENTRY_KEY)
+    service_subentry = _subentry_for(SERVICE_SUBENTRY_KEY)
+
+    assert tracker_subentry.data["group_key"] == TRACKER_SUBENTRY_KEY
+    assert service_subentry.data["group_key"] == SERVICE_SUBENTRY_KEY
+    assert flow.context["subentry_ids"][TRACKER_SUBENTRY_KEY] == tracker_subentry.subentry_id
 
     second_input = dict(first_input)
     second_input[OPT_MAP_VIEW_TOKEN_EXPIRATION] = False
@@ -416,10 +428,10 @@ def test_device_selection_creates_and_updates_subentry() -> None:
     result2 = asyncio.run(flow.async_step_device_selection(second_input))
     assert result2["type"] == "create_entry"
     assert len(manager.created) == previous_created
-    assert manager.updated, "Expected subentry to be updated on second run"
+    assert manager.updated, "Expected tracker subentry to be updated on second run"
     updated_subentry = manager.updated[-1]
-    assert updated_subentry.subentry_id == created_subentry.subentry_id
-    assert flow.context["subentry_ids"]["core_tracking"] == created_subentry.subentry_id
+    assert updated_subentry.subentry_id == tracker_subentry.subentry_id
+    assert flow.context["subentry_ids"][TRACKER_SUBENTRY_KEY] == tracker_subentry.subentry_id
 
 
 def test_ephemeral_probe_cache_allows_missing_namespace(

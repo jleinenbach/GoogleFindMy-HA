@@ -16,6 +16,7 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
     OPT_IGNORED_DEVICES,
     OPT_OPTIONS_SCHEMA_VERSION,
+    SUBENTRY_TYPE_TRACKER,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from homeassistant.config_entries import ConfigSubentry
@@ -148,7 +149,7 @@ def test_migrate_entry_identifier_namespaces_updates_subentries() -> None:
 
     subentry = ConfigSubentry(
         data={"group_key": "core_tracking", "visible_device_ids": ["entry-2:device-1"]},
-        subentry_type="googlefindmy_feature_group",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Core",
         unique_id="entry-2-core",
     )

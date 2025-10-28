@@ -112,6 +112,7 @@ from .const import (
     CACHE_KEY_CONTRIBUTOR_MODE,
     CACHE_KEY_LAST_MODE_SWITCH,
     LEGACY_SERVICE_IDENTIFIER,
+    SUBENTRY_TYPE_TRACKER,
     coerce_ignored_mapping,
     service_device_identifier,
 )
@@ -231,7 +232,7 @@ class ConfigEntrySubentryDefinition:
     key: str
     title: str
     data: Mapping[str, Any]
-    subentry_type: str = "googlefindmy_feature_group"
+    subentry_type: str = SUBENTRY_TYPE_TRACKER
     unique_id: str | None = None
     unload: CleanupCallback | None = None
 
@@ -254,7 +255,7 @@ class ConfigEntrySubEntryManager:
         entry: ConfigEntry,
         *,
         key_field: str = "group_key",
-        default_subentry_type: str = "googlefindmy_feature_group",
+        default_subentry_type: str = SUBENTRY_TYPE_TRACKER,
     ) -> None:
         self._hass = hass
         self._entry = entry

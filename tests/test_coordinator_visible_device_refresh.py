@@ -7,7 +7,7 @@ import time
 from types import MappingProxyType, SimpleNamespace
 
 from custom_components.googlefindmy.button import GoogleFindMyPlaySoundButton
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
 from custom_components.googlefindmy.coordinator import (
     FcmStatus,
     GoogleFindMyCoordinator,
@@ -30,7 +30,7 @@ def _build_entry_with_empty_visible_list() -> SimpleNamespace:
     )
     subentry = ConfigSubentry(
         data=MappingProxyType({"group_key": "core_tracking", "visible_device_ids": []}),
-        subentry_type="googlefindmy_feature_group",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Core",
         unique_id="entry-empty-visible-core",
     )
