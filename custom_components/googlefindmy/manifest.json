@@ -25,6 +25,5 @@
     "selenium>=4.37.0",
     "undetected_chromedriver>=3.5.5"
   ],
-  "homeassistant": "2025.7.0",
   "version": "1.6.0"
 }
