@@ -2047,11 +2047,19 @@ class _BaseSubentryFlow(ConfigSubentryFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         payload, title, unique_id = self._build_payload()
-        return self.async_update_and_abort(
-            data=payload,
-            title=title,
-            unique_id=unique_id,
-        )
+        update_callable = self.async_update_and_abort
+        update_kwargs = {
+            "data": payload,
+            "title": title,
+            "unique_id": unique_id,
+        }
+        update_signature = inspect.signature(update_callable).parameters
+        if "entry" in update_signature and "subentry" in update_signature:
+            subentry = self._resolve_existing()
+            if subentry is None:
+                return self.async_abort(reason="invalid_subentry")
+            return update_callable(self.config_entry, subentry, **update_kwargs)
+        return update_callable(**update_kwargs)
 
 
 class ServiceSubentryFlowHandler(_BaseSubentryFlow):
