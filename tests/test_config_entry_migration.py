@@ -379,6 +379,13 @@ def test_unique_id_subentry_migration_updates_existing(
         config_entry_id="entry-1",
     )
     entity_registry.add(
+        entity_id="button.googlefindmy_device_2_play_sound",
+        domain="button",
+        platform=integration.DOMAIN,
+        unique_id="googlefindmy_entry-1_tracker_device-2_play_sound",
+        config_entry_id="entry-1",
+    )
+    entity_registry.add(
         entity_id="binary_sensor.googlefindmy_polling",
         domain="binary_sensor",
         platform=integration.DOMAIN,
@@ -401,6 +408,13 @@ def test_unique_id_subentry_migration_updates_existing(
     assert stats_entry.unique_id == "googlefindmy_entry-1_sub-1_api_updates_total"
     button_entry = entity_registry.entities["button.googlefindmy_device_1_play_sound"]
     assert button_entry.unique_id == "googlefindmy_entry-1_sub-1_device-1_play_sound"
+    tracker_button_entry = entity_registry.entities[
+        "button.googlefindmy_device_2_play_sound"
+    ]
+    assert (
+        tracker_button_entry.unique_id
+        == "googlefindmy_entry-1_sub-1_device-2_play_sound"
+    )
     binary_entry = entity_registry.entities["binary_sensor.googlefindmy_polling"]
     assert binary_entry.unique_id == "entry-1:sub-1:polling"
 

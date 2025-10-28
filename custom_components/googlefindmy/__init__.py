@@ -496,6 +496,38 @@ _BUTTON_ACTION_SUFFIXES: tuple[str, ...] = (
     "stop_sound",
     "locate_device",
 )
+_LEGACY_BUTTON_SUBENTRY_PREFIXES: tuple[str, ...] = ("tracker",)
+
+
+def _normalize_legacy_button_remainder(
+    remainder: str,
+    *,
+    identifier: str,
+    suffixes: tuple[str, ...],
+) -> str:
+    """Strip legacy pseudo-subentry tokens before rebuilding button IDs."""
+
+    action_suffix: str | None = None
+    for suffix in suffixes:
+        if remainder.endswith(suffix):
+            action_suffix = suffix
+            payload = remainder[: -len(suffix)]
+            break
+    else:
+        return remainder
+
+    if payload.startswith(f"{identifier}_"):
+        return remainder
+
+    for legacy_prefix in _LEGACY_BUTTON_SUBENTRY_PREFIXES:
+        token = f"{legacy_prefix}_"
+        if payload.startswith(token):
+            trimmed = payload[len(token) :]
+            if trimmed:
+                return f"{trimmed}{action_suffix}"
+            break
+
+    return remainder
 
 
 def _parse_button_unique_id(
@@ -1619,7 +1651,12 @@ def _determine_subentry_unique_id(
             if remainder.startswith(f"{identifier}_"):
                 return uid
             if any(remainder.endswith(suffix) for suffix in button_suffixes):
-                return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+                normalized_remainder = _normalize_legacy_button_remainder(
+                    remainder,
+                    identifier=identifier,
+                    suffixes=button_suffixes,
+                )
+                return f"{DOMAIN}_{entry_id}_{identifier}_{normalized_remainder}"
             return None
         legacy_prefix = f"{DOMAIN}_"
         if uid.startswith(legacy_prefix):
@@ -1629,7 +1666,12 @@ def _determine_subentry_unique_id(
             if remainder.startswith(f"{identifier}_"):
                 return uid
             if any(remainder.endswith(suffix) for suffix in button_suffixes):
-                return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+                normalized_remainder = _normalize_legacy_button_remainder(
+                    remainder,
+                    identifier=identifier,
+                    suffixes=button_suffixes,
+                )
+                return f"{DOMAIN}_{entry_id}_{identifier}_{normalized_remainder}"
         return None
 
     return None
