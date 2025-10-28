@@ -448,6 +448,9 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             integration, "_async_soft_migrate_data_to_options", AsyncMock()
         )
         monkeypatch.setattr(integration, "_async_migrate_unique_ids", AsyncMock())
+        monkeypatch.setattr(
+            integration, "_async_relink_button_devices", AsyncMock()
+        )
         monkeypatch.setattr(integration, "_async_save_secrets_data", AsyncMock())
         monkeypatch.setattr(integration, "_async_seed_manual_credentials", AsyncMock())
         monkeypatch.setattr(integration, "_async_normalize_device_names", AsyncMock())
@@ -578,6 +581,14 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             await migrate_handler(SimpleNamespace(data={ATTR_MODE: MODE_MIGRATE}))
             assert integration._async_soft_migrate_data_to_options.await_count == 2
             assert integration._async_soft_migrate_data_to_options.await_args_list[
+                -1
+            ] == call(hass, entry)
+            assert integration._async_migrate_unique_ids.await_count == 2
+            assert integration._async_migrate_unique_ids.await_args_list[-1] == call(
+                hass, entry
+            )
+            assert integration._async_relink_button_devices.await_count == 2
+            assert integration._async_relink_button_devices.await_args_list[
                 -1
             ] == call(hass, entry)
             assert hass.config_entries.reload_calls == [entry.entry_id]

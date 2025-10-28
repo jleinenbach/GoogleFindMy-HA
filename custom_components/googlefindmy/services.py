@@ -67,6 +67,8 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         - "opt_map_view_token_expiration_key": str
         - "redact_url_token": Callable[[str], str]
         - "soft_migrate_entry": Callable[[HomeAssistant, Any], Any]  # awaited per entry
+        - "migrate_unique_ids": Callable[[HomeAssistant, Any], Any]
+        - "relink_button_devices": Callable[[HomeAssistant, Any], Any]
     """
 
     # ---- Small local helpers (no circular imports) ---------------------------
@@ -546,20 +548,62 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         )
 
         if mode == MODE_MIGRATE:
-            # C-2: real soft-migrate path using __init__.py helper via ctx
+            # C-2: real soft-migrate path using __init__.py helpers via ctx
             soft_migrate = ctx.get("soft_migrate_entry")
-            if callable(soft_migrate):
-                for entry_ in entries:
+            unique_id_migrate = ctx.get("migrate_unique_ids")
+            relink_button_devices = ctx.get("relink_button_devices")
+
+            if not callable(soft_migrate):
+                _LOGGER.warning(
+                    "soft_migrate_entry not provided in context; data→options migration will be skipped."
+                )
+            if not callable(unique_id_migrate):
+                _LOGGER.warning(
+                    "migrate_unique_ids not provided in context; unique-id migration will be skipped."
+                )
+            if not callable(relink_button_devices):
+                _LOGGER.warning(
+                    "relink_button_devices not provided in context; button relinking will be skipped."
+                )
+
+            soft_completed = 0
+            unique_completed = 0
+            relink_completed = 0
+
+            for entry_ in entries:
+                if callable(soft_migrate):
                     try:
                         await soft_migrate(hass, entry_)
                     except Exception as err:
                         _LOGGER.error(
                             "Soft-migrate failed for entry %s: %s", entry_.entry_id, err
                         )
-            else:
-                _LOGGER.warning(
-                    "soft_migrate_entry not provided in context; MIGRATE path is a no-op."
-                )
+                    else:
+                        soft_completed += 1
+
+                if callable(unique_id_migrate):
+                    try:
+                        await unique_id_migrate(hass, entry_)
+                    except Exception as err:
+                        _LOGGER.error(
+                            "Unique-ID migration failed for entry %s: %s",
+                            entry_.entry_id,
+                            err,
+                        )
+                    else:
+                        unique_completed += 1
+
+                if callable(relink_button_devices):
+                    try:
+                        await relink_button_devices(hass, entry_)
+                    except Exception as err:
+                        _LOGGER.error(
+                            "Button relink failed for entry %s: %s",
+                            entry_.entry_id,
+                            err,
+                        )
+                    else:
+                        relink_completed += 1
 
             # Reload all entries to apply migrations
             for entry_ in entries:
@@ -571,8 +615,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     )
 
             _LOGGER.info(
-                "googlefindmy.rebuild_registry: soft-migrate completed for %d config entrie(s).",
+                "googlefindmy.rebuild_registry: migrate completed for %d config entrie(s) (data/options=%d, unique_ids=%d, button_relinks=%d)",
                 len(entries),
+                soft_completed,
+                unique_completed,
+                relink_completed,
             )
             return
 
