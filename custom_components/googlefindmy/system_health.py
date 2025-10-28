@@ -7,12 +7,15 @@ import hashlib
 import math
 from collections.abc import Collection
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN, INTEGRATION_VERSION
+
+if TYPE_CHECKING:
+    from homeassistant.components.system_health import SystemHealthRegistration
 
 # Module-level override for tests (patched by unit tests to capture registrations).
 system_health_component: Any | None = None
@@ -158,8 +161,15 @@ def _get_fcm_snapshot(coordinator: Any) -> dict[str, Any] | None:
     return data
 
 
-async def async_register(hass: HomeAssistant) -> None:
+async def async_register(
+    hass: HomeAssistant, register: SystemHealthRegistration | None = None
+) -> None:
     """Register the system health info handler for this integration."""
+
+    if register is not None and hasattr(register, "async_register_info"):
+        register.async_register_info(async_get_system_health_info)
+        return
+
     resolved_component = system_health_component
     if resolved_component is None:
         try:

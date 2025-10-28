@@ -1,9 +1,7 @@
 # tests/test_system_health.py
-"""Tests for the Google Find My Device system health handlers."""
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -15,18 +13,6 @@ from custom_components.googlefindmy.const import (
     DATA_SECRET_BUNDLE,
     DOMAIN,
 )
-
-
-def _run(coro):
-    """Run an async coroutine in a fresh event loop for test isolation."""
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    finally:
-        asyncio.set_event_loop(None)
-        loop.close()
-
 
 class _FakeConfigEntry:
     """Minimal ConfigEntry stub for system health tests."""
@@ -97,8 +83,36 @@ class _FakeHass:
         }
 
 
-def test_async_register_registers_handler(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure the integration registers its system health callback."""
+@pytest.mark.asyncio
+async def test_async_register_uses_registration_object() -> None:
+    """Ensure the integration uses the provided registration helper when available."""
+
+    class _Registration:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, object | None]] = []
+
+        def async_register_info(
+            self,
+            handler: object,
+            manage_url: object | None = None,
+        ) -> None:
+            self.calls.append((handler, manage_url))
+
+    registration = _Registration()
+    hass = object()
+
+    await system_health.async_register(hass, registration)
+
+    assert registration.calls == [
+        (system_health.async_get_system_health_info, None)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_register_registers_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure the integration registers its system health callback when legacy API is used."""
 
     calls: list[tuple[object, str, object]] = []
 
@@ -112,18 +126,19 @@ def test_async_register_registers_handler(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     hass = object()
-    _run(system_health.async_register(hass))
+    await system_health.async_register(hass)
 
     assert calls == [(hass, DOMAIN, system_health.async_get_system_health_info)]
 
 
-def test_async_get_system_health_info_redacts_email() -> None:
+@pytest.mark.asyncio
+async def test_async_get_system_health_info_redacts_email() -> None:
     """System health info must expose account data without PII."""
 
     coordinator = _FakeCoordinator()
     hass = _FakeHass(coordinator)
 
-    info = _run(system_health.async_get_system_health_info(hass))  # type: ignore[arg-type]
+    info = await system_health.async_get_system_health_info(hass)  # type: ignore[arg-type]
 
     assert info["loaded_entries"] == 1
     assert info["fcm"]["available"] is True
