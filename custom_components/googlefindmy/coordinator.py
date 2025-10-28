@@ -108,6 +108,10 @@ from .const import (
     SERVICE_DEVICE_MODEL,
     SERVICE_DEVICE_MANUFACTURER,
     SERVICE_DEVICE_TRANSLATION_KEY,
+    SERVICE_FEATURE_PLATFORMS,
+    SERVICE_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_KEY,
+    TRACKER_FEATURE_PLATFORMS,
     service_device_identifier,
     # Helpers
     coerce_ignored_mapping,
@@ -124,7 +128,6 @@ from .const import (
     CACHE_KEY_CONTRIBUTOR_MODE,
     CACHE_KEY_LAST_MODE_SWITCH,
 )
-
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
 # This avoids silent type/name drift and keeps source labels stable.
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2
@@ -139,6 +142,13 @@ _DEFAULT_SUBENTRY_FEATURES: tuple[str, ...] = (
     "button",
     "device_tracker",
     "sensor",
+)
+
+_SERVICE_SUBENTRY_FEATURES: tuple[str, ...] = tuple(
+    sorted(dict.fromkeys(SERVICE_FEATURE_PLATFORMS))
+)
+_TRACKER_SUBENTRY_FEATURES: tuple[str, ...] = tuple(
+    sorted(dict.fromkeys(TRACKER_FEATURE_PLATFORMS))
 )
 
 
@@ -235,7 +245,7 @@ class SubentryMetadata:
     """Lightweight view of a config-entry subentry relevant to platforms."""
 
     key: str
-    subentry_id: str | None
+    config_subentry_id: str | None
     features: tuple[str, ...]
     title: str | None
     poll_intervals: Mapping[str, int]
@@ -247,7 +257,13 @@ class SubentryMetadata:
     def stable_identifier(self) -> str:
         """Return the identifier to use when namespacing entities."""
 
-        return self.subentry_id or self.key
+        return self.config_subentry_id or self.key
+
+    @property
+    def subentry_id(self) -> str | None:
+        """Backwards-compatible alias for the config subentry identifier."""
+
+        return self.config_subentry_id
 
 
 # --- Epoch normalization (ms→s tolerant) -----------------------------------
@@ -864,12 +880,31 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         metadata: dict[str, SubentryMetadata] = {}
         feature_map: dict[str, str] = {}
         default_key: str | None = None
-        manager_updates: list[tuple[str, tuple[str, ...]]] = []
+        manager_visible: dict[str, tuple[str, ...]] = {}
+
+        def _current_poll_intervals() -> Mapping[str, int]:
+            return MappingProxyType(
+                {
+                    "location": int(self.location_poll_interval),
+                    "minimum": int(self.min_poll_interval),
+                    "device": int(self.device_poll_delay),
+                    "min_accuracy": int(self._min_accuracy_threshold),
+                    "movement": int(self._movement_threshold),
+                }
+            )
+
+        def _current_filters() -> Mapping[str, Any]:
+            return MappingProxyType(
+                {
+                    "ignored_device_ids": tuple(sorted(ignored)),
+                    "allow_history_fallback": bool(self.allow_history_fallback),
+                }
+            )
 
         for group_key, subentry_id, data, title in raw_entries:
             raw_features = data.get("features")
             if isinstance(raw_features, (list, tuple, set)):
-                features = tuple(
+                normalized_features = tuple(
                     sorted(
                         {
                             str(feature)
@@ -879,10 +914,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     )
                 )
             else:
-                features = _DEFAULT_SUBENTRY_FEATURES
+                normalized_features = _DEFAULT_SUBENTRY_FEATURES
 
-            if not features:
-                features = _DEFAULT_SUBENTRY_FEATURES
+            if group_key == SERVICE_SUBENTRY_KEY:
+                features = _SERVICE_SUBENTRY_FEATURES or normalized_features
+            elif group_key == TRACKER_SUBENTRY_KEY:
+                features = _TRACKER_SUBENTRY_FEATURES or normalized_features
+            else:
+                features = normalized_features or _DEFAULT_SUBENTRY_FEATURES
 
             raw_flags = data.get("feature_flags")
             feature_flags: dict[str, Any]
@@ -936,68 +975,105 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 visibility_candidates.extend(normalized_allowed)
 
             visible_ids = tuple(sorted(dict.fromkeys(visibility_candidates)))
-            enabled_ids = tuple(
-                sorted(
-                    dev_id
-                    for dev_id in visible_ids
-                    if dev_id in self._enabled_poll_device_ids
+
+            if group_key == SERVICE_SUBENTRY_KEY:
+                visible_ids = cast(tuple[str, ...], ())
+                enabled_ids = cast(tuple[str, ...], ())
+                manager_visible_ids = cast(tuple[str, ...], ())
+            else:
+                enabled_ids = tuple(
+                    sorted(
+                        dev_id
+                        for dev_id in visible_ids
+                        if dev_id in self._enabled_poll_device_ids
+                    )
                 )
-            )
-
-            poll_intervals: Mapping[str, int] = MappingProxyType(
-                {
-                    "location": int(self.location_poll_interval),
-                    "minimum": int(self.min_poll_interval),
-                    "device": int(self.device_poll_delay),
-                    "min_accuracy": int(self._min_accuracy_threshold),
-                    "movement": int(self._movement_threshold),
-                }
-            )
-
-            filters: Mapping[str, Any] = MappingProxyType(
-                {
-                    "ignored_device_ids": tuple(sorted(ignored)),
-                    "allow_history_fallback": bool(self.allow_history_fallback),
-                }
-            )
-
-            manager_visible_ids = tuple(
-                dict.fromkeys(
-                    canonical_to_registry_id.get(dev_id, dev_id)
-                    for dev_id in visible_ids
+                manager_visible_ids = tuple(
+                    dict.fromkeys(
+                        canonical_to_registry_id.get(dev_id, dev_id)
+                        for dev_id in visible_ids
+                    )
                 )
-            )
 
             metadata[group_key] = SubentryMetadata(
                 key=group_key,
-                subentry_id=subentry_id,
+                config_subentry_id=subentry_id,
                 features=features,
                 title=title,
-                poll_intervals=poll_intervals,
-                filters=filters,
+                poll_intervals=_current_poll_intervals(),
+                filters=_current_filters(),
                 feature_flags=MappingProxyType(dict(feature_flags)),
                 visible_device_ids=visible_ids,
                 enabled_device_ids=enabled_ids,
             )
 
-            manager_updates.append((group_key, manager_visible_ids))
+            if group_key != SERVICE_SUBENTRY_KEY:
+                manager_visible[group_key] = manager_visible_ids
 
             for feature in features:
-                feature_map[feature] = group_key
+                feature_map.setdefault(feature, group_key)
 
             if default_key is None:
                 default_key = group_key
 
+        if SERVICE_SUBENTRY_KEY not in metadata:
+            service_features = _SERVICE_SUBENTRY_FEATURES or _DEFAULT_SUBENTRY_FEATURES
+            metadata[SERVICE_SUBENTRY_KEY] = SubentryMetadata(
+                key=SERVICE_SUBENTRY_KEY,
+                config_subentry_id=None,
+                features=service_features,
+                title=getattr(entry, "title", None),
+                poll_intervals=_current_poll_intervals(),
+                filters=_current_filters(),
+                feature_flags=MappingProxyType({}),
+                visible_device_ids=(),
+                enabled_device_ids=(),
+            )
+            for feature in service_features:
+                feature_map.setdefault(feature, SERVICE_SUBENTRY_KEY)
+
+        if TRACKER_SUBENTRY_KEY not in metadata:
+            tracker_features = _TRACKER_SUBENTRY_FEATURES or _DEFAULT_SUBENTRY_FEATURES
+            previous_tracker_visible = previous_visible.get(TRACKER_SUBENTRY_KEY, ())
+            metadata[TRACKER_SUBENTRY_KEY] = SubentryMetadata(
+                key=TRACKER_SUBENTRY_KEY,
+                config_subentry_id=None,
+                features=tracker_features,
+                title=getattr(entry, "title", None),
+                poll_intervals=_current_poll_intervals(),
+                filters=_current_filters(),
+                feature_flags=MappingProxyType({}),
+                visible_device_ids=previous_tracker_visible,
+                enabled_device_ids=tuple(
+                    dev_id
+                    for dev_id in previous_tracker_visible
+                    if dev_id in self._enabled_poll_device_ids
+                ),
+            )
+            manager_visible[TRACKER_SUBENTRY_KEY] = tuple(
+                dict.fromkeys(
+                    canonical_to_registry_id.get(dev_id, dev_id)
+                    for dev_id in previous_tracker_visible
+                )
+            )
+            for feature in tracker_features:
+                feature_map.setdefault(feature, TRACKER_SUBENTRY_KEY)
+
         self._subentry_metadata = metadata
         self._feature_to_subentry = feature_map
+        if TRACKER_SUBENTRY_KEY in metadata:
+            default_key = TRACKER_SUBENTRY_KEY
+        elif default_key is None and metadata:
+            default_key = next(iter(metadata))
         if default_key:
             self._default_subentry_key_value = default_key
 
         manager = self._subentry_manager
-        if manager and manager_updates:
-            for group_key, visible_ids in manager_updates:
+        if manager and manager_visible:
+            for group_key, visible_ids in manager_visible.items():
+                if group_key == SERVICE_SUBENTRY_KEY:
+                    continue
                 manager.update_visible_device_ids(group_key, visible_ids)
-
         # Ensure snapshot container has entries for all known keys
         for key in list(self._subentry_snapshots):
             if key not in metadata:
@@ -1291,6 +1367,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             return
 
+        # Refresh subentry metadata to obtain the current service subentry context.
+        try:
+            self._refresh_subentry_index()
+        except Exception:  # pragma: no cover - defensive guard
+            pass
+
+        service_meta = self._subentry_metadata.get(SERVICE_SUBENTRY_KEY)
+        service_config_subentry_id = (
+            service_meta.config_subentry_id if service_meta is not None else None
+        )
+
         setattr(
             self,
             "_service_device_identifier",
@@ -1324,17 +1411,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             except TypeError:
                 device = None
         if device is None:
-            device = dev_reg.async_get_or_create(
-                config_entry_id=entry.entry_id,
-                identifiers=identifiers,
-                manufacturer=SERVICE_DEVICE_MANUFACTURER,
-                model=SERVICE_DEVICE_MODEL,
-                sw_version=INTEGRATION_VERSION,
-                entry_type=dr.DeviceEntryType.SERVICE,
-                configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
-                translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
-                translation_placeholders={},
-            )
+            create_kwargs: dict[str, Any] = {
+                "config_entry_id": entry.entry_id,
+                "identifiers": identifiers,
+                "manufacturer": SERVICE_DEVICE_MANUFACTURER,
+                "model": SERVICE_DEVICE_MODEL,
+                "sw_version": INTEGRATION_VERSION,
+                "entry_type": dr.DeviceEntryType.SERVICE,
+                "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
+                "translation_key": SERVICE_DEVICE_TRANSLATION_KEY,
+                "translation_placeholders": {},
+                "config_subentry_id": service_config_subentry_id,
+            }
+            try:
+                device = dev_reg.async_get_or_create(**create_kwargs)
+            except TypeError as err:
+                if "config_subentry_id" in str(err):
+                    create_kwargs.pop("config_subentry_id", None)
+                    device = dev_reg.async_get_or_create(**create_kwargs)
+                else:
+                    raise
             _LOGGER.debug(
                 "Created Google Find My service device for entry %s (device_id=%s)",
                 entry.entry_id,
@@ -1342,28 +1438,41 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
         else:
             # Keep metadata fresh if it drifted (rare)
+            has_user_name = bool(getattr(device, "name_by_user", None))
+            should_clear_name = device.name is not None and not has_user_name
             needs_update = (
                 device.manufacturer != SERVICE_DEVICE_MANUFACTURER
                 or device.model != SERVICE_DEVICE_MODEL
                 or device.sw_version != INTEGRATION_VERSION
                 or device.entry_type != dr.DeviceEntryType.SERVICE
+                or getattr(device, "config_subentry_id", None)
+                != service_config_subentry_id
                 or device.translation_key != SERVICE_DEVICE_TRANSLATION_KEY
-                or device.name is not None
-                or (device.translation_placeholders or {})
-                != {}
+                or (device.translation_placeholders or {}) != {}
+                or should_clear_name
             )
             if needs_update:
-                dev_reg.async_update_device(
-                    device_id=device.id,
-                    manufacturer=SERVICE_DEVICE_MANUFACTURER,
-                    model=SERVICE_DEVICE_MODEL,
-                    sw_version=INTEGRATION_VERSION,
-                    entry_type=dr.DeviceEntryType.SERVICE,
-                    configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
-                    translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
-                    name=None,
-                    translation_placeholders={},
-                )
+                update_kwargs: dict[str, Any] = {
+                    "device_id": device.id,
+                    "manufacturer": SERVICE_DEVICE_MANUFACTURER,
+                    "model": SERVICE_DEVICE_MODEL,
+                    "sw_version": INTEGRATION_VERSION,
+                    "entry_type": dr.DeviceEntryType.SERVICE,
+                    "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
+                    "translation_key": SERVICE_DEVICE_TRANSLATION_KEY,
+                    "translation_placeholders": {},
+                    "config_subentry_id": service_config_subentry_id,
+                }
+                if should_clear_name:
+                    update_kwargs["name"] = None
+                try:
+                    dev_reg.async_update_device(**update_kwargs)
+                except TypeError as err:
+                    if "config_subentry_id" in str(err):
+                        update_kwargs.pop("config_subentry_id", None)
+                        dev_reg.async_update_device(**update_kwargs)
+                    else:
+                        raise
                 _LOGGER.debug(
                     "Updated Google Find My service device metadata for entry %s",
                     entry.entry_id,
@@ -1578,6 +1687,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not entry_id:
             return 0
 
+        try:
+            self._refresh_subentry_index(devices)
+        except Exception:  # pragma: no cover - defensive guard
+            pass
+
+        tracker_meta = self._subentry_metadata.get(TRACKER_SUBENTRY_KEY)
+        tracker_config_subentry_id = (
+            tracker_meta.config_subentry_id if tracker_meta is not None else None
+        )
+
         parent_identifier = service_device_identifier(entry_id)
         setattr(self, "_service_device_identifier", parent_identifier)
 
@@ -1602,6 +1721,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             else:
                 supports_via_kw = "via_device" in params
             setattr(self, "_dr_supports_via_device_kw", supports_via_kw)
+
+        def _update_device_with_kwargs(kwargs: dict[str, Any]) -> Any:
+            if not callable(update_device):
+                return None
+            try:
+                return update_device(**kwargs)
+            except TypeError as err:
+                if "config_subentry_id" in str(err):
+                    kwargs.pop("config_subentry_id", None)
+                    return update_device(**kwargs)
+                raise
 
         for d in devices:
             dev_id = d.get("id")
@@ -1643,15 +1773,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         if needs_identifiers or needs_via:
                             update_kwargs: dict[str, Any] = {
                                 "device_id": legacy_dev.id,
+                                "config_subentry_id": tracker_config_subentry_id,
                             }
                             if needs_identifiers:
                                 update_kwargs["new_identifiers"] = new_idents
                             if needs_via:
                                 update_kwargs["via_device_id"] = service_device_id
-                            if callable(update_device):
-                                updated = update_device(**update_kwargs)
-                                if updated is not None:
-                                    legacy_dev = updated
+                            updated = _update_device_with_kwargs(update_kwargs)
+                            if updated is not None:
+                                legacy_dev = updated
                             if (
                                 needs_identifiers
                                 and getattr(legacy_dev, "identifiers", None)
@@ -1664,6 +1794,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 != service_device_id
                             ):
                                 legacy_dev.via_device_id = service_device_id
+                            if (
+                                getattr(legacy_dev, "config_subentry_id", None)
+                                != tracker_config_subentry_id
+                            ):
+                                legacy_dev.config_subentry_id = tracker_config_subentry_id
                             created_or_updated += 1
                         if service_device_id is None:
                             self._note_pending_via_update(legacy_dev.id)
@@ -1688,6 +1823,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "manufacturer": "Google",
                     "model": "Find My Device",
                     "name": use_name,
+                    "config_subentry_id": tracker_config_subentry_id,
                 }
 
                 if parent_identifier and supports_via_kw:
@@ -1695,22 +1831,31 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 elif service_device_id is not None:
                     create_kwargs["via_device_id"] = service_device_id
 
-                try:
-                    dev = async_get_or_create(**create_kwargs)
-                except TypeError as err:
-                    if create_kwargs.pop("via_device", None) is not None:
-                        # Older HA core without via_device kwarg support.
-                        if service_device_id is not None:
-                            create_kwargs["via_device_id"] = service_device_id
-                        supports_via_kw = False
-                        setattr(self, "_dr_supports_via_device_kw", False)
-                        _LOGGER.debug(
-                            "Device Registry create fell back to via_device_id linkage: %s",
-                            err,
-                        )
+                while True:
+                    try:
                         dev = async_get_or_create(**create_kwargs)
-                    else:
+                    except TypeError as err:
+                        if (
+                            "config_subentry_id" in str(err)
+                            and "config_subentry_id" in create_kwargs
+                        ):
+                            create_kwargs.pop("config_subentry_id", None)
+                            continue
+                        via_value = create_kwargs.pop("via_device", None)
+                        if via_value is not None:
+                            # Older HA core without via_device kwarg support.
+                            if service_device_id is not None:
+                                create_kwargs["via_device_id"] = service_device_id
+                            supports_via_kw = False
+                            setattr(self, "_dr_supports_via_device_kw", False)
+                            _LOGGER.debug(
+                                "Device Registry create fell back to via_device_id linkage: %s",
+                                err,
+                            )
+                            continue
                         raise
+                    else:
+                        break
                 created_or_updated += 1
                 if service_device_id is None:
                     self._note_pending_via_update(getattr(dev, "id", None))
@@ -1719,13 +1864,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     and getattr(dev, "id", None)
                     and getattr(dev, "via_device_id", None) != service_device_id
                 ):
-                    updated = update_device(
-                        device_id=dev.id, via_device_id=service_device_id
-                    )
+                    update_kwargs = {
+                        "device_id": dev.id,
+                        "via_device_id": service_device_id,
+                        "config_subentry_id": tracker_config_subentry_id,
+                    }
+                    updated = _update_device_with_kwargs(update_kwargs)
                     if updated is not None:
                         dev = updated
-                    elif getattr(dev, "via_device_id", None) != service_device_id:
-                        dev.via_device_id = service_device_id
+                    else:
+                        if getattr(dev, "via_device_id", None) != service_device_id:
+                            dev.via_device_id = service_device_id
+                        if (
+                            getattr(dev, "config_subentry_id", None)
+                            != tracker_config_subentry_id
+                        ):
+                            dev.config_subentry_id = tracker_config_subentry_id
             else:
                 # Keep name fresh if not user-overridden and a new upstream label is available
                 raw_name = (d.get("name") or "").strip()
@@ -1735,12 +1889,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     else None
                 )
 
-                needs_update = False
                 device_id = getattr(dev, "id", "")
                 update_existing_kwargs: dict[str, Any] = {"device_id": device_id}
-                if use_name and not dev.name_by_user and dev.name != use_name:
+                name_needs_update = (
+                    bool(use_name)
+                    and not getattr(dev, "name_by_user", None)
+                    and dev.name != use_name
+                )
+                if name_needs_update:
                     update_existing_kwargs["name"] = use_name
-                    needs_update = True
 
                 needs_via_update = (
                     service_device_id is not None
@@ -1748,10 +1905,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
                 if needs_via_update:
                     update_existing_kwargs["via_device_id"] = service_device_id
-                    needs_update = True
+
+                needs_config_subentry_update = (
+                    getattr(dev, "config_subentry_id", None)
+                    != tracker_config_subentry_id
+                )
+
+                needs_update = (
+                    name_needs_update
+                    or needs_via_update
+                    or needs_config_subentry_update
+                )
 
                 if needs_update and callable(update_device) and device_id:
-                    updated = update_device(**update_existing_kwargs)
+                    update_existing_kwargs["config_subentry_id"] = (
+                        tracker_config_subentry_id
+                    )
+                    updated = _update_device_with_kwargs(update_existing_kwargs)
                     if updated is not None:
                         dev = updated
                     if (
@@ -1764,6 +1934,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         and getattr(dev, "via_device_id", None) != service_device_id
                     ):
                         dev.via_device_id = service_device_id
+                    if (
+                        getattr(dev, "config_subentry_id", None)
+                        != tracker_config_subentry_id
+                    ):
+                        dev.config_subentry_id = tracker_config_subentry_id
                     created_or_updated += 1
 
                 if service_device_id is None and dev is not None:

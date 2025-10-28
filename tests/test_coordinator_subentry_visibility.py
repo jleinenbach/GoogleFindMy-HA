@@ -7,7 +7,13 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
-from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
+from custom_components.googlefindmy.const import (
+    DOMAIN,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
+    TRACKER_SUBENTRY_KEY,
+)
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import device_registry as dr
@@ -38,6 +44,18 @@ class _StubDeviceRegistry:
 
     def async_get(self, device_id: str) -> _StubDeviceEntry | None:
         return self._entries.get(device_id)
+
+
+class _ManagerStub:
+    """Capture subentry manager updates for verification."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def update_visible_device_ids(
+        self, subentry_key: str, device_ids: tuple[str, ...]
+    ) -> None:
+        self.calls.append((subentry_key, device_ids))
 
 
 def test_refresh_normalizes_registry_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,6 +124,11 @@ def test_refresh_normalizes_registry_allowlist(monkeypatch: pytest.MonkeyPatch) 
 
     coordinator._refresh_subentry_index()
 
+    service_metadata = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_metadata is not None
+    assert service_metadata.visible_device_ids == ()
+    assert service_metadata.config_subentry_id is None
+
     metadata = coordinator.get_subentry_metadata(key="core_tracking")
     assert metadata is not None
     assert metadata.visible_device_ids == (registry_id, canonical_id)
@@ -113,3 +136,77 @@ def test_refresh_normalizes_registry_allowlist(monkeypatch: pytest.MonkeyPatch) 
 
     assert coordinator.is_device_visible_in_subentry("core_tracking", canonical_id)
     assert coordinator.is_device_visible_in_subentry("core_tracking", registry_id)
+
+
+def test_default_subentry_prefers_tracker_and_skips_service_manager_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracker subentry should be default and service updates must not emit manager calls."""
+
+    entry_id = "entry-default"
+    registry = _StubDeviceRegistry({})
+    monkeypatch.setattr(dr, "async_get", lambda hass: registry)
+
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id=f"{entry_id}-service",
+    )
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "visible_device_ids": ["device-1"],
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id=f"{entry_id}-trackers",
+    )
+
+    entry = SimpleNamespace(
+        entry_id=entry_id,
+        title="Google Find My",
+        data={},
+        options={},
+        subentries={
+            service_subentry.subentry_id: service_subentry,
+            tracker_subentry.subentry_id: tracker_subentry,
+        },
+        runtime_data=None,
+    )
+
+    loop_stub = SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None)
+    hass_stub = SimpleNamespace(loop=loop_stub, data={DOMAIN: {}})
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass_stub  # type: ignore[assignment]
+    coordinator.config_entry = entry  # type: ignore[attr-defined]
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    coordinator.data = [{"id": "device-1", "name": "Tracker One"}]
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator.allow_history_fallback = False
+    coordinator._min_accuracy_threshold = 50
+    coordinator._movement_threshold = 10
+    coordinator.device_poll_delay = 30
+    coordinator.min_poll_interval = 60
+    coordinator.location_poll_interval = 120
+    coordinator._subentry_metadata = {}
+    coordinator._subentry_snapshots = {}
+    coordinator._feature_to_subentry = {}
+    coordinator._default_subentry_key_value = SERVICE_SUBENTRY_KEY
+    coordinator._subentry_manager = _ManagerStub()
+    coordinator._warned_bad_identifier_devices = set()
+    coordinator._diag = SimpleNamespace(
+        add_warning=lambda **kwargs: None,
+        remove_warning=lambda *args, **kwargs: None,
+    )
+
+    coordinator._refresh_subentry_index()
+
+    assert coordinator._default_subentry_key() == TRACKER_SUBENTRY_KEY
+
+    manager_stub = coordinator._subentry_manager
+    assert isinstance(manager_stub, _ManagerStub)
+    assert manager_stub.calls
+    assert all(key != SERVICE_SUBENTRY_KEY for key, _ in manager_stub.calls)
