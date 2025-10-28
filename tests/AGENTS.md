@@ -80,3 +80,11 @@ implementation or adding new tests in `tests/test_coordinator_device_registry.py
 ensure the helper continues to accept both the legacy `via_device_id` keyword
 and the newer tuple form, recording the tuple in created-device metadata so the
 tests can assert the parent linkage accurately.
+
+## Translation alignment checks
+
+`tests/test_service_device_translation_alignment.py` loads every locale (including
+`strings.json`) and asserts each defines the translation key referenced by
+`custom_components.googlefindmy.const.SERVICE_DEVICE_TRANSLATION_KEY`. Update this
+test whenever new locales or service-device translation keys are introduced so it
+continues to guard localized device names.

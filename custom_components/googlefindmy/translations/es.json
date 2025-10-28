@@ -1,5 +1,10 @@
 {
   "title": "Google Find My Device",
+  "device": {
+    "google_find_hub_service": {
+      "name": "Servicio del hub de Google Find"
+    }
+  },
   "config": {
     "step": {
       "user": {

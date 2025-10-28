@@ -42,7 +42,7 @@ from .const import (
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     SERVICE_DEVICE_MANUFACTURER,
     SERVICE_DEVICE_MODEL,
-    SERVICE_DEVICE_NAME,
+    SERVICE_DEVICE_TRANSLATION_KEY,
     map_token_hex_digest,
     map_token_secret_seed,
     service_device_identifier,
@@ -138,12 +138,13 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
 
         return DeviceInfo(
             identifiers=identifiers,
-            name=SERVICE_DEVICE_NAME,
             manufacturer=SERVICE_DEVICE_MANUFACTURER,
             model=SERVICE_DEVICE_MODEL,
             sw_version=INTEGRATION_VERSION,
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
             entry_type=dr.DeviceEntryType.SERVICE,
+            translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
+            translation_placeholders={},
         )
 
     def maybe_update_device_registry_name(self, new_name: str | None) -> None:
