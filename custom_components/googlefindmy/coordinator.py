@@ -977,9 +977,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             visible_ids = tuple(sorted(dict.fromkeys(visibility_candidates)))
 
             if group_key == SERVICE_SUBENTRY_KEY:
-                visible_ids = ()
-                enabled_ids = ()
-                manager_visible_ids = ()
+                visible_ids = cast(tuple[str, ...], ())
+                enabled_ids = cast(tuple[str, ...], ())
+                manager_visible_ids = cast(tuple[str, ...], ())
             else:
                 enabled_ids = tuple(
                     sorted(
