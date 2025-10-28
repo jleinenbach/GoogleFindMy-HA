@@ -10,7 +10,14 @@ from collections.abc import Iterable
 import pytest
 
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from custom_components.googlefindmy.const import DOMAIN, service_device_identifier
+from custom_components.googlefindmy.const import (
+    DOMAIN,
+    INTEGRATION_VERSION,
+    SERVICE_DEVICE_MANUFACTURER,
+    SERVICE_DEVICE_MODEL,
+    SERVICE_DEVICE_TRANSLATION_KEY,
+    service_device_identifier,
+)
 from homeassistant.helpers import device_registry as dr
 
 
@@ -32,6 +39,8 @@ class _FakeDeviceEntry:
         sw_version: str | None = None,
         entry_type: Any | None = None,
         configuration_url: str | None = None,
+        translation_key: str | None = None,
+        translation_placeholders: dict[str, str] | None = None,
     ) -> None:
         self.identifiers: set[tuple[str, str]] = set(identifiers)
         self.config_entries = {config_entry_id}
@@ -47,6 +56,8 @@ class _FakeDeviceEntry:
         self.sw_version = sw_version
         self.entry_type = entry_type
         self.configuration_url = configuration_url
+        self.translation_key = translation_key
+        self.translation_placeholders = translation_placeholders
 
 
 class _FakeDeviceRegistry:
@@ -72,7 +83,7 @@ class _FakeDeviceRegistry:
         identifiers: set[tuple[str, str]],
         manufacturer: str,
         model: str,
-        name: str | None,
+        name: str | None = None,
         via_device_id: str | None = None,
         via_device: tuple[str, str] | None = None,
         **kwargs: Any,
@@ -88,6 +99,8 @@ class _FakeDeviceRegistry:
             sw_version=kwargs.get("sw_version"),
             entry_type=kwargs.get("entry_type"),
             configuration_url=kwargs.get("configuration_url"),
+            translation_key=kwargs.get("translation_key"),
+            translation_placeholders=kwargs.get("translation_placeholders"),
         )
         self.devices.append(entry)
         self.created.append(
@@ -102,6 +115,8 @@ class _FakeDeviceRegistry:
                 "sw_version": kwargs.get("sw_version"),
                 "entry_type": kwargs.get("entry_type"),
                 "configuration_url": kwargs.get("configuration_url"),
+                "translation_key": kwargs.get("translation_key"),
+                "translation_placeholders": kwargs.get("translation_placeholders"),
             }
         )
         return entry
@@ -113,6 +128,8 @@ class _FakeDeviceRegistry:
         new_identifiers: Iterable[tuple[str, str]] | None = None,
         via_device_id: str | None = None,
         name: str | None = None,
+        translation_key: str | None = None,
+        translation_placeholders: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         for device in self.devices:
@@ -123,6 +140,10 @@ class _FakeDeviceRegistry:
                     device.via_device_id = via_device_id
                 if name is not None:
                     device.name = name
+                if translation_key is not None:
+                    device.translation_key = translation_key
+                if translation_placeholders is not None:
+                    device.translation_placeholders = translation_placeholders
                 if "manufacturer" in kwargs:
                     device.manufacturer = kwargs["manufacturer"]
                 if "model" in kwargs:
@@ -141,6 +162,8 @@ class _FakeDeviceRegistry:
                         else set(new_identifiers),
                         "via_device_id": via_device_id,
                         "name": name,
+                        "translation_key": translation_key,
+                        "translation_placeholders": translation_placeholders,
                         "manufacturer": kwargs.get("manufacturer"),
                         "model": kwargs.get("model"),
                         "sw_version": kwargs.get("sw_version"),
@@ -286,12 +309,54 @@ def test_service_device_backfills_via_links(
     service_id = coordinator._service_device_id
     assert service_id is not None
     service_ident = service_device_identifier("entry-42")
+    service_entry = next(
+        entry for entry in fake_registry.devices if service_ident in entry.identifiers
+    )
+    assert service_entry.translation_key == SERVICE_DEVICE_TRANSLATION_KEY
+    assert service_entry.translation_placeholders == {}
+    metadata = fake_registry.created[-1]
+    assert metadata["identifiers"] == {service_ident}
+    assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
+    assert metadata["translation_placeholders"] == {}
     for entry in fake_registry.devices:
         if service_ident in entry.identifiers:
             continue
         assert entry.via_device_id == service_id
 
     assert getattr(coordinator, "_pending_via_updates") == set()
+
+
+def test_service_device_updates_add_translation(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Existing service devices gain translation metadata when missing."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
+    coordinator.hass = object()
+
+    service_ident = service_device_identifier("entry-42")
+    legacy_service = _FakeDeviceEntry(
+        identifiers={service_ident},
+        config_entry_id="entry-42",
+        name=None,
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        sw_version=INTEGRATION_VERSION,
+        entry_type=dr.DeviceEntryType.SERVICE,
+        translation_key=None,
+        translation_placeholders=None,
+    )
+    fake_registry.devices.append(legacy_service)
+
+    coordinator._ensure_service_device_exists()
+
+    assert legacy_service.translation_key == SERVICE_DEVICE_TRANSLATION_KEY
+    assert legacy_service.translation_placeholders == {}
+    assert fake_registry.updated
+    metadata = fake_registry.updated[0]
+    assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
+    assert metadata["translation_placeholders"] == {}
 
 
 def test_rebuild_flow_creates_devices_with_via_parent(

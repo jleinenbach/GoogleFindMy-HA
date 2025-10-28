@@ -105,9 +105,9 @@ from .const import (
     INTEGRATION_VERSION,
     MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
     # Integration "service device" metadata
-    SERVICE_DEVICE_NAME,
     SERVICE_DEVICE_MODEL,
     SERVICE_DEVICE_MANUFACTURER,
+    SERVICE_DEVICE_TRANSLATION_KEY,
     service_device_identifier,
     # Helpers
     coerce_ignored_mapping,
@@ -1327,12 +1327,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             device = dev_reg.async_get_or_create(
                 config_entry_id=entry.entry_id,
                 identifiers=identifiers,
-                name=SERVICE_DEVICE_NAME,
                 manufacturer=SERVICE_DEVICE_MANUFACTURER,
                 model=SERVICE_DEVICE_MODEL,
                 sw_version=INTEGRATION_VERSION,
                 entry_type=dr.DeviceEntryType.SERVICE,
                 configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
+                translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
+                translation_placeholders={},
             )
             _LOGGER.debug(
                 "Created Google Find My service device for entry %s (device_id=%s)",
@@ -1345,8 +1346,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 device.manufacturer != SERVICE_DEVICE_MANUFACTURER
                 or device.model != SERVICE_DEVICE_MODEL
                 or device.sw_version != INTEGRATION_VERSION
-                or device.name != SERVICE_DEVICE_NAME
                 or device.entry_type != dr.DeviceEntryType.SERVICE
+                or device.translation_key != SERVICE_DEVICE_TRANSLATION_KEY
+                or device.name is not None
+                or (device.translation_placeholders or {})
+                != {}
             )
             if needs_update:
                 dev_reg.async_update_device(
@@ -1354,9 +1358,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     manufacturer=SERVICE_DEVICE_MANUFACTURER,
                     model=SERVICE_DEVICE_MODEL,
                     sw_version=INTEGRATION_VERSION,
-                    name=SERVICE_DEVICE_NAME,
                     entry_type=dr.DeviceEntryType.SERVICE,
                     configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
+                    translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
+                    name=None,
+                    translation_placeholders={},
                 )
                 _LOGGER.debug(
                     "Updated Google Find My service device metadata for entry %s",
