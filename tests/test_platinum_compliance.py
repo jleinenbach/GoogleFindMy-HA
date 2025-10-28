@@ -30,7 +30,7 @@ def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
     assert required_keys.issubset(manifest.keys())
     assert manifest["domain"] == "googlefindmy"
     assert manifest["config_flow"] is True
-    assert manifest["integration_type"] == "device"
+    assert manifest["integration_type"] == "hub"
     assert manifest["iot_class"] == "cloud_polling"
     assert "recorder" in manifest.get("after_dependencies", [])
     assert "http" in manifest.get("dependencies", [])
