@@ -1348,6 +1348,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 or device.sw_version != INTEGRATION_VERSION
                 or device.entry_type != dr.DeviceEntryType.SERVICE
                 or device.translation_key != SERVICE_DEVICE_TRANSLATION_KEY
+                or device.name is not None
                 or (device.translation_placeholders or {})
                 != {}
             )
@@ -1360,6 +1361,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     entry_type=dr.DeviceEntryType.SERVICE,
                     configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
                     translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
+                    name=None,
                     translation_placeholders={},
                 )
                 _LOGGER.debug(
