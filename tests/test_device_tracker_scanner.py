@@ -100,6 +100,22 @@ def test_scanner_triggers_cloud_discovery(
                 return []
             return list(self._devices)
 
+        def get_subentry_metadata(
+            self,
+            *,
+            key: str | None = None,
+            feature: str | None = None,
+        ) -> Any:
+            if key is not None:
+                resolved = key
+            elif feature in {"button", "device_tracker", "sensor"}:
+                resolved = "core_tracking"
+            elif feature == "binary_sensor":
+                resolved = "service"
+            else:
+                resolved = "core_tracking"
+            return SimpleNamespace(key=resolved)
+
     class _StubConfigEntry:
         def __init__(self, coordinator: _StubCoordinator) -> None:
             self.runtime_data = coordinator

@@ -241,6 +241,19 @@ def test_blank_device_name_populates_buttons() -> None:
             assert resolved is not None
             return resolved
 
+        def get_subentry_metadata(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> Any:
+            if key is not None:
+                resolved = key
+            elif feature in {"button", "device_tracker", "sensor"}:
+                resolved = "core_tracking"
+            elif feature == "binary_sensor":
+                resolved = "service"
+            else:
+                resolved = "core_tracking"
+            return SimpleNamespace(key=resolved)
+
         def get_subentry_snapshot(
             self, key: str | None = None, *, feature: str | None = None
         ) -> list[dict[str, Any]]:

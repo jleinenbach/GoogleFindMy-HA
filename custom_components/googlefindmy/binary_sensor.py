@@ -83,20 +83,24 @@ async def async_setup_entry(
     Registers both diagnostic sensors under the per-entry service device.
     """
     coordinator = resolve_coordinator(entry)
+    service_meta = coordinator.get_subentry_metadata(feature="binary_sensor")
+    service_subentry_key = (
+        service_meta.key if service_meta is not None else SERVICE_SUBENTRY_KEY
+    )
     service_subentry_identifier = coordinator.stable_subentry_identifier(
-        key=SERVICE_SUBENTRY_KEY
+        key=service_subentry_key
     )
     entities: list[BinarySensorEntity] = [
         GoogleFindMyPollingSensor(
             coordinator,
             entry,
-            subentry_key=SERVICE_SUBENTRY_KEY,
+            subentry_key=service_subentry_key,
             subentry_identifier=service_subentry_identifier,
         ),
         GoogleFindMyAuthStatusSensor(
             coordinator,
             entry,
-            subentry_key=SERVICE_SUBENTRY_KEY,
+            subentry_key=service_subentry_key,
             subentry_identifier=service_subentry_identifier,
         ),
     ]

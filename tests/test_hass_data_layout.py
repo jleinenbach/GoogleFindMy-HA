@@ -236,6 +236,19 @@ class _StubCoordinator:
     ) -> str:
         return key or self._subentry_key
 
+    def get_subentry_metadata(
+        self, *, key: str | None = None, feature: str | None = None
+    ) -> Any:
+        if key is not None:
+            resolved = key
+        elif feature in {"button", "device_tracker", "sensor"}:
+            resolved = self._subentry_key
+        elif feature == "binary_sensor":
+            resolved = "service"
+        else:
+            resolved = self._subentry_key
+        return SimpleNamespace(key=resolved)
+
     def get_subentry_snapshot(
         self, key: str | None = None, *, feature: str | None = None
     ) -> list[dict[str, Any]]:

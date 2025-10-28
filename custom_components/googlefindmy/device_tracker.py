@@ -74,8 +74,12 @@ async def async_setup_entry(
     """
     coordinator = resolve_coordinator(config_entry)
 
+    tracker_meta = coordinator.get_subentry_metadata(feature="device_tracker")
+    tracker_subentry_key = (
+        tracker_meta.key if tracker_meta is not None else TRACKER_SUBENTRY_KEY
+    )
     tracker_subentry_identifier = coordinator.stable_subentry_identifier(
-        key=TRACKER_SUBENTRY_KEY
+        key=tracker_subentry_key
     )
     entities: list[GoogleFindMyDeviceTracker] = []
     known_ids: set[str] = set()
@@ -84,7 +88,7 @@ async def async_setup_entry(
     # Pointer for maintainers: coordinator.py documents the "Subentry awareness"
     # section (see GoogleFindMyCoordinator._refresh_subentry_index /
     # _store_subentry_snapshots) that drives this scanner's snapshot source.
-    initial_snapshot = coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY)
+    initial_snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
     for device in initial_snapshot:
         dev_id = device.get("id")
         name = device.get("name")
@@ -99,7 +103,7 @@ async def async_setup_entry(
             GoogleFindMyDeviceTracker(
                 coordinator,
                 device,
-                subentry_key=TRACKER_SUBENTRY_KEY,
+                subentry_key=tracker_subentry_key,
                 subentry_identifier=tracker_subentry_identifier,
             )
         )
@@ -110,7 +114,7 @@ async def async_setup_entry(
     # Dynamically add new trackers when the coordinator learns about more devices
     @callback
     def _scan_available_trackers_from_coordinator() -> None:
-        snapshot = coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY)
+        snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
         if not snapshot:
             return
 
@@ -127,7 +131,7 @@ async def async_setup_entry(
                 GoogleFindMyDeviceTracker(
                     coordinator,
                     device,
-                    subentry_key=TRACKER_SUBENTRY_KEY,
+                    subentry_key=tracker_subentry_key,
                     subentry_identifier=tracker_subentry_identifier,
                 )
             )

@@ -119,11 +119,19 @@ async def async_setup_entry(
     """
     coordinator = resolve_coordinator(entry)
 
+    service_meta = coordinator.get_subentry_metadata(feature="binary_sensor")
+    service_subentry_key = (
+        service_meta.key if service_meta is not None else SERVICE_SUBENTRY_KEY
+    )
     service_subentry_identifier = coordinator.stable_subentry_identifier(
-        key=SERVICE_SUBENTRY_KEY
+        key=service_subentry_key
+    )
+    tracker_meta = coordinator.get_subentry_metadata(feature="sensor")
+    tracker_subentry_key = (
+        tracker_meta.key if tracker_meta is not None else TRACKER_SUBENTRY_KEY
     )
     tracker_subentry_identifier = coordinator.stable_subentry_identifier(
-        key=TRACKER_SUBENTRY_KEY
+        key=tracker_subentry_key
     )
     entities: list[SensorEntity] = []
     known_ids: set[str] = set()
@@ -145,7 +153,7 @@ async def async_setup_entry(
                         coordinator,
                         stat_key,
                         desc,
-                        subentry_key=SERVICE_SUBENTRY_KEY,
+                        subentry_key=service_subentry_key,
                         subentry_identifier=service_subentry_identifier,
                     )
                 )
@@ -158,7 +166,7 @@ async def async_setup_entry(
             )
 
     # Per-device last_seen sensors from current snapshot
-    snapshot = coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY)
+    snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
     for device in snapshot:
         dev_id = device.get("id")
         dev_name = device.get("name")
@@ -172,7 +180,7 @@ async def async_setup_entry(
             GoogleFindMyLastSeenSensor(
                 coordinator,
                 device,
-                subentry_key=TRACKER_SUBENTRY_KEY,
+                subentry_key=tracker_subentry_key,
                 subentry_identifier=tracker_subentry_identifier,
             )
         )
@@ -186,7 +194,7 @@ async def async_setup_entry(
     def _add_new_sensors_on_update() -> None:
         try:
             new_entities: list[SensorEntity] = []
-            for device in coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY):
+            for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
                 dev_id = device.get("id")
                 dev_name = device.get("name")
                 if not dev_id or not dev_name or dev_id in known_ids:
@@ -195,7 +203,7 @@ async def async_setup_entry(
                     GoogleFindMyLastSeenSensor(
                         coordinator,
                         device,
-                        subentry_key=TRACKER_SUBENTRY_KEY,
+                        subentry_key=tracker_subentry_key,
                         subentry_identifier=tracker_subentry_identifier,
                     )
                 )
