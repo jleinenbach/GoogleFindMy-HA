@@ -10,7 +10,7 @@ import sys
 from contextlib import suppress
 from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
-from typing import Awaitable, TypeVar
+from typing import Any, Awaitable, Coroutine, TypeVar, cast
 
 import pytest
 
@@ -19,6 +19,7 @@ from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
     FcmReceiverHA,
     _call_in_executor,
 )
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 _T = TypeVar("_T")
 
@@ -44,12 +45,18 @@ def test_async_acquire_discards_invalid_cached_receiver(
     stub = _StubReceiver()
     hass.data[DOMAIN]["fcm_receiver"] = stub
 
+    async def _async_get_integration(*_args: object, **_kwargs: object) -> None:
+        return None
+
     loader_module = ModuleType("homeassistant.loader")
-    loader_module.async_get_integration = lambda *_args, **_kwargs: None
+    setattr(loader_module, "async_get_integration", _async_get_integration)
     monkeypatch.setitem(sys.modules, "homeassistant.loader", loader_module)
 
     module = importlib.import_module("custom_components.googlefindmy")
-    async_acquire_shared_fcm = module._async_acquire_shared_fcm
+    async_acquire_shared_fcm = cast(
+        Callable[[object], Awaitable[FcmReceiverHA]],
+        getattr(module, "_async_acquire_shared_fcm"),
+    )
 
     recorded_getters: dict[str, Callable[[], object]] = {}
 
@@ -156,7 +163,9 @@ def test_multi_entry_buffers_prevent_global_cache_access(
 
     start_calls: list[str] = []
 
-    async def fake_start(self, entry_id: str, _cache: DummyCache | None) -> None:
+    async def fake_start(
+        self: FcmReceiverHA, entry_id: str, _cache: DummyCache | None
+    ) -> None:
         start_calls.append(entry_id)
 
     monkeypatch.setattr(FcmReceiverHA, "_start_supervisor_for_entry", fake_start)
@@ -208,13 +217,15 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
     try:
         receiver = FcmReceiverHA()
 
-        async def fake_start(_self, _entry_id: str, _cache: object | None) -> None:
+        async def fake_start(
+            _self: FcmReceiverHA, _entry_id: str, _cache: object | None
+        ) -> None:
             return None
 
         monkeypatch.setattr(FcmReceiverHA, "_start_supervisor_for_entry", fake_start)
 
         def create_task(
-            coro: Awaitable[_T], *, name: str | None = None
+            coro: Coroutine[Any, Any, _T], *, name: str | None = None
         ) -> asyncio.Task[_T]:
             return loop.create_task(coro, name=name)
 
@@ -357,7 +368,8 @@ def test_receiver_reuses_hass_managed_session(
 
     async def _exercise() -> DummyPushClient | None:
         await receiver.async_initialize()
-        return await receiver._ensure_client_for_entry("entry-id", None)
+        client = await receiver._ensure_client_for_entry("entry-id", None)
+        return cast(DummyPushClient | None, client)
 
     created = asyncio.run(_exercise())
 
@@ -399,8 +411,8 @@ def test_register_coordinator_exposes_cache_and_tracks_push_updates(
             self.google_home_filter = None
 
         @property
-        def cache(self) -> DummyCache:
-            return self._cache
+        def cache(self) -> TokenCache:
+            return cast(TokenCache, self._cache)
 
         def update_device_cache(
             self, device_id: str, location_data: dict[str, object]
@@ -417,10 +429,10 @@ def test_register_coordinator_exposes_cache_and_tracks_push_updates(
         def is_ignored(self, _device_id: str) -> bool:
             return False
 
-    started: list[tuple[str, DummyCache | None]] = []
+    started: list[tuple[str, TokenCache | None]] = []
 
     async def fake_start(
-        self, entry_id: str, cache: DummyCache | None
+        self: FcmReceiverHA, entry_id: str, cache: TokenCache | None
     ) -> None:  # pragma: no cover - simple proxy
         started.append((entry_id, cache))
 
