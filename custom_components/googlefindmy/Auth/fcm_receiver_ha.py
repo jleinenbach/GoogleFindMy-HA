@@ -63,7 +63,7 @@ import math
 import random
 import time
 from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, cast
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -74,12 +74,15 @@ if TYPE_CHECKING:
     from custom_components.googlefindmy.google_home_filter import (
         GoogleHomeFilter as GoogleHomeFilterProtocol,
     )
+    from custom_components.googlefindmy.Auth.firebase_messaging._typing import (
+        CredentialsUpdatedCallable,
+    )
 else:
     GoogleHomeFilterProtocol = Any
 
 # Integration-level tunables (safe fallbacks if missing)
 try:
-    from custom_components.googlefindmy.const import (  # type: ignore
+    from custom_components.googlefindmy.const import (
         FCM_CLIENT_HEARTBEAT_INTERVAL_S,
         FCM_SERVER_HEARTBEAT_INTERVAL_S,
         FCM_IDLE_RESET_AFTER_S,
@@ -89,7 +92,7 @@ try:
         DOMAIN,
         OPT_IGNORED_DEVICES,  # for ignore fallback via options
     )
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     FCM_CLIENT_HEARTBEAT_INTERVAL_S = 20
     FCM_SERVER_HEARTBEAT_INTERVAL_S = 10
     FCM_IDLE_RESET_AFTER_S = 90.0
@@ -100,18 +103,29 @@ except Exception:  # pragma: no cover
     OPT_IGNORED_DEVICES = "ignored_devices"
 
 # Optional import of worker run-state enum (for robust state checks)
-try:
-    from custom_components.googlefindmy.Auth.firebase_messaging import (  # type: ignore
-        FcmPushClientRunState,
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.Auth.firebase_messaging import (
         FcmPushClient,
-        FcmRegisterConfig,
         FcmPushClientConfig,
+        FcmPushClientRunState,
+        FcmRegisterConfig,
     )
-except Exception:  # pragma: no cover
-    FcmPushClientRunState = None  # type: ignore[misc,assignment]
-    FcmPushClient = object  # type: ignore
-    FcmRegisterConfig = object  # type: ignore
-    FcmPushClientConfig = object  # type: ignore
+    HAVE_FCM_PUSH_CLIENT = True
+else:
+    try:
+        from custom_components.googlefindmy.Auth.firebase_messaging import (
+            FcmPushClientRunState,
+            FcmPushClient,
+            FcmRegisterConfig,
+            FcmPushClientConfig,
+        )
+        HAVE_FCM_PUSH_CLIENT = True
+    except ImportError:  # pragma: no cover
+        HAVE_FCM_PUSH_CLIENT = False
+        FcmPushClientRunState = None
+        FcmPushClient = cast("type[Any]", object)
+        FcmRegisterConfig = cast("type[Any]", object)
+        FcmPushClientConfig = cast("type[Any]", object)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,8 +138,9 @@ _T = TypeVar("_T")
 async def _call_in_executor(func: Callable[..., _T], /, *args: Any) -> _T:
     """Run ``func`` in a background thread with wide Python compatibility."""
 
-    to_thread = getattr(asyncio, "to_thread", None)
-    if to_thread is not None:
+    to_thread_obj = getattr(asyncio, "to_thread", None)
+    if to_thread_obj is not None:
+        to_thread = cast("Callable[..., Awaitable[_T]]", to_thread_obj)
         return await to_thread(func, *args)
 
     try:
@@ -213,7 +228,7 @@ class FcmReceiverHA:
         self.message_sender_id = "289722593072"  # numeric Sender ID (project number)
 
         # Config used by all clients
-        self._client_cfg = None  # initialized lazily
+        self._client_cfg: FcmPushClientConfig | None = None  # initialized lazily
 
         # Guard against concurrent start/stop/register races
         self._lock = asyncio.Lock()
@@ -288,7 +303,7 @@ class FcmReceiverHA:
     async def async_initialize(self) -> bool:
         """Initialize receiver (idempotent). Defers client creation to coordinator registration."""
         # Prepare shared client config once
-        if self._client_cfg is None and FcmPushClientConfig is not object:
+        if self._client_cfg is None and HAVE_FCM_PUSH_CLIENT:
             self._client_cfg = FcmPushClientConfig(
                 client_heartbeat_interval=int(FCM_CLIENT_HEARTBEAT_INTERVAL_S),
                 server_heartbeat_interval=int(FCM_SERVER_HEARTBEAT_INTERVAL_S),
@@ -302,7 +317,7 @@ class FcmReceiverHA:
         return True
 
     async def _ensure_client_for_entry(
-        self, entry_id: str, cache
+        self, entry_id: str, cache: TokenCache | None
     ) -> FcmPushClient | None:
         """Create or return the FCM client for the given entry (idempotent)."""
         if cache is not None:
@@ -332,7 +347,7 @@ class FcmReceiverHA:
                 )
 
             # Build register config (shared across entries)
-            if FcmRegisterConfig is object:
+            if not HAVE_FCM_PUSH_CLIENT:
                 _LOGGER.error("FCM client support not available; cannot create client")
                 return None
 
@@ -345,21 +360,25 @@ class FcmReceiverHA:
             )
 
             # Per-entry credentials update callback
-            def _on_creds_updated_entry(updated: Any, eid: str = entry_id) -> None:
-                self._on_credentials_updated_for_entry(eid, updated)
+            def _on_creds_updated_entry(updated: MutableJSONMapping) -> None:
+                self._on_credentials_updated_for_entry(entry_id, updated)
 
             http_client_session = None
             if self._hass is not None:
                 http_client_session = async_get_clientsession(self._hass)
 
             try:
+                credential_callback = cast(
+                    "CredentialsUpdatedCallable[MutableJSONMapping]",
+                    _on_creds_updated_entry,
+                )
                 pc = FcmPushClient(
-                    lambda obj, n, dm, eid=entry_id: self._on_notification(
-                        eid, obj, n, dm
+                    lambda payload, persistent_id, context, eid=entry_id: self._on_notification(
+                        eid, payload, persistent_id, context
                     ),
                     fcm_config,
                     creds,
-                    _on_creds_updated_entry,
+                    credential_callback,
                     http_client_session=http_client_session,
                     config=self._client_cfg,
                 )
@@ -373,7 +392,9 @@ class FcmReceiverHA:
             self.creds[entry_id] = creds if isinstance(creds, dict) else None
             return pc
 
-    async def _start_supervisor_for_entry(self, entry_id: str, cache) -> None:
+    async def _start_supervisor_for_entry(
+        self, entry_id: str, cache: TokenCache | None
+    ) -> None:
         """Start the supervisor loop for the given entry if not running."""
         if entry_id in self.supervisors and not self.supervisors[entry_id].done():
             return
@@ -635,31 +656,37 @@ class FcmReceiverHA:
     # -------------------- Incoming notifications --------------------
 
     def _on_notification(
-        self, entry_id: str, obj: dict[str, Any], notification, data_message
+        self,
+        entry_id: str,
+        payload: Mapping[str, Any],
+        persistent_id: str | None,
+        context: Any | None,
     ) -> None:
         """Handle incoming FCM notification (sync callback from per-entry client).
 
         Args:
             entry_id: The entry_id whose client delivered this push.
-            obj: Envelope object from the FCM client (expected to hold the data dict).
-            notification: Unused; provided by the client.
-            data_message: Unused; provided by the client.
+            payload: Envelope mapping from the FCM client (expected to hold the data dict).
+            persistent_id: Unused; provided by the client.
+            context: Optional context provided by the client.
         """
+        _ = persistent_id  # maintained for signature compatibility
+        _ = context
         try:
-            payload = (obj.get("data") or {}).get(
+            payload_dict = (payload.get("data") or {}).get(
                 "com.google.android.apps.adm.FCM_PAYLOAD"
             )
-            if not payload:
+            if not payload_dict:
                 _LOGGER.debug("FCM notification without FMD payload")
                 return
 
             # Base64 decode with padding
-            pad = len(payload) % 4
+            pad = len(payload_dict) % 4
             if pad:
-                payload += "=" * (4 - pad)
+                payload_dict += "=" * (4 - pad)
 
             try:
-                decoded = base64.b64decode(payload)
+                decoded = base64.b64decode(payload_dict)
             except (binascii.Error, ValueError) as err:
                 _LOGGER.error("FCM Base64 decode failed: %s", err)
                 return
@@ -671,7 +698,7 @@ class FcmReceiverHA:
                 _LOGGER.debug("FCM response has no canonical id")
                 return
 
-            token = self._extract_push_token(obj)
+            token = self._extract_push_token(dict(payload))
 
             # Route preference: token → entry map; fallback to client entry; final fallback: owner index; else broadcast.
             target_entries: set[str] | None = None
@@ -887,7 +914,7 @@ class FcmReceiverHA:
         try:
             from custom_components.googlefindmy.ProtoDecoders.decoder import (
                 parse_device_update_protobuf,
-            )  # type: ignore
+            )
 
             device_update = parse_device_update_protobuf(hex_response)
             if device_update.HasField("deviceMetadata"):
@@ -1073,8 +1100,8 @@ class FcmReceiverHA:
         try:
             from custom_components.googlefindmy.ProtoDecoders.decoder import (
                 parse_device_update_protobuf,
-            )  # type: ignore
-            from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (  # type: ignore
+            )
+            from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
                 decrypt_location_response_locations,
             )
 
@@ -1087,8 +1114,11 @@ class FcmReceiverHA:
                 )
                 return {}
 
-            locations: list[Mapping[str, Any]] = (
-                decrypt_location_response_locations(device_update, cache=cache) or []
+            raw_locations = decrypt_location_response_locations(
+                device_update, cache=cache
+            )
+            locations: list[JSONDict] = (
+                raw_locations if raw_locations is not None else []
             )
             if not locations:
                 return {}
@@ -1098,6 +1128,8 @@ class FcmReceiverHA:
 
             for record in locations:
                 raw_last_seen = record.get("last_seen")
+                if raw_last_seen is None:
+                    continue
                 try:
                     last_seen = float(raw_last_seen)
                 except (TypeError, ValueError):
@@ -1268,7 +1300,7 @@ class FcmReceiverHA:
             creds = self.creds.get(entry_id)
             if isinstance(creds, dict):
                 tok = (creds.get("fcm") or {}).get("registration", {}).get("token")
-                if tok:
+                if isinstance(tok, str) and tok:
                     return tok
             # Also try the current client's live creds if present
             pc = self.pcs.get(entry_id)
@@ -1277,7 +1309,7 @@ class FcmReceiverHA:
                     c = getattr(pc, "credentials", None)
                     if isinstance(c, dict):
                         tok = (c.get("fcm") or {}).get("registration", {}).get("token")
-                        if tok:
+                        if isinstance(tok, str) and tok:
                             return tok
                 except Exception:
                     pass
@@ -1285,7 +1317,7 @@ class FcmReceiverHA:
         for c in self.creds.values():
             if isinstance(c, dict):
                 tok = (c.get("fcm") or {}).get("registration", {}).get("token")
-                if tok:
+                if isinstance(tok, str) and tok:
                     return tok
         return None
 
@@ -1307,11 +1339,11 @@ class FcmReceiverHA:
             return None
 
         entry_id: str | None = None
-        cache = None
+        cache: TokenCache | None = None
         fallback_entry: str | None = None
-        fallback_cache = None
+        fallback_cache: TokenCache | None = None
         display_entry: str | None = None
-        display_cache: Any = None
+        display_cache: TokenCache | None = None
 
         for coordinator in self.coordinators.copy():
             entry = getattr(coordinator, "config_entry", None)
