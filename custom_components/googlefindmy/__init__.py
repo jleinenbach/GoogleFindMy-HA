@@ -111,8 +111,13 @@ from .const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     CACHE_KEY_CONTRIBUTOR_MODE,
     CACHE_KEY_LAST_MODE_SWITCH,
+    SERVICE_FEATURE_PLATFORMS,
+    SERVICE_SUBENTRY_KEY,
     LEGACY_SERVICE_IDENTIFIER,
+    SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
+    TRACKER_FEATURE_PLATFORMS,
+    TRACKER_SUBENTRY_KEY,
     coerce_ignored_mapping,
     service_device_identifier,
 )
@@ -2699,28 +2704,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     else:
         _LOGGER.debug("GoogleHomeFilter not available; continuing without it")
 
-    features: list[str] = []
-    for platform in PLATFORMS:
-        platform_value = getattr(platform, "value", None)
-        if isinstance(platform_value, str):
-            features.append(platform_value)
-        else:
-            features.append(_feature_name_from_platform(platform))
-    features.sort()
+    tracker_features = sorted(TRACKER_FEATURE_PLATFORMS)
+    service_features = sorted(SERVICE_FEATURE_PLATFORMS)
+    fcm_push_enabled = runtime_data.fcm_receiver is not None
+    has_google_home_filter = runtime_data.google_home_filter is not None
+    entry_title = entry.title
     await subentry_manager.async_sync(
         [
             ConfigEntrySubentryDefinition(
-                key="core_tracking",
+                key=TRACKER_SUBENTRY_KEY,
                 title="Google Find My devices",
                 data={
-                    "features": features,
-                    "fcm_push_enabled": runtime_data.fcm_receiver is not None,
-                    "has_google_home_filter": runtime_data.google_home_filter
-                    is not None,
-                    "entry_title": entry.title,
+                    "features": tracker_features,
+                    "fcm_push_enabled": fcm_push_enabled,
+                    "has_google_home_filter": has_google_home_filter,
+                    "entry_title": entry_title,
                 },
-                unique_id=f"{entry.entry_id}-core_tracking",
-            )
+                subentry_type=SUBENTRY_TYPE_TRACKER,
+                unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+            ),
+            ConfigEntrySubentryDefinition(
+                key=SERVICE_SUBENTRY_KEY,
+                title=entry_title,
+                data={
+                    "features": service_features,
+                    "fcm_push_enabled": fcm_push_enabled,
+                    "has_google_home_filter": has_google_home_filter,
+                    "entry_title": entry_title,
+                },
+                subentry_type=SUBENTRY_TYPE_SERVICE,
+                unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+            ),
         ]
     )
 

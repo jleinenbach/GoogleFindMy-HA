@@ -50,68 +50,6 @@ class _StubTokenCache:
         return None
 
 
-class _StubCoordinator:
-    """Coordinator stub recording locate/play invocations per entry."""
-
-    def __init__(self, hass: Any, *, cache: _StubTokenCache, **_: Any) -> None:
-        self.hass = hass
-        self.cache = cache
-        canonical = f"{cache.entry_id}-device"
-        self.data = [{"id": canonical, "name": f"Device {cache.entry_id}"}]
-        self.performance_metrics: dict[str, Any] = {}
-        self.last_update_success = True
-        self.config_entry: Any | None = None
-        self._display = {canonical: f"Device {cache.entry_id}"}
-        self.locate_calls: list[str] = []
-        self.play_calls: list[tuple[str, str]] = []
-        self.refresh_calls: int = 0
-
-    async def async_setup(self) -> None:
-        return None
-
-    def async_add_listener(self, _listener: Callable[[], None]) -> Callable[[], None]:
-        return lambda: None
-
-    def get_device_display_name(self, canonical_id: str) -> str | None:
-        return self._display.get(canonical_id)
-
-    def can_request_location(self, _device_id: str) -> bool:
-        return True
-
-    def can_play_sound(self, _device_id: str) -> bool:
-        return True
-
-    def async_set_updated_data(
-        self, _data: Any
-    ) -> None:  # pragma: no cover - no state change
-        return None
-
-    def push_updated(
-        self, _ids: list[str]
-    ) -> None:  # pragma: no cover - no state change
-        return None
-
-    async def async_locate_device(self, canonical_id: str) -> dict[str, Any]:
-        self.locate_calls.append(canonical_id)
-        return {"canonical_id": canonical_id, "entry_id": self.cache.entry_id}
-
-    async def async_play_sound(self, canonical_id: str) -> bool:
-        token = f"fcm-token-{self.cache.entry_id}"
-        self.play_calls.append((canonical_id, token))
-        return True
-
-    async def async_stop_sound(self, _canonical_id: str) -> bool:
-        return True
-
-    def force_poll_due(self) -> None:
-        self.refresh_calls += 1
-
-    async def async_refresh(self) -> None:
-        self.refresh_calls += 1
-
-    def attach_subentry_manager(self, manager: Any) -> None:
-        self.subentry_manager = manager
-
 
 class _StubFcm:
     """Shared FCM receiver stub tracking coordinator registrations."""
@@ -120,13 +58,13 @@ class _StubFcm:
         self.registered: list[Any] = []
         self.tokens: dict[str, str] = {}
 
-    def register_coordinator(self, coordinator: _StubCoordinator) -> None:
+    def register_coordinator(self, coordinator: Any) -> None:
         assert coordinator.cache is not None
         token = f"fcm-token-{coordinator.cache.entry_id}"
         self.tokens[coordinator.cache.entry_id] = token
         self.registered.append(coordinator)
 
-    def unregister_coordinator(self, coordinator: _StubCoordinator) -> None:
+    def unregister_coordinator(self, coordinator: Any) -> None:
         self.registered = [c for c in self.registered if c is not coordinator]
 
     def request_stop(self) -> None:  # pragma: no cover - no state change
@@ -275,7 +213,10 @@ class _StubHass:
         return func(*args)
 
 
-def test_multi_account_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_multi_account_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
     """Two entries can coexist with isolated caches, services, and FCM tokens."""
 
     loop = asyncio.new_event_loop()
@@ -391,12 +332,67 @@ def test_multi_account_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
             ),
         )
 
-        monkeypatch.setattr(
-            coordinator_module, "GoogleFindMyCoordinator", _StubCoordinator
+        def _init_coordinator(
+            coordinator: Any,
+            *,
+            cache: _StubTokenCache,
+            hass: Any,
+            **_: Any,
+        ) -> None:
+            canonical = f"{cache.entry_id}-device"
+            coordinator.data = [{"id": canonical, "name": f"Device {cache.entry_id}"}]
+            coordinator._display = {canonical: f"Device {cache.entry_id}"}
+            coordinator.locate_calls = []
+            coordinator.play_calls = []
+            coordinator.refresh_calls = 0
+
+        def _get_device_display_name(self: Any, canonical_id: str) -> str | None:
+            return self._display.get(canonical_id)
+
+        def _can_request_location(self: Any, _device_id: str) -> bool:
+            return True
+
+        def _can_play_sound(self: Any, _device_id: str) -> bool:
+            return True
+
+        async def _async_locate_device(self: Any, canonical_id: str) -> dict[str, Any]:
+            self.locate_calls.append(canonical_id)
+            return {"canonical_id": canonical_id, "entry_id": self.cache.entry_id}
+
+        async def _async_play_sound(self: Any, canonical_id: str) -> bool:
+            token = f"fcm-token-{self.cache.entry_id}"
+            self.play_calls.append((canonical_id, token))
+            return True
+
+        async def _async_stop_sound(self: Any, _canonical_id: str) -> bool:
+            return True
+
+        def _force_poll_due(self: Any) -> None:
+            self.refresh_calls += 1
+
+        async def _async_refresh(self: Any) -> None:
+            self.refresh_calls += 1
+
+        coordinator_cls = stub_coordinator_factory(
+            init_hook=_init_coordinator,
+            methods={
+                "get_device_display_name": _get_device_display_name,
+                "can_request_location": _can_request_location,
+                "can_play_sound": _can_play_sound,
+                "async_locate_device": _async_locate_device,
+                "async_play_sound": _async_play_sound,
+                "async_stop_sound": _async_stop_sound,
+                "force_poll_due": _force_poll_due,
+                "async_refresh": _async_refresh,
+            },
         )
-        monkeypatch.setattr(integration, "GoogleFindMyCoordinator", _StubCoordinator)
+
         monkeypatch.setattr(
-            map_view_module, "GoogleFindMyCoordinator", _StubCoordinator, raising=False
+            coordinator_module, "GoogleFindMyCoordinator", coordinator_cls
+        )
+        monkeypatch.setattr(integration, "GoogleFindMyCoordinator", coordinator_cls)
+        monkeypatch.setattr(
+            map_view_module, "GoogleFindMyCoordinator", coordinator_cls, raising=False
         )
 
         class _DummyView:
