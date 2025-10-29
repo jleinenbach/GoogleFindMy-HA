@@ -731,8 +731,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             ConfigEntryState.SETUP_ERROR,
             ConfigEntryState.SETUP_RETRY,
             ConfigEntryState.SETUP_IN_PROGRESS,
-            ConfigEntryState.FAILED_UNLOAD,
         }
+
+        failed_unload_state = getattr(ConfigEntryState, "FAILED_UNLOAD", None)
+        if failed_unload_state is not None:
+            allowed_reload_states.add(failed_unload_state)
         migration_error_entries: list[Any] = []
         reloadable_entries: list[Any] = []
         skipped_states: list[tuple[Any, str | ConfigEntryState | None]] = []
