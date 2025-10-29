@@ -1344,6 +1344,13 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
 
         return await self.async_step_discovery_update_info(discovery_info)
 
+    async def async_step_hub(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle Add Hub flows by delegating to the standard user step."""
+
+        return await self.async_step_user(user_input)
+
     # ------------------ Step: choose authentication path ------------------
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
