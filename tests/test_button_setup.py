@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib
 import sys
+import time
+from copy import deepcopy
+from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from typing import Any
 
@@ -184,14 +188,34 @@ def _ensure_button_dependencies() -> None:
 def _load_can_request_location_impl() -> Any:
     """Return the coordinator's can_request_location method for isolated testing."""
 
-    button_module = importlib.import_module("custom_components.googlefindmy.button")
-    coordinator_cls = getattr(button_module, "GoogleFindMyCoordinator", None)
-    if coordinator_cls is None:
-        raise AssertionError("Coordinator class not found in button module")
-    can_request = getattr(coordinator_cls, "can_request_location", None)
-    if not callable(can_request):
-        raise AssertionError("can_request_location callable missing on coordinator")
-    return can_request
+    coordinator_path = (
+        Path(__file__)
+        .resolve()
+        .parent.parent
+        / "custom_components"
+        / "googlefindmy"
+        / "coordinator.py"
+    )
+    coordinator_source = coordinator_path.read_text(encoding="utf-8")
+    module_ast = ast.parse(coordinator_source, filename=str(coordinator_path))
+
+    for node in module_ast.body:
+        if isinstance(node, ast.ClassDef) and node.name == "GoogleFindMyCoordinator":
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == "can_request_location":
+                    func_module = ast.Module(
+                        body=[deepcopy(item)],
+                        type_ignores=[],
+                    )
+                    ast.fix_missing_locations(func_module)
+                    namespace: dict[str, Any] = {}
+                    exec(
+                        compile(func_module, str(coordinator_path), "exec"),
+                        {"time": time},
+                        namespace,
+                    )
+                    return namespace[item.name]
+    raise AssertionError("can_request_location definition not found in coordinator")
 
 
 def test_blank_device_name_populates_buttons() -> None:
