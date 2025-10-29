@@ -108,6 +108,10 @@ def _stub_homeassistant() -> None:
     class ConfigEntryState:  # minimal enum-like placeholder
         LOADED = "loaded"
         NOT_LOADED = "not_loaded"
+        SETUP_ERROR = "setup_error"
+        SETUP_RETRY = "setup_retry"
+        SETUP_IN_PROGRESS = "setup_in_progress"
+        MIGRATION_ERROR = "migration_error"
 
     class ConfigEntryAuthFailed(Exception):
         pass

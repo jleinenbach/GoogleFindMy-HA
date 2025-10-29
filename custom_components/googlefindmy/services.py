@@ -20,6 +20,7 @@ import time
 from typing import Any
 from collections.abc import Iterable
 
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError, HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -547,11 +548,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             ),
         )
 
+        soft_migrate = ctx.get("soft_migrate_entry")
+        unique_id_migrate = ctx.get("migrate_unique_ids")
+        relink_button_devices = ctx.get("relink_button_devices")
+
         if mode == MODE_MIGRATE:
             # C-2: real soft-migrate path using __init__.py helpers via ctx
-            soft_migrate = ctx.get("soft_migrate_entry")
-            unique_id_migrate = ctx.get("migrate_unique_ids")
-            relink_button_devices = ctx.get("relink_button_devices")
 
             if not callable(soft_migrate):
                 _LOGGER.warning(
@@ -723,7 +725,77 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 e for e in entries if e.entry_id in affected_entry_ids
             ] or list(entries)
 
+        allowed_reload_states = {
+            ConfigEntryState.LOADED,
+            ConfigEntryState.NOT_LOADED,
+            ConfigEntryState.SETUP_ERROR,
+            ConfigEntryState.SETUP_RETRY,
+            ConfigEntryState.SETUP_IN_PROGRESS,
+        }
+        migration_error_entries: list[Any] = []
+        reloadable_entries: list[Any] = []
+        skipped_states: list[tuple[Any, str | ConfigEntryState | None]] = []
+
         for entry_ in to_reload:
+            state = getattr(entry_, "state", None)
+            if state == ConfigEntryState.MIGRATION_ERROR:
+                migration_error_entries.append(entry_)
+                continue
+            if state is None or state in allowed_reload_states:
+                reloadable_entries.append(entry_)
+                continue
+            skipped_states.append((entry_, state))
+
+        if migration_error_entries:
+            for entry_ in migration_error_entries:
+                entry_id = getattr(entry_, "entry_id", "<unknown>")
+                _LOGGER.warning(
+                    "Config entry %s is in migration error state; attempting soft migration instead of reload.",
+                    entry_id,
+                )
+                if callable(soft_migrate):
+                    try:
+                        await soft_migrate(hass, entry_)
+                    except Exception as err:
+                        _LOGGER.error(
+                            "Soft migration helper failed for entry %s: %s",
+                            entry_id,
+                            err,
+                        )
+                else:
+                    _LOGGER.warning(
+                        "Soft migration helper unavailable; entry %s remains in migration error state until migration is resolved manually.",
+                        entry_id,
+                    )
+                if callable(unique_id_migrate):
+                    try:
+                        await unique_id_migrate(hass, entry_)
+                    except Exception as err:
+                        _LOGGER.error(
+                            "Unique ID migration helper failed for entry %s: %s",
+                            entry_id,
+                            err,
+                        )
+                elif unique_id_migrate is None:
+                    _LOGGER.info(
+                        "Unique ID migration helper not provided; entry %s skipped.",
+                        entry_id,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Unique ID migration helper for entry %s is not callable; skipped.",
+                        entry_id,
+                    )
+
+        if skipped_states:
+            for entry_, state in skipped_states:
+                _LOGGER.info(
+                    "Skipping reload for entry %s in unsupported state %s.",
+                    getattr(entry_, "entry_id", "<unknown>"),
+                    state,
+                )
+
+        for entry_ in reloadable_entries:
             try:
                 await hass.config_entries.async_reload(entry_.entry_id)
             except Exception as err:
@@ -733,7 +805,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             "googlefindmy.rebuild_registry: finished (safe mode): removed %d entit(y/ies), %d device(s), entries reloaded=%d",
             removed_entities,
             removed_devices,
-            len(to_reload),
+            len(reloadable_entries),
         )
 
     # ---- Actual service registrations (global; visible even without entries) ----
