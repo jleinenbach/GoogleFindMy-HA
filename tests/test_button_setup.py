@@ -3,17 +3,11 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import importlib
 import sys
-import textwrap
-import time
-from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from typing import Any
-
-from custom_components.googlefindmy.const import DEFAULT_MIN_POLL_INTERVAL
 
 
 def _ensure_button_dependencies() -> None:
@@ -188,33 +182,16 @@ def _ensure_button_dependencies() -> None:
 
 
 def _load_can_request_location_impl() -> Any:
-    """Compile the coordinator's can_request_location method for isolated testing."""
+    """Return the coordinator's can_request_location method for isolated testing."""
 
-    source = Path("custom_components/googlefindmy/coordinator.py").read_text()
-    module_ast = ast.parse(source)
-    for node in module_ast.body:
-        if isinstance(node, ast.ClassDef) and node.name == "GoogleFindMyCoordinator":
-            for item in node.body:
-                if (
-                    isinstance(item, ast.FunctionDef)
-                    and item.name == "can_request_location"
-                ):
-                    snippet = ast.get_source_segment(source, item)
-                    if snippet is None:
-                        raise AssertionError(
-                            "Unable to extract can_request_location source"
-                        )
-                    namespace: dict[str, Any] = {}
-                    exec(
-                        textwrap.dedent(snippet),
-                        {
-                            "DEFAULT_MIN_POLL_INTERVAL": DEFAULT_MIN_POLL_INTERVAL,
-                            "time": time,
-                        },
-                        namespace,
-                    )
-                    return namespace["can_request_location"]
-    raise AssertionError("can_request_location definition not found")
+    button_module = importlib.import_module("custom_components.googlefindmy.button")
+    coordinator_cls = getattr(button_module, "GoogleFindMyCoordinator", None)
+    if coordinator_cls is None:
+        raise AssertionError("Coordinator class not found in button module")
+    can_request = getattr(coordinator_cls, "can_request_location", None)
+    if not callable(can_request):
+        raise AssertionError("can_request_location callable missing on coordinator")
+    return can_request
 
 
 def test_blank_device_name_populates_buttons() -> None:
