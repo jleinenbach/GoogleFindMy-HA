@@ -237,9 +237,8 @@ def test_blank_device_name_populates_buttons() -> None:
         def stable_subentry_identifier(
             self, *, key: str | None = None, feature: str | None = None
         ) -> str:
-            resolved = key or feature
-            assert resolved is not None
-            return resolved
+            assert key is not None, "Buttons must resolve subentry identifier by key"
+            return f"{key}-identifier"
 
         def get_subentry_metadata(
             self, *, key: str | None = None, feature: str | None = None
@@ -247,11 +246,11 @@ def test_blank_device_name_populates_buttons() -> None:
             if key is not None:
                 resolved = key
             elif feature in {"button", "device_tracker", "sensor"}:
-                resolved = "core_tracking"
+                resolved = button_module.TRACKER_SUBENTRY_KEY
             elif feature == "binary_sensor":
-                resolved = "service"
+                resolved = button_module.SERVICE_SUBENTRY_KEY
             else:
-                resolved = "core_tracking"
+                resolved = button_module.TRACKER_SUBENTRY_KEY
             return SimpleNamespace(key=resolved)
 
         def get_subentry_snapshot(
@@ -292,6 +291,8 @@ def test_blank_device_name_populates_buttons() -> None:
     for entity in added[0]:
         assert entity._device["name"] == ""
         assert entity.device_label() == "device-1"
+        assert entity.subentry_key == button_module.TRACKER_SUBENTRY_KEY
+        assert f"{button_module.TRACKER_SUBENTRY_KEY}-identifier" in entity.unique_id
 
     new_device = {"id": "device-2", "name": None}
     coordinator.data.append(new_device)
@@ -302,6 +303,8 @@ def test_blank_device_name_populates_buttons() -> None:
     for entity in added[1]:
         assert entity._device["name"] is None
         assert entity.device_label() == "device-2"
+        assert entity.subentry_key == button_module.TRACKER_SUBENTRY_KEY
+        assert f"{button_module.TRACKER_SUBENTRY_KEY}-identifier" in entity.unique_id
 
 
 def test_locate_button_available_when_push_unready() -> None:
@@ -350,8 +353,9 @@ def test_locate_button_available_when_push_unready() -> None:
         coordinator,
         device,
         device.get("name"),
-        subentry_key="core_tracking",
-        subentry_identifier="core_tracking",
+        subentry_key=button_module.TRACKER_SUBENTRY_KEY,
+        subentry_identifier=f"{button_module.TRACKER_SUBENTRY_KEY}-identifier",
     )
 
     assert locate_button.available is True
+    assert locate_button.subentry_key == button_module.TRACKER_SUBENTRY_KEY

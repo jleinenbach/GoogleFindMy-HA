@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from custom_components.googlefindmy.const import INTEGRATION_VERSION
+
 
 def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
     """Manifest must advertise the required metadata for a Platinum integration."""
@@ -32,6 +34,7 @@ def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
     assert manifest["config_flow"] is True
     assert manifest["integration_type"] == "hub"
     assert manifest["iot_class"] == "cloud_polling"
+    assert manifest["version"] == INTEGRATION_VERSION
     assert "recorder" in manifest.get("after_dependencies", [])
     assert "http" in manifest.get("dependencies", [])
     assert "custom_components.googlefindmy" in manifest.get("loggers", [])

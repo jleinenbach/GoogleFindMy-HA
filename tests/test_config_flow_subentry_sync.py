@@ -28,6 +28,12 @@ from custom_components.googlefindmy.const import (
 from homeassistant.config_entries import ConfigSubentry
 
 
+def _stable_subentry_id(entry_id: str, key: str) -> str:
+    """Return a deterministic config_subentry_id for the given entry/key pair."""
+
+    return f"{entry_id}-{key}-subentry"
+
+
 class _ConfigEntriesManagerStub:
     """Stub mimicking Home Assistant's config entries manager."""
 
@@ -61,6 +67,7 @@ class _ConfigEntriesManagerStub:
             subentry_type=subentry_type,
             title=title,
             unique_id=unique_id,
+            subentry_id=_stable_subentry_id(entry.entry_id, data["group_key"]),
         )
         self._entry.subentries[subentry.subentry_id] = subentry
         self.created.append(
@@ -69,6 +76,7 @@ class _ConfigEntriesManagerStub:
                 "title": title,
                 "unique_id": unique_id,
                 "subentry_type": subentry_type,
+                "config_subentry_id": subentry.subentry_id,
                 "object": subentry,
             }
         )
@@ -94,6 +102,7 @@ class _ConfigEntriesManagerStub:
                 "data": dict(data),
                 "title": title,
                 "unique_id": unique_id,
+                "config_subentry_id": subentry.subentry_id,
                 "subentry": subentry,
             }
         )
@@ -213,6 +222,7 @@ def test_device_selection_updates_existing_feature_group() -> None:
         subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Google Find My devices",
         unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+        subentry_id=_stable_subentry_id(entry.entry_id, TRACKER_SUBENTRY_KEY),
     )
     entry.subentries[existing.subentry_id] = existing
 

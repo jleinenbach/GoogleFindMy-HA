@@ -1,5 +1,4 @@
 # tests/test_options_flow_subentries.py
-"""Tests covering subentry selection and repair flows in the options handler."""
 
 from __future__ import annotations
 
@@ -15,8 +14,15 @@ from custom_components.googlefindmy.const import (
     OPT_IGNORED_DEVICES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     SUBENTRY_TYPE_TRACKER,
+    TRACKER_SUBENTRY_KEY,
 )
 from homeassistant.config_entries import ConfigSubentry
+
+
+def _stable_subentry_id(entry_id: str, key: str) -> str:
+    """Return deterministic config_subentry identifiers for options tests."""
+
+    return f"{entry_id}-{key}-subentry"
 
 
 @dataclass
@@ -91,6 +97,7 @@ class _EntryStub:
             subentry_type=SUBENTRY_TYPE_TRACKER,
             title=title,
             unique_id=f"{self.entry_id}-{key}",
+            subentry_id=_stable_subentry_id(self.entry_id, key),
         )
         self.subentries[subentry.subentry_id] = subentry
         return subentry
@@ -117,13 +124,13 @@ def test_settings_updates_feature_flags_for_selected_subentry() -> None:
     """Settings step should persist feature flags to the chosen subentry."""
 
     entry = _EntryStub()
-    entry.add_subentry(key="core_tracking", title="Core")
+    entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
     flow = _build_flow(entry)
 
     result = asyncio.run(
         flow.async_step_settings(
             {
-                "subentry": "core_tracking",
+                "subentry": TRACKER_SUBENTRY_KEY,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
                 OPT_CONTRIBUTOR_MODE: "high_traffic",
             }
@@ -142,7 +149,7 @@ def test_visibility_assigns_devices_to_target_subentry() -> None:
     """Visibility step should attach restored devices to the chosen subentry."""
 
     entry = _EntryStub()
-    sub = entry.add_subentry(key="core_tracking", title="Core")
+    sub = entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
     entry.options = {
         OPT_IGNORED_DEVICES: {"dev-1": {"name": "Device 1"}},
     }
@@ -150,7 +157,7 @@ def test_visibility_assigns_devices_to_target_subentry() -> None:
     flow = _build_flow(entry)
     result = asyncio.run(
         flow.async_step_visibility(
-            {"subentry": "core_tracking", "unignore_devices": ["dev-1"]}
+            {"subentry": TRACKER_SUBENTRY_KEY, "unignore_devices": ["dev-1"]}
         )
     )
 

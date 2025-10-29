@@ -2,6 +2,7 @@
 """Test configuration and environment stubs for integration tests."""
 
 from __future__ import annotations
+# tests/conftest.py
 
 import sys
 from pathlib import Path
@@ -212,7 +213,7 @@ def _stub_homeassistant() -> None:
         def __init__(
             self,
             *,
-            data: dict[str, object],
+            data: Mapping[str, object] | MappingProxyType | dict[str, object],
             subentry_type: str,
             title: str,
             unique_id: str | None = None,
@@ -233,10 +234,42 @@ def _stub_homeassistant() -> None:
                 "unique_id": self.unique_id,
             }
 
+    class ConfigSubentryFlow:
+        """Lightweight ConfigSubentryFlow stub mirroring HA attributes."""
+
+        def __init__(self, entry: ConfigEntry, subentry: ConfigSubentry) -> None:
+            self.config_entry = entry
+            self.subentry = subentry
+            self.subentry_id = subentry.subentry_id
+            self.subentry_type = subentry.subentry_type
+            self.data: Mapping[str, object] = subentry.data
+            self.title = subentry.title
+            self.unique_id = subentry.unique_id
+
+        async def async_step_init(
+            self, user_input: Mapping[str, object] | None = None
+        ) -> dict[str, object]:
+            """Record the provided data and mimic a simple form response."""
+
+            self._last_step = ("init", MappingProxyType(dict(user_input or {})))
+            return {"type": "form", "step_id": "init"}
+
+        async def async_update_and_abort(
+            self,
+            *,
+            data: Mapping[str, object],
+            reason: str,
+        ) -> dict[str, object]:
+            """Persist updates and return an abort result like HA."""
+
+            self.data = MappingProxyType(dict(data))
+            return {"type": "abort", "reason": reason, "data": dict(data)}
+
     config_entries.ConfigEntry = ConfigEntry
     config_entries.ConfigEntryState = ConfigEntryState
     config_entries.ConfigEntryAuthFailed = ConfigEntryAuthFailed
     config_entries.ConfigSubentry = ConfigSubentry
+    config_entries.ConfigSubentryFlow = ConfigSubentryFlow
     config_entries.ConfigFlow = ConfigFlow
     config_entries.OptionsFlow = OptionsFlow
     config_entries.OptionsFlowWithReload = OptionsFlowWithReload
@@ -461,9 +494,202 @@ def _stub_homeassistant() -> None:
 
     device_registry_module = sys.modules["homeassistant.helpers.device_registry"]
     device_registry_module.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
-    device_registry_module.async_get = lambda _hass=None: SimpleNamespace(
-        async_get=lambda _id: None
-    )
+
+    if not hasattr(device_registry_module, "DeviceEntryType"):
+        class DeviceEntryType:  # noqa: D401 - stub enum container
+            SERVICE = "service"
+
+        device_registry_module.DeviceEntryType = DeviceEntryType
+
+    class _StubDeviceEntry:
+        """In-memory device entry capturing registry metadata."""
+
+        _counter = 0
+
+        def __init__(
+            self,
+            *,
+            identifiers: set[tuple[str, str]],
+            config_entry_id: str,
+            name: str | None = None,
+            manufacturer: str | None = None,
+            model: str | None = None,
+            sw_version: str | None = None,
+            entry_type: object | None = None,
+            configuration_url: str | None = None,
+            translation_key: str | None = None,
+            translation_placeholders: Mapping[str, str] | None = None,
+            config_subentry_id: str | None = None,
+            via_device_id: str | None = None,
+            via_device: tuple[str, str] | None = None,
+        ) -> None:
+            type(self)._counter += 1
+            self.id = f"device-{type(self)._counter}"
+            self.identifiers = set(identifiers)
+            self.config_entries = {config_entry_id}
+            self.name = name
+            self.name_by_user = None
+            self.manufacturer = manufacturer
+            self.model = model
+            self.sw_version = sw_version
+            self.entry_type = entry_type
+            self.configuration_url = configuration_url
+            self.translation_key = translation_key
+            self.translation_placeholders = dict(translation_placeholders or {})
+            self.config_subentry_id = config_subentry_id
+            self.via_device_id = via_device_id
+            self.via_device = via_device
+            self.disabled_by = None
+
+        def update(self, **changes: object) -> None:
+            for key, value in changes.items():
+                setattr(self, key, value)
+
+    class _StubDeviceRegistry:
+        """Minimal registry implementation retaining created/updated metadata."""
+
+        def __init__(self) -> None:
+            self.devices: dict[str, _StubDeviceEntry] = {}
+            self.created: list[dict[str, object]] = []
+            self.updated: list[dict[str, object]] = []
+
+        def async_get(self, device_id: str | None) -> _StubDeviceEntry | None:
+            if not device_id:
+                return None
+            return self.devices.get(device_id)
+
+        def async_get_device(
+            self, *, identifiers: set[tuple[str, str]] | None = None
+        ) -> _StubDeviceEntry | None:
+            if not identifiers:
+                return None
+            for device in self.devices.values():
+                if identifiers & device.identifiers:
+                    return device
+            return None
+
+        def async_get_or_create(
+            self,
+            *,
+            config_entry_id: str,
+            identifiers: set[tuple[str, str]],
+            manufacturer: str,
+            model: str,
+            name: str | None = None,
+            via_device_id: str | None = None,
+            via_device: tuple[str, str] | None = None,
+            sw_version: str | None = None,
+            entry_type: object | None = None,
+            configuration_url: str | None = None,
+            translation_key: str | None = None,
+            translation_placeholders: Mapping[str, str] | None = None,
+            config_subentry_id: str | None = None,
+        ) -> _StubDeviceEntry:
+            entry = _StubDeviceEntry(
+                identifiers=identifiers,
+                config_entry_id=config_entry_id,
+                name=name,
+                manufacturer=manufacturer,
+                model=model,
+                sw_version=sw_version,
+                entry_type=entry_type,
+                configuration_url=configuration_url,
+                translation_key=translation_key,
+                translation_placeholders=translation_placeholders,
+                config_subentry_id=config_subentry_id,
+                via_device_id=via_device_id,
+                via_device=via_device,
+            )
+            self.devices[entry.id] = entry
+            self.created.append(
+                {
+                    "config_entry_id": config_entry_id,
+                    "identifiers": set(identifiers),
+                    "manufacturer": manufacturer,
+                    "model": model,
+                    "name": name,
+                    "via_device_id": via_device_id,
+                    "via_device": via_device,
+                    "sw_version": sw_version,
+                    "entry_type": entry_type,
+                    "configuration_url": configuration_url,
+                    "translation_key": translation_key,
+                    "translation_placeholders": dict(translation_placeholders or {}),
+                    "config_subentry_id": config_subentry_id,
+                }
+            )
+            return entry
+
+        def async_update_device(
+            self,
+            *,
+            device_id: str,
+            new_identifiers: set[tuple[str, str]] | None = None,
+            via_device_id: str | None = None,
+            translation_key: str | None = None,
+            translation_placeholders: Mapping[str, str] | None = None,
+            config_subentry_id: str | None = None,
+            name: str | None = None,
+            manufacturer: str | None = None,
+            model: str | None = None,
+            sw_version: str | None = None,
+            entry_type: object | None = None,
+            configuration_url: str | None = None,
+        ) -> None:
+            device = self.devices.get(device_id)
+            if device is None:
+                raise AssertionError(f"Unknown device_id {device_id}")
+            if new_identifiers is not None:
+                device.identifiers = set(new_identifiers)
+            updates: dict[str, object] = {}
+            for field, value in (
+                ("via_device_id", via_device_id),
+                ("translation_key", translation_key),
+                ("config_subentry_id", config_subentry_id),
+                ("name", name),
+                ("manufacturer", manufacturer),
+                ("model", model),
+                ("sw_version", sw_version),
+                ("entry_type", entry_type),
+                ("configuration_url", configuration_url),
+            ):
+                if value is not None:
+                    updates[field] = value
+            if translation_placeholders is not None:
+                updates["translation_placeholders"] = dict(translation_placeholders)
+            if updates:
+                device.update(**updates)
+            self.updated.append(
+                {
+                    "device_id": device_id,
+                    "new_identifiers": None
+                    if new_identifiers is None
+                    else set(new_identifiers),
+                    "via_device_id": via_device_id,
+                    "translation_key": translation_key,
+                    "translation_placeholders": None
+                    if translation_placeholders is None
+                    else dict(translation_placeholders),
+                    "config_subentry_id": config_subentry_id,
+                    "name": name,
+                    "manufacturer": manufacturer,
+                    "model": model,
+                    "sw_version": sw_version,
+                    "entry_type": entry_type,
+                    "configuration_url": configuration_url,
+                }
+            )
+
+    def _device_registry_for(hass=None) -> _StubDeviceRegistry:
+        if hass is not None:
+            registry = getattr(hass, "_device_registry_stub", None)
+            if registry is None:
+                registry = _StubDeviceRegistry()
+                setattr(hass, "_device_registry_stub", registry)
+            return registry
+        return _StubDeviceRegistry()
+
+    device_registry_module.async_get = _device_registry_for
 
     cv_module = ModuleType("homeassistant.helpers.config_validation")
 
@@ -539,6 +765,10 @@ def _stub_homeassistant() -> None:
         def __class_getitem__(cls, _item):  # pragma: no cover - typing compatibility
             return cls
 
+        @property
+        def unique_id(self) -> str | None:
+            return getattr(self, "_attr_unique_id", None)
+
     update_coordinator_module.CoordinatorEntity = CoordinatorEntity
 
     event_module = ModuleType("homeassistant.helpers.event")
@@ -612,6 +842,10 @@ def _stub_homeassistant() -> None:
 
             def async_write_ha_state(self) -> None:
                 return None
+
+            @property
+            def unique_id(self) -> str | None:
+                return getattr(self, "_attr_unique_id", None)
 
         return _EntityBase
 

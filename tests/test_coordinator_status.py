@@ -331,6 +331,8 @@ def test_push_updated_keeps_known_name_for_blank_snapshots(
     entity._handle_coordinator_update()
 
     assert entity._attr_name == "Pixel 9"
+    assert entity.subentry_key == TRACKER_SUBENTRY_KEY
+    assert subentry_identifier in entity.unique_id
 
 
 def test_poll_snapshot_reuses_cached_name_for_blank_payload(

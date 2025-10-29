@@ -13,6 +13,10 @@ from typing import Any
 import pytest
 
 from .test_button_setup import _ensure_button_dependencies
+from custom_components.googlefindmy.const import (
+    SERVICE_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_KEY,
+)
 
 
 class _StubConfigEntry:
@@ -69,7 +73,7 @@ def test_button_setup_skips_service_registration_when_platform_missing(
             self.config_entry = config_entry
             self.data = devices
             self._listeners: list[Callable[[], None]] = []
-            self._subentry_key = "core_tracking"
+            self._subentry_key = TRACKER_SUBENTRY_KEY
 
         def async_add_listener(
             self, listener: Callable[[], None]
@@ -85,7 +89,8 @@ def test_button_setup_skips_service_registration_when_platform_missing(
         def stable_subentry_identifier(
             self, *, key: str | None = None, feature: str | None = None
         ) -> str:
-            return key or self._subentry_key
+            assert key is not None
+            return f"{key}-identifier"
 
         def get_subentry_metadata(
             self, *, key: str | None = None, feature: str | None = None
@@ -93,11 +98,11 @@ def test_button_setup_skips_service_registration_when_platform_missing(
             if key is not None:
                 resolved = key
             elif feature in {"button", "device_tracker", "sensor"}:
-                resolved = self._subentry_key
+                resolved = TRACKER_SUBENTRY_KEY
             elif feature == "binary_sensor":
-                resolved = "service"
+                resolved = SERVICE_SUBENTRY_KEY
             else:
-                resolved = self._subentry_key
+                resolved = TRACKER_SUBENTRY_KEY
             return SimpleNamespace(key=resolved)
 
         def get_subentry_snapshot(

@@ -769,6 +769,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         entry = self.config_entry
 
+        entry_id = getattr(entry, "entry_id", None)
+
         raw_entries: list[tuple[str, str | None, dict[str, Any], str | None]] = []
         if entry and getattr(entry, "subentries", None):
             for subentry in entry.subentries.values():
@@ -1019,9 +1021,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         if SERVICE_SUBENTRY_KEY not in metadata:
             service_features = _SERVICE_SUBENTRY_FEATURES or _DEFAULT_SUBENTRY_FEATURES
+            stable_service_id: str | None
+            if isinstance(entry_id, str) and entry_id:
+                stable_service_id = f"{entry_id}-{SERVICE_SUBENTRY_KEY}-subentry"
+            else:
+                stable_service_id = None
             metadata[SERVICE_SUBENTRY_KEY] = SubentryMetadata(
                 key=SERVICE_SUBENTRY_KEY,
-                config_subentry_id=None,
+                config_subentry_id=stable_service_id,
                 features=service_features,
                 title=getattr(entry, "title", None),
                 poll_intervals=_current_poll_intervals(),
@@ -1036,9 +1043,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if TRACKER_SUBENTRY_KEY not in metadata:
             tracker_features = _TRACKER_SUBENTRY_FEATURES or _DEFAULT_SUBENTRY_FEATURES
             previous_tracker_visible = previous_visible.get(TRACKER_SUBENTRY_KEY, ())
+            stable_tracker_id: str | None
+            if isinstance(entry_id, str) and entry_id:
+                stable_tracker_id = f"{entry_id}-{TRACKER_SUBENTRY_KEY}-subentry"
+            else:
+                stable_tracker_id = None
             metadata[TRACKER_SUBENTRY_KEY] = SubentryMetadata(
                 key=TRACKER_SUBENTRY_KEY,
-                config_subentry_id=None,
+                config_subentry_id=stable_tracker_id,
                 features=tracker_features,
                 title=getattr(entry, "title", None),
                 poll_intervals=_current_poll_intervals(),

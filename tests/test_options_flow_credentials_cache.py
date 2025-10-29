@@ -19,9 +19,18 @@ from custom_components.googlefindmy.const import (
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
     DOMAIN,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
+    TRACKER_SUBENTRY_KEY,
 )
 from homeassistant.config_entries import ConfigSubentry
+
+
+def _stable_subentry_id(entry_id: str, key: str) -> str:
+    """Return deterministic config_subentry ids for credential cache tests."""
+
+    return f"{entry_id}-{key}-subentry"
 
 
 class _MemoryCache:
@@ -70,13 +79,22 @@ class _DummyEntry:
         self.title = data.get(CONF_GOOGLE_EMAIL, "Google Find My Device")
         self.subentries: dict[str, ConfigSubentry] = {}
 
-        core_subentry = ConfigSubentry(
-            data={"group_key": "core_tracking", "feature_flags": {}},
+        service_subentry = ConfigSubentry(
+            data={"group_key": SERVICE_SUBENTRY_KEY},
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            title="Service",
+            unique_id=f"{entry_id}-{SERVICE_SUBENTRY_KEY}",
+            subentry_id=_stable_subentry_id(entry_id, SERVICE_SUBENTRY_KEY),
+        )
+        tracker_subentry = ConfigSubentry(
+            data={"group_key": TRACKER_SUBENTRY_KEY, "feature_flags": {}},
             subentry_type=SUBENTRY_TYPE_TRACKER,
             title="Google Find My devices",
-            unique_id=f"{entry_id}-core_tracking",
+            unique_id=f"{entry_id}-{TRACKER_SUBENTRY_KEY}",
+            subentry_id=_stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY),
         )
-        self.subentries[core_subentry.subentry_id] = core_subentry
+        self.subentries[service_subentry.subentry_id] = service_subentry
+        self.subentries[tracker_subentry.subentry_id] = tracker_subentry
 
 
 class _DummyConfigEntries:
@@ -183,7 +201,7 @@ def test_options_flow_rotating_token_clears_cached_aas(
 
         new_token = "oauth-token-rotate-123456"
         result = await flow.async_step_credentials(
-            {"new_oauth_token": new_token, "subentry": "core_tracking"}
+            {"new_oauth_token": new_token, "subentry": TRACKER_SUBENTRY_KEY}
         )
         if inspect.isawaitable(result):
             result = await result
@@ -201,7 +219,7 @@ def test_options_flow_rotating_token_clears_cached_aas(
         assert hass.config_entries.updated_subentries
         subentry_id, payload = hass.config_entries.updated_subentries[-1]
         assert subentry_id in entry.subentries
-        assert payload.get("group_key") == "core_tracking"
+        assert payload.get("group_key") == TRACKER_SUBENTRY_KEY
 
         await hass.drain_tasks()
         assert hass.config_entries.reloaded == [entry.entry_id]

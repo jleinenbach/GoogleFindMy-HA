@@ -20,6 +20,7 @@ from custom_components.googlefindmy.const import (
     OPT_DEVICE_POLL_DELAY,
     DOMAIN,
     LEGACY_SERVICE_IDENTIFIER,
+    TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
 
@@ -335,7 +336,7 @@ def test_unique_id_subentry_migration_updates_existing(
     subentry = SimpleNamespace(
         subentry_id="sub-1",
         data={
-            "group_key": "core_tracking",
+            "group_key": TRACKER_SUBENTRY_KEY,
             "features": (
                 "binary_sensor",
                 "button",

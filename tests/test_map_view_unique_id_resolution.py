@@ -15,7 +15,11 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy.const import DOMAIN, TRACKER_SUBENTRY_KEY
+from custom_components.googlefindmy.const import (
+    DOMAIN,
+    SERVICE_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_KEY,
+)
 
 
 class _StubCoordinator:
@@ -27,9 +31,8 @@ class _StubCoordinator:
     def stable_subentry_identifier(
         self, *, key: str | None = None, feature: str | None = None
     ) -> str:
-        if key is not None:
-            return key
-        return "core_tracking"
+        assert key is not None, "Map view should request subentry identifiers by key"
+        return f"{key}-identifier"
 
     def get_subentry_metadata(
         self, *, key: str | None = None, feature: str | None = None
@@ -39,7 +42,7 @@ class _StubCoordinator:
         elif feature in {"button", "device_tracker", "sensor"}:
             resolved = TRACKER_SUBENTRY_KEY
         elif feature == "binary_sensor":
-            resolved = "service"
+            resolved = SERVICE_SUBENTRY_KEY
         else:
             resolved = TRACKER_SUBENTRY_KEY
         return SimpleNamespace(key=resolved)

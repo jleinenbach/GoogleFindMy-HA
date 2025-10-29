@@ -26,6 +26,7 @@ from custom_components.googlefindmy.const import (
     MODE_MIGRATE,
     SERVICE_LOCATE_DEVICE,
     SERVICE_REBUILD_REGISTRY,
+    TRACKER_SUBENTRY_KEY,
 )
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.exceptions import ServiceValidationError
@@ -211,7 +212,7 @@ class _StubCoordinator:
         self.last_update_success = True
         self.config_entry: _StubConfigEntry | None = None
         self._purged: list[str] = []
-        self._subentry_key = "core_tracking"
+        self._subentry_key = TRACKER_SUBENTRY_KEY
 
     def async_add_listener(self, _listener: Callable[[], None]) -> Callable[[], None]:
         return lambda: None
@@ -533,9 +534,9 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 
             subentry_manager = runtime_data.subentry_manager
             managed = subentry_manager.managed_subentries
-            assert "core_tracking" in managed
-            core_subentry = managed["core_tracking"]
-            assert core_subentry.data["group_key"] == "core_tracking"
+            assert TRACKER_SUBENTRY_KEY in managed
+            core_subentry = managed[TRACKER_SUBENTRY_KEY]
+            assert core_subentry.data["group_key"] == TRACKER_SUBENTRY_KEY
             features = core_subentry.data["features"]
             assert features == [
                 "binary_sensor",
@@ -547,7 +548,7 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             assert all(feature == feature.lower() for feature in features)
             assert core_subentry.data["fcm_push_enabled"] is True
             assert core_subentry.data["has_google_home_filter"] is False
-            assert core_subentry.unique_id.endswith("core_tracking")
+            assert core_subentry.unique_id.endswith(TRACKER_SUBENTRY_KEY)
 
             added_entities: list[Any] = []
 
@@ -590,17 +591,20 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             ]
             await migrate_handler(SimpleNamespace(data={ATTR_MODE: MODE_MIGRATE}))
             assert integration._async_soft_migrate_data_to_options.await_count == 2
-            assert integration._async_soft_migrate_data_to_options.await_args_list[
-                -1
-            ] == call(hass, entry)
+            assert (
+                integration._async_soft_migrate_data_to_options.await_args_list[-1]
+                == call(hass, entry)
+            )
             assert integration._async_migrate_unique_ids.await_count == 2
-            assert integration._async_migrate_unique_ids.await_args_list[-1] == call(
-                hass, entry
+            assert (
+                integration._async_migrate_unique_ids.await_args_list[-1]
+                == call(hass, entry)
             )
             assert integration._async_relink_button_devices.await_count == 2
-            assert integration._async_relink_button_devices.await_args_list[
-                -1
-            ] == call(hass, entry)
+            assert (
+                integration._async_relink_button_devices.await_args_list[-1]
+                == call(hass, entry)
+            )
             assert hass.config_entries.reload_calls == [entry.entry_id]
 
             assert await integration.async_unload_entry(hass, entry) is True

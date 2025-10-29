@@ -16,6 +16,8 @@ from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
+    SERVICE_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
@@ -85,9 +87,8 @@ def test_scanner_triggers_cloud_discovery(
             key: str | None = None,
             feature: str | None = None,
         ) -> str:
-            resolved = key or feature
-            assert resolved is not None
-            return f"{resolved}-identifier"
+            assert key is not None
+            return f"{key}-identifier"
 
         def get_subentry_snapshot(
             self,
@@ -109,11 +110,11 @@ def test_scanner_triggers_cloud_discovery(
             if key is not None:
                 resolved = key
             elif feature in {"button", "device_tracker", "sensor"}:
-                resolved = "core_tracking"
+                resolved = TRACKER_SUBENTRY_KEY
             elif feature == "binary_sensor":
-                resolved = "service"
+                resolved = SERVICE_SUBENTRY_KEY
             else:
-                resolved = "core_tracking"
+                resolved = TRACKER_SUBENTRY_KEY
             return SimpleNamespace(key=resolved)
 
     class _StubConfigEntry:
@@ -154,6 +155,11 @@ def test_scanner_triggers_cloud_discovery(
             await task
 
     asyncio.run(_exercise())
+
+    identifier = coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
+    tracker_entity = added[0][0]
+    assert tracker_entity.subentry_key == TRACKER_SUBENTRY_KEY
+    assert identifier in tracker_entity.unique_id
 
     assert triggered_calls, "scanner should schedule cloud discovery"
     call = triggered_calls[0]

@@ -7,7 +7,13 @@ import time
 from types import MappingProxyType, SimpleNamespace
 
 from custom_components.googlefindmy.button import GoogleFindMyPlaySoundButton
-from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
+from custom_components.googlefindmy.const import (
+    DOMAIN,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
+    TRACKER_SUBENTRY_KEY,
+)
 from custom_components.googlefindmy.coordinator import (
     FcmStatus,
     GoogleFindMyCoordinator,
@@ -15,6 +21,12 @@ from custom_components.googlefindmy.coordinator import (
 )
 from custom_components.googlefindmy.sensor import GoogleFindMyLastSeenSensor
 from homeassistant.config_entries import ConfigSubentry
+
+
+def _stable_subentry_id(entry_id: str, key: str) -> str:
+    """Return deterministic config_subentry identifiers for refresh tests."""
+
+    return f"{entry_id}-{key}-subentry"
 
 
 def _build_entry_with_empty_visible_list() -> SimpleNamespace:
@@ -28,13 +40,22 @@ def _build_entry_with_empty_visible_list() -> SimpleNamespace:
         subentries={},
         runtime_data=None,
     )
-    subentry = ConfigSubentry(
-        data=MappingProxyType({"group_key": "core_tracking", "visible_device_ids": []}),
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id="entry-empty-visible-service",
+        subentry_id=_stable_subentry_id(entry.entry_id, SERVICE_SUBENTRY_KEY),
+    )
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
         subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Core",
         unique_id="entry-empty-visible-core",
+        subentry_id=_stable_subentry_id(entry.entry_id, TRACKER_SUBENTRY_KEY),
     )
-    entry.subentries[subentry.subentry_id] = subentry
+    entry.subentries[service_subentry.subentry_id] = service_subentry
+    entry.subentries[tracker_subentry.subentry_id] = tracker_subentry
     return entry
 
 
@@ -60,7 +81,7 @@ def test_refresh_recovers_devices_from_empty_visible_list() -> None:
     coordinator._subentry_metadata = {}
     coordinator._subentry_snapshots = {}
     coordinator._feature_to_subentry = {}
-    coordinator._default_subentry_key_value = "core_tracking"
+    coordinator._default_subentry_key_value = TRACKER_SUBENTRY_KEY
     coordinator._subentry_manager = None
     coordinator._device_location_data = {}
     coordinator._device_names = {}
@@ -70,24 +91,32 @@ def test_refresh_recovers_devices_from_empty_visible_list() -> None:
 
     coordinator._refresh_subentry_index()
 
-    metadata = coordinator.get_subentry_metadata(key="core_tracking")
+    metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
     assert metadata is not None
     assert metadata.visible_device_ids == ("device-1",)
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.visible_device_ids == ()
+    assert service_meta.config_subentry_id == _stable_subentry_id(
+        entry.entry_id, SERVICE_SUBENTRY_KEY
+    )
 
     coordinator._store_subentry_snapshots(coordinator.data)
-    subentry_identifier = coordinator.stable_subentry_identifier(key="core_tracking")
+    subentry_identifier = coordinator.stable_subentry_identifier(
+        key=TRACKER_SUBENTRY_KEY
+    )
 
     sensor = GoogleFindMyLastSeenSensor(
         coordinator,
         {"id": "device-1", "name": "Device One"},
-        subentry_key="core_tracking",
+        subentry_key=TRACKER_SUBENTRY_KEY,
         subentry_identifier=subentry_identifier,
     )
     button = GoogleFindMyPlaySoundButton(
         coordinator,
         {"id": "device-1", "name": "Device One"},
         "Device One",
-        subentry_key="core_tracking",
+        subentry_key=TRACKER_SUBENTRY_KEY,
         subentry_identifier=subentry_identifier,
     )
 
@@ -122,12 +151,16 @@ def test_entities_remain_available_when_push_disconnected() -> None:
     coordinator._fcm_status_state = FcmStatus.DISCONNECTED
     coordinator._fcm_status_reason = "push offline"
     coordinator._fcm_status_changed_at = now_wall
-    coordinator._feature_to_subentry = {"sensor": "core_tracking", "button": "core_tracking"}
-    coordinator._default_subentry_key_value = "core_tracking"
+    coordinator._feature_to_subentry = {
+        "sensor": TRACKER_SUBENTRY_KEY,
+        "button": TRACKER_SUBENTRY_KEY,
+    }
+    coordinator._default_subentry_key_value = TRACKER_SUBENTRY_KEY
+    tracker_subentry_id = _stable_subentry_id(entry.entry_id, TRACKER_SUBENTRY_KEY)
     coordinator._subentry_metadata = {
-        "core_tracking": SubentryMetadata(
-            key="core_tracking",
-            config_subentry_id="entry-empty-visible-core",
+        TRACKER_SUBENTRY_KEY: SubentryMetadata(
+            key=TRACKER_SUBENTRY_KEY,
+            config_subentry_id=tracker_subentry_id,
             features=("sensor", "button"),
             title="Core",
             poll_intervals={},
@@ -142,18 +175,20 @@ def test_entities_remain_available_when_push_disconnected() -> None:
 
     coordinator.api = SimpleNamespace(is_push_ready=lambda: False)
 
-    subentry_identifier = coordinator.stable_subentry_identifier(key="core_tracking")
+    subentry_identifier = coordinator.stable_subentry_identifier(
+        key=TRACKER_SUBENTRY_KEY
+    )
     sensor = GoogleFindMyLastSeenSensor(
         coordinator,
         device,
-        subentry_key="core_tracking",
+        subentry_key=TRACKER_SUBENTRY_KEY,
         subentry_identifier=subentry_identifier,
     )
     button = GoogleFindMyPlaySoundButton(
         coordinator,
         device,
         "Device One",
-        subentry_key="core_tracking",
+        subentry_key=TRACKER_SUBENTRY_KEY,
         subentry_identifier=subentry_identifier,
     )
 

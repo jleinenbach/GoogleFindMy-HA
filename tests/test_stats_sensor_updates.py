@@ -239,6 +239,8 @@ def test_increment_stat_notifies_registered_stats_sensor(
             ),
         )
 
+        assert sensor.subentry_key == SERVICE_SUBENTRY_KEY
+
         async def _exercise() -> None:
             notified = asyncio.Event()
 
@@ -435,6 +437,7 @@ def test_stats_sensor_device_info_uses_service_identifiers() -> None:
             (DOMAIN, f"entry-stats:{subentry_identifier}:service"),
         }
 
+        assert sensor.subentry_key == SERVICE_SUBENTRY_KEY
         assert sensor.device_info.identifiers == expected
     finally:
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]

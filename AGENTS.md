@@ -179,6 +179,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > **Offline mode:**
 > – pre-commit run --all-files *(mandatory, even if pre-commit.ci could supply autofixes)*
 > – ruff format --check *(mandatory; capture the outcome in the "Testing" section)*
+> – ruff check . *(mandatory; you may run `ruff check --fix` beforehand, but finish with a non-fixing run and document the result)*
 > – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(mandatory for Python changes; capture the outcome)*
 >   *When editing modules under `custom_components/googlefindmy/NovaApi/`, run `python -m mypy <module-path>` (for example, `python -m mypy custom_components/googlefindmy/NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py`) in addition to the command above so the excluded package still receives a strict check. Document the targeted run in the testing summary.*
 > – pytest -q *(mandatory; investigate and resolve every `DeprecationWarning`; capture the outcome)*
@@ -188,9 +189,10 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – pre-commit install *(make sure hooks are installed)*
 > – pre-commit run --all-files *(run again if new hooks were installed)*
 > – ruff format --check *(reconfirm that formatting is correct)*
+> – ruff check . *(reconfirm that linting passes without autofixes; run `ruff check --fix` beforehand if needed and rerun without `--fix` before recording results)*
 > – pytest -q *(reconfirm that the tests pass)*
 > – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(full run across the entire codebase and tests)*
-> – ruff check --fix --exit-non-zero-on-fix && ruff check *(optional when additional linting fixes are necessary)*
+> – ruff check --fix --exit-non-zero-on-fix && ruff check *(optional helper when additional linting fixes are necessary; still conclude with the standalone `ruff check .` command above)*
 > – pip-compile requirements-dev.in && pip-compile custom_components/googlefindmy/requirements.in *(when the corresponding `*.in` inputs exist; otherwise, record that no compile targets are present and skip without creating ad-hoc `requirements.txt` files)*
 > – pip-audit -r requirements-dev.txt -r custom_components/googlefindmy/requirements.txt *(security scan; exit code 1 is acceptable but must be noted)* — prefer `python -m pip_audit` so the tool resolves even when the entry point directory is absent from `$PATH`
 > – review package/version updates and synchronize lock files/manifests as needed (see the "Home Assistant version & dependencies" section)
@@ -207,6 +209,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 * **Synchronization points:** Keep `custom_components/googlefindmy/manifest.json`, `custom_components/googlefindmy/requirements.txt`, `pyproject.toml`, and `requirements-dev.txt` aligned. When bumping versions, check whether other files (for example, `hacs.json` or helpers under `script/`) must change as well.
 * **Upgrade workflow:** With internet access, perform dependency maintenance via `pip install`, `pip-compile`, `pip-audit`, `poetry update` (if relevant), and `python -m pip list --outdated`. Afterwards rerun tests/linters and document the outcomes.
 * **Change notes:** Record adjusted minimum versions or dropped legacy releases in the PR description and, when needed, in `CHANGELOG.md` or `README.md`.
+* **Manifest compatibility (Jan 2025):** The shared CI still ships a `script.hassfest` build that rejects the `homeassistant` manifest key. Until upstream relaxes the schema for custom integrations, do **not** add `"homeassistant": "<version>"` to `custom_components/googlefindmy/manifest.json` or `hacs.json`. Track the minimum supported Home Assistant core release in documentation/tests instead.
 
 ## Maintenance mode
 

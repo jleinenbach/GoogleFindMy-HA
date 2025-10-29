@@ -9,6 +9,11 @@ from types import SimpleNamespace
 from typing import Any
 from collections.abc import Callable, Iterable
 
+from custom_components.googlefindmy.const import (
+    SERVICE_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_KEY,
+)
+
 
 def test_duplicate_devices_seed_only_once() -> None:
     """Duplicate IDs in the coordinator snapshot create a single entity per platform."""
@@ -35,9 +40,8 @@ def test_duplicate_devices_seed_only_once() -> None:
         def stable_subentry_identifier(
             self, *, key: str | None = None, feature: str | None = None
         ) -> str:
-            resolved = key or feature
-            assert resolved is not None
-            return f"{resolved}-identifier"
+            assert key is not None
+            return f"{key}-identifier"
 
         def get_subentry_metadata(
             self, *, key: str | None = None, feature: str | None = None
@@ -45,11 +49,11 @@ def test_duplicate_devices_seed_only_once() -> None:
             if key is not None:
                 resolved = key
             elif feature in {"button", "device_tracker", "sensor"}:
-                resolved = "core_tracking"
+                resolved = TRACKER_SUBENTRY_KEY
             elif feature == "binary_sensor":
-                resolved = "service"
+                resolved = SERVICE_SUBENTRY_KEY
             else:
-                resolved = "core_tracking"
+                resolved = TRACKER_SUBENTRY_KEY
             return SimpleNamespace(key=resolved)
 
         def get_subentry_snapshot(

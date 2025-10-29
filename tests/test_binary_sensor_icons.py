@@ -113,6 +113,9 @@ from custom_components.googlefindmy.const import (  # noqa: E402 - import after 
 )
 
 
+SERVICE_SUBENTRY_IDENTIFIER = "entry-id-service-subentry"
+
+
 @pytest.mark.parametrize(
     ("event_state", "expected_icon"),
     [
@@ -129,12 +132,13 @@ def test_auth_status_sensor_icon(event_state: bool, expected_icon: str) -> None:
         coordinator,
         entry,
         subentry_key=SERVICE_SUBENTRY_KEY,
-        subentry_identifier="core_tracking",
+        subentry_identifier=SERVICE_SUBENTRY_IDENTIFIER,
     )
 
     # Force the fast-path state without requiring Home Assistant event bus.
     sensor._event_state = event_state
 
+    assert sensor.subentry_key == SERVICE_SUBENTRY_KEY
     assert sensor.icon == expected_icon
 
 
@@ -158,7 +162,7 @@ def test_auth_status_sensor_attributes_include_nova_snapshots() -> None:
         coordinator,
         entry,
         subentry_key=SERVICE_SUBENTRY_KEY,
-        subentry_identifier="core_tracking",
+        subentry_identifier=SERVICE_SUBENTRY_IDENTIFIER,
     )
 
     attrs = sensor.extra_state_attributes
@@ -181,9 +185,10 @@ def test_auth_status_sensor_attributes_return_none_when_unavailable() -> None:
         coordinator,
         entry,
         subentry_key=SERVICE_SUBENTRY_KEY,
-        subentry_identifier="core_tracking",
+        subentry_identifier=SERVICE_SUBENTRY_IDENTIFIER,
     )
 
+    assert sensor.subentry_key == SERVICE_SUBENTRY_KEY
     assert sensor.extra_state_attributes is None
 
 
@@ -197,18 +202,20 @@ def test_service_diagnostic_sensors_share_service_device_identifiers() -> None:
         coordinator,
         entry,
         subentry_key=SERVICE_SUBENTRY_KEY,
-        subentry_identifier="core_tracking",
+        subentry_identifier=SERVICE_SUBENTRY_IDENTIFIER,
     )
     auth = GoogleFindMyAuthStatusSensor(
         coordinator,
         entry,
         subentry_key=SERVICE_SUBENTRY_KEY,
-        subentry_identifier="core_tracking",
+        subentry_identifier=SERVICE_SUBENTRY_IDENTIFIER,
     )
 
+    assert polling.subentry_key == SERVICE_SUBENTRY_KEY
+    assert auth.subentry_key == SERVICE_SUBENTRY_KEY
     expected_identifiers = {
         service_device_identifier("entry-id"),
-        (DOMAIN, "entry-id:core_tracking:service"),
+        (DOMAIN, f"entry-id:{SERVICE_SUBENTRY_IDENTIFIER}:service"),
     }
 
     assert polling.device_info.identifiers == expected_identifiers
