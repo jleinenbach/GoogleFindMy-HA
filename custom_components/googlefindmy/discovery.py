@@ -46,6 +46,7 @@ except ImportError:  # pragma: no cover - provide a minimal fallback for tests
 from . import config_flow as config_flow_module
 from .ha_typing import callback
 from .const import CONF_GOOGLE_EMAIL, CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, DOMAIN
+from .email import normalize_email
 
 cf = cast(Any, config_flow_module)
 
@@ -66,14 +67,6 @@ def _log_task_exception(task: asyncio.Future[Any]) -> None:
 CLOUD_DISCOVERY_NAMESPACE = f"{DOMAIN}.cloud_scan"
 SECRETS_DISCOVERY_NAMESPACE = f"{DOMAIN}.secrets_file"
 _DEFAULT_SECRETS_SCAN_INTERVAL = timedelta(seconds=30)
-
-
-def _normalize_email(value: str | None) -> str:
-    """Normalize an email string for comparison and unique ID generation."""
-
-    return (value or "").strip().lower()
-
-
 class _CloudDiscoveryResults(list[dict[str, Any]]):
     """Results container that triggers config flows on append."""
 
@@ -188,12 +181,12 @@ def _cloud_discovery_stable_key(
 ) -> str:
     """Generate a stable identifier used to deduplicate discovery flows."""
 
-    normalized_email = _normalize_email(email if isinstance(email, str) else None)
+    normalized_email = normalize_email(email if isinstance(email, str) else None)
     if not normalized_email and isinstance(secrets_bundle, Mapping):
         for key in ("google_email", "email", "username", "Email"):
             value = secrets_bundle.get(key)
             if isinstance(value, str) and value:
-                normalized_email = _normalize_email(value)
+                normalized_email = normalize_email(value)
                 if normalized_email:
                     break
 
@@ -218,7 +211,7 @@ def _cloud_discovery_stable_key(
 def _redact_account_for_log(email: str | None, stable_key: str) -> str:
     """Return a partially redacted account identifier safe for logging."""
 
-    normalized = _normalize_email(email if isinstance(email, str) else None)
+    normalized = normalize_email(email if isinstance(email, str) else None)
     if normalized:
         local_part, _, domain = normalized.partition("@")
         if local_part:
@@ -249,7 +242,7 @@ def _assemble_cloud_discovery_payload(
 ) -> dict[str, Any]:
     """Prepare the payload forwarded to the config flow discovery handler."""
 
-    clean_email = _normalize_email(email if isinstance(email, str) else None)
+    clean_email = normalize_email(email if isinstance(email, str) else None)
     payload: dict[str, Any] = {
         "email": clean_email,
         CONF_GOOGLE_EMAIL: clean_email,

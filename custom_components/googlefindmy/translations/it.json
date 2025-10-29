@@ -423,6 +423,10 @@
       "title": "Rilevato conflitto di ID univoco dell’entità",
       "description": "Alcune entità di **{entry}** utilizzano già il nuovo formato di ID univoco e sono in conflitto con la migrazione.\n\n**Conteggio:** {count}\n**Esempi:** {entities}\n\nPer risolvere:\n1) Apri **Impostazioni → Dispositivi e servizi → Entità** e cerca le entità elencate.\n2) Rimuovi o rinomina le entità in conflitto, oppure elimina le voci non più utilizzate di altre integrazioni.\n3) Ricarica l’integrazione (o riavvia Home Assistant). La migrazione verrà ripetuta automaticamente."
     },
+    "duplicate_account": {
+      "title": "Account Google Find My duplicato",
+      "description": "Home Assistant ha rilevato più voci Google Find My per lo stesso account ({email}). Può rimanere attiva una sola voce. Rimuovi o disattiva la voce duplicata \"{entry_title}\" oppure riautentica l’account corretto. Causa: {cause}."
+    },
     "duplicate_account_entries": {
       "title": "Rilevate voci di account duplicate",
       "description": "Questo account Google (**{email}**) è già configurato in un'altra voce:\n\n{entries}\n\nDisattiva o rimuovi le voci duplicate in modo che rimanga attiva una sola voce per account, quindi ricarica l'integrazione (o riavvia Home Assistant)."

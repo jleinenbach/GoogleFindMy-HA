@@ -423,6 +423,10 @@
       "title": "Entity unique ID collision detected",
       "description": "Some entities for **{entry}** already use the new unique ID format and conflict with the migration.\n\n**Count:** {count}\n**Examples:** {entities}\n\nTo resolve:\n1) Open **Settings → Devices & Services → Entities** and search for the listed entities.\n2) Remove or rename conflicting entities, or delete abandoned entries from other integrations.\n3) Reload the integration (or restart Home Assistant). The migration will retry automatically."
     },
+    "duplicate_account": {
+      "title": "Duplicate Google Find My account",
+      "description": "Home Assistant detected multiple Google Find My entries for the same account ({email}). Only one entry can remain active. Remove or disable the duplicate entry \"{entry_title}\" or reauthenticate the intended account. Cause: {cause}."
+    },
     "duplicate_account_entries": {
       "title": "Duplicate account entries detected",
       "description": "This Google account (**{email}**) is already configured by another entry:\n\n{entries}\n\nDisable or remove the duplicate entry so that only one entry per account remains active, then reload the integration (or restart Home Assistant)."

@@ -78,6 +78,7 @@ from .const import (
     DEFAULT_OPTIONS,
     DEFAULT_ENABLE_STATS_ENTITIES,
 )
+from .email import normalize_email, normalize_email_or_default, unique_account_id
 
 import voluptuous as vol
 
@@ -948,18 +949,11 @@ def _interpret_reauth_choice(
         return None, None, "invalid_token"
 
     return "manual", token_raw, None
-
-
-def _normalize_email(email: str | None) -> str:
-    """Normalize emails consistently for unique_id / comparisons."""
-    return (email or "").strip().lower()
-
-
 def _find_entry_by_email(hass: HomeAssistant, email: str) -> ConfigEntry | None:
     """Return an existing entry that matches the normalized email, if any."""
-    target = _normalize_email(email)
+    target = normalize_email_or_default(email)
     for e in hass.config_entries.async_entries(DOMAIN):
-        if _normalize_email(e.data.get(CONF_GOOGLE_EMAIL)) == target:
+        if normalize_email_or_default(e.data.get(CONF_GOOGLE_EMAIL)) == target:
             return e
     return None
 
@@ -1082,11 +1076,15 @@ def _normalize_and_validate_discovery_payload(
     if not candidates:
         raise DiscoveryFlowError("cannot_connect")
 
-    normalized_email = _normalize_email(email_candidate)
+    normalized_email = normalize_email(email_candidate)
+    if not normalized_email:
+        raise DiscoveryFlowError("invalid_discovery_info")
     title = payload_dict.get("title") or payload_dict.get("name")
+    unique_id = normalized_email
+
     return CloudDiscoveryData(
         email=email_candidate,
-        unique_id=normalized_email,
+        unique_id=unique_id,
         candidates=tuple(candidates),
         secrets_bundle=secrets_bundle,
         title=str(title) if isinstance(title, str) else None,
@@ -1408,9 +1406,10 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     errors["base"] = err
             else:
                 assert method == "secrets" and email and cands
-                uid = _normalize_email(email)
-                await self.async_set_unique_id(uid)
-                self._abort_if_unique_id_configured()
+                uid = unique_account_id(normalize_email(email))
+                if uid:
+                    await self.async_set_unique_id(uid)
+                    self._abort_if_unique_id_configured()
 
                 chosen = await async_pick_working_token(
                     email,
@@ -1472,9 +1471,10 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                 errors["base"] = err
             else:
                 assert method == "manual" and email and cands
-                uid = _normalize_email(email)
-                await self.async_set_unique_id(uid)
-                self._abort_if_unique_id_configured()
+                uid = unique_account_id(normalize_email(email))
+                if uid:
+                    await self.async_set_unique_id(uid)
+                    self._abort_if_unique_id_configured()
 
                 chosen = await async_pick_working_token(email, cands)
                 if not chosen:
@@ -1527,7 +1527,9 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         errors: dict[str, str] = {}
 
         # Ensure unique_id is set (should already be done)
-        email_for_uid = _normalize_email(self._auth_data.get(CONF_GOOGLE_EMAIL))
+        email_for_uid = unique_account_id(
+            normalize_email(self._auth_data.get(CONF_GOOGLE_EMAIL))
+        )
         if email_for_uid and not self.unique_id:
             await self.async_set_unique_id(email_for_uid)
             self._abort_if_unique_id_configured()
@@ -1686,7 +1688,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
 
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         assert entry is not None
-        fixed_email = _normalize_email(entry.data.get(CONF_GOOGLE_EMAIL))
+        raw_email = entry.data.get(CONF_GOOGLE_EMAIL)
+        fixed_email = normalize_email_or_default(raw_email)
 
         if selector is not None:
             schema = vol.Schema(
@@ -1753,7 +1756,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                             errors["base"] = "invalid_token"
                         else:
                             parsed: dict[str, Any] = dict(payload)
-                            extracted_email = _normalize_email(
+                            extracted_email = normalize_email(
                                 _extract_email_from_secrets(parsed)
                             )
                             cands = _extract_oauth_candidates_from_secrets(parsed)

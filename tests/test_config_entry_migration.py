@@ -5,12 +5,10 @@ from __future__ import annotations
 
 import asyncio
 from importlib import import_module
-
-# tests/test_config_entry_migration.py
-
 from dataclasses import dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Iterable
+from unittest.mock import Mock
 
 import pytest
 
@@ -23,6 +21,246 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
+from custom_components.googlefindmy.email import normalize_email, unique_account_id
+
+
+@dataclass(slots=True)
+class _MigrationTestEntry:
+    """Lightweight config entry stand-in for migration tests."""
+
+    entry_id: str
+    data: dict[str, Any]
+    title: str = ""
+    options: dict[str, Any] = None  # type: ignore[assignment]
+    version: int = 1
+    unique_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.options is None:
+            self.options = {}
+
+    domain: str = DOMAIN
+
+    def add_to_hass(self, hass: "_MigrationHass") -> None:
+        hass.config_entries.add_entry(self)
+
+
+class _MigrationConfigEntriesManager:
+    """Capture updates applied during migration for assertions."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, _MigrationTestEntry] = {}
+        self.updated: list[tuple[_MigrationTestEntry, dict[str, Any]]] = []
+        self.raise_on_unique_id = False
+
+    def add_entry(self, entry: _MigrationTestEntry) -> None:
+        self._entries[entry.entry_id] = entry
+
+    def async_entries(self, domain: str | None = None) -> list[_MigrationTestEntry]:
+        if domain is None:
+            return list(self._entries.values())
+        return [entry for entry in self._entries.values() if entry.domain == domain]
+
+    def async_update_entry(
+        self, entry: _MigrationTestEntry, **kwargs: Any
+    ) -> None:
+        payload = dict(kwargs)
+        if self.raise_on_unique_id and "unique_id" in payload:
+            self.updated.append((entry, payload))
+            raise ValueError("unique_id collision")
+        self.updated.append((entry, payload))
+        if "data" in payload:
+            entry.data = payload["data"]
+        if "options" in payload:
+            entry.options = payload["options"]
+        if "title" in payload:
+            entry.title = payload["title"]
+        if "unique_id" in payload:
+            entry.unique_id = payload["unique_id"]
+        if "version" in payload:
+            entry.version = payload["version"]
+
+
+@dataclass(slots=True)
+class _MigrationHass:
+    """Minimal Home Assistant stub exposing config entries manager."""
+
+    config_entries: _MigrationConfigEntriesManager
+
+
+def _make_hass_with_entries(
+    *entries: _MigrationTestEntry,
+) -> _MigrationHass:
+    manager = _MigrationConfigEntriesManager()
+    hass = _MigrationHass(config_entries=manager)
+    for entry in entries:
+        entry.add_to_hass(hass)
+    return hass
+
+
+def test_async_migrate_entry_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Migration should set metadata and unique_id when no duplicates exist."""
+
+    integration = import_module("custom_components.googlefindmy")
+
+    entry = _MigrationTestEntry(
+        entry_id="entry-1",
+        data={DATA_SECRET_BUNDLE: {"username": "User@Example.com"}},
+        title="Legacy",
+        version=1,
+    )
+    hass = _make_hass_with_entries(entry)
+
+    created_issues: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(
+        integration.ir,
+        "async_create_issue",
+        lambda *args, **kwargs: created_issues.append((args, kwargs)),
+    )
+    monkeypatch.setattr(integration.ir, "async_delete_issue", lambda *args, **kwargs: None)
+
+    result = asyncio.run(integration.async_migrate_entry(hass, entry))
+
+    assert result is True
+    expected_unique_id = unique_account_id(normalize_email("User@Example.com"))
+    assert entry.unique_id == expected_unique_id
+    assert entry.title == "User@Example.com"
+    assert entry.version == integration.CONFIG_ENTRY_VERSION
+    assert entry.data[CONF_GOOGLE_EMAIL] == "User@Example.com"
+    assert created_issues == []
+    assert hass.config_entries.updated
+    update_payload = hass.config_entries.updated[0][1]
+    assert update_payload["unique_id"] == expected_unique_id
+    assert update_payload["version"] == integration.CONFIG_ENTRY_VERSION
+
+
+def test_async_migrate_entry_detects_duplicate_before_unique_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate accounts should raise a repair issue and skip unique_id."""
+
+    integration = import_module("custom_components.googlefindmy")
+
+    primary = _MigrationTestEntry(
+        entry_id="primary",
+        data={CONF_GOOGLE_EMAIL: "duplicate@example.com"},
+        title="Primary",
+        version=integration.CONFIG_ENTRY_VERSION,
+        unique_id=unique_account_id(normalize_email("duplicate@example.com")),
+    )
+    duplicate = _MigrationTestEntry(
+        entry_id="duplicate",
+        data={DATA_SECRET_BUNDLE: {"username": "Duplicate@Example.com"}},
+        title="Secondary",
+        version=1,
+    )
+    hass = _make_hass_with_entries(primary, duplicate)
+
+    issue_helper = Mock(
+        wraps=integration._log_duplicate_and_raise_repair_issue
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy._log_duplicate_and_raise_repair_issue",
+        issue_helper,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.ir.async_delete_issue",
+        lambda *args, **kwargs: None,
+    )
+
+    result = asyncio.run(integration.async_migrate_entry(hass, duplicate))
+
+    assert result is True
+    assert duplicate.unique_id is None
+    assert duplicate.version == integration.CONFIG_ENTRY_VERSION
+    assert hass.config_entries.updated
+    update_payload = hass.config_entries.updated[0][1]
+    assert "unique_id" not in update_payload
+    assert issue_helper.call_count == 1
+    assert issue_helper.call_args.kwargs["cause"] == "pre_migration_duplicate"
+
+
+def test_async_migrate_entry_value_error_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ValueError when writing unique_id should trigger a retry without it."""
+
+    integration = import_module("custom_components.googlefindmy")
+
+    entry = _MigrationTestEntry(
+        entry_id="entry-value-error",
+        data={CONF_GOOGLE_EMAIL: "fallback@example.com"},
+        title="Fallback",
+        version=1,
+    )
+    hass = _make_hass_with_entries(entry)
+    hass.config_entries.raise_on_unique_id = True
+
+    issue_helper = Mock(
+        wraps=integration._log_duplicate_and_raise_repair_issue
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy._log_duplicate_and_raise_repair_issue",
+        issue_helper,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.ir.async_delete_issue",
+        lambda *args, **kwargs: None,
+    )
+
+    result = asyncio.run(integration.async_migrate_entry(hass, entry))
+
+    assert result is True
+    assert len(hass.config_entries.updated) == 2
+    first_payload = hass.config_entries.updated[0][1]
+    second_payload = hass.config_entries.updated[1][1]
+    assert "unique_id" in first_payload
+    assert "unique_id" not in second_payload
+    assert issue_helper.call_count == 1
+    assert issue_helper.call_args.kwargs["cause"] == "unique_id_conflict"
+
+
+def test_async_migrate_entry_recovers_partial_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An entry stuck from a previous migration should still be updated."""
+
+    integration = import_module("custom_components.googlefindmy")
+
+    primary = _MigrationTestEntry(
+        entry_id="existing",
+        data={CONF_GOOGLE_EMAIL: "recovery@example.com"},
+        title="Existing",
+        version=integration.CONFIG_ENTRY_VERSION,
+        unique_id=unique_account_id(normalize_email("recovery@example.com")),
+    )
+    stuck = _MigrationTestEntry(
+        entry_id="stuck",
+        data={DATA_SECRET_BUNDLE: {"username": "Recovery@Example.com"}},
+        title="",
+        version=integration.CONFIG_ENTRY_VERSION,
+        unique_id=None,
+    )
+    hass = _make_hass_with_entries(primary, stuck)
+
+    issue_helper = Mock(
+        wraps=integration._log_duplicate_and_raise_repair_issue
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy._log_duplicate_and_raise_repair_issue",
+        issue_helper,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.ir.async_delete_issue",
+        lambda *args, **kwargs: None,
+    )
+
+    result = asyncio.run(integration.async_migrate_entry(hass, stuck))
+
+    assert result is True
+    assert hass.config_entries.updated
+    payload = hass.config_entries.updated[0][1]
+    assert "unique_id" not in payload
+    assert "data" in payload
+    assert issue_helper.call_count == 1
+    assert issue_helper.call_args.kwargs["cause"] == "pre_migration_duplicate"
+
 
 
 class _StubConfigEntry:
@@ -59,6 +297,12 @@ class _StubConfigEntries:
             entry.title = kwargs["title"]
         if "unique_id" in kwargs:
             entry.unique_id = kwargs["unique_id"]
+        if "version" in kwargs:
+            entry.version = kwargs["version"]
+
+    def async_entries(self, domain: str | None = None) -> list[_StubConfigEntry]:
+        del domain
+        return [self._entry]
 
 
 class _FakeRegistryEntry:
@@ -314,7 +558,8 @@ def test_async_migrate_entry_populates_email_and_options() -> None:
     assert entry.version == integration.CONFIG_ENTRY_VERSION
     assert entry.data[CONF_GOOGLE_EMAIL] == "User@Example.com"
     assert entry.title == "User@Example.com"
-    assert entry.unique_id == "user@example.com"
+    expected_unique_id = unique_account_id(normalize_email("User@Example.com"))
+    assert entry.unique_id == expected_unique_id
     assert entry.options[OPT_DEVICE_POLL_DELAY] == 7
 
     hass_second = _StubHass(entry)

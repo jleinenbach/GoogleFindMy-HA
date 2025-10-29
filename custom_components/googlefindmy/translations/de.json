@@ -423,6 +423,10 @@
       "title": "Entity-Unique-ID-Konflikt erkannt",
       "description": "Einige Entitäten für **{entry}** verwenden bereits das neue Unique-ID-Format und kollidieren mit der Migration.\n\n**Anzahl:** {count}\n**Beispiele:** {entities}\n\nSo löst du das Problem:\n1) Öffne **Einstellungen → Geräte & Dienste → Entitäten** und suche nach den aufgeführten Entitäten.\n2) Entferne oder benenne kollidierende Entitäten um bzw. lösche verwaiste Einträge anderer Integrationen.\n3) Lade die Integration neu (oder starte Home Assistant neu). Die Migration wird automatisch erneut versucht."
     },
+    "duplicate_account": {
+      "title": "Doppeltes Google-Find-My-Konto",
+      "description": "Home Assistant hat mehrere Google Find My-Einträge für dasselbe Konto ({email}) erkannt. Es kann nur ein Eintrag aktiv bleiben. Entferne oder deaktiviere den doppelten Eintrag \"{entry_title}\" oder authentifiziere das gewünschte Konto erneut. Ursache: {cause}."
+    },
     "duplicate_account_entries": {
       "title": "Doppelte Kontoeinträge erkannt",
       "description": "Dieses Google-Konto (**{email}**) wird bereits von einem anderen Eintrag verwendet:\n\n{entries}\n\nDeaktiviere oder entferne doppelte Einträge, sodass pro Konto nur eine Instanz aktiv bleibt, und lade anschließend die Integration neu (oder starte Home Assistant neu)."

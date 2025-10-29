@@ -423,6 +423,10 @@
       "title": "Wykryto konflikt unikalnych ID encji",
       "description": "Niektóre encje dla **{entry}** używają już nowego formatu unikalnych ID i kolidują z migracją.\n\n**Liczba:** {count}\n**Przykłady:** {entities}\n\nAby rozwiązać problem:\n1) Otwórz **Ustawienia → Urządzenia i usługi → Encje** i wyszukaj wskazane encje.\n2) Usuń lub zmień nazwy kolidujących encji, albo usuń porzucone wpisy z innych integracji.\n3) Przeładuj integrację (lub uruchom ponownie Home Assistant). Migracja zostanie ponowiona automatycznie."
     },
+    "duplicate_account": {
+      "title": "Zduplikowane konto Google Find My",
+      "description": "Home Assistant wykrył wiele wpisów Google Find My dla tego samego konta ({email}). Aktywny może pozostać tylko jeden wpis. Usuń lub wyłącz zduplikowany wpis \"{entry_title}\" albo ponownie uwierzytelnij właściwe konto. Przyczyna: {cause}."
+    },
     "duplicate_account_entries": {
       "title": "Wykryto zduplikowane wpisy kont",
       "description": "To konto Google (**{email}**) jest już skonfigurowane w innym wpisie:\n\n{entries}\n\nWyłącz lub usuń zduplikowane wpisy, aby dla każdego konta pozostał tylko jeden aktywny wpis, a następnie przeładuj integrację (lub uruchom ponownie Home Assistanta)."

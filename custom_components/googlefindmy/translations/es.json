@@ -423,6 +423,10 @@
       "title": "Conflicto de ID único de entidad detectado",
       "description": "Algunas entidades de **{entry}** ya usan el nuevo formato de ID único y entran en conflicto con la migración.\n\n**Cantidad:** {count}\n**Ejemplos:** {entities}\n\nPara resolverlo:\n1) Abre **Ajustes → Dispositivos y servicios → Entidades** y busca las entidades indicadas.\n2) Elimina o renombra las entidades en conflicto, o borra entradas abandonadas de otras integraciones.\n3) Recarga la integración (o reinicia Home Assistant). La migración volverá a intentarse automáticamente."
     },
+    "duplicate_account": {
+      "title": "Cuenta duplicada de Google Find My",
+      "description": "Home Assistant detectó varias entradas de Google Find My para la misma cuenta ({email}). Solo una entrada puede permanecer activa. Elimina o desactiva la entrada duplicada \"{entry_title}\" o vuelve a autenticar la cuenta correcta. Motivo: {cause}."
+    },
     "duplicate_account_entries": {
       "title": "Entradas de cuenta duplicadas detectadas",
       "description": "Esta cuenta de Google (**{email}**) ya está configurada en otro registro:\n\n{entries}\n\nDesactiva o elimina las entradas duplicadas para que solo quede activa una por cuenta y, después, vuelve a cargar la integración (o reinicia Home Assistant)."
