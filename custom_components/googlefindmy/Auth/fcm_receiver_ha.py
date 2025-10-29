@@ -97,7 +97,7 @@ except ImportError:  # pragma: no cover
     FCM_SERVER_HEARTBEAT_INTERVAL_S = 10
     FCM_IDLE_RESET_AFTER_S = 90.0
     FCM_CONNECTION_RETRY_COUNT = 5
-    FCM_MONITOR_INTERVAL_S = 1.0
+    FCM_MONITOR_INTERVAL_S = 1
     FCM_ABORT_ON_SEQ_ERROR_COUNT = 3
     DOMAIN = "googlefindmy"
     OPT_IGNORED_DEVICES = "ignored_devices"

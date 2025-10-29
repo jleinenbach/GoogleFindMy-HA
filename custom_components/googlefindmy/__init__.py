@@ -40,7 +40,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from types import MappingProxyType
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -141,12 +141,22 @@ if TYPE_CHECKING:
     except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
         from enum import StrEnum
 
-        class RegistryEntryDisablerType(StrEnum):
+        class _RegistryEntryDisablerType(StrEnum):
             """Minimal fallback matching the Home Assistant enum interface."""
 
             INTEGRATION = "integration"
+
+        RegistryEntryDisablerType = _RegistryEntryDisablerType
+
+    from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+        FcmReceiverProtocol as NovaFcmReceiverProtocol,
+    )
+    from .api import FcmReceiverProtocol as ApiFcmReceiverProtocol
 else:
     from typing import Any as RegistryEntryDisablerType
+
+    NovaFcmReceiverProtocol = FcmReceiverHA
+    ApiFcmReceiverProtocol = FcmReceiverHA
 
 try:  # pragma: no cover - compatibility shim for stripped test envs
     from homeassistant.helpers.entity_registry import (
@@ -167,14 +177,19 @@ if TYPE_CHECKING:
 else:
     from typing import Any as GoogleHomeFilterProtocol
 
+GoogleHomeFilterFactory: Callable[
+    [HomeAssistant, Mapping[str, Any]], GoogleHomeFilterProtocol
+] | None
+
 try:
     from .google_home_filter import GoogleHomeFilter as _GoogleHomeFilterClass
 except Exception:  # pragma: no cover
-    _GoogleHomeFilterClass = None
-
-GoogleHomeFilter = cast(
-    "type[GoogleHomeFilterProtocol] | None", _GoogleHomeFilterClass
-)
+    GoogleHomeFilterFactory = None
+else:
+    GoogleHomeFilterFactory = cast(
+        "Callable[[HomeAssistant, Mapping[str, Any]], GoogleHomeFilterProtocol]",
+        _GoogleHomeFilterClass,
+    )
 
 try:
     # Helper name has been `config_entry_only_config_schema` since Core 2023.7
@@ -425,6 +440,195 @@ class RuntimeData:
         return self.token_cache
 
 type MyConfigEntry = ConfigEntry
+
+
+class GoogleFindMyDomainData(TypedDict, total=False):
+    """Typed container describing objects stored under ``hass.data[DOMAIN]``."""
+
+    cloud_scan_results: Mapping[str, Any]
+    device_owner_index: dict[str, str]
+    discovery_manager: DiscoveryManager
+    entries: dict[str, RuntimeData]
+    fcm_lock: asyncio.Lock
+    fcm_receiver: FcmReceiverHA
+    fcm_refcount: int
+    fcm_lock_contention_count: int
+    initial_setup_complete: bool
+    nova_refcount: int
+    services_lock: asyncio.Lock
+    services_registered: bool
+    system_health_registered: bool
+    views_registered: bool
+
+
+def _domain_data(hass: HomeAssistant) -> GoogleFindMyDomainData:
+    """Return the typed domain data bucket, creating it on first access."""
+
+    return cast(GoogleFindMyDomainData, hass.data.setdefault(DOMAIN, {}))
+
+
+def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
+    """Return the shared FCM lock, creating it if missing."""
+
+    lock = bucket.get("fcm_lock")
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        bucket["fcm_lock"] = lock
+    return lock
+
+
+def _ensure_services_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
+    """Return the integration services lock, creating it if missing."""
+
+    lock = bucket.get("services_lock")
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        bucket["services_lock"] = lock
+    return lock
+
+
+def _ensure_entries_bucket(bucket: GoogleFindMyDomainData) -> dict[str, RuntimeData]:
+    """Return the per-entry runtime data bucket."""
+
+    entries = bucket.get("entries")
+    if not isinstance(entries, dict):
+        entries = {}
+        bucket["entries"] = entries
+    return entries
+
+
+def _ensure_device_owner_index(bucket: GoogleFindMyDomainData) -> dict[str, str]:
+    """Return the shared device owner index mapping."""
+
+    owner_index = bucket.get("device_owner_index")
+    if not isinstance(owner_index, dict):
+        owner_index = {}
+        bucket["device_owner_index"] = owner_index
+    return owner_index
+
+
+def _get_discovery_manager(
+    bucket: GoogleFindMyDomainData,
+) -> DiscoveryManager | None:
+    """Return the discovery manager if already initialized."""
+
+    manager = bucket.get("discovery_manager")
+    if isinstance(manager, DiscoveryManager):
+        return manager
+    return None
+
+
+def _set_discovery_manager(
+    bucket: GoogleFindMyDomainData, manager: DiscoveryManager
+) -> None:
+    """Store the shared discovery manager."""
+
+    bucket["discovery_manager"] = manager
+
+
+def _get_fcm_receiver(bucket: GoogleFindMyDomainData) -> FcmReceiverHA | None:
+    """Return the cached shared FCM receiver if present."""
+
+    receiver = bucket.get("fcm_receiver")
+    if isinstance(receiver, FcmReceiverHA):
+        return receiver
+    return None
+
+
+def _set_fcm_receiver(bucket: GoogleFindMyDomainData, receiver: FcmReceiverHA) -> None:
+    """Store the shared FCM receiver."""
+
+    bucket["fcm_receiver"] = receiver
+
+
+def _pop_fcm_receiver(bucket: GoogleFindMyDomainData) -> FcmReceiverHA | None:
+    """Remove and return the cached shared FCM receiver."""
+
+    receiver = bucket.pop("fcm_receiver", None)
+    if isinstance(receiver, FcmReceiverHA):
+        return receiver
+    return None
+
+
+def _pop_any_fcm_receiver(bucket: GoogleFindMyDomainData) -> object | None:
+    """Remove and return the cached shared FCM receiver regardless of type."""
+
+    return bucket.pop("fcm_receiver", None)
+
+
+def _get_fcm_refcount(bucket: GoogleFindMyDomainData) -> int:
+    """Return the current shared FCM refcount."""
+
+    value = bucket.get("fcm_refcount")
+    if isinstance(value, int):
+        return value
+    return 0
+
+
+def _set_fcm_refcount(bucket: GoogleFindMyDomainData, value: int) -> None:
+    """Persist the shared FCM refcount."""
+
+    bucket["fcm_refcount"] = value
+
+
+def _get_nova_refcount(bucket: GoogleFindMyDomainData) -> int:
+    """Return the Nova API session provider refcount."""
+
+    value = bucket.get("nova_refcount")
+    if isinstance(value, int):
+        return value
+    return 0
+
+
+def _set_nova_refcount(bucket: GoogleFindMyDomainData, value: int) -> None:
+    """Persist the Nova API session provider refcount."""
+
+    bucket["nova_refcount"] = value
+
+
+def _ensure_cloud_scan_results(
+    bucket: GoogleFindMyDomainData, results: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """Ensure the shared cloud discovery results mapping is stored."""
+
+    existing = bucket.get("cloud_scan_results")
+    if isinstance(existing, Mapping):
+        return existing
+    bucket["cloud_scan_results"] = results
+    return results
+
+
+def _domain_fcm_provider(hass: HomeAssistant) -> FcmReceiverHA:
+    """Return the shared FCM receiver for provider callbacks."""
+
+    bucket = _domain_data(hass)
+    receiver = _get_fcm_receiver(bucket)
+    if receiver is None:  # pragma: no cover - defensive guard
+        raise RuntimeError("Shared FCM receiver unavailable")
+    return receiver
+
+
+async def _async_stop_receiver_if_possible(receiver: object | None) -> None:
+    """Invoke ``async_stop`` on ``receiver`` when available."""
+
+    if receiver is None:
+        return
+
+    stop_callable = getattr(receiver, "async_stop", None)
+    if stop_callable is None:
+        return
+
+    try:
+        result = stop_callable()
+    except Exception as err:  # pragma: no cover - defensive
+        _LOGGER.debug("Failed to call async_stop on stale FCM receiver: %s", err)
+        return
+
+    if inspect.isawaitable(result):
+        try:
+            await cast(Awaitable[object], result)
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("async_stop coroutine failed: %s", err)
 
 
 def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> str:
@@ -742,7 +946,10 @@ async def _async_relink_button_devices(hass: HomeAssistant, entry: ConfigEntry) 
                 device = device_registry.async_get_device(identifiers={candidate})
                 if device is None:
                     continue
-                if entry.entry_id not in getattr(device, "config_entries", ()):  # type: ignore[arg-type]
+                config_entries = cast(
+                    Collection[str], getattr(device, "config_entries", ())
+                )
+                if entry.entry_id not in config_entries:
                     continue
                 if _device_is_service_device(device, entry.entry_id):
                     continue
@@ -1773,15 +1980,17 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         - Maintains a reference counter to support multiple entries.
         - NEW: attaches HA context to enable owner-index fallback routing.
     """
-    bucket = hass.data.setdefault(DOMAIN, {})
-    fcm_lock = bucket.setdefault("fcm_lock", asyncio.Lock())
+    bucket = _domain_data(hass)
+    fcm_lock: asyncio.Lock = _ensure_fcm_lock(bucket)
     if fcm_lock.locked():
-        bucket["fcm_lock_contention_count"] = (
-            int(bucket.get("fcm_lock_contention_count", 0)) + 1
-        )
+        contention = bucket.get("fcm_lock_contention_count")
+        if not isinstance(contention, int):
+            contention = 0
+        bucket["fcm_lock_contention_count"] = contention + 1
     async with fcm_lock:
-        refcount = int(bucket.get("fcm_refcount", 0))
-        fcm: FcmReceiverHA | None = bucket.get("fcm_receiver")
+        refcount = _get_fcm_refcount(bucket)
+        raw_receiver = cast(object | None, bucket.get("fcm_receiver"))
+        fcm = raw_receiver if isinstance(raw_receiver, FcmReceiverHA) else None
 
         def _method_is_coroutine(receiver: object, name: str) -> bool:
             """Return True if receiver.name is an async callable."""
@@ -1804,23 +2013,24 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
                 return inspect.iscoroutinefunction(cls_candidate)
             return False
 
-        if fcm is not None and (
+        if raw_receiver is not None and not isinstance(raw_receiver, FcmReceiverHA):
+            _LOGGER.warning(
+                "Discarding cached FCM receiver with unexpected type: %s",
+                type(raw_receiver).__name__,
+            )
+            stale = _pop_any_fcm_receiver(bucket)
+            await _async_stop_receiver_if_possible(stale)
+            fcm = None
+        elif fcm is not None and (
             not _method_is_coroutine(fcm, "async_register_for_location_updates")
             or not _method_is_coroutine(fcm, "async_unregister_for_location_updates")
         ):
             _LOGGER.warning(
                 "Discarding cached FCM receiver lacking async registration methods"
             )
-            stale = bucket.pop("fcm_receiver", None)
+            stale = _pop_any_fcm_receiver(bucket)
+            await _async_stop_receiver_if_possible(stale)
             fcm = None
-            stop_callable = getattr(stale, "async_stop", None)
-            if stop_callable is not None:
-                try:
-                    result = stop_callable()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as err:  # pragma: no cover - defensive
-                    _LOGGER.debug("Failed to stop stale FCM receiver: %s", err)
 
         if fcm is None:
             fcm = FcmReceiverHA()
@@ -1840,33 +2050,44 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
             except Exception as err:
                 _LOGGER.debug("FCM attach_hass skipped: %s", err)
 
-            bucket["fcm_receiver"] = fcm
+            _set_fcm_receiver(bucket, fcm)
             _LOGGER.info("Shared FCM receiver initialized")
 
             # Register provider for both consumer modules (exactly once on first acquire)
             # Re-registering ensures downstream modules resolve the refreshed instance.
-            loc_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
-            api_register_fcm_provider(lambda: hass.data[DOMAIN].get("fcm_receiver"))
+            def provider() -> FcmReceiverHA:
+                """Return the shared FCM receiver for integration consumers."""
 
-        bucket["fcm_refcount"] = refcount + 1
-        _LOGGER.debug("FCM refcount -> %s", bucket["fcm_refcount"])
+                return _domain_fcm_provider(hass)
+
+            provider_fn: Callable[[], FcmReceiverHA] = provider
+            loc_register_fcm_provider(
+                cast(Callable[[], NovaFcmReceiverProtocol], provider_fn)
+            )
+            api_register_fcm_provider(
+                cast(Callable[[], ApiFcmReceiverProtocol], provider_fn)
+            )
+
+        new_refcount = refcount + 1
+        _set_fcm_refcount(bucket, new_refcount)
+        _LOGGER.debug("FCM refcount -> %s", new_refcount)
         return fcm
 
 
 async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
     """Decrease refcount; stop and unregister provider when it reaches zero."""
-    bucket = hass.data.setdefault(DOMAIN, {})
-    fcm_lock = bucket.setdefault("fcm_lock", asyncio.Lock())
+    bucket = _domain_data(hass)
+    fcm_lock: asyncio.Lock = _ensure_fcm_lock(bucket)
     async with fcm_lock:
-        refcount = int(bucket.get("fcm_refcount", 0)) - 1
+        refcount = _get_fcm_refcount(bucket) - 1
         refcount = max(refcount, 0)
-        bucket["fcm_refcount"] = refcount
+        _set_fcm_refcount(bucket, refcount)
         _LOGGER.debug("FCM refcount -> %s", refcount)
 
         if refcount != 0:
             return
 
-        fcm: FcmReceiverHA | None = bucket.pop("fcm_receiver", None)
+        fcm = _pop_fcm_receiver(bucket)
 
         # Unregister providers first (consumers will see provider=None immediately)
         try:
@@ -1930,19 +2151,20 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         even if no config entry is loaded, which enables frontend validation of
         automations referencing these services.
     """
-    bucket = hass.data.setdefault(DOMAIN, {})
+    bucket = _domain_data(hass)
     runtime = _cloud_discovery_runtime(hass)
-    discovery_manager: DiscoveryManager | None = bucket.get("discovery_manager")
+    discovery_manager = _get_discovery_manager(bucket)
     if discovery_manager is None:
         discovery_manager = await async_initialize_discovery_runtime(hass)
-        bucket["discovery_manager"] = discovery_manager
-    bucket.setdefault("cloud_scan_results", runtime["results"])
-    bucket.setdefault("entries", {})  # entry_id -> RuntimeData
-    bucket.setdefault(
-        "device_owner_index", {}
-    )  # canonical_id -> entry_id (E2.5 scaffold)
+        _set_discovery_manager(bucket, discovery_manager)
+    _ensure_cloud_scan_results(bucket, runtime["results"])
+    _ensure_entries_bucket(bucket)  # entry_id -> RuntimeData
+    _ensure_device_owner_index(bucket)  # canonical_id -> entry_id (E2.5 scaffold)
 
-    if not bucket.get("system_health_registered"):
+    system_health_registered = bucket.get("system_health_registered")
+    if not isinstance(system_health_registered, bool):
+        system_health_registered = False
+    if not system_health_registered:
         try:
             await system_health_module.async_register(hass)
         except Exception as err:  # pragma: no cover - diagnostics only
@@ -1951,9 +2173,12 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             bucket["system_health_registered"] = True
 
     # Use a lock + idempotent flag to avoid double registration on racey startups.
-    services_lock = bucket.setdefault("services_lock", asyncio.Lock())
+    services_lock: asyncio.Lock = _ensure_services_lock(bucket)
     async with services_lock:
-        if not bucket.get("services_registered"):
+        services_registered = bucket.get("services_registered")
+        if not isinstance(services_registered, bool):
+            services_registered = False
+        if not services_registered:
             svc_ctx = {
                 "domain": DOMAIN,
                 "resolve_canonical": _resolve_canonical_from_any,
@@ -2030,10 +2255,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     pm_setup_start = time.monotonic()
 
     # Distinguish cold start vs. reload
-    domain_bucket = hass.data.setdefault(DOMAIN, {})
-    is_reload = bool(domain_bucket.get("initial_setup_complete", False))
-    domain_bucket.setdefault("device_owner_index", {})  # ensure present (E2.5)
-    domain_bucket.setdefault("nova_refcount", 0)
+    domain_bucket = _domain_data(hass)
+    initial_setup_complete = domain_bucket.get("initial_setup_complete")
+    is_reload = (
+        bool(initial_setup_complete)
+        if isinstance(initial_setup_complete, bool)
+        else False
+    )
+    _ensure_device_owner_index(domain_bucket)  # ensure present (E2.5)
+    if "nova_refcount" not in domain_bucket:
+        _set_nova_refcount(domain_bucket, 0)
 
     # 1) Token cache: create/register early (ENTRY-SCOPED ONLY)
     legacy_path = os.path.join(
@@ -2133,17 +2364,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             except Exception as err:
                 _LOGGER.debug("Nova API register_hass() raised: %s", err)
             else:
-                bucket = hass.data.setdefault(DOMAIN, {})
-                refcount = int(bucket.get("nova_refcount", 0)) + 1
-                bucket["nova_refcount"] = refcount
+                domain_bucket = _domain_data(hass)
+                refcount = _get_nova_refcount(domain_bucket) + 1
+                _set_nova_refcount(domain_bucket, refcount)
                 _LOGGER.debug("Nova session provider refcount -> %s", refcount)
 
                 def _release_nova_session_provider() -> None:
-                    inner_bucket = hass.data.setdefault(DOMAIN, {})
-                    inner_refcount = max(
-                        int(inner_bucket.get("nova_refcount", 0)) - 1, 0
-                    )
-                    inner_bucket["nova_refcount"] = inner_refcount
+                    inner_bucket = _domain_data(hass)
+                    inner_refcount = max(_get_nova_refcount(inner_bucket) - 1, 0)
+                    _set_nova_refcount(inner_bucket, inner_refcount)
                     _LOGGER.debug(
                         "Nova session provider refcount -> %s", inner_refcount
                     )
@@ -2277,7 +2506,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         fcm_receiver=fcm,
     )
     entry.runtime_data = runtime_data
-    hass.data[DOMAIN].setdefault("entries", {})[entry.entry_id] = runtime_data
+    entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
+    entries_bucket[entry.entry_id] = runtime_data
 
     entity_registry = er.async_get(hass)
     registry_entries_iterable: Iterable[Any] = _iter_config_entry_entities(
@@ -2302,12 +2532,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
 
     # Owner-index scaffold (E2.5): coordinator will eventually claim canonical_ids
-    hass.data[DOMAIN].setdefault("device_owner_index", {})
+    _ensure_device_owner_index(domain_bucket)
 
     # Optional: attach Google Home filter (options-first configuration)
-    if GoogleHomeFilter is not None:
+    if GoogleHomeFilterFactory is not None:
         try:
-            google_home_filter = GoogleHomeFilter(hass, _effective_config(entry))
+            google_home_filter = GoogleHomeFilterFactory(hass, _effective_config(entry))
             runtime_data.google_home_filter = google_home_filter
             _LOGGER.debug("Initialized Google Home filter (options-first)")
         except Exception as err:
@@ -2340,7 +2570,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         ]
     )
 
-    bucket = hass.data.setdefault(DOMAIN, {})
+    bucket = domain_bucket
 
     # Coordinator setup (DR listeners, initial index, etc.)
     try:
@@ -2351,7 +2581,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
 
     # Register map views (idempotent across multi-entry)
-    if not bucket.get("views_registered"):
+    views_registered = bucket.get("views_registered")
+    if not isinstance(views_registered, bool):
+        views_registered = False
+    if not views_registered:
         hass.http.register_view(GoogleFindMyMapView(hass))
         hass.http.register_view(GoogleFindMyMapRedirectView(hass))
         bucket["views_registered"] = True
@@ -2655,8 +2888,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     entries_bucket: dict[str, RuntimeData] | None = None
 
     try:
-        bucket = hass.data.setdefault(DOMAIN, {})
-        entries_bucket = bucket.setdefault("entries", {})
+        bucket = _domain_data(hass)
+        entries_bucket = _ensure_entries_bucket(bucket)
 
         stored_runtime = entries_bucket.get(entry.entry_id)
         if not isinstance(runtime_data, RuntimeData) and isinstance(
@@ -2678,7 +2911,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     unloaded = bool(await hass.config_entries.async_unload_platforms(entry, PLATFORMS))
     if unloaded:
         if entries_bucket is None:
-            entries_bucket = hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})
+            entries_bucket = _ensure_entries_bucket(_domain_data(hass))
 
         if subentry_manager is None:
             stored = entries_bucket.get(entry.entry_id)
@@ -2730,8 +2963,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Cleanup owner index (E2.5)
     try:
-        bucket = hass.data.setdefault(DOMAIN, {})
-        owner_index: dict[str, str] = bucket.setdefault("device_owner_index", {})
+        bucket = _domain_data(hass)
+        owner_index: dict[str, str] = _ensure_device_owner_index(bucket)
         stale = [cid for cid, eid in list(owner_index.items()) if eid == entry.entry_id]
         for cid in stale:
             owner_index.pop(cid, None)
