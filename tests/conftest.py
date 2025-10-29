@@ -10,7 +10,7 @@ import asyncio
 import importlib
 import inspect
 from collections.abc import Callable, Iterable, Mapping
-from typing import Any
+from typing import Any, cast
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from datetime import datetime, timezone
 import json
@@ -1145,17 +1145,11 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
         return _CoordinatorStub
 
     return _factory
-
-
 _stub_homeassistant()
 
-from custom_components.googlefindmy.const import (
-    SERVICE_SUBENTRY_KEY as _SERVICE_SUBENTRY_KEY,
-    TRACKER_SUBENTRY_KEY as _TRACKER_SUBENTRY_KEY,
-)
-
-SERVICE_SUBENTRY_KEY = _SERVICE_SUBENTRY_KEY
-TRACKER_SUBENTRY_KEY = _TRACKER_SUBENTRY_KEY
+const_module = importlib.import_module("custom_components.googlefindmy.const")
+SERVICE_SUBENTRY_KEY = cast(str, getattr(const_module, "SERVICE_SUBENTRY_KEY"))
+TRACKER_SUBENTRY_KEY = cast(str, getattr(const_module, "TRACKER_SUBENTRY_KEY"))
 
 components_pkg = importlib.import_module("custom_components")
 components_pkg.__path__ = [str(ROOT / "custom_components")]
