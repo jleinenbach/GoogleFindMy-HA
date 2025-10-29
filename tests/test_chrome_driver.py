@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import sys
 from types import SimpleNamespace
 
@@ -40,6 +41,10 @@ class FakeChromeOptions:
 
     def add_argument(self, argument: str) -> None:
         self.arguments.append(argument)
+
+
+class SentinelError(RuntimeError):
+    """Sentinel error raised by the Chrome stub."""
 
 
 @pytest.fixture(autouse=True)
@@ -90,3 +95,30 @@ def test_create_driver_headless_passes_options_to_uc(monkeypatch: pytest.MonkeyP
         "--disable-gpu",
         "--no-sandbox",
     ]
+
+
+def test_create_driver_fallback_logs_and_raises_runtime_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The driver falls back to the system Chrome binary and raises a runtime error when startup fails twice."""
+
+    caplog.set_level(logging.WARNING)
+
+    chrome_calls: list[FakeChromeOptions] = []
+
+    def chrome_stub(*, options: FakeChromeOptions) -> object:
+        chrome_calls.append(options)
+        raise SentinelError("driver start failed")
+
+    monkeypatch.setattr(chrome_driver.uc, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.setattr(chrome_driver.uc, "Chrome", chrome_stub)
+    monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/opt/chrome")
+
+    with pytest.raises(RuntimeError):
+        chrome_driver.create_driver(headless=True)
+
+    assert len(chrome_calls) == 2, "Both bundled and fallback Chrome invocations should be attempted"
+    assert chrome_calls[0].binary_location is None
+    assert chrome_calls[1].binary_location == "/opt/chrome"
+    assert "Default ChromeDriver startup failed" in " ".join(caplog.messages)
+    assert "ChromeDriver failed using system binary" in " ".join(caplog.messages)
