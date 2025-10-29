@@ -117,6 +117,7 @@ from .const import (
     service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator
+from .email import normalize_email, unique_account_id
 from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
 from .discovery import (
     DiscoveryManager,
@@ -1430,64 +1431,67 @@ async def _async_soft_migrate_data_to_options(
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Handle config entry migrations for legacy Google Find My entries."""
 
-    target_version = CONFIG_ENTRY_VERSION
-    raw_email: str | None = None
-    normalized_email = ""
-    data_changed = False
+    raw_email, normalized_email = _resolve_entry_email(entry)
 
-    existing_email = entry.data.get(CONF_GOOGLE_EMAIL)
-    if isinstance(existing_email, str) and existing_email.strip():
-        raw_email = existing_email.strip()
-    else:
-        secrets_bundle = entry.data.get(DATA_SECRET_BUNDLE)
-        if isinstance(secrets_bundle, dict):
-            for key in ("google_email", "username", "Email", "email"):
-                candidate = secrets_bundle.get(key)
-                if isinstance(candidate, str) and candidate.strip():
-                    raw_email = candidate.strip()
-                    break
-
-    if isinstance(raw_email, str) and raw_email:
-        normalized_email = _normalize_email(raw_email)
-        if entry.data.get(CONF_GOOGLE_EMAIL) != raw_email:
-            new_data = dict(entry.data)
-            new_data[CONF_GOOGLE_EMAIL] = raw_email
-            data_changed = True
-        else:
-            new_data = dict(entry.data)
-    else:
-        new_data = dict(entry.data)
+    new_data = dict(entry.data)
+    if raw_email and new_data.get(CONF_GOOGLE_EMAIL) != raw_email:
+        new_data[CONF_GOOGLE_EMAIL] = raw_email
 
     update_kwargs: dict[str, Any] = {}
-    if data_changed:
+    if new_data != entry.data:
         update_kwargs["data"] = new_data
 
     if raw_email and entry.title != raw_email:
         update_kwargs["title"] = raw_email
 
-    if normalized_email and entry.unique_id != normalized_email:
-        update_kwargs["unique_id"] = normalized_email
+    if entry.version != CONFIG_ENTRY_VERSION:
+        update_kwargs["version"] = CONFIG_ENTRY_VERSION
+
+    conflict: ConfigEntry | None = None
+    others = [
+        candidate
+        for candidate in hass.config_entries.async_entries(DOMAIN)
+        if candidate.entry_id != entry.entry_id
+    ]
+
+    for other in others:
+        other_normalized = _extract_email_from_entry(other)
+        if normalized_email and other_normalized == normalized_email:
+            conflict = other
+            break
+
+    unique_id = unique_account_id(normalized_email)
+    if unique_id and entry.unique_id != unique_id and not conflict:
+        update_kwargs["unique_id"] = unique_id
+
+    if conflict and normalized_email:
+        _log_duplicate_and_raise_repair_issue(
+            hass,
+            entry,
+            normalized_email,
+            cause="pre_migration_duplicate",
+        )
 
     if update_kwargs:
+        if conflict and "unique_id" in update_kwargs:
+            update_kwargs.pop("unique_id", None)
+
         try:
             hass.config_entries.async_update_entry(entry, **update_kwargs)
-        except TypeError:
-            unique_id_value = update_kwargs.pop("unique_id", None)
+        except ValueError:
+            if normalized_email:
+                _log_duplicate_and_raise_repair_issue(
+                    hass,
+                    entry,
+                    normalized_email,
+                    cause="unique_id_conflict",
+                )
+            update_kwargs.pop("unique_id", None)
             if update_kwargs:
                 hass.config_entries.async_update_entry(entry, **update_kwargs)
-            if unique_id_value and entry.unique_id != unique_id_value:
-                if hasattr(entry, "_unique_id"):
-                    try:
-                        setattr(entry, "_unique_id", unique_id_value)
-                    except Exception as err:  # pragma: no cover - defensive fallback
-                        _LOGGER.debug(
-                            "Unable to set unique_id on entry '%s': %s",
-                            entry.entry_id,
-                            err,
-                        )
 
-    if entry.version < target_version:
-        entry.version = target_version
+    if not conflict:
+        _clear_duplicate_account_issue(hass, entry)
 
     await _async_soft_migrate_data_to_options(hass, entry)
 
@@ -2110,37 +2114,148 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
 # ------------------------------ Setup / Unload -----------------------------
 
 
-def _normalize_email(value: str | None) -> str:
-    """Normalize an email for comparisons/unique-id semantics (lowercased, trimmed)."""
-    return (value or "").strip().lower()
+def _resolve_entry_email(entry: ConfigEntry) -> tuple[str | None, str | None]:
+    """Return the raw and normalized e-mail associated with a config entry."""
+
+    email_value = entry.data.get(CONF_GOOGLE_EMAIL)
+    raw_email: str | None
+    if isinstance(email_value, str) and email_value.strip():
+        raw_email = email_value.strip()
+    else:
+        raw_email = None
+        secrets_bundle = entry.data.get(DATA_SECRET_BUNDLE)
+        if isinstance(secrets_bundle, Mapping):
+            for key in ("google_email", "username", "Email", "email"):
+                candidate = secrets_bundle.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    raw_email = candidate.strip()
+                    break
+
+    normalized_email = normalize_email(raw_email)
+    return raw_email, normalized_email
 
 
-def _extract_email_from_entry(entry: ConfigEntry) -> str:
-    """Best-effort extraction of the Google email from a config entry.
+def _extract_email_from_entry(entry: ConfigEntry) -> str | None:
+    """Return the normalized email for ``entry`` if available."""
 
-    Preferred:
-      - entry.data[CONF_GOOGLE_EMAIL]
+    _, normalized = _resolve_entry_email(entry)
+    return normalized
 
-    Fallbacks (legacy secrets bundle):
-      - entry.data[DATA_SECRET_BUNDLE]['username'] or ['Email'] if present.
 
-    Returns:
-      Normalized email string or empty string if unavailable.
-    """
-    email = entry.data.get(CONF_GOOGLE_EMAIL)
-    if isinstance(email, str) and email:
-        return _normalize_email(email)
+def _log_duplicate_and_raise_repair_issue(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    normalized_email: str,
+    *,
+    cause: str,
+) -> None:
+    """Create or refresh a Repair issue for duplicate account configuration."""
+
+    _LOGGER.warning(
+        "googlefindmy %s: duplicate account %s detected (%s)",
+        entry.entry_id,
+        normalized_email,
+        cause,
+    )
+    try:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            f"duplicate_account_{entry.entry_id}",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="duplicate_account",
+            translation_placeholders={
+                "email": normalized_email,
+                "entry_title": entry.title or entry.entry_id,
+                "cause": cause,
+            },
+        )
+    except Exception as err:  # pragma: no cover - defensive log only
+        _LOGGER.debug("Failed to create duplicate-account repair issue: %s", err)
+
+
+def _clear_duplicate_account_issue(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove the duplicate-account Repair issue when resolved."""
 
     try:
-        secrets = entry.data.get(DATA_SECRET_BUNDLE) or {}
-        if isinstance(secrets, dict):
-            cand = secrets.get("username") or secrets.get("Email")
-            if isinstance(cand, str) and cand:
-                return _normalize_email(cand)
+        ir.async_delete_issue(hass, DOMAIN, f"duplicate_account_{entry.entry_id}")
     except Exception:
-        pass
+        return
 
-    return ""
+
+def _select_authoritative_entry_id(
+    entry: ConfigEntry, duplicates: Sequence[ConfigEntry]
+) -> str:
+    """Return the entry_id that should remain active for a duplicate account."""
+
+    if not duplicates:
+        return entry.entry_id
+    candidates = [entry, *duplicates]
+    # Deterministic ordering by entry_id keeps behaviour predictable across restarts.
+    authoritative = min(candidates, key=lambda candidate: candidate.entry_id)
+    return authoritative.entry_id
+
+
+def _ensure_post_migration_consistency(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> tuple[bool, str | None]:
+    """Repair stale metadata and detect duplicates before setup."""
+
+    raw_email, normalized_email = _resolve_entry_email(entry)
+
+    new_data = dict(entry.data)
+    if raw_email and new_data.get(CONF_GOOGLE_EMAIL) != raw_email:
+        new_data[CONF_GOOGLE_EMAIL] = raw_email
+
+    update_kwargs: dict[str, Any] = {}
+    if new_data != entry.data:
+        update_kwargs["data"] = new_data
+
+    if raw_email and entry.title != raw_email:
+        update_kwargs["title"] = raw_email
+
+    unique_id = unique_account_id(normalized_email)
+    if unique_id and entry.unique_id != unique_id:
+        update_kwargs["unique_id"] = unique_id
+
+    if update_kwargs:
+        try:
+            hass.config_entries.async_update_entry(entry, **update_kwargs)
+        except ValueError:
+            if normalized_email:
+                _log_duplicate_and_raise_repair_issue(
+                    hass,
+                    entry,
+                    normalized_email,
+                    cause="unique_id_conflict_setup",
+                )
+            update_kwargs.pop("unique_id", None)
+            if update_kwargs:
+                hass.config_entries.async_update_entry(entry, **update_kwargs)
+
+    duplicates: list[ConfigEntry] = []
+    if normalized_email:
+        duplicates = [
+            candidate
+            for candidate in hass.config_entries.async_entries(DOMAIN)
+            if candidate.entry_id != entry.entry_id
+            and _extract_email_from_entry(candidate) == normalized_email
+        ]
+
+    if duplicates and normalized_email:
+        _log_duplicate_and_raise_repair_issue(
+            hass,
+            entry,
+            normalized_email,
+            cause="setup_duplicate",
+        )
+    else:
+        _clear_duplicate_account_issue(hass, entry)
+
+    authoritative_entry_id = _select_authoritative_entry_id(entry, duplicates)
+    should_setup = not duplicates or entry.entry_id == authoritative_entry_id
+    return should_setup, normalized_email
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
@@ -2211,54 +2326,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
       6) Schedule initial refresh after HA is fully started.
     """
     # --- Multi-entry policy: allow MA; block duplicate-account (same email) ----
-    all_entries = hass.config_entries.async_entries(DOMAIN)
-    active_entries = [e for e in all_entries if _is_active_entry(e)]
-
     # Legacy issue cleanup: we no longer block on multiple config entries
     try:
         ir.async_delete_issue(hass, DOMAIN, "multiple_config_entries")
     except Exception:
         pass
 
-    # Duplicate-account detection (same normalized email across entries)
-    current_email = _extract_email_from_entry(entry)
-    if current_email:
-        dupes = [
-            e
-            for e in active_entries
-            if e.entry_id != entry.entry_id
-            and _extract_email_from_entry(e) == current_email
-        ]
-        if dupes:
-            # Create a repair issue and abort only this entry; the existing one remains active.
-            titles = ", ".join([d.title or d.entry_id for d in dupes])
-            ir.async_create_issue(
-                hass,
-                DOMAIN,
-                f"duplicate_account_{entry.entry_id}",
-                is_fixable=False,
-                severity=ir.IssueSeverity.ERROR,
-                translation_key="duplicate_account_entries",
-                translation_placeholders={
-                    "email": current_email,
-                    "entries": titles,
-                },
-            )
-            _LOGGER.error(
-                "Duplicate Google account detected for '%s' (email=%s). "
-                "This config entry will not be loaded to prevent conflicts.",
-                entry.title or entry.entry_id,
-                current_email,
-            )
-            return False
-
-    # Ensure resolved duplicate-account issues are cleared before continuing setup.
-    try:
-        ir.async_delete_issue(
-            hass, DOMAIN, f"duplicate_account_{entry.entry_id}"
+    should_setup, normalized_email = _ensure_post_migration_consistency(hass, entry)
+    if not should_setup:
+        _LOGGER.warning(
+            "Skipping setup for %s due to duplicate account %s",
+            entry.entry_id,
+            normalized_email or "",
         )
-    except Exception:
-        pass
+        return False
 
     pm_setup_start = time.monotonic()
 

@@ -13,6 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN, INTEGRATION_VERSION
+from .email import normalize_email
 
 if TYPE_CHECKING:
     from homeassistant.components.system_health import SystemHealthRegistration
@@ -46,26 +47,17 @@ def _format_epoch_utc(value: Any) -> str | None:
     except (OverflowError, OSError, ValueError):
         return None
     return dt.isoformat().replace("+00:00", "Z")
-
-
-def _normalize_email(value: str | None) -> str:
-    """Return a normalized email address (lowercase, trimmed)."""
-    if not isinstance(value, str):
-        return ""
-    return value.strip().lower()
-
-
 def _email_hash(entry: ConfigEntry) -> str | None:
     """Return a truncated SHA-256 hash for the account email (or None if absent)."""
     email = entry.data.get(CONF_GOOGLE_EMAIL)
     if isinstance(email, str) and email:
-        normalized = _normalize_email(email)
+        normalized = normalize_email(email)
     else:
         bundle = entry.data.get(DATA_SECRET_BUNDLE)
-        normalized = ""
+        normalized: str | None = None
         if isinstance(bundle, dict):
             candidate = bundle.get("username") or bundle.get("Email")
-            normalized = _normalize_email(candidate)
+            normalized = normalize_email(candidate)
     if not normalized:
         return None
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
