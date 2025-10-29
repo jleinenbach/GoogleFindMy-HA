@@ -908,6 +908,71 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         asyncio.set_event_loop(None)
 
 
+def test_duplicate_account_issue_cleanup_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolved duplicate-account issues are cleared during normal setup."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy")
+
+        config_entries_module = importlib.import_module("homeassistant.config_entries")
+        state_cls = config_entries_module.ConfigEntryState
+        if not hasattr(state_cls, "SETUP_IN_PROGRESS"):
+            setattr(state_cls, "SETUP_IN_PROGRESS", "setup_in_progress")
+        if not hasattr(state_cls, "SETUP_RETRY"):
+            setattr(state_cls, "SETUP_RETRY", "setup_retry")
+
+        entry = _StubConfigEntry()
+        hass = _StubHass(entry, loop)
+
+        delete_calls: list[tuple[Any, str, str]] = []
+
+        def _delete_issue(
+            hass_arg: Any, domain: str, issue_id: str, **_: Any
+        ) -> None:
+            delete_calls.append((hass_arg, domain, issue_id))
+
+        monkeypatch.setattr(
+            integration.ir, "async_delete_issue", _delete_issue, raising=False
+        )
+
+        create_calls: list[tuple[Any, str, str]] = []
+
+        def _record_create(
+            hass_arg: Any, domain: str, issue_id: str, **_: Any
+        ) -> None:
+            create_calls.append((hass_arg, domain, issue_id))
+
+        monkeypatch.setattr(
+            integration.ir, "async_create_issue", _record_create, raising=False
+        )
+
+        def _fail_domain_data(_hass: Any) -> None:
+            raise RuntimeError("stop after duplicate cleanup")
+
+        monkeypatch.setattr(integration, "_domain_data", _fail_domain_data)
+
+        with pytest.raises(RuntimeError):
+            loop.run_until_complete(integration.async_setup_entry(hass, entry))
+
+        issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
+        assert (
+            f"duplicate_account_{entry.entry_id}" in issue_ids
+        ), "Expected duplicate-account cleanup to delete stale issue"
+        cleanup_index = issue_ids.index(f"duplicate_account_{entry.entry_id}")
+        cleanup_call = delete_calls[cleanup_index]
+        assert cleanup_call[0] is hass
+        assert cleanup_call[1] == DOMAIN
+        assert create_calls == []
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
 def test_service_no_active_entry_placeholders() -> None:
     """Service validation exposes counts/list placeholders for inactive setups."""
 

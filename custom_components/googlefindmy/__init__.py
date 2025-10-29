@@ -2252,6 +2252,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             )
             return False
 
+    # Ensure resolved duplicate-account issues are cleared before continuing setup.
+    try:
+        ir.async_delete_issue(
+            hass, DOMAIN, f"duplicate_account_{entry.entry_id}"
+        )
+    except Exception:
+        pass
+
     pm_setup_start = time.monotonic()
 
     # Distinguish cold start vs. reload
