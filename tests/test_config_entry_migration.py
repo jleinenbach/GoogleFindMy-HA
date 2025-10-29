@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from importlib import import_module
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Iterable
 from unittest.mock import Mock
@@ -31,13 +31,9 @@ class _MigrationTestEntry:
     entry_id: str
     data: dict[str, Any]
     title: str = ""
-    options: dict[str, Any] = None  # type: ignore[assignment]
+    options: dict[str, Any] = field(default_factory=dict)
     version: int = 1
     unique_id: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.options is None:
-            self.options = {}
 
     domain: str = DOMAIN
 
@@ -131,7 +127,7 @@ def test_async_migrate_entry_happy_path(monkeypatch: pytest.MonkeyPatch) -> None
     assert hass.config_entries.updated
     update_payload = hass.config_entries.updated[0][1]
     assert update_payload["unique_id"] == expected_unique_id
-    assert update_payload["version"] == integration.CONFIG_ENTRY_VERSION
+    assert "version" not in update_payload
 
 
 def test_async_migrate_entry_detects_duplicate_before_unique_id(
@@ -176,6 +172,7 @@ def test_async_migrate_entry_detects_duplicate_before_unique_id(
     assert hass.config_entries.updated
     update_payload = hass.config_entries.updated[0][1]
     assert "unique_id" not in update_payload
+    assert "version" not in update_payload
     assert issue_helper.call_count == 1
     assert issue_helper.call_args.kwargs["cause"] == "pre_migration_duplicate"
 
@@ -214,6 +211,8 @@ def test_async_migrate_entry_value_error_fallback(monkeypatch: pytest.MonkeyPatc
     second_payload = hass.config_entries.updated[1][1]
     assert "unique_id" in first_payload
     assert "unique_id" not in second_payload
+    assert "version" not in first_payload
+    assert "version" not in second_payload
     assert issue_helper.call_count == 1
     assert issue_helper.call_args.kwargs["cause"] == "unique_id_conflict"
 
@@ -260,6 +259,29 @@ def test_async_migrate_entry_recovers_partial_state(monkeypatch: pytest.MonkeyPa
     assert "data" in payload
     assert issue_helper.call_count == 1
     assert issue_helper.call_args.kwargs["cause"] == "pre_migration_duplicate"
+
+
+def test_async_migrate_entry_updates_version_without_update_call() -> None:
+    """Entries requiring only a version bump should still persist the update."""
+
+    integration = import_module("custom_components.googlefindmy")
+
+    email = "stable@example.com"
+    normalized = normalize_email(email)
+    entry = _MigrationTestEntry(
+        entry_id="entry-stable",
+        data={CONF_GOOGLE_EMAIL: email},
+        title=email,
+        version=1,
+        unique_id=unique_account_id(normalized),
+    )
+    hass = _make_hass_with_entries(entry)
+
+    result = asyncio.run(integration.async_migrate_entry(hass, entry))
+
+    assert result is True
+    assert hass.config_entries.updated == []
+    assert entry.version == integration.CONFIG_ENTRY_VERSION
 
 
 

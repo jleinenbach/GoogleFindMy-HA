@@ -62,6 +62,7 @@ async def test_rebuild_registry_handles_migration_error(
     await handler(ServiceCall({ATTR_MODE: MODE_REBUILD}))
 
     assert entry_manager.reload_calls == [entry.entry_id]
+    assert entry_manager.migrate_calls == [entry.entry_id]
     assert ("soft", entry.entry_id) in migration_calls
     assert ("unique", entry.entry_id) in migration_calls
     assert any("migration error state" in record.message for record in caplog.records)

@@ -1449,8 +1449,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if raw_email and entry.title != raw_email:
         update_kwargs["title"] = raw_email
 
-    if entry.version != CONFIG_ENTRY_VERSION:
-        update_kwargs["version"] = CONFIG_ENTRY_VERSION
+    version_update_required = entry.version != CONFIG_ENTRY_VERSION
 
     conflict: ConfigEntry | None = None
     others = [
@@ -1496,6 +1495,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             update_kwargs.pop("unique_id", None)
             if update_kwargs:
                 hass.config_entries.async_update_entry(entry, **update_kwargs)
+
+    if version_update_required:
+        entry.version = CONFIG_ENTRY_VERSION
 
     if not conflict:
         _clear_duplicate_account_issue(hass, entry)
@@ -2169,6 +2171,10 @@ def _apply_update_entry_fallback(
     options = update_kwargs.get("options")
     if isinstance(options, Mapping):
         hass.config_entries.async_update_entry(entry, options=dict(options))
+
+    version_value = update_kwargs.get("version")
+    if isinstance(version_value, int):
+        entry.version = version_value
 
 
 def _format_duplicate_entries(

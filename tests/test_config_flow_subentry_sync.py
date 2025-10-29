@@ -262,3 +262,14 @@ def test_device_selection_updates_existing_feature_group() -> None:
     assert flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
     assert flags[OPT_GOOGLE_HOME_FILTER_ENABLED] is True
     assert flags[OPT_ENABLE_STATS_ENTITIES] is False
+
+
+def test_supported_subentry_types_include_hub_handler() -> None:
+    """Config flow must expose the hub handler alongside service and tracker types."""
+
+    entry = _EntryStub()
+    mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)
+
+    assert mapping[SUBENTRY_TYPE_SERVICE] is config_flow.ServiceSubentryFlowHandler
+    assert mapping[SUBENTRY_TYPE_TRACKER] is config_flow.TrackerSubentryFlowHandler
+    assert mapping["hub"] is config_flow.ServiceSubentryFlowHandler
