@@ -713,3 +713,8 @@ tooling environment this consistently includes:
 Contributors working offline can preinstall these packages (alongside
 `types-requests` from `requirements-dev.txt`) to avoid repeated network
 downloads during strict mypy runs.
+
+The first invocation of `mypy --strict` after creating a fresh environment may
+display an interactive prompt asking to install the missing type stubs listed
+above. When scripting or running in CI, pass `--install-types --non-interactive`
+so the command exits cleanly without waiting for user input.
