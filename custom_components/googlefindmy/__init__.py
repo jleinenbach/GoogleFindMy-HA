@@ -1461,7 +1461,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             break
 
     unique_id = unique_account_id(normalized_email)
-    if unique_id and entry.unique_id != unique_id and not conflict:
+    current_unique_id = getattr(entry, "unique_id", None)
+    if unique_id and current_unique_id != unique_id and not conflict:
         update_kwargs["unique_id"] = unique_id
 
     if conflict and normalized_email:
@@ -1470,6 +1471,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry,
             normalized_email,
             cause="pre_migration_duplicate",
+            conflicts=[conflict],
         )
 
     if update_kwargs:
@@ -2142,12 +2144,56 @@ def _extract_email_from_entry(entry: ConfigEntry) -> str | None:
     return normalized
 
 
+def _apply_update_entry_fallback(
+    hass: HomeAssistant, entry: ConfigEntry, update_kwargs: Mapping[str, Any]
+) -> None:
+    """Apply entry update fields when stubs reject extended keywords."""
+
+    data = update_kwargs.get("data")
+    if isinstance(data, Mapping):
+        entry.data = dict(data)
+
+    title = update_kwargs.get("title")
+    if isinstance(title, str):
+        entry.title = title
+
+    unique_id = update_kwargs.get("unique_id")
+    if isinstance(unique_id, str):
+        setattr(entry, "unique_id", unique_id)
+
+    options = update_kwargs.get("options")
+    if isinstance(options, Mapping):
+        hass.config_entries.async_update_entry(entry, options=dict(options))
+
+
+def _format_duplicate_entries(
+    entry: ConfigEntry, conflicts: Sequence[ConfigEntry] | None
+) -> str:
+    """Return a bullet list describing duplicate config entries."""
+
+    ordered: list[ConfigEntry] = [entry, *(conflicts or ())]
+    seen: set[str] = set()
+    lines: list[str] = []
+    for candidate in ordered:
+        entry_id = getattr(candidate, "entry_id", "") or ""
+        if entry_id in seen:
+            continue
+        seen.add(entry_id)
+        label = candidate.title or entry_id or ""
+        if entry_id:
+            lines.append(f"- {label} ({entry_id})")
+        else:
+            lines.append(f"- {label}")
+    return "\n".join(lines)
+
+
 def _log_duplicate_and_raise_repair_issue(
     hass: HomeAssistant,
     entry: ConfigEntry,
     normalized_email: str,
     *,
     cause: str,
+    conflicts: Sequence[ConfigEntry] | None = None,
 ) -> None:
     """Create or refresh a Repair issue for duplicate account configuration."""
 
@@ -2157,19 +2203,31 @@ def _log_duplicate_and_raise_repair_issue(
         normalized_email,
         cause,
     )
+    issue_id = f"duplicate_account_{entry.entry_id}"
+    placeholders: dict[str, Any] = {
+        "email": normalized_email,
+        "entries": _format_duplicate_entries(entry, conflicts),
+    }
+    if cause:
+        placeholders["cause"] = cause
+
+    issue_severity = getattr(ir, "IssueSeverity", None)
+    if issue_severity is not None:
+        severity_value = getattr(issue_severity, "WARNING", None)
+        if severity_value is None:
+            severity_value = getattr(issue_severity, "ERROR", "warning")
+    else:
+        severity_value = getattr(ir, "WARNING", "warning")
+
     try:
         ir.async_create_issue(
             hass,
             DOMAIN,
-            f"duplicate_account_{entry.entry_id}",
+            issue_id,
             is_fixable=False,
-            severity=ir.IssueSeverity.WARNING,
-            translation_key="duplicate_account",
-            translation_placeholders={
-                "email": normalized_email,
-                "entry_title": entry.title or entry.entry_id,
-                "cause": cause,
-            },
+            severity=severity_value,
+            translation_key="duplicate_account_entries",
+            translation_placeholders=placeholders,
         )
     except Exception as err:  # pragma: no cover - defensive log only
         _LOGGER.debug("Failed to create duplicate-account repair issue: %s", err)
@@ -2216,12 +2274,15 @@ def _ensure_post_migration_consistency(
         update_kwargs["title"] = raw_email
 
     unique_id = unique_account_id(normalized_email)
-    if unique_id and entry.unique_id != unique_id:
+    current_unique_id = getattr(entry, "unique_id", None)
+    if unique_id and current_unique_id != unique_id:
         update_kwargs["unique_id"] = unique_id
 
     if update_kwargs:
         try:
             hass.config_entries.async_update_entry(entry, **update_kwargs)
+        except TypeError:
+            _apply_update_entry_fallback(hass, entry, update_kwargs)
         except ValueError:
             if normalized_email:
                 _log_duplicate_and_raise_repair_issue(
@@ -2232,7 +2293,10 @@ def _ensure_post_migration_consistency(
                 )
             update_kwargs.pop("unique_id", None)
             if update_kwargs:
-                hass.config_entries.async_update_entry(entry, **update_kwargs)
+                try:
+                    hass.config_entries.async_update_entry(entry, **update_kwargs)
+                except TypeError:
+                    _apply_update_entry_fallback(hass, entry, update_kwargs)
 
     duplicates: list[ConfigEntry] = []
     if normalized_email:
@@ -2249,6 +2313,7 @@ def _ensure_post_migration_consistency(
             entry,
             normalized_email,
             cause="setup_duplicate",
+            conflicts=duplicates,
         )
     else:
         _clear_duplicate_account_issue(hass, entry)
