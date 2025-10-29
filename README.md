@@ -14,6 +14,9 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 ---
 <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Continuous integration status](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml/badge.svg)](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
+>[!CAUTION]
+>**Home Assistant Core 2025.7 or newer is required.** This integration depends on the new per-entry **service / tracker** subentry UI and the `config_subentry_id`-aware device-grouping features added in 2025.7, so older Home Assistant cores are **not supported**.
+
 ### Continuous integration checks
 
 Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, `mypy --strict`, and `pytest -q --cov` on Python 3.12 to protect code quality before merges.
@@ -28,9 +31,6 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 - 📍 **Historical Map-View**: Each tracker has a filterable Map-View that shows tracker movement with location data
 - 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
 - ❣️ **More to come!**
-
->[!IMPORTANT]
->**Home Assistant Core 2025.7 or newer is required.** Older releases do not support the integration's upcoming subentry and service-grouping UX, which causes devices to appear misgrouped or hidden in the UI.
 
 The manifest classifies Google Find My Device as a **hub** integration. Home Assistant treats the integration as a central coordinator that manages multiple connected devices, aligning documentation and compliance checks with the restored 1.6.0 metadata.
 
@@ -99,14 +99,24 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 
 ## Subentries and feature groups
 
-Home Assistant's config-entry **subentries** let the integration organize devices and helper entities into feature groups. During setup, the config flow seeds a `Core tracking` group that powers the device tracker, sensors, binary sensors, and helper buttons exposed by the integration. The group metadata includes the Home Assistant platforms that should load, whether Firebase Cloud Messaging (FCM) push is enabled, and which devices are currently visible in that group.
+Home Assistant's config-entry **subentries** let the integration organize devices and helper entities into feature groups. The coordinator deterministically provisions two subentries—`SERVICE_SUBENTRY_KEY` and `TRACKER_SUBENTRY_KEY`—and recreates them after reloads or restarts so entity grouping stays stable across updates. Both subentries persist alongside the config entry, storing options, `visible_device_ids`, and diagnostics based on their constant identifiers.
 
-- **Initial setup:** The device-selection step creates or updates the `Core tracking` feature group automatically. No manual action is required unless you later add additional Google accounts or feature groups.
-- **Options workflow:** Every options step that exposes a **Feature group** selector applies its changes only to the chosen subentry. For example, when you modify polling thresholds or enable the statistics helpers, the integration persists those toggles on the selected feature group and keeps its registry of visible devices in sync.
-- **Device visibility:** Restoring ignored devices assigns them to the feature group you pick in the options flow so they reappear under the correct collection of entities.
-- **Repairs menu:** The **Subentry repairs** workflow provides bulk management tools. Use **Move devices** to reassign trackers between groups, or **Delete subentry** to retire a group after selecting a fallback destination for its devices. The integration enforces that at least one feature group remains so core tracking continues to function.
+### Service hub subentry
 
-Advanced installations that use push notifications or future feature packs may surface additional groups. Each group is fully independent: credentials, options, and repair actions all respect the feature group that you select in the UI.
+The service hub subentry, identified by `SERVICE_SUBENTRY_KEY`, represents the account-level hub device for the integration.
+
+- Home Assistant localizes the hub device name in the UI using `SERVICE_DEVICE_TRANSLATION_KEY` instead of a hard-coded string, so translations stay synchronized with the codebase.
+- The hub publishes only integration-scope diagnostics (polling status, authentication health, statistics counters) and intentionally surfaces **zero tracker devices** via `visible_device_ids`. It is the logical parent for trackers, not a list of them.
+- All diagnostic entities exposed here point to a shared service device in Home Assistant's device registry. Each entity still exports a stable unique ID and provides `DeviceInfo`, which Home Assistant uses to group the diagnostics under the service hub in the UI.[1]
+- This shared hub device is what users see as the central integration device in the UI, reflecting Home Assistant's hub-style integration guidance.[1]
+
+### Tracker subentry
+
+The tracker subentry, keyed by `TRACKER_SUBENTRY_KEY`, represents the phones, tablets, and tags imported from Google Find My Device.
+
+- Each tracker entry backs per-device entities such as `device_tracker`, “last seen” timestamp sensors, and control buttons for actions like ring / play sound / locate.
+- Trackers register as individual device entries in the Home Assistant device registry with their own unique IDs and `DeviceInfo`. They link back to the service hub via `via_device` / `via_device_id`, which keeps each tracker as a first-class device while nesting it beneath the hub in the UI.[1]
+- Trackers never appear in the service hub’s `visible_device_ids` list and are never assigned to the service hub subentry; they stay within the tracker subentry so repairs and options target the correct devices.
 
 ### Subentry flow abort reasons
 
@@ -298,6 +308,8 @@ message listing the available IDs so you can pick the right account.
 
 - Böttger, L. (2024). GoogleFindMyTools [Computer software]. https://github.com/leonboe1/GoogleFindMyTools
 - Firebase Cloud Messaging integration. https://github.com/home-assistant/mobile-apps-fcm-push
+
+[1]: https://developers.home-assistant.io/blog/2019/10/05/simple-mode/?utm_source=chatgpt.com "Simple Mode in Home Assistant 1.0"
 
 ## Special thanks to some amazing contributors!
 
