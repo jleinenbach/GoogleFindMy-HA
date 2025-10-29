@@ -659,7 +659,7 @@ class FcmReceiverHA:
         self,
         entry_id: str,
         payload: Mapping[str, Any],
-        persistent_id: str,
+        persistent_id: str | None,
         context: Any | None,
     ) -> None:
         """Handle incoming FCM notification (sync callback from per-entry client).
