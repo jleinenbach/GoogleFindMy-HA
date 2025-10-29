@@ -180,8 +180,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – pre-commit run --all-files *(mandatory, even if pre-commit.ci could supply autofixes)*
 > – ruff format --check *(mandatory; capture the outcome in the "Testing" section)*
 > – ruff check . *(mandatory; you may run `ruff check --fix` beforehand, but finish with a non-fixing run and document the result)*
-> – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(mandatory for Python changes; capture the outcome)*
->   *When editing modules under `custom_components/googlefindmy/NovaApi/`, run `python -m mypy <module-path>` (for example, `python -m mypy custom_components/googlefindmy/NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py`) in addition to the command above so the excluded package still receives a strict check. Document the targeted run in the testing summary.*
+> – mypy --strict --explicit-package-bases custom_components/googlefindmy tests *(mandatory for Python changes; capture the outcome)*
 > – pytest -q *(mandatory; investigate and resolve every `DeprecationWarning`; capture the outcome)*
 >
 > **Online mode (in addition to the offline steps):**
@@ -191,7 +190,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – ruff format --check *(reconfirm that formatting is correct)*
 > – ruff check . *(reconfirm that linting passes without autofixes; run `ruff check --fix` beforehand if needed and rerun without `--fix` before recording results)*
 > – pytest -q *(reconfirm that the tests pass)*
-> – mypy --strict --explicit-package-bases --exclude 'custom_components/googlefindmy/NovaApi/' custom_components/googlefindmy tests *(full run across the entire codebase and tests)*
+> – mypy --strict --explicit-package-bases custom_components/googlefindmy tests *(full run across the entire codebase and tests)*
 > – ruff check --fix --exit-non-zero-on-fix && ruff check *(optional helper when additional linting fixes are necessary; still conclude with the standalone `ruff check .` command above)*
 > – pip-compile requirements-dev.in && pip-compile custom_components/googlefindmy/requirements.in *(when the corresponding `*.in` inputs exist; otherwise, record that no compile targets are present and skip without creating ad-hoc `requirements.txt` files)*
 > – pip-audit -r requirements-dev.txt -r custom_components/googlefindmy/requirements.txt *(security scan; exit code 1 is acceptable but must be noted)* — prefer `python -m pip_audit` so the tool resolves even when the entry point directory is absent from `$PATH`
