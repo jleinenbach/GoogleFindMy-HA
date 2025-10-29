@@ -550,6 +550,12 @@ def _pop_fcm_receiver(bucket: GoogleFindMyDomainData) -> FcmReceiverHA | None:
     return None
 
 
+def _pop_any_fcm_receiver(bucket: GoogleFindMyDomainData) -> object | None:
+    """Remove and return the cached shared FCM receiver regardless of type."""
+
+    return bucket.pop("fcm_receiver", None)
+
+
 def _get_fcm_refcount(bucket: GoogleFindMyDomainData) -> int:
     """Return the current shared FCM refcount."""
 
@@ -600,6 +606,29 @@ def _domain_fcm_provider(hass: HomeAssistant) -> FcmReceiverHA:
     if receiver is None:  # pragma: no cover - defensive guard
         raise RuntimeError("Shared FCM receiver unavailable")
     return receiver
+
+
+async def _async_stop_receiver_if_possible(receiver: object | None) -> None:
+    """Invoke ``async_stop`` on ``receiver`` when available."""
+
+    if receiver is None:
+        return
+
+    stop_callable = getattr(receiver, "async_stop", None)
+    if stop_callable is None:
+        return
+
+    try:
+        result = stop_callable()
+    except Exception as err:  # pragma: no cover - defensive
+        _LOGGER.debug("Failed to call async_stop on stale FCM receiver: %s", err)
+        return
+
+    if inspect.isawaitable(result):
+        try:
+            await cast(Awaitable[object], result)
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("async_stop coroutine failed: %s", err)
 
 
 def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> str:
@@ -1960,7 +1989,8 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         bucket["fcm_lock_contention_count"] = contention + 1
     async with fcm_lock:
         refcount = _get_fcm_refcount(bucket)
-        fcm = _get_fcm_receiver(bucket)
+        raw_receiver = cast(object | None, bucket.get("fcm_receiver"))
+        fcm = raw_receiver if isinstance(raw_receiver, FcmReceiverHA) else None
 
         def _method_is_coroutine(receiver: object, name: str) -> bool:
             """Return True if receiver.name is an async callable."""
@@ -1983,23 +2013,24 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
                 return inspect.iscoroutinefunction(cls_candidate)
             return False
 
-        if fcm is not None and (
+        if raw_receiver is not None and not isinstance(raw_receiver, FcmReceiverHA):
+            _LOGGER.warning(
+                "Discarding cached FCM receiver with unexpected type: %s",
+                type(raw_receiver).__name__,
+            )
+            stale = _pop_any_fcm_receiver(bucket)
+            await _async_stop_receiver_if_possible(stale)
+            fcm = None
+        elif fcm is not None and (
             not _method_is_coroutine(fcm, "async_register_for_location_updates")
             or not _method_is_coroutine(fcm, "async_unregister_for_location_updates")
         ):
             _LOGGER.warning(
                 "Discarding cached FCM receiver lacking async registration methods"
             )
-            stale = _pop_fcm_receiver(bucket)
+            stale = _pop_any_fcm_receiver(bucket)
+            await _async_stop_receiver_if_possible(stale)
             fcm = None
-            stop_callable = getattr(stale, "async_stop", None)
-            if stop_callable is not None:
-                try:
-                    result = stop_callable()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as err:  # pragma: no cover - defensive
-                    _LOGGER.debug("Failed to stop stale FCM receiver: %s", err)
 
         if fcm is None:
             fcm = FcmReceiverHA()
