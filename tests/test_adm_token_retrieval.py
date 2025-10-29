@@ -121,6 +121,30 @@ def test_normalize_service_accepts_full_scope() -> None:
     assert normalized == "android_device_manager"
 
 
+def test_is_non_retryable_auth_for_invalid_aas_token_error() -> None:
+    """InvalidAasTokenError must be treated as non-retryable."""
+
+    err = InvalidAasTokenError("cached token expired")
+
+    assert adm_token_retrieval._is_non_retryable_auth(err) is True
+
+
+def test_is_non_retryable_auth_for_missing_auth_marker() -> None:
+    """Errors with the gpsoauth missing-auth marker must not be retried."""
+
+    err = RuntimeError("missing 'auth' in gpsoauth response")
+
+    assert adm_token_retrieval._is_non_retryable_auth(err) is True
+
+
+def test_is_non_retryable_auth_allows_transient_errors() -> None:
+    """Unrelated transient failures must remain retryable."""
+
+    err = ConnectionError("temporary backend outage, please retry")
+
+    assert adm_token_retrieval._is_non_retryable_auth(err) is False
+
+
 def test_generate_adm_token_falls_back_to_provider_when_aas_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
