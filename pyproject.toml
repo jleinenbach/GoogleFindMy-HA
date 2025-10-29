@@ -110,7 +110,7 @@ module = [
     "custom_components.googlefindmy.__init__",
     "custom_components.googlefindmy.Auth.fcm_receiver_ha",
 ]
-ignore_errors = true
+ignore_errors = false
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]
