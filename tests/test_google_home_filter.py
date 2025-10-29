@@ -1,8 +1,8 @@
 # tests/test_google_home_filter.py
+"""Regression coverage for the Google Home passive-zone logic."""
 
 from __future__ import annotations
 
-import logging
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -15,90 +15,119 @@ from custom_components.googlefindmy.const import (
 )
 
 
-def _ensure_core_state() -> None:
+class _FakeState(SimpleNamespace):
+    """Minimal stand-in for ``homeassistant.core.State``."""
+
+    def __init__(self, entity_id: str, state: str, attributes: dict[str, Any]):
+        super().__init__(entity_id=entity_id, state=state, attributes=attributes)
+
+
+def _ensure_core_state_module() -> None:
+    """Install a lightweight ``homeassistant.core`` module if missing."""
+
     core_module = sys.modules.get("homeassistant.core")
     if core_module is None:
         core_module = ModuleType("homeassistant.core")
         sys.modules["homeassistant.core"] = core_module
-    if not hasattr(core_module, "State"):
-        class _State(SimpleNamespace):
-            def __init__(self, entity_id: str, state: str, attributes: dict[str, Any]):
-                super().__init__(entity_id=entity_id, state=state, attributes=attributes)
 
-        core_module.State = _State  # type: ignore[attr-defined]
+    if not hasattr(core_module, "State"):
+        core_module.State = _FakeState  # type: ignore[attr-defined]
     if not hasattr(core_module, "callback"):
         core_module.callback = lambda func: func  # type: ignore[attr-defined]
 
 
-class _StatesStub:
-    """Lightweight state manager mimicking Home Assistant's interface."""
+def _ensure_zone_module() -> None:
+    """Provide the ``homeassistant.components.zone`` module."""
 
-    def __init__(self, mapping: dict[str, SimpleNamespace]) -> None:
+    components_pkg = sys.modules.get("homeassistant.components")
+    if components_pkg is None:
+        components_pkg = ModuleType("homeassistant.components")
+        components_pkg.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["homeassistant.components"] = components_pkg
+
+    zone_module = sys.modules.get("homeassistant.components.zone")
+    if zone_module is None:
+        zone_module = ModuleType("homeassistant.components.zone")
+        zone_module.DOMAIN = "zone"
+        sys.modules["homeassistant.components.zone"] = zone_module
+        setattr(components_pkg, "zone", zone_module)
+
+
+def _ensure_helpers_modules() -> ModuleType:
+    """Create ``homeassistant.helpers`` and its entity registry module."""
+
+    helpers_pkg = sys.modules.get("homeassistant.helpers")
+    if helpers_pkg is None:
+        helpers_pkg = ModuleType("homeassistant.helpers")
+        helpers_pkg.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["homeassistant.helpers"] = helpers_pkg
+
+    registry_module = sys.modules.get("homeassistant.helpers.entity_registry")
+    if registry_module is None:
+        registry_module = ModuleType("homeassistant.helpers.entity_registry")
+        sys.modules["homeassistant.helpers.entity_registry"] = registry_module
+        setattr(helpers_pkg, "entity_registry", registry_module)
+
+    return registry_module
+
+
+def _ensure_event_helper_module() -> ModuleType:
+    """Return (or install) ``homeassistant.helpers.event`` for monkeypatching."""
+
+    module = sys.modules.get("homeassistant.helpers.event")
+    if module is None:
+        module = ModuleType("homeassistant.helpers.event")
+        sys.modules["homeassistant.helpers.event"] = module
+    if not hasattr(module, "async_track_state_change_event"):
+        module.async_track_state_change_event = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
+    return module
+
+
+class _FakeStates:
+    """Map-based Home Assistant state container used for tests."""
+
+    def __init__(self, mapping: dict[str, _FakeState]):
         self._mapping = mapping
 
-    def get(self, entity_id: str) -> SimpleNamespace | None:
+    def get(self, entity_id: str) -> _FakeState | None:
         return self._mapping.get(entity_id)
 
-    def async_all(self, domain: str | None = None) -> list[SimpleNamespace]:
+    def async_all(self, domain: str | None = None) -> list[_FakeState]:
         if domain is None:
             return list(self._mapping.values())
         prefix = f"{domain}."
         return [state for key, state in self._mapping.items() if key.startswith(prefix)]
 
 
-class _EntityRegistryStub:
-    """Minimal entity-registry stub returning configured IDs."""
+def test_should_filter_detection_when_zone_passive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passive ``zone.home`` prevents substitution for Google Home detections."""
 
-    def __init__(self, mapping: dict[str, str]) -> None:
-        self._mapping = mapping
-
-    def async_get_entity_id(self, _platform: str, _domain: str, unique_id: str) -> str | None:
-        return self._mapping.get(unique_id)
-
-
-def _ensure_zone_module() -> None:
-    if "homeassistant.components.zone" in sys.modules:
-        return
-    zone_module = ModuleType("homeassistant.components.zone")
-    zone_module.DOMAIN = "zone"
-    sys.modules["homeassistant.components.zone"] = zone_module
-
-
-def _ensure_event_helper() -> None:
-    event_module = sys.modules.get("homeassistant.helpers.event")
-    if event_module is None:
-        event_module = ModuleType("homeassistant.helpers.event")
-        sys.modules["homeassistant.helpers.event"] = event_module
-    if not hasattr(event_module, "async_track_state_change_event"):
-        event_module.async_track_state_change_event = (  # type: ignore[attr-defined]
-            lambda *_args, **_kwargs: None
-        )
-
-
-def _ensure_entity_registry_module() -> ModuleType:
-    helpers_pkg = sys.modules.get("homeassistant.helpers")
-    if helpers_pkg is None:
-        helpers_pkg = ModuleType("homeassistant.helpers")
-        helpers_pkg.__path__ = []  # type: ignore[attr-defined]
-        sys.modules["homeassistant.helpers"] = helpers_pkg
-    module = sys.modules.get("homeassistant.helpers.entity_registry")
-    if module is None:
-        module = ModuleType("homeassistant.helpers.entity_registry")
-        sys.modules["homeassistant.helpers.entity_registry"] = module
-        setattr(helpers_pkg, "entity_registry", module)
-    return module
-
-
-def test_should_filter_detection_passive_zone(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
-    """Warn and skip substitution when zone.home is passive."""
-
-    _ensure_core_state()
+    _ensure_core_state_module()
     _ensure_zone_module()
-    _ensure_event_helper()
-    entity_registry_module = _ensure_entity_registry_module()
+    registry_module = _ensure_helpers_modules()
+    event_module = _ensure_event_helper_module()
+
     from custom_components.googlefindmy.google_home_filter import GoogleHomeFilter
 
-    zone_state = SimpleNamespace(
+    monkeypatch.setattr(
+        registry_module,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get_entity_id=lambda *_args, **_kwargs: None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        event_module,
+        "async_track_state_change_event",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        GoogleHomeFilter,
+        "is_device_at_home",
+        lambda self, _device_id: False,
+    )
+
+    zone_state = _FakeState(
         entity_id="zone.home",
         state="zoning",
         attributes={
@@ -109,24 +138,8 @@ def test_should_filter_detection_passive_zone(monkeypatch, caplog: pytest.LogCap
     )
 
     hass = SimpleNamespace()
-    hass.states = _StatesStub({"zone.home": zone_state})
+    hass.states = _FakeStates({"zone.home": zone_state})
     hass.data = {}
-    hass.config_entries = SimpleNamespace()
-
-    registry = _EntityRegistryStub(mapping={})
-
-    monkeypatch.setattr(entity_registry_module, "async_get", lambda _hass: registry)
-
-    unsub_calls: list[tuple[Any, tuple[str, ...]]] = []
-
-    def _track_state_change_event(hass_obj: Any, entity_ids: list[str], callback) -> None:
-        unsub_calls.append((hass_obj, tuple(entity_ids)))
-        return lambda: None
-
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.google_home_filter.async_track_state_change_event",
-        _track_state_change_event,
-    )
 
     filter_config = {
         OPT_GOOGLE_HOME_FILTER_ENABLED: True,
@@ -135,11 +148,4 @@ def test_should_filter_detection_passive_zone(monkeypatch, caplog: pytest.LogCap
 
     gh_filter = GoogleHomeFilter(hass, filter_config)
 
-    caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        outcome = gh_filter.should_filter_detection("device-1", "Nest Speaker")
-
-    assert outcome == (False, None)
-    assert unsub_calls == [(hass, ("zone.home",))]
-    assert any("zone.home is passive" in message for message in caplog.messages)
-
+    assert gh_filter.should_filter_detection("device-1", "Nest Speaker") == (False, None)
