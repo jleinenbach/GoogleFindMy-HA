@@ -20,9 +20,9 @@ import time
 from typing import Any
 from collections.abc import Iterable
 
+from homeassistant import exceptions as ha_exceptions
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import ServiceValidationError, HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.network import get_url
 
@@ -48,6 +48,10 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+ServiceValidationError = ha_exceptions.ServiceValidationError
+HomeAssistantError = ha_exceptions.HomeAssistantError
+ConfigEntryError = getattr(ha_exceptions, "ConfigEntryError", HomeAssistantError)
 
 
 async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> None:
@@ -751,6 +755,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             skipped_states.append((entry_, state))
 
         if migration_error_entries:
+            migrate_callable = getattr(hass.config_entries, "async_migrate", None)
             for entry_ in migration_error_entries:
                 entry_id = getattr(entry_, "entry_id", "<unknown>")
                 _LOGGER.warning(
@@ -794,10 +799,46 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                         entry_id,
                     )
 
+                reasons: list[str] = []
                 if soft_completed:
+                    reasons.append("soft migration helpers completed")
+
+                migration_succeeded = False
+                if callable(migrate_callable):
+                    try:
+                        await migrate_callable(entry_.entry_id)
+                    except ConfigEntryError as err:
+                        _LOGGER.error(
+                            "Retrying Home Assistant migration for entry %s failed: %s",
+                            entry_id,
+                            err,
+                        )
+                    except Exception as err:  # pragma: no cover - defensive guard
+                        _LOGGER.error(
+                            "Unexpected error while migrating entry %s: %s",
+                            entry_id,
+                            err,
+                        )
+                    else:
+                        migration_succeeded = True
+                        reasons.append("Home Assistant migration retried")
+                else:
+                    _LOGGER.warning(
+                        "Config entries manager does not expose async_migrate; entry %s will rely on reload after helpers.",
+                        entry_id,
+                    )
+
+                if migration_succeeded or soft_completed:
                     reloadable_entries.append(entry_)
+                    joined_reasons = ", ".join(reasons) or "no additional context"
                     _LOGGER.info(
-                        "Config entry %s recovered from migration error; queued for reload.",
+                        "Config entry %s recovered from migration error; queued for reload (%s).",
+                        entry_id,
+                        joined_reasons,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Config entry %s remains in migration error state after rebuild helpers.",
                         entry_id,
                     )
 

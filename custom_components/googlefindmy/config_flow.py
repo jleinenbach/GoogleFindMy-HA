@@ -1211,6 +1211,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         return {
             SUBENTRY_TYPE_SERVICE: ServiceSubentryFlowHandler,
             SUBENTRY_TYPE_TRACKER: TrackerSubentryFlowHandler,
+            "hub": ServiceSubentryFlowHandler,
         }
 
     async def async_step_discovery(
