@@ -37,8 +37,9 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from collections.abc import Mapping as CollMapping
 from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, TypeVar, cast
 
 from .Auth.adm_token_retrieval import _mask_email as _mask_email_for_logs
 from .api import GoogleFindMyAPI
@@ -214,6 +215,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntriesFlowManager
 
+if TYPE_CHECKING:
+    HomeAssistantErrorBase = Exception
+else:
+    HomeAssistantErrorBase = HomeAssistantError
+
 # Optional network exception typing (robust mapping without hard dependency)
 aiohttp: ModuleType | None
 try:  # pragma: no cover - environment dependent
@@ -235,12 +241,18 @@ SOURCE_DISCOVERY_UPDATE_INFO = "discovery_update_info"
 
 # --- Soft optional imports for additional options (keep the flow robust) ----------
 # If these constants are not present in your build, the fields are omitted.
+OPT_MOVEMENT_THRESHOLD: str | None
+DEFAULT_MOVEMENT_THRESHOLD: int | None
 try:
     from .const import OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD
 except Exception:  # noqa: BLE001
-    OPT_MOVEMENT_THRESHOLD = None  # type: ignore[assignment]
-    DEFAULT_MOVEMENT_THRESHOLD = None  # type: ignore[assignment]
+    OPT_MOVEMENT_THRESHOLD = None
+    DEFAULT_MOVEMENT_THRESHOLD = None
 
+OPT_GOOGLE_HOME_FILTER_ENABLED: str | None
+OPT_GOOGLE_HOME_FILTER_KEYWORDS: str | None
+DEFAULT_GOOGLE_HOME_FILTER_ENABLED: bool | None
+DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS: str | None
 try:
     from .const import (
         OPT_GOOGLE_HOME_FILTER_ENABLED,
@@ -249,19 +261,175 @@ try:
         DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     )
 except Exception:  # noqa: BLE001
-    OPT_GOOGLE_HOME_FILTER_ENABLED = None  # type: ignore[assignment]
-    OPT_GOOGLE_HOME_FILTER_KEYWORDS = None  # type: ignore[assignment]
-    DEFAULT_GOOGLE_HOME_FILTER_ENABLED = None  # type: ignore[assignment]
-    DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS = None  # type: ignore[assignment]
+    OPT_GOOGLE_HOME_FILTER_ENABLED = None
+    OPT_GOOGLE_HOME_FILTER_KEYWORDS = None
+    DEFAULT_GOOGLE_HOME_FILTER_ENABLED = None
+    DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS = None
 
 # Optional UI helper for visibility menu
+ignored_choices_for_ui: (
+    Callable[[Mapping[str, Mapping[str, object]]], dict[str, str]] | None
+)
 try:
     from .const import ignored_choices_for_ui  # helper that formats UI choices
 except Exception:  # noqa: BLE001
-    ignored_choices_for_ui = None  # type: ignore[assignment]
+    ignored_choices_for_ui = None
 # -----------------------------------------------------------------------------------
 
 _LOGGER = logging.getLogger(__name__)
+
+
+_CallbackT = TypeVar("_CallbackT", bound=Callable[..., Any])
+
+
+def _typed_callback(func: _CallbackT) -> _CallbackT:
+    """Return a callback decorator that preserves type information."""
+
+    return cast(_CallbackT, callback(func))
+
+
+class _ConfigFlowMixin:
+    hass: HomeAssistant
+    context: dict[str, Any]
+    unique_id: str | None
+
+    async def async_set_unique_id(
+        self, unique_id: str | None, *, raise_on_progress: bool = False
+    ) -> None:
+        ...
+
+    def async_show_form(
+        self,
+        *,
+        step_id: str,
+        data_schema: vol.Schema | None = None,
+        errors: Mapping[str, str] | None = None,
+        description_placeholders: Mapping[str, Any] | None = None,
+    ) -> FlowResult:
+        ...
+
+    def async_show_menu(
+        self,
+        *,
+        step_id: str,
+        menu_options: list[str],
+    ) -> FlowResult:
+        ...
+
+    def async_create_entry(
+        self,
+        *,
+        title: str,
+        data: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> FlowResult:
+        ...
+
+    def async_abort(
+        self,
+        *,
+        reason: str,
+        description_placeholders: Mapping[str, Any] | None = None,
+    ) -> FlowResult:
+        ...
+
+    def async_update_reload_and_abort(self, **kwargs: Any) -> FlowResult:
+        ...
+
+    def _abort_if_unique_id_configured(
+        self, *, updates: Mapping[str, Any] | None = None
+    ) -> None:
+        ...
+
+    def _set_confirm_only(self) -> None:
+        ...
+
+    def add_suggested_values_to_schema(
+        self, schema: vol.Schema, suggested_values: Mapping[str, Any]
+    ) -> vol.Schema:
+        ...
+
+    def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
+        ...
+
+    async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None:
+        ...
+
+
+class _ConfigSubentryFlowMixin:
+    config_entry: ConfigEntry
+    subentry: ConfigSubentry | None
+
+    def async_create_entry(self, *, title: str, data: dict[str, Any]) -> FlowResult:
+        ...
+
+    def async_update_and_abort(self, *args: Any, **kwargs: Any) -> FlowResult:
+        ...
+
+
+class _OptionsFlowMixin:
+    hass: HomeAssistant
+    config_entry: ConfigEntry
+
+    def async_show_form(
+        self,
+        *,
+        step_id: str,
+        data_schema: vol.Schema | None = None,
+        errors: Mapping[str, str] | None = None,
+        description_placeholders: Mapping[str, Any] | None = None,
+    ) -> FlowResult:
+        ...
+
+    def async_show_menu(
+        self,
+        *,
+        step_id: str,
+        menu_options: list[str],
+    ) -> FlowResult:
+        ...
+
+    def async_create_entry(
+        self,
+        *,
+        title: str,
+        data: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> FlowResult:
+        ...
+
+    def async_abort(
+        self,
+        *,
+        reason: str,
+        description_placeholders: Mapping[str, Any] | None = None,
+    ) -> FlowResult:
+        ...
+
+    def async_update_and_abort(self, *args: Any, **kwargs: Any) -> FlowResult:
+        ...
+
+    def add_suggested_values_to_schema(
+        self, schema: vol.Schema, suggested_values: Mapping[str, Any]
+    ) -> vol.Schema:
+        ...
+
+    def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
+        ...
+
+    async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None:
+        ...
+
+
+if hasattr(config_entries, "OptionsFlowWithReload"):
+    OptionsFlowBase = cast(
+        type[config_entries.OptionsFlow],
+        getattr(config_entries, "OptionsFlowWithReload"),
+    )
+else:
+    OptionsFlowBase = cast(
+        type[config_entries.OptionsFlow], config_entries.OptionsFlow
+    )
 
 
 @dataclass(slots=True)
@@ -286,19 +454,8 @@ _FIELD_SUBENTRY = "subentry"
 _FIELD_REPAIR_TARGET = "target_subentry"
 _FIELD_REPAIR_DELETE = "delete_subentry"
 _FIELD_REPAIR_FALLBACK = "fallback_subentry"
+# Field identifiers used in options/visibility flows
 _FIELD_REPAIR_DEVICES = "device_ids"
-
-# ---------------------------------------------------------------------
-# Backcompat base for OptionsFlow: prefer OptionsFlowWithReload if present
-# ---------------------------------------------------------------------
-OptionsFlowBase: type[config_entries.OptionsFlow]
-if hasattr(config_entries, "OptionsFlowWithReload"):
-    OptionsFlowBase = cast(
-        type[config_entries.OptionsFlow],
-        getattr(config_entries, "OptionsFlowWithReload"),
-    )
-else:
-    OptionsFlowBase = config_entries.OptionsFlow
 
 # ---------------------------
 # Validators (format/plausibility)
@@ -460,16 +617,22 @@ def _map_api_exc_to_error_key(err: Exception) -> str:
     if any(k in name for k in ("auth", "unauthor", "forbidden", "credential")):
         return "invalid_auth"
 
-    status = getattr(err, "status", None) or getattr(err, "status_code", None)
-    try:
-        if int(status) in (401, 403):
-            return "invalid_auth"
-    except Exception:
-        pass
+    status_obj = getattr(err, "status", None)
+    if status_obj is None:
+        status_obj = getattr(err, "status_code", None)
+    status_int: int | None = None
+    if isinstance(status_obj, bool):
+        status_int = int(status_obj)
+    elif isinstance(status_obj, (int, float)):
+        status_int = int(status_obj)
+    elif isinstance(status_obj, str) and status_obj.isdigit():
+        status_int = int(status_obj)
+    if status_int in (401, 403):
+        return "invalid_auth"
 
     if aiohttp is not None and isinstance(
         err, (aiohttp.ClientError, aiohttp.ServerTimeoutError)
-    ):  # type: ignore[attr-defined]
+    ):
         return "cannot_connect"
     if any(k in name for k in ("timeout", "dns", "socket", "connection", "connect")):
         return "cannot_connect"
@@ -588,15 +751,6 @@ def _extract_oauth_candidates_from_secrets(
         pass
 
     return cands
-
-
-def _cand_labels(cands: list[tuple[str, str]]) -> str:
-    """Return a short, safe label list for candidates (no secrets)."""
-    labels = [src for src, _ in cands][:5]
-    tail = "…" if len(cands) > 5 else ""
-    return ", ".join(labels) + tail
-
-
 # ---------------------------
 # API probing helpers (signature-robust)
 # ---------------------------
@@ -801,7 +955,7 @@ def _normalize_email(email: str | None) -> str:
     return (email or "").strip().lower()
 
 
-def _find_entry_by_email(hass, email: str) -> ConfigEntry | None:
+def _find_entry_by_email(hass: HomeAssistant, email: str) -> ConfigEntry | None:
     """Return an existing entry that matches the normalized email, if any."""
     target = _normalize_email(email)
     for e in hass.config_entries.async_entries(DOMAIN):
@@ -815,7 +969,7 @@ def _find_entry_by_email(hass, email: str) -> ConfigEntry | None:
 # ---------------------------
 
 
-class DiscoveryFlowError(HomeAssistantError):
+class DiscoveryFlowError(HomeAssistantErrorBase):
     """Raised when a discovery payload cannot be processed."""
 
     def __init__(self, reason: str) -> None:
@@ -1002,16 +1156,16 @@ async def _ingest_discovery_credentials(
     else:
         updates = None
 
-    flow._auth_data = auth_data  # type: ignore[attr-defined]
     return auth_data, updates
 
 
 # ---------------------------
 # Config Flow
 # ---------------------------
-class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[misc]
     """Handle the initial config flow for Google Find My Device."""
 
+    domain = DOMAIN
     VERSION = 1
 
     def __init__(self) -> None:
@@ -1043,13 +1197,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             context.pop("confirm_only", None)
 
     @staticmethod
-    @callback
+    @_typed_callback
     def async_get_options_flow(config_entry: ConfigEntry) -> config_entries.OptionsFlow:
         """Return the options flow for an existing config entry."""
         return OptionsFlowHandler()
 
     @classmethod
-    @callback
+    @_typed_callback
     def async_get_supported_subentry_types(
         cls,
         _config_entry: ConfigEntry,
@@ -1111,7 +1265,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         existing_entry = _find_entry_by_email(self.hass, normalized.email)
         try:
-            _, updates = await _ingest_discovery_credentials(
+            auth_data, updates = await _ingest_discovery_credentials(
                 self, normalized, existing_entry=existing_entry
             )
         except DiscoveryFlowError as err:
@@ -1125,6 +1279,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "cannot_connect" if reason != "invalid_discovery_info" else reason
                 )
             return await self.async_abort(reason=reason)
+
+        self._auth_data = auth_data
 
         placeholders = dict(self.context.get("title_placeholders", {}) or {})
         placeholders.setdefault("email", normalized.email)
@@ -1160,7 +1316,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_discovery(discovery_info)
 
         try:
-            _, updates = await _ingest_discovery_credentials(
+            auth_data, updates = await _ingest_discovery_credentials(
                 self, normalized, existing_entry=existing_entry
             )
         except DiscoveryFlowError as err:
@@ -1174,6 +1330,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "cannot_connect" if reason != "invalid_discovery_info" else reason
                 )
             return await self.async_abort(reason=reason)
+
+        self._auth_data = auth_data
 
         if updates is None:
             updates = {"data": dict(existing_entry.data)}
@@ -1416,7 +1574,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         base_schema = vol.Schema(schema_fields)
 
         # Defaults
-        defaults = {
+        defaults: dict[str, Any] = {
             OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
             OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
             OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_MIN_ACCURACY_THRESHOLD,
@@ -1492,19 +1650,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 subentry_context.setdefault(self._subentry_key_core_tracking, None)
                 subentry_context.setdefault(self._subentry_key_service, None)
 
+            create_entry = cast(Callable[..., FlowResult], self.async_create_entry)
             try:
-                return self.async_create_entry(
+                return create_entry(
                     # **Change**: title is always the email for clear multi-account display
                     title=self._auth_data.get(CONF_GOOGLE_EMAIL)
                     or "Google Find My Device",
                     data=data_payload,
-                    options=options_payload,  # type: ignore[call-arg]
+                    options=options_payload,
                 )
             except TypeError:
                 # Older HA cores: merge options into data
                 shadow = dict(data_payload)
                 shadow.update(options_payload)
-                return self.async_create_entry(
+                return create_entry(
                     title=self._auth_data.get(CONF_GOOGLE_EMAIL)
                     or "Google Find My Device",
                     data=shadow,
@@ -1590,61 +1749,69 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             )
 
                     elif method == "secrets":
-                        parsed: dict[str, Any] = dict(payload)  # type: ignore[assignment]
-                        extracted_email = _normalize_email(
-                            _extract_email_from_secrets(parsed)
-                        )
-                        cands = _extract_oauth_candidates_from_secrets(parsed)
-
-                        if extracted_email and extracted_email != fixed_email:
-                            existing = _find_entry_by_email(self.hass, extracted_email)
-                            if existing is not None:
-                                return self.async_abort(reason="already_configured")
-                            errors["base"] = "email_mismatch"
+                        if not isinstance(payload, Mapping):
+                            errors["base"] = "invalid_token"
                         else:
-                            chosen = await async_pick_working_token(
-                                fixed_email, cands, secrets_bundle=parsed
+                            parsed: dict[str, Any] = dict(payload)
+                            extracted_email = _normalize_email(
+                                _extract_email_from_secrets(parsed)
                             )
-                            if not chosen:
-                                _LOGGER.warning(
-                                    "Token validation failed for %s. No working token found among candidates (%s).",
-                                    _mask_email_for_logs(fixed_email),
-                                    _cand_labels(cands),
+                            cands = _extract_oauth_candidates_from_secrets(parsed)
+
+                            if extracted_email and extracted_email != fixed_email:
+                                existing = _find_entry_by_email(
+                                    self.hass, extracted_email
                                 )
-                                errors["base"] = "cannot_connect"
+                                if existing is not None:
+                                    return self.async_abort(reason="already_configured")
+                                errors["base"] = "email_mismatch"
                             else:
-                                # Prefer non-JWT if available
-                                to_persist = chosen
-                                bad_reason = _disqualifies_for_persistence(to_persist)
-                                if bad_reason:
-                                    alt = next(
-                                        (
-                                            v
-                                            for (_src, v) in cands
-                                            if not _disqualifies_for_persistence(v)
-                                        ),
-                                        None,
-                                    )
-                                    if alt:
-                                        to_persist = alt
-                                updated_data = {
-                                    **entry.data,
-                                    DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                    CONF_OAUTH_TOKEN: to_persist,
-                                    DATA_SECRET_BUNDLE: parsed,
-                                }
-                                if isinstance(
-                                    to_persist, str
-                                ) and to_persist.startswith("aas_et/"):
-                                    updated_data[DATA_AAS_TOKEN] = to_persist
-                                elif DATA_AAS_TOKEN in updated_data:
-                                    updated_data.pop(DATA_AAS_TOKEN, None)
-                                await self._async_clear_cached_aas_token(entry)
-                                return self.async_update_reload_and_abort(
-                                    entry=entry,
-                                    data=updated_data,
-                                    reason="reauth_successful",
+                                chosen = await async_pick_working_token(
+                                    fixed_email, cands, secrets_bundle=parsed
                                 )
+                                if not chosen:
+                                    _LOGGER.warning(
+                                        "Token validation failed for %s. No working token found among candidates (%s).",
+                                        _mask_email_for_logs(fixed_email),
+                                        _cand_labels(cands),
+                                    )
+                                    errors["base"] = "cannot_connect"
+                                else:
+                                    # Prefer non-JWT if available
+                                    to_persist = chosen
+                                    bad_reason = _disqualifies_for_persistence(
+                                        to_persist
+                                    )
+                                    if bad_reason:
+                                        alt = next(
+                                            (
+                                                v
+                                                for (_src, v) in cands
+                                                if not _disqualifies_for_persistence(v)
+                                            ),
+                                            None,
+                                        )
+                                        if alt:
+                                            to_persist = alt
+                                    updated_data = {
+                                        **entry.data,
+                                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                        CONF_OAUTH_TOKEN: to_persist,
+                                        DATA_SECRET_BUNDLE: parsed,
+                                    }
+                                    if (
+                                        isinstance(to_persist, str)
+                                        and to_persist.startswith("aas_et/")
+                                    ):
+                                        updated_data[DATA_AAS_TOKEN] = to_persist
+                                    elif DATA_AAS_TOKEN in updated_data:
+                                        updated_data.pop(DATA_AAS_TOKEN, None)
+                                    await self._async_clear_cached_aas_token(entry)
+                                    return self.async_update_reload_and_abort(
+                                        entry=entry,
+                                        data=updated_data,
+                                        reason="reauth_successful",
+                                    )
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept first candidate and reload
@@ -1667,27 +1834,31 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 reason="reauth_successful",
                             )
                         if method == "secrets":
-                            parsed = dict(payload)  # type: ignore[assignment]
-                            cands = _extract_oauth_candidates_from_secrets(parsed)
-                            token_first = cands[0][1] if cands else ""
-                            updated_data = {
-                                **entry.data,
-                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                CONF_OAUTH_TOKEN: token_first,
-                                DATA_SECRET_BUNDLE: parsed,
-                            }
-                            if isinstance(token_first, str) and token_first.startswith(
-                                "aas_et/"
-                            ):
-                                updated_data[DATA_AAS_TOKEN] = token_first
+                            if not isinstance(payload, Mapping):
+                                errors["base"] = "invalid_token"
                             else:
-                                updated_data.pop(DATA_AAS_TOKEN, None)
-                            await self._async_clear_cached_aas_token(entry)
-                            return self.async_update_reload_and_abort(
-                                entry=entry,
-                                data=updated_data,
-                                reason="reauth_successful",
-                            )
+                                parsed = dict(payload)
+                                cands = _extract_oauth_candidates_from_secrets(parsed)
+                                token_first = cands[0][1] if cands else ""
+                                updated_data = {
+                                    **entry.data,
+                                    DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                    CONF_OAUTH_TOKEN: token_first,
+                                    DATA_SECRET_BUNDLE: parsed,
+                                }
+                                if (
+                                    isinstance(token_first, str)
+                                    and token_first.startswith("aas_et/")
+                                ):
+                                    updated_data[DATA_AAS_TOKEN] = token_first
+                                else:
+                                    updated_data.pop(DATA_AAS_TOKEN, None)
+                                await self._async_clear_cached_aas_token(entry)
+                                return self.async_update_reload_and_abort(
+                                    entry=entry,
+                                    data=updated_data,
+                                    reason="reauth_successful",
+                                )
                     errors["base"] = _map_api_exc_to_error_key(err2)
 
         return self.async_show_form(
@@ -1912,15 +2083,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if (
             callable(add_fn) and ConfigSubentry is not None
         ):  # pragma: no cover - legacy fallback
+            subentry_cls = cast(Callable[..., ConfigSubentry], ConfigSubentry)
             try:
-                subentry = ConfigSubentry(  # type: ignore[call-arg]
+                subentry = subentry_cls(
                     data=MappingProxyType(dict(data)),
                     subentry_type=subentry_type,
                     title=title,
                     unique_id=unique_id,
                 )
             except TypeError:  # pragma: no cover - legacy signature
-                subentry = ConfigSubentry(  # type: ignore[call-arg]
+                subentry = subentry_cls(
                     data=MappingProxyType(dict(data)),
                     title=title,
                     unique_id=unique_id,
@@ -1975,7 +2147,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 # ---------------------------
 
 
-class _BaseSubentryFlow(ConfigSubentryFlow):
+class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: ignore[misc]
     """Shared helpers for Google Find My config subentry flows."""
 
     _group_key: str
@@ -1983,10 +2155,11 @@ class _BaseSubentryFlow(ConfigSubentryFlow):
     _features: tuple[str, ...]
 
     def __init__(self, config_entry: ConfigEntry) -> None:
+        super_init = cast(Callable[..., None], super().__init__)
         try:
-            super().__init__(config_entry)  # type: ignore[misc]
+            super_init(config_entry)
         except TypeError:  # pragma: no cover - legacy stub compatibility
-            super().__init__()  # type: ignore[call-arg]
+            super_init()
             self.config_entry = config_entry
         else:
             self.config_entry = getattr(self, "config_entry", config_entry)
@@ -2012,7 +2185,11 @@ class _BaseSubentryFlow(ConfigSubentryFlow):
             OPT_ENABLE_STATS_ENTITIES,
             OPT_CONTRIBUTOR_MODE,
         ):
-            if key not in payload and key in self.config_entry.data:
+            if (
+                key is not None
+                and key not in payload
+                and key in self.config_entry.data
+            ):
                 payload[key] = self.config_entry.data[key]
         return payload
 
@@ -2024,7 +2201,7 @@ class _BaseSubentryFlow(ConfigSubentryFlow):
             OPT_ENABLE_STATS_ENTITIES,
             OPT_CONTRIBUTOR_MODE,
         ):
-            if key in self.config_entry.data:
+            if key is not None and key in self.config_entry.data:
                 defaults[key] = self.config_entry.data[key]
         return defaults
 
@@ -2109,7 +2286,7 @@ class TrackerSubentryFlowHandler(_BaseSubentryFlow):
 # ---------------------------
 # Options Flow
 # ---------------------------
-class OptionsFlowHandler(OptionsFlowBase):
+class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[misc, valid-type]
     """Options flow to update non-secret settings and optionally refresh credentials.
 
     Notes:
@@ -2144,18 +2321,20 @@ class OptionsFlowHandler(OptionsFlowBase):
         cache = self._get_entry_cache(entry)
         if cache is not None:
             session = async_get_clientsession(self.hass)
+            api_ctor = cast(Callable[..., GoogleFindMyAPI], GoogleFindMyAPI)
             try:
-                return GoogleFindMyAPI(cache=cache, session=session)  # type: ignore[call-arg]
+                return api_ctor(cache=cache, session=session)
             except TypeError:
-                return GoogleFindMyAPI(cache=cache)  # type: ignore[call-arg]
+                return api_ctor(cache=cache)
 
         oauth = entry.data.get(CONF_OAUTH_TOKEN)
         email = entry.data.get(CONF_GOOGLE_EMAIL)
         if oauth and email:
+            api_ctor = cast(Callable[..., GoogleFindMyAPI], GoogleFindMyAPI)
             try:
-                return GoogleFindMyAPI(oauth_token=oauth, google_email=email)  # type: ignore[call-arg]
+                return api_ctor(oauth_token=oauth, google_email=email)
             except TypeError:
-                return GoogleFindMyAPI(token=oauth, email=email)  # type: ignore[call-arg]
+                return api_ctor(token=oauth, email=email)
 
         raise RuntimeError(
             "GoogleFindMyAPI requires either `cache=` or minimal flow credentials."
@@ -2286,7 +2465,10 @@ class OptionsFlowHandler(OptionsFlowBase):
                 "entry_title"
             )
 
-        await ConfigFlow._async_update_subentry(  # type: ignore[misc]
+        update_helper = cast(
+            Callable[..., Awaitable[None] | None], ConfigFlow._async_update_subentry
+        )
+        result = update_helper(
             self,
             entry,
             subentry,
@@ -2294,6 +2476,8 @@ class OptionsFlowHandler(OptionsFlowBase):
             title=getattr(subentry, "title", None) or data.get("entry_title"),
             unique_id=getattr(subentry, "unique_id", None),
         )
+        if inspect.isawaitable(result):
+            await result
 
     async def _async_refresh_subentry_entry_title(
         self, entry: ConfigEntry, subentry_option: _SubentryOption
@@ -2314,7 +2498,10 @@ class OptionsFlowHandler(OptionsFlowBase):
         ):
             return
         data["entry_title"] = new_title
-        await ConfigFlow._async_update_subentry(  # type: ignore[misc]
+        update_helper = cast(
+            Callable[..., Awaitable[None] | None], ConfigFlow._async_update_subentry
+        )
+        result = update_helper(
             self,
             entry,
             subentry,
@@ -2322,6 +2509,8 @@ class OptionsFlowHandler(OptionsFlowBase):
             title=new_title,
             unique_id=getattr(subentry, "unique_id", None),
         )
+        if inspect.isawaitable(result):
+            await result
 
     async def _async_assign_devices_to_subentry(
         self, entry: ConfigEntry, target_key: str, device_ids: list[str]
@@ -2362,7 +2551,10 @@ class OptionsFlowHandler(OptionsFlowBase):
                 continue
 
             data["visible_device_ids"] = tuple(sorted(dict.fromkeys(visible)))
-            await ConfigFlow._async_update_subentry(  # type: ignore[misc]
+            update_helper = cast(
+                Callable[..., Awaitable[None] | None], ConfigFlow._async_update_subentry
+            )
+            result = update_helper(
                 self,
                 entry,
                 subentry,
@@ -2370,6 +2562,8 @@ class OptionsFlowHandler(OptionsFlowBase):
                 title=getattr(subentry, "title", None),
                 unique_id=getattr(subentry, "unique_id", None),
             )
+            if inspect.isawaitable(result):
+                await result
             changed.add(option.key)
 
         return changed
@@ -2578,13 +2772,16 @@ class OptionsFlowHandler(OptionsFlowBase):
         if not ignored_map:
             return self.async_abort(reason="no_ignored_devices")
 
+        choices: dict[str, str]
         if callable(ignored_choices_for_ui):
-            choices = ignored_choices_for_ui(ignored_map)  # type: ignore[misc]
+            choices = dict(ignored_choices_for_ui(ignored_map))
         else:
-            choices = {
-                dev_id: (meta.get("name") or dev_id)
-                for dev_id, meta in ignored_map.items()
-            }
+            choices = {}
+            for dev_id, meta in ignored_map.items():
+                name_obj: object | None = None
+                if isinstance(meta, CollMapping):
+                    name_obj = meta.get("name")
+                choices[dev_id] = dev_id if not isinstance(name_obj, str) else name_obj
 
         subentry_choices, _ = self._subentry_choice_map()
         default_subentry = self._default_subentry_key(subentry_choices)
@@ -2969,9 +3166,9 @@ class OptionsFlowHandler(OptionsFlowBase):
 
 
 # ---------- Custom exceptions ----------
-class CannotConnect(HomeAssistantError):
+class CannotConnect(HomeAssistantErrorBase):
     """Error to indicate we cannot connect to the remote service."""
 
 
-class InvalidAuth(HomeAssistantError):
+class InvalidAuth(HomeAssistantErrorBase):
     """Error to indicate invalid authentication was provided."""
