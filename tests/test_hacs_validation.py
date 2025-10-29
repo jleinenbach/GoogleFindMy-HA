@@ -12,8 +12,6 @@ import pytest
 
 from custom_components.googlefindmy.const import INTEGRATION_VERSION
 
-MINIMUM_CORE_VERSION = "2025.7.0"
-
 
 @pytest.fixture(name="hacs_metadata")
 def fixture_hacs_metadata() -> dict[str, object]:
@@ -36,7 +34,6 @@ def test_hacs_metadata_matches_manifest(
         "name",
         "content_in_root",
         "render_readme",
-        "homeassistant",
         "filename",
         "zip_release",
         "hide_default_branch",
@@ -48,16 +45,8 @@ def test_hacs_metadata_matches_manifest(
     match = re.search(r'INTEGRATION_VERSION: str = "([^"]+)"', const_text)
     assert match, "INTEGRATION_VERSION constant missing"
     assert manifest["version"] == INTEGRATION_VERSION == match.group(1)
-    assert manifest["homeassistant"] == MINIMUM_CORE_VERSION
-    assert hacs_metadata["homeassistant"] == MINIMUM_CORE_VERSION
-
-
-def test_hacs_requires_modern_core(hacs_metadata: dict[str, object]) -> None:
-    """The minimum core version must follow YYYY.M.P pattern and be recent."""
-
-    version = hacs_metadata.get("homeassistant")
-    assert isinstance(version, str)
-    assert version == MINIMUM_CORE_VERSION
+    assert "homeassistant" not in manifest
+    assert "homeassistant" not in hacs_metadata
 
 
 def test_no_micro_sign_in_integration_files(
