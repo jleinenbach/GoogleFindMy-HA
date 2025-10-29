@@ -66,6 +66,18 @@ exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/go
 
 [[tool.mypy.overrides]]
 module = [
+    "custom_components.googlefindmy.Auth",
+    "custom_components.googlefindmy.Auth.*",
+    "custom_components.googlefindmy.Auth.fcm_receiver_ha",
+    "custom_components.googlefindmy.FMDNCrypto",
+    "custom_components.googlefindmy.FMDNCrypto.*",
+    "custom_components.googlefindmy.KeyBackup",
+    "custom_components.googlefindmy.KeyBackup.*",
+    "custom_components.googlefindmy.ProtoDecoders",
+    "custom_components.googlefindmy.ProtoDecoders.*",
+    "custom_components.googlefindmy.SpotApi",
+    "custom_components.googlefindmy.SpotApi.*",
+    "custom_components.googlefindmy.__init__",
     "custom_components.googlefindmy.api",
     "custom_components.googlefindmy.binary_sensor",
     "custom_components.googlefindmy.button",
@@ -87,28 +99,6 @@ module = [
     "custom_components.googlefindmy.services",
     "custom_components.googlefindmy.system_health",
     "custom_components.googlefindmy.util_services",
-]
-ignore_errors = false
-
-[[tool.mypy.overrides]]
-module = [
-    "custom_components.googlefindmy.Auth",
-    "custom_components.googlefindmy.Auth.*",
-    "custom_components.googlefindmy.FMDNCrypto",
-    "custom_components.googlefindmy.FMDNCrypto.*",
-    "custom_components.googlefindmy.KeyBackup",
-    "custom_components.googlefindmy.KeyBackup.*",
-    "custom_components.googlefindmy.ProtoDecoders",
-    "custom_components.googlefindmy.ProtoDecoders.*",
-    "custom_components.googlefindmy.SpotApi",
-    "custom_components.googlefindmy.SpotApi.*",
-]
-ignore_errors = false
-
-[[tool.mypy.overrides]]
-module = [
-    "custom_components.googlefindmy.__init__",
-    "custom_components.googlefindmy.Auth.fcm_receiver_ha",
 ]
 ignore_errors = false
 
