@@ -29,7 +29,7 @@ from tests.helpers import (
 async def test_rebuild_registry_handles_migration_error(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Service must skip reload and invoke migration helpers for MIGRATION_ERROR entries."""
+    """Service must migrate and reload entries that recover from MIGRATION_ERROR."""
 
     entry = FakeConfigEntry(entry_id="entry-1", state=ConfigEntryState.MIGRATION_ERROR)
     entry_manager = FakeConfigEntriesManager([entry])
@@ -57,11 +57,12 @@ async def test_rebuild_registry_handles_migration_error(
     await services.async_register_services(hass, ctx)
     handler = hass.services.handlers[(DOMAIN, SERVICE_REBUILD_REGISTRY)]
 
-    caplog.set_level(logging.WARNING)
+    caplog.set_level(logging.INFO)
 
     await handler(ServiceCall({ATTR_MODE: MODE_REBUILD}))
 
-    assert entry_manager.reload_calls == []
+    assert entry_manager.reload_calls == [entry.entry_id]
     assert ("soft", entry.entry_id) in migration_calls
     assert ("unique", entry.entry_id) in migration_calls
     assert any("migration error state" in record.message for record in caplog.records)
+    assert any("queued for reload" in record.message for record in caplog.records)
