@@ -34,6 +34,12 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.config_entries import ConfigSubentry
 
 
+def _stable_subentry_id(entry_id: str, key: str) -> str:
+    """Return deterministic config_subentry_id values for tests."""
+
+    return f"{entry_id}-{key}-subentry"
+
+
 def test_async_pick_working_token_accepts_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -339,6 +345,7 @@ def test_device_selection_creates_and_updates_subentry() -> None:
                 subentry_type=subentry_type,
                 title=title,
                 unique_id=unique_id,
+                subentry_id=_stable_subentry_id(entry.entry_id, data["group_key"]),
             )
             entry.subentries[subentry.subentry_id] = subentry
             self.created.append(subentry)
@@ -416,7 +423,14 @@ def test_device_selection_creates_and_updates_subentry() -> None:
 
     assert tracker_subentry.data["group_key"] == TRACKER_SUBENTRY_KEY
     assert service_subentry.data["group_key"] == SERVICE_SUBENTRY_KEY
+    assert tracker_subentry.subentry_id == _stable_subentry_id(
+        entry.entry_id, TRACKER_SUBENTRY_KEY
+    )
+    assert service_subentry.subentry_id == _stable_subentry_id(
+        entry.entry_id, SERVICE_SUBENTRY_KEY
+    )
     assert flow.context["subentry_ids"][TRACKER_SUBENTRY_KEY] == tracker_subentry.subentry_id
+    assert flow.context["subentry_ids"][SERVICE_SUBENTRY_KEY] == service_subentry.subentry_id
 
     second_input = dict(first_input)
     second_input[OPT_MAP_VIEW_TOKEN_EXPIRATION] = False

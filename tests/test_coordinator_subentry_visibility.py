@@ -19,6 +19,12 @@ from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import device_registry as dr
 
 
+def _stable_subentry_id(entry_id: str, key: str) -> str:
+    """Return deterministic config_subentry identifiers for fixtures."""
+
+    return f"{entry_id}-{key}-subentry"
+
+
 class _StubDeviceEntry:
     """Minimal device entry stub exposing registry metadata."""
 
@@ -79,13 +85,14 @@ def test_refresh_normalizes_registry_allowlist(monkeypatch: pytest.MonkeyPatch) 
     subentry = ConfigSubentry(
         data=MappingProxyType(
             {
-                "group_key": "core_tracking",
+                "group_key": TRACKER_SUBENTRY_KEY,
                 "visible_device_ids": [registry_id],
             }
         ),
         subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Core",
         unique_id=f"{entry_id}-core",
+        subentry_id=_stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY),
     )
     entry = SimpleNamespace(
         entry_id=entry_id,
@@ -114,7 +121,7 @@ def test_refresh_normalizes_registry_allowlist(monkeypatch: pytest.MonkeyPatch) 
     coordinator._subentry_metadata = {}
     coordinator._subentry_snapshots = {}
     coordinator._feature_to_subentry = {}
-    coordinator._default_subentry_key_value = "core_tracking"
+    coordinator._default_subentry_key_value = TRACKER_SUBENTRY_KEY
     coordinator._subentry_manager = None
     coordinator._warned_bad_identifier_devices = set()
     coordinator._diag = SimpleNamespace(
@@ -127,15 +134,17 @@ def test_refresh_normalizes_registry_allowlist(monkeypatch: pytest.MonkeyPatch) 
     service_metadata = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
     assert service_metadata is not None
     assert service_metadata.visible_device_ids == ()
-    assert service_metadata.config_subentry_id is None
+    assert service_metadata.config_subentry_id == _stable_subentry_id(
+        entry_id, SERVICE_SUBENTRY_KEY
+    )
 
-    metadata = coordinator.get_subentry_metadata(key="core_tracking")
+    metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
     assert metadata is not None
     assert metadata.visible_device_ids == (registry_id, canonical_id)
     assert metadata.enabled_device_ids == (canonical_id,)
 
-    assert coordinator.is_device_visible_in_subentry("core_tracking", canonical_id)
-    assert coordinator.is_device_visible_in_subentry("core_tracking", registry_id)
+    assert coordinator.is_device_visible_in_subentry(TRACKER_SUBENTRY_KEY, canonical_id)
+    assert coordinator.is_device_visible_in_subentry(TRACKER_SUBENTRY_KEY, registry_id)
 
 
 def test_default_subentry_prefers_tracker_and_skips_service_manager_updates(
@@ -152,6 +161,7 @@ def test_default_subentry_prefers_tracker_and_skips_service_manager_updates(
         subentry_type=SUBENTRY_TYPE_SERVICE,
         title="Service",
         unique_id=f"{entry_id}-service",
+        subentry_id=_stable_subentry_id(entry_id, SERVICE_SUBENTRY_KEY),
     )
     tracker_subentry = ConfigSubentry(
         data=MappingProxyType(
@@ -163,6 +173,7 @@ def test_default_subentry_prefers_tracker_and_skips_service_manager_updates(
         subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Trackers",
         unique_id=f"{entry_id}-trackers",
+        subentry_id=_stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY),
     )
 
     entry = SimpleNamespace(
@@ -205,6 +216,15 @@ def test_default_subentry_prefers_tracker_and_skips_service_manager_updates(
     coordinator._refresh_subentry_index()
 
     assert coordinator._default_subentry_key() == TRACKER_SUBENTRY_KEY
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.visible_device_ids == ()
+    assert service_meta.config_subentry_id == _stable_subentry_id(
+        entry_id, SERVICE_SUBENTRY_KEY
+    )
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.visible_device_ids == ("device-1",)
 
     manager_stub = coordinator._subentry_manager
     assert isinstance(manager_stub, _ManagerStub)

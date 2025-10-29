@@ -1,4 +1,5 @@
 # tests/test_options_flow_registry_updates.py
+# tests/test_options_flow_registry_updates.py
 """Tests asserting subentry repair steps update registry assignments."""
 
 from __future__ import annotations
@@ -24,6 +25,12 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import device_registry as dr
+
+
+def _stable_subentry_id(entry_id: str, key: str) -> str:
+    """Return deterministic config_subentry ids for options-repair tests."""
+
+    return f"{entry_id}-{key}-subentry"
 
 
 class _RegistryTracker:
@@ -163,7 +170,7 @@ def _prepare_coordinator_baseline(
     coordinator._subentry_metadata = {}
     coordinator._subentry_snapshots = {}
     coordinator._feature_to_subentry = {}
-    coordinator._default_subentry_key_value = "core_tracking"
+    coordinator._default_subentry_key_value = TRACKER_SUBENTRY_KEY
     coordinator._subentry_manager = None
 
 
@@ -193,6 +200,7 @@ class _EntryStub:
             subentry_type=SUBENTRY_TYPE_TRACKER,
             title=title,
             unique_id=f"{self.entry_id}-{key}",
+            subentry_id=_stable_subentry_id(self.entry_id, key),
         )
         self.subentries[subentry.subentry_id] = subentry
         return subentry
@@ -340,7 +348,7 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
     subentry_manager = ConfigEntrySubEntryManager(hass, entry)
 
     core_definition = ConfigEntrySubentryDefinition(
-        key="core_tracking",
+        key=TRACKER_SUBENTRY_KEY,
         title="Core",
         data={"features": ["device_tracker"]},
     )
@@ -361,7 +369,7 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
     finally:
         dr.async_get = original_async_get
 
-    core_subentry = subentry_manager.get("core_tracking")
+    core_subentry = subentry_manager.get(TRACKER_SUBENTRY_KEY)
     secondary_subentry = subentry_manager.get("secondary")
     assert core_subentry is not None
     assert secondary_subentry is not None
@@ -383,7 +391,7 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
         "ha-dev-2",
     )
 
-    core_metadata = coordinator.get_subentry_metadata(key="core_tracking")
+    core_metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
     secondary_metadata = coordinator.get_subentry_metadata(key="secondary")
     assert core_metadata is not None
     assert secondary_metadata is not None

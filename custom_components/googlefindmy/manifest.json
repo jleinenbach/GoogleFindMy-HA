@@ -4,6 +4,7 @@
   "after_dependencies": ["recorder"],
   "codeowners": ["@BSkando"],
   "config_flow": true,
+  "homeassistant": "2025.7.0",
   "dependencies": ["http"],
   "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
   "integration_type": "hub",

@@ -26,6 +26,12 @@ from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import device_registry as dr
 
 
+def _stable_subentry_id(entry_id: str, key: str) -> str:
+    """Return deterministic config_subentry identifiers for tests."""
+
+    return f"{entry_id}-{key}-subentry"
+
+
 class _FakeDeviceEntry:
     """Minimal stand-in for Home Assistant's DeviceEntry."""
 
@@ -217,12 +223,14 @@ def _build_entry_with_subentries(entry_id: str) -> SimpleNamespace:
         subentry_type=SUBENTRY_TYPE_SERVICE,
         title="Service",
         unique_id=f"{entry_id}-service",
+        subentry_id=_stable_subentry_id(entry_id, SERVICE_SUBENTRY_KEY),
     )
     tracker_subentry = ConfigSubentry(
         data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
         subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Trackers",
         unique_id=f"{entry_id}-tracker",
+        subentry_id=_stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY),
     )
     return SimpleNamespace(
         entry_id=entry_id,
