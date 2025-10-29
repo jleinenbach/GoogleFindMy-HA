@@ -1,7 +1,9 @@
 # tests/test_auth_flow.py
+
 from __future__ import annotations
 
 from collections.abc import Sequence
+import importlib
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -29,7 +31,7 @@ _stub_uc.Chrome = _stub_chrome
 
 sys.modules.setdefault("undetected_chromedriver", _stub_uc)
 
-from custom_components.googlefindmy.Auth import auth_flow
+auth_flow = importlib.import_module("custom_components.googlefindmy.Auth.auth_flow")
 
 
 class _FakeDriver:
