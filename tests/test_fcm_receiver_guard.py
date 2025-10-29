@@ -12,9 +12,6 @@ from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
 from typing import Awaitable, TypeVar
 
-
-_T = TypeVar("_T")
-
 import pytest
 
 from custom_components.googlefindmy.const import DOMAIN
@@ -22,6 +19,8 @@ from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
     FcmReceiverHA,
     _call_in_executor,
 )
+
+_T = TypeVar("_T")
 
 
 class _StubReceiver:
