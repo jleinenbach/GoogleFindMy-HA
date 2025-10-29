@@ -3,17 +3,15 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import importlib
 import sys
-import textwrap
 import time
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from typing import Any
 
-from custom_components.googlefindmy.const import DEFAULT_MIN_POLL_INTERVAL
+from tests.helpers import compile_class_method_from_module
 
 
 def _ensure_button_dependencies() -> None:
@@ -188,33 +186,22 @@ def _ensure_button_dependencies() -> None:
 
 
 def _load_can_request_location_impl() -> Any:
-    """Compile the coordinator's can_request_location method for isolated testing."""
+    """Return the coordinator's can_request_location method for isolated testing."""
 
-    source = Path("custom_components/googlefindmy/coordinator.py").read_text()
-    module_ast = ast.parse(source)
-    for node in module_ast.body:
-        if isinstance(node, ast.ClassDef) and node.name == "GoogleFindMyCoordinator":
-            for item in node.body:
-                if (
-                    isinstance(item, ast.FunctionDef)
-                    and item.name == "can_request_location"
-                ):
-                    snippet = ast.get_source_segment(source, item)
-                    if snippet is None:
-                        raise AssertionError(
-                            "Unable to extract can_request_location source"
-                        )
-                    namespace: dict[str, Any] = {}
-                    exec(
-                        textwrap.dedent(snippet),
-                        {
-                            "DEFAULT_MIN_POLL_INTERVAL": DEFAULT_MIN_POLL_INTERVAL,
-                            "time": time,
-                        },
-                        namespace,
-                    )
-                    return namespace["can_request_location"]
-    raise AssertionError("can_request_location definition not found")
+    coordinator_path = (
+        Path(__file__)
+        .resolve()
+        .parent.parent
+        / "custom_components"
+        / "googlefindmy"
+        / "coordinator.py"
+    )
+    return compile_class_method_from_module(
+        module_path=coordinator_path,
+        class_name="GoogleFindMyCoordinator",
+        method_name="can_request_location",
+        global_overrides={"time": time},
+    )
 
 
 def test_blank_device_name_populates_buttons() -> None:
