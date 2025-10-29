@@ -45,7 +45,19 @@ def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
     loop = asyncio.new_event_loop()
     try:
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(pyfuncitem.obj(**pyfuncitem.funcargs))
+        argnames = getattr(pyfuncitem._fixtureinfo, "argnames", ())  # noqa: SLF001 - pytest internals
+        if any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in inspect.signature(pyfuncitem.obj).parameters.values()
+        ):
+            call_kwargs = pyfuncitem.funcargs
+        else:
+            call_kwargs = {
+                name: pyfuncitem.funcargs[name]
+                for name in argnames
+                if name in pyfuncitem.funcargs
+            }
+        loop.run_until_complete(pyfuncitem.obj(**call_kwargs))
     finally:
         asyncio.set_event_loop(None)
         loop.close()
