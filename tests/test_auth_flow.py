@@ -1,11 +1,33 @@
 # tests/test_auth_flow.py
-
 from __future__ import annotations
 
 from collections.abc import Sequence
+import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+_stub_uc = SimpleNamespace()
+
+
+class _StubChromeOptions:
+    def __init__(self) -> None:
+        self.arguments: list[str] = []
+        self.binary_location: str | None = None
+
+    def add_argument(self, argument: str) -> None:
+        self.arguments.append(argument)
+
+
+def _stub_chrome(*, options: _StubChromeOptions | None = None) -> object:
+    return object()
+
+
+_stub_uc.ChromeOptions = _StubChromeOptions
+_stub_uc.Chrome = _stub_chrome
+
+sys.modules.setdefault("undetected_chromedriver", _stub_uc)
 
 from custom_components.googlefindmy.Auth import auth_flow
 
