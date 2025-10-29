@@ -1,6 +1,6 @@
-# tests/test_fcm_receiver_guard.py
 """Tests for the shared FCM receiver guard logic."""
 
+# tests/test_fcm_receiver_guard.py
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +10,10 @@ import sys
 from contextlib import suppress
 from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
+from typing import Awaitable, TypeVar
+
+
+_T = TypeVar("_T")
 
 import pytest
 
@@ -114,7 +118,7 @@ def test_multi_entry_buffers_prevent_global_cache_access(
 ) -> None:
     """Ensure two entries never fall back to global cache helpers."""
 
-    async def _boom(*_args, **_kwargs) -> None:
+    async def _boom(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("Global cache helper must not be used")
 
     monkeypatch.setattr(
@@ -210,7 +214,9 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
 
         monkeypatch.setattr(FcmReceiverHA, "_start_supervisor_for_entry", fake_start)
 
-        def create_task(coro, *, name: str | None = None):
+        def create_task(
+            coro: Awaitable[_T], *, name: str | None = None
+        ) -> asyncio.Task[_T]:
             return loop.create_task(coro, name=name)
 
         monkeypatch.setattr(asyncio, "create_task", create_task)
@@ -332,13 +338,13 @@ def test_receiver_reuses_hass_managed_session(
     class DummyPushClient:
         def __init__(
             self,
-            _callback,
-            _config,
-            _creds,
-            _creds_cb,
+            _callback: Callable[..., Awaitable[object]],
+            _config: object,
+            _creds: object,
+            _creds_cb: Callable[..., Awaitable[object]],
             *,
-            config=None,
-            http_client_session=None,
+            config: object | None = None,
+            http_client_session: object | None = None,
         ) -> None:
             recorded["session"] = http_client_session
             recorded["config"] = config
