@@ -1,5 +1,4 @@
 # tests/test_options_flow_subentries.py
-"""Tests covering subentry selection and repair flows in the options handler."""
 
 from __future__ import annotations
 
@@ -14,7 +13,6 @@ from custom_components.googlefindmy.const import (
     OPT_CONTRIBUTOR_MODE,
     OPT_IGNORED_DEVICES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
