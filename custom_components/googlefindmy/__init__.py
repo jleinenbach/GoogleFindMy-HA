@@ -2024,12 +2024,17 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
 
             # Register provider for both consumer modules (exactly once on first acquire)
             # Re-registering ensures downstream modules resolve the refreshed instance.
-            provider: Callable[[], FcmReceiverHA] = lambda: _domain_fcm_provider(hass)
+            def provider() -> FcmReceiverHA:
+                """Return the shared FCM receiver for integration consumers."""
+
+                return _domain_fcm_provider(hass)
+
+            provider_fn: Callable[[], FcmReceiverHA] = provider
             loc_register_fcm_provider(
-                cast(Callable[[], NovaFcmReceiverProtocol], provider)
+                cast(Callable[[], NovaFcmReceiverProtocol], provider_fn)
             )
             api_register_fcm_provider(
-                cast(Callable[[], ApiFcmReceiverProtocol], provider)
+                cast(Callable[[], ApiFcmReceiverProtocol], provider_fn)
             )
 
         new_refcount = refcount + 1
