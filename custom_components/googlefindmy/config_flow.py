@@ -37,7 +37,46 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Iterable, Mapping, cast
+from types import MappingProxyType, ModuleType
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, cast
+
+from .Auth.adm_token_retrieval import _mask_email as _mask_email_for_logs
+from .api import GoogleFindMyAPI
+from .const import (
+    # Core domain & credential keys
+    DOMAIN,
+    CONF_OAUTH_TOKEN,
+    CONF_GOOGLE_EMAIL,
+    DATA_AUTH_METHOD,
+    DATA_AAS_TOKEN,
+    DATA_SECRET_BUNDLE,
+    # Options (non-secret runtime settings)
+    OPT_LOCATION_POLL_INTERVAL,
+    OPT_DEVICE_POLL_DELAY,
+    OPT_MIN_ACCURACY_THRESHOLD,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_IGNORED_DEVICES,
+    OPT_CONTRIBUTOR_MODE,
+    OPT_ENABLE_STATS_ENTITIES,
+    SERVICE_FEATURE_PLATFORMS,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
+    TRACKER_FEATURE_PLATFORMS,
+    TRACKER_SUBENTRY_KEY,
+    # Defaults
+    DEFAULT_LOCATION_POLL_INTERVAL,
+    DEFAULT_DEVICE_POLL_DELAY,
+    DEFAULT_MIN_ACCURACY_THRESHOLD,
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_CONTRIBUTOR_MODE,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
+    OPT_OPTIONS_SCHEMA_VERSION,
+    coerce_ignored_mapping,
+    DEFAULT_OPTIONS,
+    DEFAULT_ENABLE_STATS_ENTITIES,
+)
 
 import voluptuous as vol
 
@@ -52,31 +91,32 @@ try:  # pragma: no cover - compatibility shim for stripped environments
         async_create_discovery_flow,
     )
 except Exception:  # noqa: BLE001
-    SOURCE_DISCOVERY = "discovery"  # type: ignore[assignment]
-    SOURCE_DISCOVERY_UPDATE = "discovery_update"  # type: ignore[assignment]
+    SOURCE_DISCOVERY = "discovery"
+    SOURCE_DISCOVERY_UPDATE = "discovery_update"
 
     try:  # pragma: no cover - runtime optional dependency
         from homeassistant.helpers.discovery_flow import DiscoveryKey as _DiscoveryKey
     except Exception:  # noqa: BLE001
 
         @dataclass(slots=True)
-        class DiscoveryKey:  # type: ignore[no-redef]
+        class _FallbackDiscoveryKey:
             """Fallback DiscoveryKey representation for legacy cores."""
 
             domain: str
             key: str | tuple[str, ...]
             version: int = 1
 
+        DiscoveryKey = _FallbackDiscoveryKey
     else:  # pragma: no cover - simple aliasing
-        DiscoveryKey = _DiscoveryKey  # type: ignore[assignment]
+        DiscoveryKey = _DiscoveryKey
 
-    async def async_create_discovery_flow(  # type: ignore[no-redef]
-        hass,
-        domain,
-        context,
-        data,
+    async def _async_create_discovery_flow(
+        hass: HomeAssistant,
+        domain: str,
+        context: Mapping[str, Any] | None,
+        data: Mapping[str, Any],
         *,
-        discovery_key=None,
+        discovery_key: DiscoveryKey | None = None,
     ) -> None:
         """Fallback helper mirroring modern discovery flow creation."""
 
@@ -85,14 +125,19 @@ except Exception:  # noqa: BLE001
                 async_create_flow as _async_create_flow,
             )
         except Exception:  # noqa: BLE001
-            await hass.config_entries.flow.async_init(  # type: ignore[attr-defined]
+            flow_manager = cast(
+                "ConfigEntriesFlowManager",
+                getattr(hass.config_entries, "flow"),
+            )
+            await flow_manager.async_init(
                 domain,
                 context=context,
                 data=data,
             )
             return
 
-        await _async_create_flow(  # type: ignore[call-arg]
+        create_flow: Callable[..., Awaitable[None]] = _async_create_flow
+        await create_flow(
             hass,
             domain,
             context,
@@ -100,16 +145,20 @@ except Exception:  # noqa: BLE001
             discovery_key=discovery_key,
         )
 
+    async_create_discovery_flow = _async_create_discovery_flow
+
 
 try:  # pragma: no cover - compatibility shim for stripped environments
     from homeassistant.config_entries import ConfigSubentry, ConfigSubentryFlow
 except Exception:  # noqa: BLE001
     try:  # pragma: no cover - best-effort partial import
-        from homeassistant.config_entries import ConfigSubentry
+        from homeassistant.config_entries import ConfigSubentry as _ConfigSubentry
     except Exception:  # noqa: BLE001
-        ConfigSubentry = None  # type: ignore[assignment]
+        ConfigSubentry = None
+    else:
+        ConfigSubentry = _ConfigSubentry
 
-    class ConfigSubentryFlow:  # type: ignore[no-redef]
+    class _FallbackConfigSubentryFlow:
         """Fallback stub for Home Assistant's ConfigSubentryFlow."""
 
         def __init__(self, config_entry: ConfigEntry) -> None:
@@ -154,63 +203,32 @@ except Exception:  # noqa: BLE001
                 "unique_id": unique_id,
             }
 
-from homeassistant.core import callback
+    ConfigSubentryFlow = _FallbackConfigSubentryFlow
+
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntriesFlowManager
+
 # Optional network exception typing (robust mapping without hard dependency)
+aiohttp: ModuleType | None
 try:  # pragma: no cover - environment dependent
     import aiohttp
 except Exception:  # noqa: BLE001
-    aiohttp = None  # type: ignore[assignment]
+    aiohttp = None
 
 # Selector is not guaranteed in older cores; import defensively.
+selector: Callable[[Mapping[str, Any]], Any] | None
 try:  # pragma: no cover - environment dependent
-    from homeassistant.helpers.selector import selector
+    from homeassistant.helpers.selector import selector as _selector
 except Exception:  # noqa: BLE001
-    selector = None  # type: ignore[assignment]
-
-from types import MappingProxyType
-from .api import GoogleFindMyAPI
-from .Auth.adm_token_retrieval import _mask_email as _mask_email_for_logs
-
-from .const import (
-    # Core domain & credential keys
-    DOMAIN,
-    CONF_OAUTH_TOKEN,
-    CONF_GOOGLE_EMAIL,
-    DATA_AUTH_METHOD,
-    DATA_AAS_TOKEN,
-    DATA_SECRET_BUNDLE,
-    # Options (non-secret runtime settings)
-    OPT_LOCATION_POLL_INTERVAL,
-    OPT_DEVICE_POLL_DELAY,
-    OPT_MIN_ACCURACY_THRESHOLD,
-    OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_IGNORED_DEVICES,
-    OPT_CONTRIBUTOR_MODE,
-    OPT_ENABLE_STATS_ENTITIES,
-    SERVICE_FEATURE_PLATFORMS,
-    SERVICE_SUBENTRY_KEY,
-    SUBENTRY_TYPE_SERVICE,
-    SUBENTRY_TYPE_TRACKER,
-    TRACKER_FEATURE_PLATFORMS,
-    TRACKER_SUBENTRY_KEY,
-    # Defaults
-    DEFAULT_LOCATION_POLL_INTERVAL,
-    DEFAULT_DEVICE_POLL_DELAY,
-    DEFAULT_MIN_ACCURACY_THRESHOLD,
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_CONTRIBUTOR_MODE,
-    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
-    CONTRIBUTOR_MODE_IN_ALL_AREAS,
-    OPT_OPTIONS_SCHEMA_VERSION,
-    coerce_ignored_mapping,
-    DEFAULT_OPTIONS,
-    DEFAULT_ENABLE_STATS_ENTITIES,
-)
+    selector = None
+else:
+    selector = cast(Callable[[Mapping[str, Any]], Any], _selector)
 
 # Standard discovery update info source exposed for helper-triggered updates.
 SOURCE_DISCOVERY_UPDATE_INFO = "discovery_update_info"
@@ -273,10 +291,14 @@ _FIELD_REPAIR_DEVICES = "device_ids"
 # ---------------------------------------------------------------------
 # Backcompat base for OptionsFlow: prefer OptionsFlowWithReload if present
 # ---------------------------------------------------------------------
-try:  # pragma: no cover - environment dependent
-    OptionsFlowBase = config_entries.OptionsFlowWithReload  # type: ignore[attr-defined]
-except Exception:
-    OptionsFlowBase = config_entries.OptionsFlow  # type: ignore[assignment]
+OptionsFlowBase: type[config_entries.OptionsFlow]
+if hasattr(config_entries, "OptionsFlowWithReload"):
+    OptionsFlowBase = cast(
+        type[config_entries.OptionsFlow],
+        getattr(config_entries, "OptionsFlowWithReload"),
+    )
+else:
+    OptionsFlowBase = config_entries.OptionsFlow
 
 # ---------------------------
 # Validators (format/plausibility)
