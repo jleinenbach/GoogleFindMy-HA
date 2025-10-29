@@ -127,7 +127,7 @@ def test_async_migrate_entry_happy_path(monkeypatch: pytest.MonkeyPatch) -> None
     assert hass.config_entries.updated
     update_payload = hass.config_entries.updated[0][1]
     assert update_payload["unique_id"] == expected_unique_id
-    assert "version" not in update_payload
+    assert update_payload["version"] == integration.CONFIG_ENTRY_VERSION
 
 
 def test_async_migrate_entry_detects_duplicate_before_unique_id(
@@ -172,7 +172,7 @@ def test_async_migrate_entry_detects_duplicate_before_unique_id(
     assert hass.config_entries.updated
     update_payload = hass.config_entries.updated[0][1]
     assert "unique_id" not in update_payload
-    assert "version" not in update_payload
+    assert update_payload["version"] == integration.CONFIG_ENTRY_VERSION
     assert issue_helper.call_count == 1
     assert issue_helper.call_args.kwargs["cause"] == "pre_migration_duplicate"
 
@@ -210,9 +210,9 @@ def test_async_migrate_entry_value_error_fallback(monkeypatch: pytest.MonkeyPatc
     first_payload = hass.config_entries.updated[0][1]
     second_payload = hass.config_entries.updated[1][1]
     assert "unique_id" in first_payload
+    assert first_payload["version"] == integration.CONFIG_ENTRY_VERSION
     assert "unique_id" not in second_payload
-    assert "version" not in first_payload
-    assert "version" not in second_payload
+    assert second_payload["version"] == integration.CONFIG_ENTRY_VERSION
     assert issue_helper.call_count == 1
     assert issue_helper.call_args.kwargs["cause"] == "unique_id_conflict"
 
@@ -280,7 +280,12 @@ def test_async_migrate_entry_updates_version_without_update_call() -> None:
     result = asyncio.run(integration.async_migrate_entry(hass, entry))
 
     assert result is True
-    assert hass.config_entries.updated == []
+    assert hass.config_entries.updated == [
+        (
+            entry,
+            {"version": integration.CONFIG_ENTRY_VERSION},
+        )
+    ]
     assert entry.version == integration.CONFIG_ENTRY_VERSION
 
 
