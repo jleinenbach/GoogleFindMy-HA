@@ -25,6 +25,22 @@ if str(ROOT) not in sys.path:
 INTEGRATION_ROOT = ROOT / "custom_components" / "googlefindmy"
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Accept the asyncio mode ini option when pytest-asyncio is absent."""
+
+    if importlib.util.find_spec("pytest_asyncio") is not None:
+        return
+
+    try:
+        parser.addini(
+            "asyncio_mode",
+            "Default asyncio mode placeholder when pytest-asyncio is unavailable.",
+        )
+    except ValueError:
+        # Another plugin already registered the option; reuse it.
+        return
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Register the asyncio marker for coroutine-based tests."""
 
