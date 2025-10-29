@@ -1478,6 +1478,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             conflicts=[conflict],
         )
 
+    if version_update_required:
+        update_kwargs["version"] = CONFIG_ENTRY_VERSION
+
     if update_kwargs:
         if conflict and "unique_id" in update_kwargs:
             update_kwargs.pop("unique_id", None)
