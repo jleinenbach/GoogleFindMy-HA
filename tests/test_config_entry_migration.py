@@ -5,10 +5,6 @@ from __future__ import annotations
 
 import asyncio
 from importlib import import_module
-
-# tests/test_config_entry_migration.py
-
-import asyncio
 from dataclasses import dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Iterable
