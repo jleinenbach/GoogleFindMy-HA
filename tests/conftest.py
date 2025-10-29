@@ -1147,9 +1147,16 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
     return _factory
 _stub_homeassistant()
 
-const_module = importlib.import_module("custom_components.googlefindmy.const")
-SERVICE_SUBENTRY_KEY = cast(str, getattr(const_module, "SERVICE_SUBENTRY_KEY"))
-TRACKER_SUBENTRY_KEY = cast(str, getattr(const_module, "TRACKER_SUBENTRY_KEY"))
+
+def _load_integration_constant(attribute: str) -> str:
+    """Resolve a constant from the integration module after stubs are ready."""
+
+    const_module = importlib.import_module("custom_components.googlefindmy.const")
+    return cast(str, getattr(const_module, attribute))
+
+
+SERVICE_SUBENTRY_KEY = _load_integration_constant("SERVICE_SUBENTRY_KEY")
+TRACKER_SUBENTRY_KEY = _load_integration_constant("TRACKER_SUBENTRY_KEY")
 
 components_pkg = importlib.import_module("custom_components")
 components_pkg.__path__ = [str(ROOT / "custom_components")]
