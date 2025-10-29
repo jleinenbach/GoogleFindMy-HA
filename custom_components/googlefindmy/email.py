@@ -24,6 +24,19 @@ def normalize_email(raw: str | None) -> str | None:
     return normalized.casefold()
 
 
+def normalize_email_or_default(
+    raw: str | None,
+    *,
+    fallback: str = "",
+) -> str:
+    """Return normalized email or the fallback when normalization fails."""
+
+    normalized = normalize_email(raw)
+    if normalized is None:
+        return fallback
+    return normalized
+
+
 def unique_account_id(normalized_email: str | None) -> str | None:
     """Return the integration-wide unique identifier for an account.
 

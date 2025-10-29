@@ -78,7 +78,7 @@ from .const import (
     DEFAULT_OPTIONS,
     DEFAULT_ENABLE_STATS_ENTITIES,
 )
-from .email import normalize_email, unique_account_id
+from .email import normalize_email, normalize_email_or_default, unique_account_id
 
 import voluptuous as vol
 
@@ -951,9 +951,9 @@ def _interpret_reauth_choice(
     return "manual", token_raw, None
 def _find_entry_by_email(hass: HomeAssistant, email: str) -> ConfigEntry | None:
     """Return an existing entry that matches the normalized email, if any."""
-    target = normalize_email(email) or ""
+    target = normalize_email_or_default(email)
     for e in hass.config_entries.async_entries(DOMAIN):
-        if (normalize_email(e.data.get(CONF_GOOGLE_EMAIL)) or "") == target:
+        if normalize_email_or_default(e.data.get(CONF_GOOGLE_EMAIL)) == target:
             return e
     return None
 
@@ -1687,9 +1687,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         assert entry is not None
         raw_email = entry.data.get(CONF_GOOGLE_EMAIL)
-        fixed_email = normalize_email(raw_email)
-        if not isinstance(fixed_email, str) or not fixed_email:
-            fixed_email = ""
+        fixed_email = normalize_email_or_default(raw_email)
 
         if selector is not None:
             schema = vol.Schema(
