@@ -1,10 +1,31 @@
 # tests/test_auth_flow.py
-from __future__ import annotations
-
-from collections.abc import Callable
-from typing import Any
+from typing import Any, Callable
 
 import pytest
+
+
+try:  # pragma: no cover - defensive import shim for optional dependency
+    import undetected_chromedriver  # type: ignore[unused-ignore]  # noqa: F401
+except ModuleNotFoundError:  # pragma: no cover - executed in CI without the package
+    import sys
+    import types
+
+    class _ChromeOptionsStub:
+        def __init__(self) -> None:
+            self.arguments: list[str] = []
+            self.binary_location: str | None = None
+
+        def add_argument(self, argument: str) -> None:
+            self.arguments.append(argument)
+
+    def _chrome_stub(*args: Any, **kwargs: Any) -> object:
+        return object()
+
+    sys.modules.setdefault(
+        "undetected_chromedriver",
+        types.SimpleNamespace(ChromeOptions=_ChromeOptionsStub, Chrome=_chrome_stub),
+    )
+
 
 from custom_components.googlefindmy.Auth import auth_flow
 from custom_components.googlefindmy.Auth.auth_flow import (
