@@ -34,6 +34,34 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.config_entries import ConfigSubentry
 
 
+def test_async_step_hub_delegates_to_user() -> None:
+    """Add Hub flows must reuse the standard user onboarding form."""
+
+    async def _exercise() -> tuple[Any, Any]:
+        user_flow = config_flow.ConfigFlow()
+        user_flow.hass = object()  # type: ignore[assignment]
+        user_flow.context = {}
+        user_flow.unique_id = None  # type: ignore[attr-defined]
+        user_result = await user_flow.async_step_user()
+        if inspect.isawaitable(user_result):
+            user_result = await user_result
+
+        hub_flow = config_flow.ConfigFlow()
+        hub_flow.hass = object()  # type: ignore[assignment]
+        hub_flow.context = {"source": "hub"}
+        hub_flow.unique_id = None  # type: ignore[attr-defined]
+        hub_result = await hub_flow.async_step_hub()
+        if inspect.isawaitable(hub_result):
+            hub_result = await hub_result
+
+        return user_result, hub_result
+
+    user_result, hub_result = asyncio.run(_exercise())
+
+    assert hub_result == user_result
+    assert hub_result.get("type") == "form"
+
+
 def _stable_subentry_id(entry_id: str, key: str) -> str:
     """Return deterministic config_subentry_id values for tests."""
 
