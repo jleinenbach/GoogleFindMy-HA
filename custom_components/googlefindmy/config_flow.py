@@ -1686,7 +1686,10 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
 
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         assert entry is not None
-        fixed_email = normalize_email(entry.data.get(CONF_GOOGLE_EMAIL))
+        raw_email = entry.data.get(CONF_GOOGLE_EMAIL)
+        fixed_email = normalize_email(raw_email)
+        if not isinstance(fixed_email, str) or not fixed_email:
+            fixed_email = ""
 
         if selector is not None:
             schema = vol.Schema(
