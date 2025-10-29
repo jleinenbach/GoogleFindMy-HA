@@ -107,7 +107,6 @@ ignore_errors = false
 
 [[tool.mypy.overrides]]
 module = [
-    "custom_components.googlefindmy.config_flow",
     "custom_components.googlefindmy.__init__",
     "custom_components.googlefindmy.Auth.fcm_receiver_ha",
 ]

@@ -37,7 +37,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Awaitable, Callable, Iterable, Mapping, cast
 
 import voluptuous as vol
 
@@ -582,19 +582,23 @@ async def _try_probe_devices(
     api: GoogleFindMyAPI, *, email: str, token: str
 ) -> list[dict[str, Any]]:
     """Call the API to fetch a basic device list using defensive signatures."""
+    caller = cast(
+        Callable[..., Awaitable[list[dict[str, Any]]]],
+        api.async_get_basic_device_list,
+    )
     try:
-        return await api.async_get_basic_device_list(username=email, token=token)  # type: ignore[call-arg]
+        return await caller(username=email, token=token)
     except TypeError:
         pass
     try:
-        return await api.async_get_basic_device_list(email=email, token=token)  # type: ignore[call-arg]
+        return await caller(email=email, token=token)
     except TypeError:
         pass
     try:
-        return await api.async_get_basic_device_list(email=email)  # type: ignore[call-arg]
+        return await caller(email=email)
     except TypeError:
         pass
-    return await api.async_get_basic_device_list()
+    return await caller()
 
 
 async def _async_new_api_for_probe(
@@ -604,21 +608,22 @@ async def _async_new_api_for_probe(
     secrets_bundle: dict[str, Any] | None = None,
 ) -> GoogleFindMyAPI:
     """Create a fresh, ephemeral API instance for pre-flight validation."""
+    factory = cast(Callable[..., GoogleFindMyAPI], GoogleFindMyAPI)
     try:
-        return GoogleFindMyAPI(
+        return factory(
             oauth_token=token,
             google_email=email,
             secrets_bundle=secrets_bundle,
-        )  # type: ignore[call-arg]
+        )
     except TypeError:
         try:
-            return GoogleFindMyAPI(
+            return factory(
                 token=token,
                 email=email,
                 secrets_bundle=secrets_bundle,
-            )  # type: ignore[call-arg]
+            )
         except TypeError:
-            return GoogleFindMyAPI()  # type: ignore[call-arg]
+            return factory()
 
 
 async def async_pick_working_token(
@@ -2414,13 +2419,13 @@ class OptionsFlowHandler(OptionsFlowBase):
         errors: dict[str, str] = {}
 
         entry = self.config_entry
-        opt = entry.options
-        dat = entry.data
+        opt = cast(Mapping[str, object], entry.options)
+        dat = cast(Mapping[str, object], entry.data)
 
-        def _get(cur_key, default_val):
+        def _get(cur_key: str, default_val: object) -> object:
             return opt.get(cur_key, dat.get(cur_key, default_val))
 
-        current = {
+        current: dict[str, object] = {
             OPT_LOCATION_POLL_INTERVAL: _get(
                 OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
             ),
