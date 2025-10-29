@@ -72,6 +72,15 @@ Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
 
+## AST extraction helper
+
+The :mod:`tests.helpers.ast_extract` module exposes
+``compile_class_method_from_module`` for compiling individual methods from
+integration modules without importing Home Assistant. Import the helper with
+``from tests.helpers import compile_class_method_from_module`` and provide the
+module path, class name, and method name to retrieve a standalone function that
+can be bound using :class:`types.MethodType`.
+
 ## Device registry expectations
 
 The coordinator device-registry tests exercise Home Assistant's 2025.10

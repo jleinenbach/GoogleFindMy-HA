@@ -3,15 +3,15 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import importlib
 import sys
 import time
-from copy import deepcopy
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from typing import Any
+
+from tests.helpers import compile_class_method_from_module
 
 
 def _ensure_button_dependencies() -> None:
@@ -196,26 +196,12 @@ def _load_can_request_location_impl() -> Any:
         / "googlefindmy"
         / "coordinator.py"
     )
-    coordinator_source = coordinator_path.read_text(encoding="utf-8")
-    module_ast = ast.parse(coordinator_source, filename=str(coordinator_path))
-
-    for node in module_ast.body:
-        if isinstance(node, ast.ClassDef) and node.name == "GoogleFindMyCoordinator":
-            for item in node.body:
-                if isinstance(item, ast.FunctionDef) and item.name == "can_request_location":
-                    func_module = ast.Module(
-                        body=[deepcopy(item)],
-                        type_ignores=[],
-                    )
-                    ast.fix_missing_locations(func_module)
-                    namespace: dict[str, Any] = {}
-                    exec(
-                        compile(func_module, str(coordinator_path), "exec"),
-                        {"time": time},
-                        namespace,
-                    )
-                    return namespace[item.name]
-    raise AssertionError("can_request_location definition not found in coordinator")
+    return compile_class_method_from_module(
+        module_path=coordinator_path,
+        class_name="GoogleFindMyCoordinator",
+        method_name="can_request_location",
+        global_overrides={"time": time},
+    )
 
 
 def test_blank_device_name_populates_buttons() -> None:
