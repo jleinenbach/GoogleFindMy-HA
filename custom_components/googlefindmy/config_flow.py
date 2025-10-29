@@ -1080,9 +1080,13 @@ def _normalize_and_validate_discovery_payload(
     if not normalized_email:
         raise DiscoveryFlowError("invalid_discovery_info")
     title = payload_dict.get("title") or payload_dict.get("name")
+    unique_id = unique_account_id(normalized_email)
+    if unique_id is None:
+        raise DiscoveryFlowError("invalid_discovery_info")
+
     return CloudDiscoveryData(
         email=email_candidate,
-        unique_id=unique_account_id(normalized_email),
+        unique_id=unique_id,
         candidates=tuple(candidates),
         secrets_bundle=secrets_bundle,
         title=str(title) if isinstance(title, str) else None,

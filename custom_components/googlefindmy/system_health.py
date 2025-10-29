@@ -49,12 +49,13 @@ def _format_epoch_utc(value: Any) -> str | None:
     return dt.isoformat().replace("+00:00", "Z")
 def _email_hash(entry: ConfigEntry) -> str | None:
     """Return a truncated SHA-256 hash for the account email (or None if absent)."""
+    normalized: str | None
     email = entry.data.get(CONF_GOOGLE_EMAIL)
     if isinstance(email, str) and email:
         normalized = normalize_email(email)
     else:
+        normalized = None
         bundle = entry.data.get(DATA_SECRET_BUNDLE)
-        normalized: str | None = None
         if isinstance(bundle, dict):
             candidate = bundle.get("username") or bundle.get("Email")
             normalized = normalize_email(candidate)
