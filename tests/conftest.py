@@ -9,8 +9,8 @@ from pathlib import Path
 import asyncio
 import importlib
 import inspect
-from collections.abc import Mapping, Callable
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any, cast
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from datetime import datetime, timezone
 import json
@@ -23,6 +23,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 INTEGRATION_ROOT = ROOT / "custom_components" / "googlefindmy"
+
+SERVICE_SUBENTRY_KEY: str = "service"
+TRACKER_SUBENTRY_KEY: str = "tracker"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -1024,7 +1027,136 @@ def fixture_manifest(integration_root: Path) -> dict[str, object]:
     return manifest_data
 
 
+@pytest.fixture(name="stub_coordinator_factory")
+def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
+    """Return a factory that builds coordinator stubs with async helpers."""
+
+    def _factory(
+        *,
+        data: Iterable[dict[str, Any]] | None = None,
+        stats: Mapping[str, Any] | None = None,
+        performance_metrics: Mapping[str, Any] | None = None,
+        last_update_success: bool = True,
+        subentry_key: str = TRACKER_SUBENTRY_KEY,
+        service_subentry_key: str = SERVICE_SUBENTRY_KEY,
+        metadata_for_feature: Mapping[str, str] | None = None,
+        snapshot_callback: Callable[[str | None, str | None], Iterable[dict[str, Any]]] | None = None,
+        init_hook: Callable[..., None] | None = None,
+        methods: Mapping[str, Callable[..., Any]] | None = None,
+        extra_attributes: Mapping[str, Any] | None = None,
+    ) -> type[Any]:
+        base_data = list(data) if data is not None else [{"id": "device-1", "name": "Device"}]
+        base_stats = dict(stats or {"background_updates": 1})
+        base_performance = dict(performance_metrics or {})
+        feature_map = dict(metadata_for_feature or {})
+
+        def _coerce_attribute(value: Any) -> Any:
+            return value() if callable(value) else value
+
+        class _CoordinatorStub:
+            """Coordinator stub matching the runtime contract used in tests."""
+
+            def __init__(self, hass: Any, *, cache: Any, **kwargs: Any) -> None:
+                self.hass = hass
+                self.cache = cache
+                self.data = list(base_data)
+                self.stats = dict(base_stats)
+                self.performance_metrics = dict(base_performance)
+                self.last_update_success = last_update_success
+                self.config_entry: Any | None = None
+                self._purged: list[str] = []
+                self._listeners: list[Callable[[], None]] = []
+                self._subentry_key = subentry_key
+                self._service_subentry_key = service_subentry_key
+                self._metadata_for_feature = dict(feature_map)
+                self._snapshot_callback = snapshot_callback
+                self._init_kwargs = dict(kwargs)
+                self.subentry_manager: Any | None = None
+                if extra_attributes:
+                    for key, value in extra_attributes.items():
+                        setattr(self, key, _coerce_attribute(value))
+                if init_hook is not None:
+                    init_hook(self, hass=hass, cache=cache, kwargs=kwargs)
+
+            def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+                self._listeners.append(listener)
+                return lambda: None
+
+            def force_poll_due(self) -> None:  # pragma: no cover - default no-op
+                return None
+
+            async def async_setup(self) -> None:
+                return None
+
+            async def async_refresh(self) -> None:
+                return None
+
+            async def async_shutdown(self) -> None:
+                return None
+
+            async def async_request_refresh(self) -> None:  # pragma: no cover - optional
+                return None
+
+            def async_set_updated_data(self, _data: Any) -> None:  # pragma: no cover - optional
+                return None
+
+            def push_updated(self, _ids: list[str]) -> None:  # pragma: no cover - optional
+                return None
+
+            def purge_device(self, device_id: str) -> None:
+                self._purged.append(device_id)
+
+            def stable_subentry_identifier(
+                self, *, key: str | None = None, feature: str | None = None
+            ) -> str:
+                if key is not None:
+                    return key
+                if feature is not None and feature in self._metadata_for_feature:
+                    return self._metadata_for_feature[feature]
+                if feature == "binary_sensor":
+                    return self._service_subentry_key
+                return self._subentry_key
+
+            def get_subentry_metadata(
+                self, *, key: str | None = None, feature: str | None = None
+            ) -> Any:
+                resolved = self.stable_subentry_identifier(key=key, feature=feature)
+                return SimpleNamespace(key=resolved)
+
+            def get_subentry_snapshot(
+                self, key: str | None = None, *, feature: str | None = None
+            ) -> list[dict[str, Any]]:
+                if self._snapshot_callback is not None:
+                    return list(self._snapshot_callback(key, feature))
+                return list(self.data)
+
+            def is_device_visible_in_subentry(
+                self, subentry_key: str, device_id: str
+            ) -> bool:
+                return True
+
+            def attach_subentry_manager(self, manager: Any) -> None:
+                self.subentry_manager = manager
+
+        if methods:
+            for name, method in methods.items():
+                setattr(_CoordinatorStub, name, method)
+
+        return _CoordinatorStub
+
+    return _factory
 _stub_homeassistant()
+
+
+def _load_integration_constant(attribute: str) -> str:
+    """Resolve a constant from the integration module after stubs are ready."""
+
+    const_module = importlib.import_module("custom_components.googlefindmy.const")
+    return cast(str, getattr(const_module, attribute))
+
+
+SERVICE_SUBENTRY_KEY = _load_integration_constant("SERVICE_SUBENTRY_KEY")
+TRACKER_SUBENTRY_KEY = _load_integration_constant("TRACKER_SUBENTRY_KEY")
 
 components_pkg = importlib.import_module("custom_components")
 components_pkg.__path__ = [str(ROOT / "custom_components")]

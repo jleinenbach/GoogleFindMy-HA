@@ -26,6 +26,9 @@ from custom_components.googlefindmy.const import (
     MODE_MIGRATE,
     SERVICE_LOCATE_DEVICE,
     SERVICE_REBUILD_REGISTRY,
+    SERVICE_FEATURE_PLATFORMS,
+    SERVICE_SUBENTRY_KEY,
+    TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
 )
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
@@ -200,69 +203,11 @@ class _StubHass:
         return func(*args)
 
 
-class _StubCoordinator:
-    """Minimal coordinator stub satisfying platform expectations."""
 
-    def __init__(self, hass: _StubHass, *, cache: _StubCache, **_: Any) -> None:
-        self.hass = hass
-        self.cache = cache
-        self.data = [{"id": "device-1", "name": "Device"}]
-        self.stats = {"background_updates": 1}
-        self.performance_metrics: dict[str, Any] = {}
-        self.last_update_success = True
-        self.config_entry: _StubConfigEntry | None = None
-        self._purged: list[str] = []
-        self._subentry_key = TRACKER_SUBENTRY_KEY
-
-    def async_add_listener(self, _listener: Callable[[], None]) -> Callable[[], None]:
-        return lambda: None
-
-    def force_poll_due(self) -> None:  # pragma: no cover - reload path
-        return None
-
-    async def async_setup(self) -> None:
-        return None
-
-    async def async_refresh(self) -> None:
-        return None
-
-    async def async_shutdown(self) -> None:
-        return None
-
-    def purge_device(self, device_id: str) -> None:
-        self._purged.append(device_id)
-
-    def stable_subentry_identifier(
-        self, *, key: str | None = None, feature: str | None = None
-    ) -> str:
-        return key or self._subentry_key
-
-    def get_subentry_metadata(
-        self, *, key: str | None = None, feature: str | None = None
-    ) -> Any:
-        if key is not None:
-            resolved = key
-        elif feature in {"button", "device_tracker", "sensor"}:
-            resolved = self._subentry_key
-        elif feature == "binary_sensor":
-            resolved = "service"
-        else:
-            resolved = self._subentry_key
-        return SimpleNamespace(key=resolved)
-
-    def get_subentry_snapshot(
-        self, key: str | None = None, *, feature: str | None = None
-    ) -> list[dict[str, Any]]:
-        return list(self.data)
-
-    def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
-        return True
-
-    def attach_subentry_manager(self, manager: Any) -> None:
-        self.subentry_manager = manager
-
-
-def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hass_data_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
     """The integration stores runtime state only under hass.data[DOMAIN]["entries"]."""
 
     loop = asyncio.new_event_loop()
@@ -490,16 +435,17 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             AsyncMock(return_value=dummy_fcm),
         )
 
+        coordinator_cls = stub_coordinator_factory()
         # Ensure isinstance checks in platform modules resolve to the stub coordinator.
         monkeypatch.setattr(
-            coordinator_module, "GoogleFindMyCoordinator", _StubCoordinator
+            coordinator_module, "GoogleFindMyCoordinator", coordinator_cls
         )
-        monkeypatch.setattr(integration, "GoogleFindMyCoordinator", _StubCoordinator)
-        monkeypatch.setattr(button_module, "GoogleFindMyCoordinator", _StubCoordinator)
+        monkeypatch.setattr(integration, "GoogleFindMyCoordinator", coordinator_cls)
+        monkeypatch.setattr(button_module, "GoogleFindMyCoordinator", coordinator_cls)
         monkeypatch.setattr(
             map_view_module,
             "GoogleFindMyCoordinator",
-            _StubCoordinator,
+            coordinator_cls,
             raising=False,
         )
 
@@ -535,20 +481,26 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
             subentry_manager = runtime_data.subentry_manager
             managed = subentry_manager.managed_subentries
             assert TRACKER_SUBENTRY_KEY in managed
+            assert SERVICE_SUBENTRY_KEY in managed
+            service_subentry = managed[SERVICE_SUBENTRY_KEY]
             core_subentry = managed[TRACKER_SUBENTRY_KEY]
             assert core_subentry.data["group_key"] == TRACKER_SUBENTRY_KEY
-            features = core_subentry.data["features"]
-            assert features == [
-                "binary_sensor",
-                "button",
-                "device_tracker",
-                "sensor",
-            ]
-            assert all(isinstance(feature, str) for feature in features)
-            assert all(feature == feature.lower() for feature in features)
+            tracker_features = core_subentry.data["features"]
+            assert tracker_features == sorted(TRACKER_FEATURE_PLATFORMS)
+            assert all(isinstance(feature, str) for feature in tracker_features)
+            assert all(feature == feature.lower() for feature in tracker_features)
             assert core_subentry.data["fcm_push_enabled"] is True
             assert core_subentry.data["has_google_home_filter"] is False
             assert core_subentry.unique_id.endswith(TRACKER_SUBENTRY_KEY)
+
+            assert service_subentry.data["group_key"] == SERVICE_SUBENTRY_KEY
+            service_features = service_subentry.data["features"]
+            assert service_features == sorted(SERVICE_FEATURE_PLATFORMS)
+            assert all(isinstance(feature, str) for feature in service_features)
+            assert all(feature == feature.lower() for feature in service_features)
+            assert service_subentry.data["fcm_push_enabled"] is True
+            assert service_subentry.data["has_google_home_filter"] is False
+            assert service_subentry.unique_id == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
 
             added_entities: list[Any] = []
 
@@ -626,6 +578,7 @@ def test_hass_data_layout(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_setup_entry_reactivates_disabled_button_entities(
     monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
 ) -> None:
     """Disabled button entities are re-enabled during setup."""
 
@@ -693,7 +646,8 @@ def test_setup_entry_reactivates_disabled_button_entities(
             integration, "GoogleFindMyMapRedirectView", _RegisterViewStub
         )
 
-        monkeypatch.setattr(integration, "GoogleFindMyCoordinator", _StubCoordinator)
+        coordinator_cls = stub_coordinator_factory()
+        monkeypatch.setattr(integration, "GoogleFindMyCoordinator", coordinator_cls)
 
         disabled_marker = integration.RegistryEntryDisabler.INTEGRATION
 

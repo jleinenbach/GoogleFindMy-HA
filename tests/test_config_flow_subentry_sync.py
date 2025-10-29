@@ -192,6 +192,7 @@ def test_device_selection_creates_feature_groups_with_flags() -> None:
 
     assert service_record["subentry_type"] == SUBENTRY_TYPE_SERVICE
     assert tracker_record["subentry_type"] == SUBENTRY_TYPE_TRACKER
+    assert service_record["unique_id"] == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
 
     assert service_payload["features"] == sorted(SERVICE_FEATURE_PLATFORMS)
     assert "visible_device_ids" not in service_payload
@@ -251,6 +252,7 @@ def test_device_selection_updates_existing_feature_group() -> None:
         record for record in manager.created if record["subentry_type"] == SUBENTRY_TYPE_SERVICE
     )
     assert created_service["data"]["group_key"] == SERVICE_SUBENTRY_KEY
+    assert created_service["unique_id"] == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
 
     assert manager.updated, "tracker subentry should be updated"
     payload = manager.updated[-1]["data"]
