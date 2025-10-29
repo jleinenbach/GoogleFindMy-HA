@@ -757,6 +757,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     "Config entry %s is in migration error state; attempting soft migration instead of reload.",
                     entry_id,
                 )
+                soft_completed = False
                 if callable(soft_migrate):
                     try:
                         await soft_migrate(hass, entry_)
@@ -766,6 +767,8 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                             entry_id,
                             err,
                         )
+                    else:
+                        soft_completed = True
                 else:
                     _LOGGER.warning(
                         "Soft migration helper unavailable; entry %s remains in migration error state until migration is resolved manually.",
@@ -788,6 +791,13 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 else:
                     _LOGGER.warning(
                         "Unique ID migration helper for entry %s is not callable; skipped.",
+                        entry_id,
+                    )
+
+                if soft_completed:
+                    reloadable_entries.append(entry_)
+                    _LOGGER.info(
+                        "Config entry %s recovered from migration error; queued for reload.",
                         entry_id,
                     )
 
