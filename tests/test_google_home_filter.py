@@ -149,3 +149,66 @@ def test_should_filter_detection_when_zone_passive(monkeypatch: pytest.MonkeyPat
     gh_filter = GoogleHomeFilter(hass, filter_config)
 
     assert gh_filter.should_filter_detection("device-1", "Nest Speaker") == (False, None)
+
+
+def test_should_filter_detection_substitutes_home_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active ``zone.home`` coordinates substitute semantic Google Home detections."""
+
+    _ensure_core_state_module()
+    _ensure_zone_module()
+    registry_module = _ensure_helpers_modules()
+    event_module = _ensure_event_helper_module()
+
+    from custom_components.googlefindmy.google_home_filter import GoogleHomeFilter
+
+    monkeypatch.setattr(
+        registry_module,
+        "async_get",
+        lambda _hass: SimpleNamespace(
+            async_get_entity_id=lambda *_args, **_kwargs: None
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        event_module,
+        "async_track_state_change_event",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        GoogleHomeFilter,
+        "is_device_at_home",
+        lambda self, _device_id: False,
+    )
+
+    zone_state = _FakeState(
+        entity_id="zone.home",
+        state="zoning",
+        attributes={
+            "latitude": 1.23,
+            "longitude": 4.56,
+            "radius": 10.0,
+            "passive": False,
+        },
+    )
+
+    hass = SimpleNamespace()
+    hass.states = _FakeStates({"zone.home": zone_state})
+    hass.data = {}
+
+    filter_config = {
+        OPT_GOOGLE_HOME_FILTER_ENABLED: True,
+        OPT_GOOGLE_HOME_FILTER_KEYWORDS: ["nest"],
+    }
+
+    gh_filter = GoogleHomeFilter(hass, filter_config)
+
+    assert gh_filter.should_filter_detection("device-1", "Nest Speaker") == (
+        False,
+        {"latitude": 1.23, "longitude": 4.56, "radius": 10.0},
+    )
+
+    # Second call with literal Home exercises the spam debounce path.
+    assert gh_filter.should_filter_detection("device-1", "Home") == (True, None)
