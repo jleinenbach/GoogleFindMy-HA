@@ -81,6 +81,23 @@
       "discovery_secrets_update": "Se detectaron nuevas credenciales para {email}"
     }
   },
+  "config_subentries": {
+    "hub": {
+      "title": "Hub",
+      "step": {
+        "user": {
+          "title": "Agregar grupo de funciones del hub",
+          "description": "Crea o actualiza el grupo de funciones del hub para que Home Assistant pueda exponer los servicios compartidos de esta integración."
+        },
+        "reconfigure": {
+          "title": "Actualizar grupo de funciones del hub",
+          "description": "Actualiza el grupo de funciones del hub para asegurarte de que las funciones más recientes estén disponibles."
+        }
+      },
+      "abort": {},
+      "error": {}
+    }
+  },
   "options": {
     "step": {
       "init": {

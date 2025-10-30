@@ -81,6 +81,23 @@
       "discovery_secrets_update": "New credentials detected for {email}"
     }
   },
+  "config_subentries": {
+    "hub": {
+      "title": "Hub",
+      "step": {
+        "user": {
+          "title": "Add hub feature group",
+          "description": "Create or refresh the hub feature group so Home Assistant can expose shared services for this integration."
+        },
+        "reconfigure": {
+          "title": "Update hub feature group",
+          "description": "Refresh the hub feature group to ensure the latest feature set is available."
+        }
+      },
+      "abort": {},
+      "error": {}
+    }
+  },
   "options": {
     "step": {
       "init": {
