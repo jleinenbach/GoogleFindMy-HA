@@ -367,6 +367,18 @@ Add to the PR description:
 
 *(When unsure, add a follow-up item; don’t block urgent fixes.)*
 
+### Deprecation shim checklist (Home Assistant)
+
+- [ ] `custom_components/googlefindmy/__init__.py` — `CONFIG_SCHEMA` retains
+  the `config_entry_only_config_schema`/`no_yaml_config_schema` fallback chain,
+  and `_apply_update_entry_fallback()` mirrors legacy `async_update_entry`
+  keyword handling. Drop these once the minimum supported Core guarantees the
+  modern helpers/signatures.
+- [ ] `custom_components/googlefindmy/system_health.py` —
+  `async_get_system_health_info()` still supports the pre-2024 signature of
+  `ConfigEntries.async_entries()` that omitted the domain filter. Remove this
+  guard when compatibility with that Core series is no longer required.
+
 ---
 
 ## 9) Docs & i18n (minimal but strict)

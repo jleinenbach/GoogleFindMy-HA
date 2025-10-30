@@ -137,7 +137,6 @@ from . import diagnostics  # noqa: F401
 
 # Service registration has been moved to a dedicated module (clean separation of concerns)
 from .services import async_register_services
-from . import system_health as system_health_module
 
 if TYPE_CHECKING:
     try:  # pragma: no cover - type-checking fallback for stripped test envs
@@ -524,7 +523,6 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     nova_refcount: int
     services_lock: asyncio.Lock
     services_registered: bool
-    system_health_registered: bool
     views_registered: bool
 
 
@@ -2415,17 +2413,6 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     _ensure_cloud_scan_results(bucket, runtime["results"])
     _ensure_entries_bucket(bucket)  # entry_id -> RuntimeData
     _ensure_device_owner_index(bucket)  # canonical_id -> entry_id (E2.5 scaffold)
-
-    system_health_registered = bucket.get("system_health_registered")
-    if not isinstance(system_health_registered, bool):
-        system_health_registered = False
-    if not system_health_registered:
-        try:
-            await system_health_module.async_register(hass)
-        except Exception as err:  # pragma: no cover - diagnostics only
-            _LOGGER.debug("System health registration failed: %s", err)
-        else:
-            bucket["system_health_registered"] = True
 
     # Use a lock + idempotent flag to avoid double registration on racey startups.
     services_lock: asyncio.Lock = _ensure_services_lock(bucket)
