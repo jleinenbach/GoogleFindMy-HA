@@ -53,7 +53,7 @@
       },
       "migrate_complete": {
         "title": "Migration abgeschlossen",
-        "description": "Google Find My Device wurde auf die neue Struktur mit Funktionsgruppen migriert. Prüfe deine Geräte und lade die Integration neu, falls Entitäten offline bleiben."
+        "description": "Google Find My Device für **{email}** wurde auf die neue Struktur mit Funktionsgruppen migriert. Prüfe deine Geräte und lade die Integration neu, falls Entitäten offline bleiben."
       }
     },
     "error": {

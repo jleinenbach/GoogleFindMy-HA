@@ -53,7 +53,7 @@
       },
       "migrate_complete": {
         "title": "Migration complete",
-        "description": "Google Find My Device has been migrated to the new feature group structure. Review your devices and reload the integration if any entities remain offline."
+        "description": "Google Find My Device for **{email}** has been migrated to the new feature group structure. Review your devices and reload the integration if any entities remain offline."
       }
     },
     "error": {

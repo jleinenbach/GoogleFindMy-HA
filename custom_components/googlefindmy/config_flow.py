@@ -1384,6 +1384,22 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     if isinstance(key, str) and value is not None
                 }
 
+        if "email" not in placeholders:
+            candidate_entry = getattr(self, "config_entry", None)
+            email_placeholder: str | None = None
+            if isinstance(candidate_entry, ConfigEntry):
+                email_placeholder = normalize_email_or_default(
+                    candidate_entry.data.get(CONF_GOOGLE_EMAIL)
+                )
+                if not email_placeholder:
+                    email_placeholder = normalize_email_or_default(
+                        candidate_entry.title if isinstance(candidate_entry.title, str) else None
+                    )
+                if not email_placeholder:
+                    email_placeholder = candidate_entry.entry_id
+            if email_placeholder:
+                placeholders["email"] = email_placeholder
+
         return await self._async_resolve_flow_result(
             cast(
                 FlowResult | Awaitable[FlowResult],
