@@ -41,7 +41,6 @@ from collections.abc import Mapping as CollMapping
 from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, TypeVar, cast
 
-from .Auth.adm_token_retrieval import _mask_email as _mask_email_for_logs
 from .api import GoogleFindMyAPI
 from .const import (
     # Core domain & credential keys
@@ -287,6 +286,20 @@ def _typed_callback(func: _CallbackT) -> _CallbackT:
     """Return a callback decorator that preserves type information."""
 
     return cast(_CallbackT, callback(func))
+
+
+def _mask_email_for_logs(email: str | None) -> str:
+    """Return a privacy-friendly representation of an email for logs."""
+
+    if not email or "@" not in email:
+        return "<unknown>"
+
+    local, domain = email.split("@", 1)
+    if not local:
+        return f"*@{domain}"
+
+    masked_local = (local[0] + "***") if len(local) > 1 else "*"
+    return f"{masked_local}@{domain}"
 
 
 class _ConfigFlowMixin:
