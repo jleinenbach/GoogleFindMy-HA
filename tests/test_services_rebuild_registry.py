@@ -63,7 +63,39 @@ async def test_rebuild_registry_handles_migration_error(
 
     assert entry_manager.reload_calls == [entry.entry_id]
     assert entry_manager.migrate_calls == [entry.entry_id]
+    assert entry.state == ConfigEntryState.NOT_LOADED
     assert ("soft", entry.entry_id) in migration_calls
     assert ("unique", entry.entry_id) in migration_calls
     assert any("migration error state" in record.message for record in caplog.records)
     assert any("queued for reload" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_rebuild_registry_skips_reload_when_migration_still_required(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Entries that remain in MIGRATION_ERROR must not be reloaded automatically."""
+
+    entry = FakeConfigEntry(entry_id="entry-2", state=ConfigEntryState.MIGRATION_ERROR)
+    entry_manager = FakeConfigEntriesManager([entry], migration_success=False)
+    hass = FakeHass(entry_manager)
+
+    device_registry = FakeDeviceRegistry()
+    entity_registry = FakeEntityRegistry()
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services.er, "async_get", lambda hass: entity_registry)
+
+    ctx: dict[str, Any] = {}
+
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.handlers[(DOMAIN, SERVICE_REBUILD_REGISTRY)]
+
+    caplog.set_level(logging.INFO)
+
+    await handler(ServiceCall({ATTR_MODE: MODE_REBUILD}))
+
+    assert entry_manager.migrate_calls == [entry.entry_id]
+    assert entry_manager.reload_calls == []
+    assert entry.state == ConfigEntryState.MIGRATION_ERROR
+    assert any("manual migration" in record.message for record in caplog.records)
