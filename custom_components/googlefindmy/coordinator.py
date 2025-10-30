@@ -1789,7 +1789,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             and getattr(legacy_dev, "via_device_id", None)
                             != service_device_id
                         )
-                        if needs_identifiers or needs_via:
+                        needs_config_subentry = (
+                            getattr(legacy_dev, "config_subentry_id", None)
+                            != tracker_config_subentry_id
+                        )
+                        if (
+                            needs_identifiers
+                            or needs_via
+                            or needs_config_subentry
+                        ):
                             update_kwargs: dict[str, Any] = {
                                 "device_id": legacy_dev.id,
                                 "config_subentry_id": tracker_config_subentry_id,
@@ -1813,10 +1821,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 != service_device_id
                             ):
                                 legacy_dev.via_device_id = service_device_id
-                            if (
-                                getattr(legacy_dev, "config_subentry_id", None)
-                                != tracker_config_subentry_id
-                            ):
+                            if needs_config_subentry:
                                 legacy_dev.config_subentry_id = tracker_config_subentry_id
                             created_or_updated += 1
                         if service_device_id is None:

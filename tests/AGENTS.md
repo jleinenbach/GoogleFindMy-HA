@@ -90,6 +90,19 @@ ensure the helper continues to accept both the legacy `via_device_id` keyword
 and the newer tuple form, recording the tuple in created-device metadata so the
 tests can assert the parent linkage accurately.
 
+### Update checklist for registry stub changes
+
+When adjusting the registry stubs or adding new assertions, confirm the
+following to preserve migration coverage:
+
+1. **Identifier continuity** — Existing entries still match on the expected
+   identifier tuples after the change.
+2. **Config subentry alignment** — Legacy devices without a `config_subentry_id`
+   are updated to reference the tracker subentry when migrations run.
+3. **`device_id` verification** — Recorded updates are associated with the
+   precise device entry under test so assertions catch accidental cross-device
+   mutations.
+
 ## Translation alignment checks
 
 `tests/test_service_device_translation_alignment.py` loads every locale (including
