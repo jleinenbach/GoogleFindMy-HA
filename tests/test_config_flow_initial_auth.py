@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
+import sys
 from typing import Any
 from collections.abc import Awaitable, Callable
 from types import MappingProxyType
@@ -31,8 +33,29 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.Auth.username_provider import username_string
+from homeassistant import config_entries as ha_config_entries
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.config_entries import ConfigSubentry
+
+
+def test_config_flow_import_without_gpsoauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config flow must import without requiring gpsoauth at runtime."""
+
+    monkeypatch.setitem(sys.modules, "gpsoauth", None)
+
+    reloaded = importlib.reload(config_flow)
+    flow_cls = getattr(reloaded, "ConfigFlow", None)
+
+    assert flow_cls is not None
+    assert issubclass(flow_cls, ha_config_entries.ConfigFlow)
+
+    handlers = getattr(ha_config_entries, "HANDLERS", None)
+    if handlers is not None:
+        assert handlers.get(DOMAIN) is flow_cls
+    else:  # Fallback for minimal stubs without handler registry
+        assert getattr(flow_cls, "domain", None) == DOMAIN
 
 
 def test_async_step_hub_delegates_to_user() -> None:
