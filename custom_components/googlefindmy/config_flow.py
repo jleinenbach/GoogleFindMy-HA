@@ -1831,15 +1831,16 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     subentry_context[group_key] = getattr(subentry, "subentry_id", None)
 
         oauth_token = self._auth_data.get(CONF_OAUTH_TOKEN)
+        flow_result: FlowResult | Awaitable[FlowResult]
         if oauth_token:
-            next_step = await self.async_step_device_selection()
+            flow_result = await self.async_step_device_selection()
         else:
             self.context["reauth_success_reason_override"] = "reconfigure_successful"
-            next_step = await self.async_step_reauth_confirm()
+            flow_result = await self.async_step_reauth_confirm()
 
-        if inspect.isawaitable(next_step):
-            return await cast(Awaitable[FlowResult], next_step)
-        return cast(FlowResult, next_step)
+        if not isinstance(flow_result, dict):
+            return await flow_result
+        return flow_result
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
