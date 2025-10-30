@@ -292,7 +292,7 @@ def test_supported_subentry_types_include_hub_handler() -> None:
 
     assert mapping[SUBENTRY_TYPE_SERVICE] is config_flow.ServiceSubentryFlowHandler
     assert mapping[SUBENTRY_TYPE_TRACKER] is config_flow.TrackerSubentryFlowHandler
-    assert mapping["hub"] is config_flow.ServiceSubentryFlowHandler
+    assert mapping["hub"] is config_flow.HubSubentryFlowHandler
 
 
 @pytest.mark.asyncio

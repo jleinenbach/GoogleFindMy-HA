@@ -291,9 +291,11 @@ class ConfigEntrySubEntryManager:
     ) -> _AwaitableT:
         """Return the awaited subentry operation result when needed."""
 
-        if inspect.isawaitable(result):
-            return await cast(Awaitable[_AwaitableT], result)
-        return cast(_AwaitableT, result)
+        if isinstance(result, Awaitable):
+            awaited_any = await result
+            awaited_value: _AwaitableT = cast(_AwaitableT, awaited_any)
+            return awaited_value
+        return result
 
     def _refresh_from_entry(self) -> None:
         """Populate managed mapping from the config entry."""
@@ -1740,6 +1742,20 @@ _DEFAULT_SUBENTRY_FEATURES: tuple[str, ...] = (
 )
 
 
+def _looks_like_tracker_sensor_suffix(value: str) -> bool:
+    """Return True when a sensor unique_id suffix targets a tracker entity."""
+
+    if not value:
+        return False
+
+    lowered = value.lower()
+    if lowered.endswith("_last_seen"):
+        return True
+    if "device-" in lowered or "device_" in lowered:
+        return True
+    return False
+
+
 @dataclass(slots=True)
 class _SubentryUniqueIdMigrationResult:
     updated: int = 0
@@ -1794,6 +1810,8 @@ def _resolve_subentry_identifier_map(entry: ConfigEntry) -> dict[str, str]:
 
     mapping: dict[str, str] = {}
     default_identifier: str | None = None
+    service_identifier: str | None = None
+    tracker_identifier: str | None = None
 
     subentries = getattr(entry, "subentries", None)
     if isinstance(subentries, Mapping):
@@ -1822,6 +1840,13 @@ def _resolve_subentry_identifier_map(entry: ConfigEntry) -> dict[str, str]:
             if not identifier:
                 identifier = _DEFAULT_SUBENTRY_IDENTIFIER
 
+            group_key_raw = data.get("group_key")
+            group_key = str(group_key_raw).strip() if isinstance(group_key_raw, str) else ""
+            if group_key == SERVICE_SUBENTRY_KEY and not service_identifier:
+                service_identifier = identifier
+            elif group_key == TRACKER_SUBENTRY_KEY and not tracker_identifier:
+                tracker_identifier = identifier
+
             for feature in features:
                 mapping.setdefault(feature, identifier)
 
@@ -1830,6 +1855,14 @@ def _resolve_subentry_identifier_map(entry: ConfigEntry) -> dict[str, str]:
 
     if default_identifier is None:
         default_identifier = _DEFAULT_SUBENTRY_IDENTIFIER
+
+    if isinstance(service_identifier, str) and service_identifier:
+        for feature in SERVICE_FEATURE_PLATFORMS:
+            mapping[feature] = service_identifier
+
+    if isinstance(tracker_identifier, str) and tracker_identifier:
+        for feature in TRACKER_FEATURE_PLATFORMS:
+            mapping.setdefault(feature, tracker_identifier)
 
     for feature in _DEFAULT_SUBENTRY_FEATURES:
         mapping.setdefault(feature, default_identifier)
@@ -1903,20 +1936,65 @@ def _determine_subentry_unique_id(
         return None
 
     if feature == "sensor":
+        tracker_identifier = subentry_map.get("device_tracker")
+        if not isinstance(tracker_identifier, str) or not tracker_identifier:
+            tracker_identifier = None
+        service_identifier = subentry_map.get("binary_sensor")
+        if not isinstance(service_identifier, str) or not service_identifier:
+            service_identifier = None
+
+        def _select_sensor_identifier(
+            remainder: str,
+        ) -> tuple[str, str]:
+            """Return the identifier and normalized remainder for sensor entities."""
+
+            tracker_prefix = (
+                f"{tracker_identifier}_" if tracker_identifier is not None else None
+            )
+            service_prefix = (
+                f"{service_identifier}_" if service_identifier is not None else None
+            )
+
+            if service_prefix and remainder.startswith(service_prefix):
+                assert service_identifier is not None
+                return service_identifier, remainder
+
+            if tracker_prefix and remainder.startswith(tracker_prefix):
+                tail = remainder[len(tracker_prefix) :]
+                if service_prefix and tail.startswith(service_prefix):
+                    assert service_identifier is not None
+                    return service_identifier, tail
+                chosen = tracker_identifier if tracker_identifier is not None else identifier
+                return chosen, remainder
+
+            if service_identifier and not _looks_like_tracker_sensor_suffix(remainder):
+                return service_identifier, remainder
+
+            if tracker_identifier:
+                return tracker_identifier, remainder
+
+            return identifier, remainder
+
         scoped_prefix = f"{DOMAIN}_{entry_id}_"
         if uid.startswith(scoped_prefix):
             remainder = uid[len(scoped_prefix) :]
-            if remainder.startswith(f"{identifier}_"):
-                return uid
-            return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+            target_identifier, normalized_remainder = _select_sensor_identifier(
+                remainder
+            )
+            if normalized_remainder.startswith(f"{target_identifier}_"):
+                return f"{DOMAIN}_{entry_id}_{normalized_remainder}"
+            return f"{DOMAIN}_{entry_id}_{target_identifier}_{normalized_remainder}"
         legacy_prefix = f"{DOMAIN}_"
         if uid.startswith(legacy_prefix):
             remainder = uid[len(legacy_prefix) :]
             if remainder.startswith(f"{entry_id}_"):
                 remainder = remainder[len(entry_id) + 1 :]
-            if remainder.startswith(f"{identifier}_"):
-                return uid
-            return f"{DOMAIN}_{entry_id}_{identifier}_{remainder}"
+            target_identifier, normalized_remainder = _select_sensor_identifier(
+                remainder
+            )
+            if normalized_remainder.startswith(f"{target_identifier}_"):
+                return f"{DOMAIN}_{entry_id}_{normalized_remainder}"
+            return f"{DOMAIN}_{entry_id}_{target_identifier}_{normalized_remainder}"
         return None
 
     if feature == "button":
@@ -2318,11 +2396,11 @@ def _select_authoritative_entry_id(
     """Return the entry_id that should remain active for a duplicate account."""
 
     if not duplicates:
-        return entry.entry_id
+        return str(entry.entry_id)
     candidates = [entry, *duplicates]
     # Deterministic ordering by entry_id keeps behaviour predictable across restarts.
     authoritative = min(candidates, key=lambda candidate: candidate.entry_id)
-    return authoritative.entry_id
+    return str(authoritative.entry_id)
 
 
 def _ensure_post_migration_consistency(

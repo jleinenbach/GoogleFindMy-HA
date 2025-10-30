@@ -70,7 +70,7 @@ from types import MappingProxyType
 if TYPE_CHECKING:
     from homeassistant.core import Event
 
-    from . import ConfigEntrySubEntryManager
+    from . import ConfigEntrySubEntryManager, ConfigEntrySubentryDefinition
     from .google_home_filter import GoogleHomeFilter as GoogleHomeFilterProtocol
 else:  # pragma: no cover - typing fallback for runtime imports
     Event = Any
@@ -111,6 +111,8 @@ from .const import (
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
     TRACKER_FEATURE_PLATFORMS,
     service_device_identifier,
@@ -694,6 +696,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._feature_to_subentry: dict[str, str] = {}
         self._default_subentry_key_value: str = "core_tracking"
         self._subentry_manager: ConfigEntrySubEntryManager | None = None
+        self._pending_subentry_repair: asyncio.Task[None] | None = None
 
         # Statistics (extend as needed)
         self.stats: dict[str, int] = {
@@ -762,6 +765,130 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         return self._default_subentry_key_value or "core_tracking"
 
+    def _build_core_subentry_definitions(
+        self,
+    ) -> list["ConfigEntrySubentryDefinition"]:
+        """Return definitions for the core tracker/service subentries."""
+
+        entry = self.config_entry or getattr(self, "entry", None)
+        entry_id = getattr(entry, "entry_id", None) if entry is not None else None
+        if entry is None or not isinstance(entry_id, str) or not entry_id:
+            _LOGGER.debug(
+                "Skipping core subentry repair: config entry unavailable (entry=%s)",
+                entry,
+            )
+            return []
+
+        try:
+            from . import ConfigEntrySubentryDefinition  # local import to avoid cycles
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug(
+                "Skipping core subentry repair: definition factory import failed (%s)",
+                err,
+            )
+            return []
+
+        runtime_data = getattr(entry, "runtime_data", None)
+        fcm_receiver = getattr(runtime_data, "fcm_receiver", None)
+        google_home_filter = getattr(runtime_data, "google_home_filter", None)
+
+        fcm_push_enabled = fcm_receiver is not None
+        has_google_home_filter = google_home_filter is not None
+        entry_title = getattr(entry, "title", None) or "Google Find My"
+
+        tracker_features = list(_TRACKER_SUBENTRY_FEATURES or TRACKER_FEATURE_PLATFORMS)
+        service_features = list(_SERVICE_SUBENTRY_FEATURES or SERVICE_FEATURE_PLATFORMS)
+
+        tracker_definition = ConfigEntrySubentryDefinition(
+            key=TRACKER_SUBENTRY_KEY,
+            title="Google Find My devices",
+            data={
+                "features": tracker_features,
+                "fcm_push_enabled": fcm_push_enabled,
+                "has_google_home_filter": has_google_home_filter,
+                "entry_title": entry_title,
+            },
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            unique_id=f"{entry_id}-{TRACKER_SUBENTRY_KEY}",
+        )
+        service_definition = ConfigEntrySubentryDefinition(
+            key=SERVICE_SUBENTRY_KEY,
+            title=entry_title,
+            data={
+                "features": service_features,
+                "fcm_push_enabled": fcm_push_enabled,
+                "has_google_home_filter": has_google_home_filter,
+                "entry_title": entry_title,
+            },
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            unique_id=f"{entry_id}-{SERVICE_SUBENTRY_KEY}",
+        )
+
+        return [tracker_definition, service_definition]
+
+    def _schedule_core_subentry_repair(self, missing_keys: set[str]) -> None:
+        """Schedule a repair task to recreate missing core subentries."""
+
+        if not missing_keys:
+            return
+
+        manager = self._subentry_manager
+        hass = getattr(self, "hass", None)
+        if manager is None or hass is None:
+            return
+
+        pending = self._pending_subentry_repair
+        if pending is not None and not pending.done():
+            _LOGGER.debug(
+                "Core subentry repair already running; deferring additional request (%s)",
+                sorted(missing_keys),
+            )
+            return
+
+        entry_id = self._entry_id() or "unknown"
+
+        async def _repair() -> None:
+            try:
+                definitions = self._build_core_subentry_definitions()
+                if not definitions:
+                    _LOGGER.debug(
+                        "Core subentry repair skipped for %s: definitions unavailable",
+                        entry_id,
+                    )
+                    return
+
+                _LOGGER.debug(
+                    "Repairing missing subentries %s for entry %s",
+                    sorted(missing_keys),
+                    entry_id,
+                )
+                await manager.async_sync(definitions)
+            except asyncio.CancelledError:  # pragma: no cover - task cancelled
+                raise
+            except Exception as err:  # pragma: no cover - defensive logging
+                _LOGGER.warning(
+                    "Core subentry repair failed for entry %s: %s",
+                    entry_id,
+                    err,
+                )
+                return
+            finally:
+                self._pending_subentry_repair = None
+
+            self._ensure_service_device_exists()
+            self._refresh_subentry_index()
+            _LOGGER.debug(
+                "Core subentry repair completed for entry %s", entry_id
+            )
+
+        task_name = f"{DOMAIN}.repair_core_subentries"
+        create_task = getattr(hass, "async_create_task", None)
+        if callable(create_task):
+            task = create_task(_repair(), name=task_name)
+        else:  # pragma: no cover - fallback for legacy stubs
+            task = asyncio.create_task(_repair(), name=task_name)
+        self._pending_subentry_repair = task
+
     def _refresh_subentry_index(
         self, visible_devices: Sequence[Mapping[str, Any]] | None = None
     ) -> None:
@@ -788,6 +915,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         getattr(subentry, "title", None),
                     )
                 )
+
+        present_core_keys = {
+            group_key
+            for group_key, _subentry_id, _data, _title in raw_entries
+        }
+        required_missing = {
+            key
+            for key in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY)
+            if key not in present_core_keys
+        }
+        if required_missing:
+            self._schedule_core_subentry_repair(required_missing)
 
         if not raw_entries:
             raw_entries.append(

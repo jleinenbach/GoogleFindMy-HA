@@ -45,6 +45,7 @@ LEGACY_SERVICE_IDENTIFIER: str = "integration"
 SERVICE_SUBENTRY_KEY: str = "service"
 TRACKER_SUBENTRY_KEY: str = "core_tracking"
 SUBENTRY_TYPE_SERVICE: str = "service"
+SUBENTRY_TYPE_HUB: str = "hub"
 SUBENTRY_TYPE_TRACKER: str = "tracker"
 
 # Canonical feature lists for config subentries (kept sorted and import-safe)
@@ -55,6 +56,7 @@ TRACKER_FEATURE_PLATFORMS: tuple[str, ...] = (
 )
 SERVICE_FEATURE_PLATFORMS: tuple[str, ...] = (
     "binary_sensor",
+    "sensor",
 )
 
 
@@ -478,6 +480,7 @@ __all__ = [
     "SERVICE_SUBENTRY_KEY",
     "TRACKER_SUBENTRY_KEY",
     "SUBENTRY_TYPE_SERVICE",
+    "SUBENTRY_TYPE_HUB",
     "SUBENTRY_TYPE_TRACKER",
     "service_device_identifier",
     "CONF_OAUTH_TOKEN",

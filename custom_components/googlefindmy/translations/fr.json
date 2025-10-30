@@ -81,6 +81,23 @@
       "discovery_secrets_update": "Nouvelles informations d'identification détectées pour {email}"
     }
   },
+  "config_subentries": {
+    "hub": {
+      "title": "Hub",
+      "step": {
+        "user": {
+          "title": "Ajouter le groupe de fonctionnalités du hub",
+          "description": "Créez ou mettez à jour le groupe de fonctionnalités du hub afin que Home Assistant puisse exposer les services partagés de cette intégration."
+        },
+        "reconfigure": {
+          "title": "Mettre à jour le groupe de fonctionnalités du hub",
+          "description": "Actualisez le groupe de fonctionnalités du hub pour que les fonctions les plus récentes soient disponibles."
+        }
+      },
+      "abort": {},
+      "error": {}
+    }
+  },
   "options": {
     "step": {
       "init": {

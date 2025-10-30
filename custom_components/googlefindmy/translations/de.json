@@ -81,6 +81,23 @@
       "discovery_secrets_update": "Neue Anmeldedaten für {email} erkannt"
     }
   },
+  "config_subentries": {
+    "hub": {
+      "title": "Hub",
+      "step": {
+        "user": {
+          "title": "Hub-Featuregruppe hinzufügen",
+          "description": "Erstelle oder aktualisiere die Hub-Featuregruppe, damit Home Assistant gemeinsame Dienste für diese Integration bereitstellen kann."
+        },
+        "reconfigure": {
+          "title": "Hub-Featuregruppe aktualisieren",
+          "description": "Aktualisiere die Hub-Featuregruppe, um den neuesten Funktionsumfang bereitzustellen."
+        }
+      },
+      "abort": {},
+      "error": {}
+    }
+  },
   "options": {
     "step": {
       "init": {

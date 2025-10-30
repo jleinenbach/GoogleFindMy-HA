@@ -28,6 +28,8 @@ from custom_components.googlefindmy.const import (
     SERVICE_REBUILD_REGISTRY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
 )
@@ -202,6 +204,144 @@ class _StubHass:
     async def async_add_executor_job(self, func: Callable[..., Any], *args: Any) -> Any:
         return func(*args)
 
+
+ 
+def test_service_stats_unique_id_migration_prefers_service_subentry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracker-prefixed stats sensor IDs collapse to the service identifier."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy")
+
+        entry = _StubConfigEntry()
+        entry.entry_id = "entry-test"
+
+        tracker_subentry = ConfigSubentry(
+            data={
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "features": ("device_tracker", "sensor"),
+            },
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            title="Devices",
+            unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+            subentry_id="tracker-subentry",
+        )
+        service_subentry = ConfigSubentry(
+            data={
+                "group_key": SERVICE_SUBENTRY_KEY,
+                "features": ("binary_sensor",),
+            },
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            title="Service",
+            unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+            subentry_id="service-subentry",
+        )
+        entry.subentries = {
+            tracker_subentry.subentry_id: tracker_subentry,
+            service_subentry.subentry_id: service_subentry,
+        }
+
+        hass = _StubHass(entry, loop)
+
+        class _RegistryStub:
+            def __init__(self) -> None:
+                self.entities: dict[str, SimpleNamespace] = {}
+                self._by_key: dict[tuple[str, str, str], str] = {}
+                self.updated: list[str] = []
+
+            def add(
+                self,
+                *,
+                entity_id: str,
+                domain: str,
+                platform: str,
+                unique_id: str,
+                config_entry_id: str,
+            ) -> None:
+                entry_obj = SimpleNamespace(
+                    entity_id=entity_id,
+                    domain=domain,
+                    platform=platform,
+                    unique_id=unique_id,
+                    config_entry_id=config_entry_id,
+                )
+                self.entities[entity_id] = entry_obj
+                self._by_key[(domain, platform, unique_id)] = entity_id
+
+            def async_get_entity_id(
+                self, domain: str, platform: str, unique_id: str
+            ) -> str | None:
+                return self._by_key.get((domain, platform, unique_id))
+
+            def async_update_entity(
+                self,
+                entity_id: str,
+                *,
+                new_unique_id: str | None = None,
+                **_: Any,
+            ) -> None:
+                entry_obj = self.entities[entity_id]
+                if new_unique_id:
+                    self._by_key.pop(
+                        (entry_obj.domain, entry_obj.platform, entry_obj.unique_id),
+                        None,
+                    )
+                    entry_obj.unique_id = new_unique_id
+                    self._by_key[(entry_obj.domain, entry_obj.platform, new_unique_id)] = (
+                        entity_id
+                    )
+                self.updated.append(entity_id)
+
+        class _DeviceRegistryStub:
+            def __init__(self) -> None:
+                self.devices: dict[str, Any] = {}
+
+            def async_update_device(self, **_: Any) -> None:  # pragma: no cover - stub
+                return None
+
+        entity_registry = _RegistryStub()
+        entity_registry.add(
+            entity_id="sensor.googlefindmy_api_updates",
+            domain="sensor",
+            platform=integration.DOMAIN,
+            unique_id=(
+                f"{integration.DOMAIN}_{entry.entry_id}_"
+                f"{tracker_subentry.subentry_id}_{service_subentry.subentry_id}_api_updates_total"
+            ),
+            config_entry_id=entry.entry_id,
+        )
+        device_registry = _DeviceRegistryStub()
+
+        monkeypatch.setattr(
+            integration.er, "async_get", lambda _hass: entity_registry
+        )
+        monkeypatch.setattr(
+            integration.dr, "async_get", lambda _hass: device_registry
+        )
+
+        loop.run_until_complete(
+            integration._async_migrate_unique_ids(hass, entry)
+        )
+
+        migrated = entity_registry.entities["sensor.googlefindmy_api_updates"]
+        assert migrated.unique_id == (
+            f"{integration.DOMAIN}_{entry.entry_id}_"
+            f"{service_subentry.subentry_id}_api_updates_total"
+        )
+        assert entity_registry.updated == ["sensor.googlefindmy_api_updates"]
+    finally:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+            with suppress(Exception):
+                loop.run_until_complete(task)
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 def test_hass_data_layout(

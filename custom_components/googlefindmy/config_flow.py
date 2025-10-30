@@ -38,7 +38,7 @@ import logging
 import re
 from dataclasses import dataclass
 from collections.abc import Mapping as CollMapping
-from types import MappingProxyType, ModuleType
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, TypeVar, cast
 
 from .api import GoogleFindMyAPI
@@ -64,6 +64,7 @@ from .const import (
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
@@ -1456,7 +1457,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         return {
             SUBENTRY_TYPE_SERVICE: ServiceSubentryFlowHandler,
             SUBENTRY_TYPE_TRACKER: TrackerSubentryFlowHandler,
-            "hub": ServiceSubentryFlowHandler,
+            SUBENTRY_TYPE_HUB: HubSubentryFlowHandler,
         }
 
     async def async_step_discovery(
@@ -1595,6 +1596,32 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
     ) -> FlowResult:
         """Handle Add Hub flows by delegating to the standard user step."""
 
+        entry_hint: str | None = None
+        context_obj = getattr(self, "context", None)
+        if isinstance(context_obj, Mapping):
+            raw_entry = context_obj.get("entry_id")
+            if isinstance(raw_entry, str) and raw_entry:
+                entry_hint = raw_entry
+
+        config_entry_obj = getattr(self, "config_entry", None)
+        if config_entry_obj is None:
+            lookup_entry = cast(ConfigEntry, SimpleNamespace())
+        else:
+            lookup_entry = cast(ConfigEntry, config_entry_obj)
+
+        supported_types = type(self).async_get_supported_subentry_types(lookup_entry)
+        if SUBENTRY_TYPE_HUB not in supported_types:
+            _LOGGER.error(
+                "Add Hub flow requested but no hub subentry handler is registered"
+            )
+            raise HomeAssistantErrorBase(
+                "Hub subentry handler is not registered; reinstall the integration."
+            )
+
+        _LOGGER.info(
+            "Add Hub flow requested; delegating to standard onboarding (entry_id=%s)",
+            entry_hint or "<new>",
+        )
         return await self.async_step_user(user_input)
 
     # ------------------ Step: choose authentication path ------------------
@@ -1905,6 +1932,9 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             if isinstance(entry_id, str):
                 entry_for_update = self.hass.config_entries.async_get_entry(entry_id)
             if entry_for_update is not None:
+                await self._async_trigger_core_subentry_repair(
+                    self.hass, entry_for_update
+                )
                 await self._async_sync_feature_subentries(
                     entry_for_update,
                     options_payload=options_payload,
@@ -2306,7 +2336,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     except Exception:  # pragma: no cover
                         pass
 
-        runtime_bucket = self.hass.data.get(DOMAIN, {}).get("entries", {})
+        runtime_container = getattr(self.hass, "data", {}) if self.hass else {}
+        runtime_bucket = runtime_container.get(DOMAIN, {}).get("entries", {})
         runtime_entry = runtime_bucket.get(entry.entry_id)
         if runtime_entry is not None:
             for attr in ("_cache", "cache"):
@@ -2320,6 +2351,101 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                 if cache is not None:
                     return cache
         return None
+
+    @staticmethod
+    async def _async_trigger_core_subentry_repair(
+        hass: HomeAssistant | None, entry: ConfigEntry | None
+    ) -> None:
+        """Ensure core tracker/service subentries exist before presenting forms."""
+
+        if hass is None or entry is None:
+            return
+
+        coordinator: Any | None = None
+        subentry_manager: Any | None = None
+
+        runtime = getattr(entry, "runtime_data", None)
+        if runtime is not None:
+            coordinator = getattr(runtime, "coordinator", None) or getattr(
+                runtime, "data", None
+            )
+            subentry_manager = getattr(runtime, "subentry_manager", None)
+
+        if coordinator is None or subentry_manager is None:
+            domain_bucket: Any = getattr(hass, "data", {}).get(DOMAIN)
+            if isinstance(domain_bucket, Mapping):
+                entries_bucket = domain_bucket.get("entries")
+                if isinstance(entries_bucket, Mapping):
+                    runtime_candidate = entries_bucket.get(entry.entry_id)
+                    if runtime_candidate is not None:
+                        if coordinator is None:
+                            coordinator = getattr(runtime_candidate, "coordinator", None)
+                            if coordinator is None and isinstance(runtime_candidate, Mapping):
+                                coordinator = runtime_candidate.get("coordinator")
+                        if subentry_manager is None:
+                            subentry_manager = getattr(
+                                runtime_candidate, "subentry_manager", None
+                            )
+                            if (
+                                subentry_manager is None
+                                and isinstance(runtime_candidate, Mapping)
+                            ):
+                                subentry_manager = runtime_candidate.get(
+                                    "subentry_manager"
+                                )
+
+        if coordinator is None or subentry_manager is None:
+            return
+
+        attach_manager = getattr(coordinator, "attach_subentry_manager", None)
+        if callable(attach_manager):
+            try:
+                attach_manager(subentry_manager)
+            except Exception as err:  # pragma: no cover - defensive guard
+                _LOGGER.debug(
+                    "Skipping core subentry repair attachment due to error: %s", err
+                )
+
+        builder = getattr(coordinator, "_build_core_subentry_definitions", None)
+        if not callable(builder):
+            return
+
+        try:
+            definitions = builder()
+        except Exception as err:  # pragma: no cover - defensive guard
+            _LOGGER.debug("Core subentry repair builder failed: %s", err)
+            return
+
+        if not definitions:
+            return
+
+        sync_method = getattr(subentry_manager, "async_sync", None)
+        if not callable(sync_method):
+            return
+
+        try:
+            await sync_method(definitions)
+        except Exception as err:  # pragma: no cover - defensive guard
+            _LOGGER.debug("Core subentry repair via options flow failed: %s", err)
+            return
+
+        refresher = getattr(coordinator, "_refresh_subentry_index", None)
+        if callable(refresher):
+            try:
+                refresher()
+            except Exception as err:  # pragma: no cover - defensive guard
+                _LOGGER.debug(
+                    "Core subentry metadata refresh after repair failed: %s", err
+                )
+
+        ensure_device = getattr(coordinator, "_ensure_service_device_exists", None)
+        if callable(ensure_device):
+            try:
+                ensure_device()
+            except Exception as err:  # pragma: no cover - defensive guard
+                _LOGGER.debug(
+                    "Service device ensure after core subentry repair failed: %s", err
+                )
 
     def _ensure_subentry_context(self) -> dict[str, str | None]:
         """Return (and initialize) the flow-scoped subentry identifier mapping."""
@@ -2663,6 +2789,32 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
                 return self.async_abort(reason="invalid_subentry")
             return update_callable(self.config_entry, subentry, **update_kwargs)
         return update_callable(**update_kwargs)
+
+
+class HubSubentryFlowHandler(_BaseSubentryFlow):
+    """Config subentry flow handler invoked from the Add Hub entry point."""
+
+    _group_key = SERVICE_SUBENTRY_KEY
+    _subentry_type = SUBENTRY_TYPE_HUB
+    _features = _SERVICE_FEATURE_PLATFORMS
+
+    def _visible_device_ids(self) -> tuple[str, ...]:
+        return ()
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Provision or update the hub feature group when requested by the UI."""
+
+        _LOGGER.info(
+            "Hub subentry flow requested; provisioning service feature group (entry_id=%s)",
+            self._entry_id or "<unknown>",
+        )
+        result = super().async_step_user(user_input)
+        if inspect.isawaitable(result):
+            awaited = await cast(Awaitable[FlowResult], result)
+            return cast(FlowResult, awaited)
+        return cast(FlowResult, result)
 
 
 class ServiceSubentryFlowHandler(_BaseSubentryFlow):
@@ -3035,6 +3187,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Update non-secret options in a single form."""
+        await ConfigFlow._async_trigger_core_subentry_repair(
+            self.hass, self.config_entry
+        )
         errors: dict[str, str] = {}
 
         entry = self.config_entry
@@ -3233,6 +3388,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Entry point for subentry repair operations."""
+        await ConfigFlow._async_trigger_core_subentry_repair(
+            self.hass, self.config_entry
+        )
 
         subentry_choices, _ = self._subentry_choice_map()
         if not subentry_choices:
@@ -3247,6 +3405,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Assign selected devices to a subentry, removing them from others."""
+        await ConfigFlow._async_trigger_core_subentry_repair(
+            self.hass, self.config_entry
+        )
 
         subentry_choices, _ = self._subentry_choice_map()
         if not subentry_choices:
@@ -3313,6 +3474,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Remove a subentry after optionally moving its devices to a fallback."""
+        await ConfigFlow._async_trigger_core_subentry_repair(
+            self.hass, self.config_entry
+        )
 
         subentry_choices, option_map = self._subentry_choice_map()
         removable_choices = {

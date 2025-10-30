@@ -9,6 +9,8 @@ import asyncio
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
+import pytest
+
 from custom_components.googlefindmy import (
     config_flow,
     ConfigEntrySubEntryManager,
@@ -18,6 +20,7 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
@@ -148,8 +151,10 @@ class _HassStub:
         )
         self.data: dict[str, Any] = {}
 
-    def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
-        return asyncio.create_task(coro)
+    def async_create_task(
+        self, coro: Any, *, name: str | None = None
+    ) -> asyncio.Task[Any]:
+        return asyncio.create_task(coro, name=name)
 
 
 def _prepare_coordinator_baseline(
@@ -172,6 +177,7 @@ def _prepare_coordinator_baseline(
     coordinator._feature_to_subentry = {}
     coordinator._default_subentry_key_value = TRACKER_SUBENTRY_KEY
     coordinator._subentry_manager = None
+    coordinator._pending_subentry_repair = None
 
 
 class _EntryStub:
@@ -352,6 +358,12 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
         title="Core",
         data={"features": ["device_tracker"]},
     )
+    service_definition = ConfigEntrySubentryDefinition(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Service",
+        data={"features": list(SERVICE_FEATURE_PLATFORMS)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
     secondary_definition = ConfigEntrySubentryDefinition(
         key="secondary",
         title="Secondary",
@@ -361,7 +373,11 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
         },
     )
 
-    asyncio.run(subentry_manager.async_sync([core_definition, secondary_definition]))
+    asyncio.run(
+        subentry_manager.async_sync(
+            [core_definition, service_definition, secondary_definition]
+        )
+    )
 
     coordinator.attach_subentry_manager(subentry_manager)
     try:
@@ -418,7 +434,87 @@ def test_coordinator_default_features_map_to_core_group() -> None:
         sorted(dict.fromkeys(TRACKER_FEATURE_PLATFORMS))
     )
     assert tracker_metadata.features == expected_tracker_features
-    assert all(isinstance(feature, str) for feature in tracker_metadata.features)
+
+
+@pytest.mark.asyncio
+async def test_options_settings_repairs_missing_service_subentry() -> None:
+    """Settings step should rebuild missing service subentries before showing forms."""
+
+    entry = _EntryStub()
+    entity_registry = _RegistryTracker()
+    device_registry = _RegistryTracker()
+    hass = _HassStub(entry, entity_registry, device_registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    _prepare_coordinator_baseline(coordinator, hass, entry)
+    coordinator.data = []
+    coordinator._enabled_poll_device_ids = set()
+
+    tracker_definition = ConfigEntrySubentryDefinition(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Tracker devices",
+        data={"features": list(TRACKER_FEATURE_PLATFORMS)},
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+    )
+    service_definition = ConfigEntrySubentryDefinition(
+        key=SERVICE_SUBENTRY_KEY,
+        title=entry.title,
+        data={"features": list(SERVICE_FEATURE_PLATFORMS)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+    )
+
+    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+    await subentry_manager.async_sync([tracker_definition, service_definition])
+
+    coordinator.attach_subentry_manager(subentry_manager)
+    runtime_data = SimpleNamespace(
+        coordinator=coordinator,
+        subentry_manager=subentry_manager,
+        fcm_receiver=None,
+        google_home_filter=None,
+    )
+    entry.runtime_data = runtime_data
+    hass.data = {DOMAIN: {"entries": {entry.entry_id: runtime_data}}}
+
+    coordinator._refresh_subentry_index()
+
+    service_subentry = subentry_manager.get(SERVICE_SUBENTRY_KEY)
+    assert service_subentry is not None
+    entry.subentries.pop(service_subentry.subentry_id, None)
+    subentry_manager._refresh_from_entry()
+    coordinator._refresh_subentry_index()
+
+    flow = _build_flow(entry, hass)
+
+    result = await flow.async_step_settings()
+    assert result["type"] == "form"
+
+    repaired_service = subentry_manager.get(SERVICE_SUBENTRY_KEY)
+    assert repaired_service is not None
+
+    coordinator._refresh_subentry_index()
+    service_identifier = coordinator.stable_subentry_identifier(
+        key=SERVICE_SUBENTRY_KEY
+    )
+    binary_identifier = coordinator.stable_subentry_identifier(
+        feature="binary_sensor"
+    )
+    assert binary_identifier == service_identifier
+    tracker_identifier = coordinator.stable_subentry_identifier(
+        feature="device_tracker"
+    )
+    assert tracker_identifier == coordinator.stable_subentry_identifier(
+        key=TRACKER_SUBENTRY_KEY
+    )
+
+    tracker_metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_metadata is not None
+
+    service_metadata = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_metadata is not None
+    assert "sensor" in service_metadata.features
     assert all(feature == feature.lower() for feature in tracker_metadata.features)
 
     mapped_keys = {
@@ -434,5 +530,13 @@ def test_coordinator_default_features_map_to_core_group() -> None:
         sorted(dict.fromkeys(SERVICE_FEATURE_PLATFORMS))
     )
     assert service_metadata.features == expected_service_features
-    for feature in service_metadata.features:
+    overlapping = set(service_metadata.features) & set(TRACKER_FEATURE_PLATFORMS)
+    for feature in overlapping:
+        mapped = coordinator._feature_to_subentry.get(feature)
+        assert mapped in {
+            SERVICE_SUBENTRY_KEY,
+            TRACKER_SUBENTRY_KEY,
+        }, f"unexpected owner for overlapping feature {feature}: {mapped}"
+
+    for feature in set(service_metadata.features) - overlapping:
         assert coordinator._feature_to_subentry.get(feature) == SERVICE_SUBENTRY_KEY

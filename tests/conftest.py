@@ -270,7 +270,17 @@ def _stub_homeassistant() -> None:
             }
 
     class ConfigSubentryFlow:
-        """Lightweight ConfigSubentryFlow stub mirroring HA attributes."""
+        """Lightweight ConfigSubentryFlow stub mirroring HA attributes.
+
+        Home Assistant instantiates config-subentry flow handlers with the
+        signature ``ConfigSubentryFlow(config_entry, config_subentry)``. Future
+        tests should therefore pass the parent ``ConfigEntry`` alongside either
+        an existing ``ConfigSubentry`` or a freshly constructed instance when
+        spinning up a handler. The stub stores both objects verbatim so the
+        tests can assert against ``config_entry`` state, the ``subentry`` data,
+        or the generated ``subentry_id`` without recreating the wiring logic in
+        every test.
+        """
 
         def __init__(self, entry: ConfigEntry, subentry: ConfigSubentry) -> None:
             self.config_entry = entry
@@ -797,6 +807,9 @@ def _stub_homeassistant() -> None:
         def async_write_ha_state(self) -> None:  # pragma: no cover - stub behaviour
             return None
 
+        async def async_added_to_hass(self) -> None:  # pragma: no cover - stub behaviour
+            return None
+
         def __class_getitem__(cls, _item):  # pragma: no cover - typing compatibility
             return cls
 
@@ -824,10 +837,80 @@ def _stub_homeassistant() -> None:
 
     entity_registry_module = sys.modules["homeassistant.helpers.entity_registry"]
 
-    def _async_get_entity_registry(_hass=None):  # pragma: no cover - stub behaviour
-        return SimpleNamespace(async_get=lambda _entity_id: None)
+    class _StubEntityRegistryEntry:
+        """Entity registry entry capturing subentry assignments for assertions."""
 
-    entity_registry_module.async_get = _async_get_entity_registry
+        __slots__ = (
+            "entity_id",
+            "platform",
+            "unique_id",
+            "config_entry_id",
+            "config_entry_subentry_id",
+            "device_id",
+        )
+
+        def __init__(
+            self,
+            *,
+            entity_id: str,
+            platform: str,
+            unique_id: str | None,
+            config_entry_id: str | None,
+            config_entry_subentry_id: str | None,
+        ) -> None:
+            self.entity_id = entity_id
+            self.platform = platform
+            self.unique_id = unique_id
+            self.config_entry_id = config_entry_id
+            self.config_entry_subentry_id = config_entry_subentry_id
+            self.device_id: str | None = None
+
+    class _StubEntityRegistry:
+        """In-memory entity registry stub used by platform setup tests."""
+
+        def __init__(self) -> None:
+            self.entities: dict[str, _StubEntityRegistryEntry] = {}
+
+        def async_get(self, entity_id: str) -> _StubEntityRegistryEntry | None:
+            return self.entities.get(entity_id)
+
+        def async_get_entity_id(self, platform: str, unique_id: str) -> str | None:
+            for entity_id, entry in self.entities.items():
+                if entry.platform == platform and entry.unique_id == unique_id:
+                    return entity_id
+            return None
+
+        def record_entity(
+            self,
+            entity_id: str,
+            *,
+            platform: str,
+            unique_id: str | None,
+            config_entry_id: str | None,
+            config_entry_subentry_id: str | None,
+        ) -> _StubEntityRegistryEntry:
+            entry = _StubEntityRegistryEntry(
+                entity_id=entity_id,
+                platform=platform,
+                unique_id=unique_id,
+                config_entry_id=config_entry_id,
+                config_entry_subentry_id=config_entry_subentry_id,
+            )
+            self.entities[entity_id] = entry
+            return entry
+
+    def _entity_registry_for(
+        hass: Any | None = None,
+    ) -> _StubEntityRegistry:  # pragma: no cover - stub behaviour
+        if hass is not None:
+            registry = getattr(hass, "_entity_registry_stub", None)
+            if registry is None:
+                registry = _StubEntityRegistry()
+                setattr(hass, "_entity_registry_stub", registry)
+            return registry
+        return _StubEntityRegistry()
+
+    entity_registry_module.async_get = _entity_registry_for
 
     util_pkg = sys.modules.setdefault(
         "homeassistant.util", ModuleType("homeassistant.util")

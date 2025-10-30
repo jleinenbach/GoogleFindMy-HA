@@ -81,6 +81,23 @@
       "discovery_secrets_update": "Wykryto nowe dane logowania dla {email}"
     }
   },
+  "config_subentries": {
+    "hub": {
+      "title": "Hub",
+      "step": {
+        "user": {
+          "title": "Dodaj grupę funkcji huba",
+          "description": "Utwórz lub zaktualizuj grupę funkcji huba, aby Home Assistant mógł udostępnić wspólne usługi tej integracji."
+        },
+        "reconfigure": {
+          "title": "Zaktualizuj grupę funkcji huba",
+          "description": "Odśwież grupę funkcji huba, aby najnowsze funkcje były dostępne."
+        }
+      },
+      "abort": {},
+      "error": {}
+    }
+  },
   "options": {
     "step": {
       "init": {
