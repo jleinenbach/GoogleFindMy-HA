@@ -51,6 +51,57 @@ from .email import normalize_email
 cf = cast(Any, config_flow_module)
 
 _LOGGER = logging.getLogger(__name__)
+_DEFAULT_DISCOVERY_SOURCE: str = getattr(cf, "SOURCE_DISCOVERY", "discovery")
+
+
+def _home_assistant_discovery_sources() -> set[str]:
+    """Return the set of discovery sources supported by Home Assistant."""
+
+    cached: set[str] | None = getattr(
+        _home_assistant_discovery_sources, "_cache", None
+    )
+    if cached is not None:
+        return cached
+
+    sources: set[str] = set()
+
+    modules_to_inspect: list[Any] = []
+
+    config_entries_module = getattr(cf, "config_entries", None)
+    if config_entries_module is not None:
+        modules_to_inspect.append(config_entries_module)
+
+    try:  # pragma: no cover - optional in stripped test envs
+        from homeassistant import config_entries as ha_config_entries
+    except Exception:  # noqa: BLE001 - absence is acceptable in tests
+        ha_config_entries = None
+    if ha_config_entries is not None:
+        modules_to_inspect.append(ha_config_entries)
+
+    for module in modules_to_inspect:
+        try:
+            attributes = dir(module)
+        except Exception:  # noqa: BLE001 - defensive fallback
+            continue
+        for name in attributes:
+            if not name.startswith("SOURCE_"):
+                continue
+            value = getattr(module, name, None)
+            if isinstance(value, str) and value:
+                sources.add(value)
+
+    if not sources:
+        for attr in (
+            "SOURCE_DISCOVERY",
+            "SOURCE_DISCOVERY_UPDATE",
+            "SOURCE_RECONFIGURE",
+        ):
+            fallback = getattr(cf, attr, None)
+            if isinstance(fallback, str) and fallback:
+                sources.add(fallback)
+
+    setattr(_home_assistant_discovery_sources, "_cache", sources)
+    return sources
 
 
 def _log_task_exception(task: asyncio.Future[Any]) -> None:
@@ -326,7 +377,9 @@ async def _trigger_cloud_discovery(
         except Exception:  # noqa: BLE001
             discovery_key = None
 
-        context_source = source or cf.SOURCE_DISCOVERY
+        supported_sources = _home_assistant_discovery_sources()
+        use_candidate = isinstance(source, str) and source in supported_sources
+        context_source = source if use_candidate else _DEFAULT_DISCOVERY_SOURCE
         context = {"source": context_source}
 
         if callable(helper):

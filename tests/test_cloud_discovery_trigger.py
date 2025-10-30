@@ -83,6 +83,40 @@ def test_trigger_cloud_discovery_uses_helper(
     ), "trigger log should redact identifiers"
 
 
+def test_trigger_cloud_discovery_sanitizes_context_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom discovery triggers should not leak into the context source."""
+
+    hass = _make_hass()
+    captured: list[tuple] = []
+
+    async def _helper(*args, **kwargs):
+        captured.append((args, kwargs))
+        return None
+
+    monkeypatch.setattr(config_flow, "async_create_discovery_flow", _helper)
+
+    async def _exercise() -> bool:
+        return await integration._trigger_cloud_discovery(
+            hass,
+            email="User@Example.com",
+            token="aas_et/TOKEN",
+            secrets_bundle={"aas_token": "aas_et/TOKEN"},
+            source="cloud_scanner",
+        )
+
+    assert asyncio.run(_exercise()) is True
+    assert len(captured) == 1
+
+    _, kwargs = captured[0]
+    context = kwargs.get("context", {})
+    data = kwargs.get("data", {})
+
+    assert context["source"] == config_flow.SOURCE_DISCOVERY
+    assert data["discovery_source"] == "cloud_scanner"
+
+
 def test_trigger_cloud_discovery_falls_back(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
