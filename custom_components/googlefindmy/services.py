@@ -557,6 +557,18 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         relink_button_devices = ctx.get("relink_button_devices")
         manager = getattr(hass, "config_entries", None)
 
+        allowed_reload_states: set[ConfigEntryState] = {
+            ConfigEntryState.LOADED,
+            ConfigEntryState.NOT_LOADED,
+            ConfigEntryState.SETUP_ERROR,
+            ConfigEntryState.SETUP_RETRY,
+            ConfigEntryState.SETUP_IN_PROGRESS,
+        }
+
+        failed_unload_state = getattr(ConfigEntryState, "FAILED_UNLOAD", None)
+        if failed_unload_state is not None:
+            allowed_reload_states.add(failed_unload_state)
+
         async def _recover_migration_error_entry(entry_: Any) -> tuple[bool, Any | None]:
             """Attempt to recover an entry from MIGRATION_ERROR and signal reload readiness."""
 
@@ -570,6 +582,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     migrate_callable = getattr(manager, "async_migrate", None)
                     if not callable(migrate_callable):
                         migrate_callable = None
+            migration_supported = bool(migrate_entry_callable or migrate_callable)
 
             entry_id = getattr(entry_, "entry_id", "<unknown>")
             _LOGGER.warning(
@@ -619,6 +632,20 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             if soft_completed:
                 reasons.append("soft migration helpers completed")
 
+            if not migration_supported:
+                reasons.append("Home Assistant migration API unavailable")
+                refreshed_entry = _entry_for_id(hass, entry_.entry_id) or entry_
+                joined_reasons = ", ".join(reasons) or "no helper progress"
+                _LOGGER.warning(
+                    (
+                        "Config entry %s remains in migration error state; Home Assistant "
+                        "cannot retry migration automatically (%s); manual migration required."
+                    ),
+                    entry_id,
+                    joined_reasons,
+                )
+                return False, refreshed_entry
+
             migration_succeeded = False
             if callable(migrate_entry_callable):
                 try:
@@ -656,21 +683,25 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 else:
                     migration_succeeded = bool(migrate_result)
                     reasons.append("Home Assistant migration retried")
-            else:
-                _LOGGER.warning(
-                    "Config entries manager does not expose async_migrate_entry or async_migrate; entry %s cannot be migrated automatically.",
-                    entry_id,
-                )
 
             refreshed_entry = _entry_for_id(hass, entry_.entry_id) or entry_
             refreshed_state = getattr(refreshed_entry, "state", None)
 
-            if refreshed_state != ConfigEntryState.MIGRATION_ERROR and not migration_succeeded:
-                reasons.append("entry state recovered")
+            state_ready = False
+            if refreshed_state == ConfigEntryState.MIGRATION_ERROR:
+                pass
+            elif refreshed_state is None:
+                reasons.append("entry state unavailable after recovery attempt")
+            elif refreshed_state in allowed_reload_states:
+                state_ready = True
+                state_name = getattr(refreshed_state, "name", str(refreshed_state))
+                if not migration_succeeded:
+                    reasons.append(f"entry state recovered ({state_name})")
+            else:
+                state_name = getattr(refreshed_state, "name", str(refreshed_state))
+                reasons.append(f"entry state transitioned to {state_name}")
 
-            should_reload = (
-                migration_succeeded or refreshed_state != ConfigEntryState.MIGRATION_ERROR
-            )
+            should_reload = migration_succeeded or state_ready
 
             if should_reload:
                 joined_reasons = ", ".join(reasons) or "no additional context"
@@ -746,6 +777,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
             # Reload all entries to apply migrations
             entries_to_reload: list[Any] = []
+            migrate_skipped_states: list[tuple[Any, str | ConfigEntryState | None]] = []
             for entry_ in entries:
                 state = getattr(entry_, "state", None)
                 if state == ConfigEntryState.MIGRATION_ERROR:
@@ -755,7 +787,18 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     if should_reload and refreshed_entry is not None:
                         entries_to_reload.append(refreshed_entry)
                     continue
-                entries_to_reload.append(entry_)
+                if state is None or state in allowed_reload_states:
+                    entries_to_reload.append(entry_)
+                    continue
+                migrate_skipped_states.append((entry_, state))
+
+            if migrate_skipped_states:
+                for entry_, state in migrate_skipped_states:
+                    _LOGGER.info(
+                        "Skipping reload for entry %s in unsupported state %s.",
+                        getattr(entry_, "entry_id", "<unknown>"),
+                        state,
+                    )
 
             for entry_ in entries_to_reload:
                 try:
@@ -874,17 +917,6 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 e for e in entries if e.entry_id in affected_entry_ids
             ] or list(entries)
 
-        allowed_reload_states = {
-            ConfigEntryState.LOADED,
-            ConfigEntryState.NOT_LOADED,
-            ConfigEntryState.SETUP_ERROR,
-            ConfigEntryState.SETUP_RETRY,
-            ConfigEntryState.SETUP_IN_PROGRESS,
-        }
-
-        failed_unload_state = getattr(ConfigEntryState, "FAILED_UNLOAD", None)
-        if failed_unload_state is not None:
-            allowed_reload_states.add(failed_unload_state)
         reloadable_entries: list[Any] = []
         skipped_states: list[tuple[Any, str | ConfigEntryState | None]] = []
 

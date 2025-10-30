@@ -39,12 +39,17 @@ class FakeConfigEntriesManager:
         entries: Iterable[FakeConfigEntry] | None = None,
         *,
         migration_success: bool = True,
+        supports_migrate: bool = True,
     ) -> None:
         self._entries: list[FakeConfigEntry] = list(entries or [])
         self.reload_calls: list[str] = []
         self.update_calls: list[tuple[FakeConfigEntry, dict[str, Any]]] = []
         self.migrate_calls: list[str] = []
         self.migration_success = migration_success
+        if not supports_migrate:
+            # Mirror Home Assistant instances that omit async_migrate helpers.
+            self.async_migrate_entry = None  # type: ignore[assignment]
+            self.async_migrate = None  # type: ignore[assignment]
 
     def add_entry(self, entry: FakeConfigEntry) -> None:
         """Register another entry for subsequent lookups."""
