@@ -555,6 +555,139 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         soft_migrate = ctx.get("soft_migrate_entry")
         unique_id_migrate = ctx.get("migrate_unique_ids")
         relink_button_devices = ctx.get("relink_button_devices")
+        manager = getattr(hass, "config_entries", None)
+
+        async def _recover_migration_error_entry(entry_: Any) -> tuple[bool, Any | None]:
+            """Attempt to recover an entry from MIGRATION_ERROR and signal reload readiness."""
+
+            migrate_entry_callable = None
+            migrate_callable = None
+            if manager is not None:
+                migrate_entry_callable = getattr(manager, "async_migrate_entry", None)
+                if not callable(migrate_entry_callable):
+                    migrate_entry_callable = None
+                if migrate_entry_callable is None:
+                    migrate_callable = getattr(manager, "async_migrate", None)
+                    if not callable(migrate_callable):
+                        migrate_callable = None
+
+            entry_id = getattr(entry_, "entry_id", "<unknown>")
+            _LOGGER.warning(
+                "Config entry %s is in migration error state; attempting soft migration instead of reload.",
+                entry_id,
+            )
+
+            soft_completed = False
+            if callable(soft_migrate):
+                try:
+                    await soft_migrate(hass, entry_)
+                except Exception as err:
+                    _LOGGER.error(
+                        "Soft migration helper failed for entry %s: %s",
+                        entry_id,
+                        err,
+                    )
+                else:
+                    soft_completed = True
+            else:
+                _LOGGER.warning(
+                    "Soft migration helper unavailable; entry %s remains in migration error state until migration is resolved manually.",
+                    entry_id,
+                )
+
+            if callable(unique_id_migrate):
+                try:
+                    await unique_id_migrate(hass, entry_)
+                except Exception as err:
+                    _LOGGER.error(
+                        "Unique ID migration helper failed for entry %s: %s",
+                        entry_id,
+                        err,
+                    )
+            elif unique_id_migrate is None:
+                _LOGGER.info(
+                    "Unique ID migration helper not provided; entry %s skipped.",
+                    entry_id,
+                )
+            else:
+                _LOGGER.warning(
+                    "Unique ID migration helper for entry %s is not callable; skipped.",
+                    entry_id,
+                )
+
+            reasons: list[str] = []
+            if soft_completed:
+                reasons.append("soft migration helpers completed")
+
+            migration_succeeded = False
+            if callable(migrate_entry_callable):
+                try:
+                    migrate_result = await migrate_entry_callable(entry_)
+                except ConfigEntryError as err:
+                    _LOGGER.error(
+                        "Retrying Home Assistant migration for entry %s failed: %s",
+                        entry_id,
+                        err,
+                    )
+                except Exception as err:  # pragma: no cover - defensive guard
+                    _LOGGER.error(
+                        "Unexpected error while migrating entry %s: %s",
+                        entry_id,
+                        err,
+                    )
+                else:
+                    migration_succeeded = bool(migrate_result)
+                    reasons.append("Home Assistant migration retried")
+            elif callable(migrate_callable):
+                try:
+                    migrate_result = await migrate_callable(entry_.entry_id)
+                except ConfigEntryError as err:
+                    _LOGGER.error(
+                        "Retrying Home Assistant migration for entry %s failed: %s",
+                        entry_id,
+                        err,
+                    )
+                except Exception as err:  # pragma: no cover - defensive guard
+                    _LOGGER.error(
+                        "Unexpected error while migrating entry %s: %s",
+                        entry_id,
+                        err,
+                    )
+                else:
+                    migration_succeeded = bool(migrate_result)
+                    reasons.append("Home Assistant migration retried")
+            else:
+                _LOGGER.warning(
+                    "Config entries manager does not expose async_migrate_entry or async_migrate; entry %s cannot be migrated automatically.",
+                    entry_id,
+                )
+
+            refreshed_entry = _entry_for_id(hass, entry_.entry_id) or entry_
+            refreshed_state = getattr(refreshed_entry, "state", None)
+
+            if refreshed_state != ConfigEntryState.MIGRATION_ERROR and not migration_succeeded:
+                reasons.append("entry state recovered")
+
+            should_reload = (
+                migration_succeeded or refreshed_state != ConfigEntryState.MIGRATION_ERROR
+            )
+
+            if should_reload:
+                joined_reasons = ", ".join(reasons) or "no additional context"
+                _LOGGER.info(
+                    "Config entry %s recovered from migration error; queued for reload (%s).",
+                    entry_id,
+                    joined_reasons,
+                )
+                return True, refreshed_entry
+
+            joined_reasons = ", ".join(reasons) or "no helper progress"
+            _LOGGER.warning(
+                "Config entry %s remains in migration error state after rebuild helpers; manual migration required (%s).",
+                entry_id,
+                joined_reasons,
+            )
+            return False, refreshed_entry
 
         if mode == MODE_MIGRATE:
             # C-2: real soft-migrate path using __init__.py helpers via ctx
@@ -612,7 +745,19 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                         relink_completed += 1
 
             # Reload all entries to apply migrations
+            entries_to_reload: list[Any] = []
             for entry_ in entries:
+                state = getattr(entry_, "state", None)
+                if state == ConfigEntryState.MIGRATION_ERROR:
+                    should_reload, refreshed_entry = await _recover_migration_error_entry(
+                        entry_
+                    )
+                    if should_reload and refreshed_entry is not None:
+                        entries_to_reload.append(refreshed_entry)
+                    continue
+                entries_to_reload.append(entry_)
+
+            for entry_ in entries_to_reload:
                 try:
                     await hass.config_entries.async_reload(entry_.entry_id)
                 except Exception as err:
@@ -740,148 +885,22 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         failed_unload_state = getattr(ConfigEntryState, "FAILED_UNLOAD", None)
         if failed_unload_state is not None:
             allowed_reload_states.add(failed_unload_state)
-        migration_error_entries: list[Any] = []
         reloadable_entries: list[Any] = []
         skipped_states: list[tuple[Any, str | ConfigEntryState | None]] = []
 
         for entry_ in to_reload:
             state = getattr(entry_, "state", None)
             if state == ConfigEntryState.MIGRATION_ERROR:
-                migration_error_entries.append(entry_)
+                should_reload, refreshed_entry = await _recover_migration_error_entry(
+                    entry_
+                )
+                if should_reload and refreshed_entry is not None:
+                    reloadable_entries.append(refreshed_entry)
                 continue
             if state is None or state in allowed_reload_states:
                 reloadable_entries.append(entry_)
                 continue
             skipped_states.append((entry_, state))
-
-        if migration_error_entries:
-            manager = getattr(hass, "config_entries", None)
-            migrate_entry_callable = None
-            migrate_callable = None
-            if manager is not None:
-                migrate_entry_callable = getattr(manager, "async_migrate_entry", None)
-                if not callable(migrate_entry_callable):
-                    migrate_entry_callable = None
-                if migrate_entry_callable is None:
-                    migrate_callable = getattr(manager, "async_migrate", None)
-                    if not callable(migrate_callable):
-                        migrate_callable = None
-            for entry_ in migration_error_entries:
-                entry_id = getattr(entry_, "entry_id", "<unknown>")
-                _LOGGER.warning(
-                    "Config entry %s is in migration error state; attempting soft migration instead of reload.",
-                    entry_id,
-                )
-                soft_completed = False
-                if callable(soft_migrate):
-                    try:
-                        await soft_migrate(hass, entry_)
-                    except Exception as err:
-                        _LOGGER.error(
-                            "Soft migration helper failed for entry %s: %s",
-                            entry_id,
-                            err,
-                        )
-                    else:
-                        soft_completed = True
-                else:
-                    _LOGGER.warning(
-                        "Soft migration helper unavailable; entry %s remains in migration error state until migration is resolved manually.",
-                        entry_id,
-                    )
-                if callable(unique_id_migrate):
-                    try:
-                        await unique_id_migrate(hass, entry_)
-                    except Exception as err:
-                        _LOGGER.error(
-                            "Unique ID migration helper failed for entry %s: %s",
-                            entry_id,
-                            err,
-                        )
-                elif unique_id_migrate is None:
-                    _LOGGER.info(
-                        "Unique ID migration helper not provided; entry %s skipped.",
-                        entry_id,
-                    )
-                else:
-                    _LOGGER.warning(
-                        "Unique ID migration helper for entry %s is not callable; skipped.",
-                        entry_id,
-                    )
-
-                reasons: list[str] = []
-                if soft_completed:
-                    reasons.append("soft migration helpers completed")
-
-                migration_succeeded = False
-                if callable(migrate_entry_callable):
-                    try:
-                        migrate_result = await migrate_entry_callable(entry_)
-                    except ConfigEntryError as err:
-                        _LOGGER.error(
-                            "Retrying Home Assistant migration for entry %s failed: %s",
-                            entry_id,
-                            err,
-                        )
-                    except Exception as err:  # pragma: no cover - defensive guard
-                        _LOGGER.error(
-                            "Unexpected error while migrating entry %s: %s",
-                            entry_id,
-                            err,
-                        )
-                    else:
-                        migration_succeeded = bool(migrate_result)
-                        reasons.append("Home Assistant migration retried")
-                elif callable(migrate_callable):
-                    try:
-                        migrate_result = await migrate_callable(entry_.entry_id)
-                    except ConfigEntryError as err:
-                        _LOGGER.error(
-                            "Retrying Home Assistant migration for entry %s failed: %s",
-                            entry_id,
-                            err,
-                        )
-                    except Exception as err:  # pragma: no cover - defensive guard
-                        _LOGGER.error(
-                            "Unexpected error while migrating entry %s: %s",
-                            entry_id,
-                            err,
-                        )
-                    else:
-                        migration_succeeded = bool(migrate_result)
-                        reasons.append("Home Assistant migration retried")
-                else:
-                    _LOGGER.warning(
-                        "Config entries manager does not expose async_migrate_entry or async_migrate; entry %s cannot be migrated automatically.",
-                        entry_id,
-                    )
-
-                refreshed_entry = _entry_for_id(hass, entry_.entry_id) or entry_
-                refreshed_state = getattr(refreshed_entry, "state", None)
-
-                if refreshed_state != ConfigEntryState.MIGRATION_ERROR and not migration_succeeded:
-                    reasons.append("entry state recovered")
-
-                should_reload = (
-                    migration_succeeded
-                    or refreshed_state != ConfigEntryState.MIGRATION_ERROR
-                )
-
-                if should_reload:
-                    reloadable_entries.append(refreshed_entry)
-                    joined_reasons = ", ".join(reasons) or "no additional context"
-                    _LOGGER.info(
-                        "Config entry %s recovered from migration error; queued for reload (%s).",
-                        entry_id,
-                        joined_reasons,
-                    )
-                else:
-                    joined_reasons = ", ".join(reasons) or "no helper progress"
-                    _LOGGER.warning(
-                        "Config entry %s remains in migration error state after rebuild helpers; manual migration required (%s).",
-                        entry_id,
-                        joined_reasons,
-                    )
 
         if skipped_states:
             for entry_, state in skipped_states:
