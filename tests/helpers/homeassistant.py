@@ -34,11 +34,17 @@ class FakeConfigEntry:
 class FakeConfigEntriesManager:
     """Provide config entry access and capture reload/update attempts."""
 
-    def __init__(self, entries: Iterable[FakeConfigEntry] | None = None) -> None:
+    def __init__(
+        self,
+        entries: Iterable[FakeConfigEntry] | None = None,
+        *,
+        migration_success: bool = True,
+    ) -> None:
         self._entries: list[FakeConfigEntry] = list(entries or [])
         self.reload_calls: list[str] = []
         self.update_calls: list[tuple[FakeConfigEntry, dict[str, Any]]] = []
         self.migrate_calls: list[str] = []
+        self.migration_success = migration_success
 
     def add_entry(self, entry: FakeConfigEntry) -> None:
         """Register another entry for subsequent lookups."""
@@ -70,13 +76,21 @@ class FakeConfigEntriesManager:
 
         self.reload_calls.append(entry_id)
 
-    async def async_migrate(self, entry_id: str) -> None:
-        """Record migration attempts and mark the entry as reloadable."""
+    async def async_migrate_entry(self, entry: FakeConfigEntry) -> bool:
+        """Record migration attempts and optionally mark the entry as reloadable."""
 
-        self.migrate_calls.append(entry_id)
-        entry = self.async_get_entry(entry_id)
-        if entry is not None:
+        self.migrate_calls.append(entry.entry_id)
+        if self.migration_success:
             entry.state = ConfigEntryState.NOT_LOADED
+        return self.migration_success
+
+    async def async_migrate(self, entry_id: str) -> bool:
+        """Backwards-compatible alias that delegates to ``async_migrate_entry``."""
+
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return False
+        return await self.async_migrate_entry(entry)
 
 
 class FakeServiceRegistry:
