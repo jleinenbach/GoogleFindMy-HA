@@ -88,12 +88,14 @@ try:  # pragma: no cover - compatibility shim for stripped environments
     from homeassistant.config_entries import (
         SOURCE_DISCOVERY,
         SOURCE_DISCOVERY_UPDATE,
+        SOURCE_RECONFIGURE,
         DiscoveryKey,
         async_create_discovery_flow,
     )
 except Exception:  # noqa: BLE001
     SOURCE_DISCOVERY = "discovery"
     SOURCE_DISCOVERY_UPDATE = "discovery_update"
+    SOURCE_RECONFIGURE = "reconfigure"
 
     try:  # pragma: no cover - runtime optional dependency
         from homeassistant.helpers.discovery_flow import DiscoveryKey as _DiscoveryKey
@@ -1628,6 +1630,14 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         ):
             defaults[OPT_ENABLE_STATS_ENTITIES] = DEFAULT_ENABLE_STATS_ENTITIES
 
+        reconfigure_defaults = self.context.get("reconfigure_options")
+        if isinstance(reconfigure_defaults, Mapping):
+            for key, value in reconfigure_defaults.items():
+                if key is None:
+                    continue
+                if value is not None:
+                    defaults[key] = value
+
         schema_with_defaults = self.add_suggested_values_to_schema(
             base_schema, defaults
         )
@@ -1647,9 +1657,11 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                 data_payload[DATA_AAS_TOKEN] = aas_token
 
             options_payload: dict[str, Any] = {}
+            managed_option_keys: set[str] = set()
             for k in schema_fields.keys():
                 # `k` may be a voluptuous marker; retrieve the underlying key
                 real_key = next(iter(getattr(k, "schema", {k})))
+                managed_option_keys.add(real_key)
                 options_payload[real_key] = user_input.get(
                     real_key, defaults.get(real_key)
                 )
@@ -1669,6 +1681,50 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     defaults=defaults,
                     context_map=subentry_context,
                 )
+                if self.context.get("is_reconfigure"):
+                    merged_data = dict(getattr(entry_for_update, "data", {}) or {})
+                    for removable in (
+                        DATA_AUTH_METHOD,
+                        CONF_OAUTH_TOKEN,
+                        CONF_GOOGLE_EMAIL,
+                        DATA_SECRET_BUNDLE,
+                        DATA_AAS_TOKEN,
+                    ):
+                        merged_data.pop(removable, None)
+                    for key, value in data_payload.items():
+                        if value is not None:
+                            merged_data[key] = value
+
+                    existing_options = dict(
+                        getattr(entry_for_update, "options", {}) or {}
+                    )
+                    for managed in managed_option_keys | {OPT_OPTIONS_SCHEMA_VERSION}:
+                        existing_options.pop(managed, None)
+                    existing_options.update(options_payload)
+
+                    try:
+                        self.hass.config_entries.async_update_entry(
+                            entry_for_update,
+                            data=merged_data,
+                            options=existing_options,
+                        )
+                    except TypeError:
+                        self.hass.config_entries.async_update_entry(
+                            entry_for_update,
+                            data=merged_data,
+                        )
+                        setattr(entry_for_update, "options", existing_options)
+                    else:
+                        setattr(entry_for_update, "options", existing_options)
+                    setattr(entry_for_update, "data", merged_data)
+
+                    self.hass.async_create_task(
+                        self.hass.config_entries.async_reload(entry_for_update.entry_id)
+                    )
+                    self.context.pop("is_reconfigure", None)
+                    self.context.pop("reauth_success_reason_override", None)
+                    self.context.pop("reconfigure_options", None)
+                    return await self.async_abort(reason="reconfigure_successful")
             else:
                 subentry_context.setdefault(self._subentry_key_core_tracking, None)
                 subentry_context.setdefault(self._subentry_key_service, None)
@@ -1700,6 +1756,90 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
         """Start a reauthentication flow linked to an existing entry context."""
         return await self.async_step_reauth_confirm()
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle manual reconfiguration initiated from the config entry UI."""
+
+        entry_id = self.context.get("entry_id")
+        if not isinstance(entry_id, str):
+            return await self.async_abort(reason="unknown")
+
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if entry is None:
+            return await self.async_abort(reason="unknown")
+
+        placeholders = dict(self.context.get("title_placeholders", {}) or {})
+        email = normalize_email_or_default(entry.data.get(CONF_GOOGLE_EMAIL))
+        if email:
+            placeholders["email"] = email
+        if placeholders:
+            self.context["title_placeholders"] = placeholders
+
+        self._auth_data = {}
+        for key in (
+            DATA_AUTH_METHOD,
+            CONF_OAUTH_TOKEN,
+            CONF_GOOGLE_EMAIL,
+            DATA_SECRET_BUNDLE,
+            DATA_AAS_TOKEN,
+        ):
+            value = entry.data.get(key)
+            if value is not None:
+                self._auth_data[key] = value
+        if CONF_GOOGLE_EMAIL not in self._auth_data and email:
+            self._auth_data[CONF_GOOGLE_EMAIL] = email
+
+        existing_unique_id = getattr(entry, "unique_id", None)
+        if existing_unique_id:
+            await self.async_set_unique_id(existing_unique_id, raise_on_progress=False)
+
+        defaults = dict(DEFAULT_OPTIONS)
+        entry_options = getattr(entry, "options", {}) or {}
+        if isinstance(entry_options, Mapping):
+            for opt_key, opt_value in entry_options.items():
+                if opt_value is not None:
+                    defaults[opt_key] = opt_value
+
+        for opt_key in (
+            OPT_LOCATION_POLL_INTERVAL,
+            OPT_DEVICE_POLL_DELAY,
+            OPT_MIN_ACCURACY_THRESHOLD,
+            OPT_MAP_VIEW_TOKEN_EXPIRATION,
+            OPT_CONTRIBUTOR_MODE,
+            OPT_MOVEMENT_THRESHOLD,
+            OPT_GOOGLE_HOME_FILTER_ENABLED,
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS,
+            OPT_ENABLE_STATS_ENTITIES,
+        ):
+            if opt_key is None:
+                continue
+            if opt_key not in defaults and opt_key in entry.data:
+                defaults[opt_key] = entry.data[opt_key]
+
+        self.context["reconfigure_options"] = defaults
+        self.context["is_reconfigure"] = True
+
+        subentry_context = self._ensure_subentry_context()
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, Mapping):
+            for subentry in subentries.values():
+                data = getattr(subentry, "data", {}) or {}
+                group_key = data.get("group_key")
+                if isinstance(group_key, str) and group_key in subentry_context:
+                    subentry_context[group_key] = getattr(subentry, "subentry_id", None)
+
+        oauth_token = self._auth_data.get(CONF_OAUTH_TOKEN)
+        if oauth_token:
+            next_step = await self.async_step_device_selection()
+        else:
+            self.context["reauth_success_reason_override"] = "reconfigure_successful"
+            next_step = await self.async_step_reauth_confirm()
+
+        if inspect.isawaitable(next_step):
+            return await cast(Awaitable[FlowResult], next_step)
+        return cast(FlowResult, next_step)
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
@@ -1766,10 +1906,14 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                             updated_data.pop(DATA_SECRET_BUNDLE, None)
                             await self._async_clear_cached_aas_token(entry)
+                            success_reason = self.context.get(
+                                "reauth_success_reason_override",
+                                "reauth_successful",
+                            )
                             return self.async_update_reload_and_abort(
                                 entry=entry,
                                 data=updated_data,
-                                reason="reauth_successful",
+                                reason=success_reason,
                             )
 
                     elif method == "secrets":
@@ -1831,10 +1975,14 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                                     elif DATA_AAS_TOKEN in updated_data:
                                         updated_data.pop(DATA_AAS_TOKEN, None)
                                     await self._async_clear_cached_aas_token(entry)
+                                    success_reason = self.context.get(
+                                        "reauth_success_reason_override",
+                                        "reauth_successful",
+                                    )
                                     return self.async_update_reload_and_abort(
                                         entry=entry,
                                         data=updated_data,
-                                        reason="reauth_successful",
+                                        reason=success_reason,
                                     )
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):

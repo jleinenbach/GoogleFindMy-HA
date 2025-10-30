@@ -16,6 +16,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from script.clean_pycache import clean_pycache, format_summary
+
 RUFF_FORMAT_SCRIPT = (
     Path(__file__).resolve().parent / "precommit_hooks" / "ruff_format.py"
 )
@@ -94,6 +96,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.skip_pytest:
         pytest_exit = _run_command(_build_pytest_command(args.pytest_args or []))
         exit_code = max(exit_code, pytest_exit)
+
+        directory_count, file_count = clean_pycache()
+        summary = format_summary(directory_count, file_count)
+        print(f"Post-pytest cleanup: {summary}")
 
     return exit_code
 
