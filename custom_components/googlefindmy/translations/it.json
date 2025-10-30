@@ -53,7 +53,7 @@
       },
       "migrate_complete": {
         "title": "Migrazione completata",
-        "description": "La configurazione di **{email}** è stata migrata al formato più recente. Seleziona **Invia** per terminare."
+        "description": "Google Find My Device è stato migrato alla nuova struttura dei gruppi di funzionalità. Controlla i tuoi dispositivi e ricarica l'integrazione se alcune entità risultano offline."
       }
     },
     "error": {
@@ -73,8 +73,8 @@
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
       "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",
       "reauth_successful": "Riautenticazione riuscita.",
-      "migration_failed": "Migrazione non riuscita. Controlla i log per i dettagli.",
-      "migration_complete": "Migrazione confermata."
+      "migration_complete_confirmed": "Migrazione completata.",
+      "migration_failed": "Migrazione non riuscita. Rimuovi l'integrazione e aggiungila di nuovo."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json rilevato per {email}",

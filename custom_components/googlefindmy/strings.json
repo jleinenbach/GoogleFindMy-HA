@@ -53,7 +53,7 @@
       },
       "migrate_complete": {
         "title": "Migration complete",
-        "description": "The configuration for **{email}** has been migrated to the latest format. Select **Submit** to finish."
+        "description": "Google Find My Device has been migrated to the new feature group structure. Review your devices and reload the integration if any entities remain offline."
       }
     },
     "error": {
@@ -73,8 +73,8 @@
       "cannot_connect": "Failed to connect to Google Find My Device.",
       "invalid_discovery_info": "The discovery payload was invalid. Check the credentials and try again.",
       "reauth_successful": "Reauthentication successful.",
-      "migration_failed": "Migration failed. Check the logs for details.",
-      "migration_complete": "Migration acknowledged."
+      "migration_complete_confirmed": "Migration complete.",
+      "migration_failed": "Migration failed. Please remove and re-add the integration."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json detected for {email}",

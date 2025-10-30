@@ -53,7 +53,7 @@
       },
       "migrate_complete": {
         "title": "Migration abgeschlossen",
-        "description": "Die Konfiguration für **{email}** wurde auf das neueste Format migriert. Wähle **Senden**, um abzuschließen."
+        "description": "Google Find My Device wurde auf die neue Struktur mit Funktionsgruppen migriert. Prüfe deine Geräte und lade die Integration neu, falls Entitäten offline bleiben."
       }
     },
     "error": {
@@ -73,8 +73,8 @@
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",
       "reauth_successful": "Erneute Authentifizierung erfolgreich.",
-      "migration_failed": "Migration fehlgeschlagen. Details finden sich in den Logs.",
-      "migration_complete": "Migration bestätigt."
+      "migration_complete_confirmed": "Migration abgeschlossen.",
+      "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json für {email} erkannt",
