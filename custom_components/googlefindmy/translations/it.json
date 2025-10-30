@@ -50,6 +50,10 @@
           "secrets_json": "Nuovo secrets.json (contenuto completo)",
           "new_oauth_token": "Nuovo token OAuth"
         }
+      },
+      "migrate_complete": {
+        "title": "Migrazione completata",
+        "description": "Google Find My Device per **{email}** è stato migrato alla nuova struttura dei gruppi di funzionalità. Controlla i tuoi dispositivi e ricarica l'integrazione se alcune entità risultano offline."
       }
     },
     "error": {
@@ -68,7 +72,9 @@
       "already_configured": "Google Find My Device è già configurato.",
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
       "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",
-      "reauth_successful": "Riautenticazione riuscita."
+      "reauth_successful": "Riautenticazione riuscita.",
+      "migration_complete_confirmed": "Migrazione completata.",
+      "migration_failed": "Migrazione non riuscita. Rimuovi l'integrazione e aggiungila di nuovo."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json rilevato per {email}",

@@ -50,6 +50,10 @@
           "secrets_json": "New secrets.json (full contents)",
           "new_oauth_token": "New OAuth token"
         }
+      },
+      "migrate_complete": {
+        "title": "Migration complete",
+        "description": "Google Find My Device for **{email}** has been migrated to the new feature group structure. Review your devices and reload the integration if any entities remain offline."
       }
     },
     "error": {
@@ -68,7 +72,9 @@
       "already_configured": "Google Find My Device is already configured.",
       "cannot_connect": "Failed to connect to Google Find My Device.",
       "invalid_discovery_info": "The discovery payload was invalid. Check the credentials and try again.",
-      "reauth_successful": "Reauthentication successful."
+      "reauth_successful": "Reauthentication successful.",
+      "migration_complete_confirmed": "Migration complete.",
+      "migration_failed": "Migration failed. Please remove and re-add the integration."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json detected for {email}",

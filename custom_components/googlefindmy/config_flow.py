@@ -55,9 +55,11 @@ from .const import (
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_MIN_POLL_INTERVAL,
     OPT_IGNORED_DEVICES,
     OPT_CONTRIBUTOR_MODE,
     OPT_ENABLE_STATS_ENTITIES,
+    OPT_ALLOW_HISTORY_FALLBACK,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
@@ -73,6 +75,7 @@ from .const import (
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     OPT_OPTIONS_SCHEMA_VERSION,
+    MIGRATE_DATA_KEYS_TO_OPTIONS,
     coerce_ignored_mapping,
     DEFAULT_OPTIONS,
     DEFAULT_ENABLE_STATS_ENTITIES,
@@ -1191,6 +1194,232 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         self._pending_discovery_updates: dict[str, Any] | None = None
         self._pending_discovery_existing_entry: ConfigEntry | None = None
         self._discovery_confirm_pending = False
+
+    async def async_step_migrate(self, entry: ConfigEntry) -> FlowResult:
+        """Migrate legacy config entries to the subentry-aware structure."""
+
+        _LOGGER.debug(
+            "Starting config entry migration for %s (version=%s)",
+            entry.entry_id,
+            entry.version,
+        )
+
+        setattr(self, "config_entry", entry)
+
+        context = getattr(self, "context", None)
+        if not isinstance(context, dict):
+            context = {}
+            setattr(self, "context", context)
+        context.setdefault("entry_id", entry.entry_id)
+
+        normalized_email = normalize_email_or_default(entry.data.get(CONF_GOOGLE_EMAIL))
+        placeholders = dict(context.get("title_placeholders", {}) or {})
+        if normalized_email:
+            placeholders["email"] = normalized_email
+        if placeholders:
+            context["title_placeholders"] = placeholders
+
+        if entry.version >= self.VERSION:
+            _LOGGER.debug("Entry %s already matches target version", entry.entry_id)
+            return await self.async_step_migrate_complete()
+
+        old_data = dict(getattr(entry, "data", {}) or {})
+        old_options = dict(getattr(entry, "options", {}) or {})
+
+        options_payload: dict[str, Any] = dict(DEFAULT_OPTIONS)
+        managed_option_keys: set[str] = (
+            set(DEFAULT_OPTIONS.keys()) | set(MIGRATE_DATA_KEYS_TO_OPTIONS)
+        )
+
+        for key, value in old_options.items():
+            if value is not None:
+                options_payload[key] = value
+
+        for key in managed_option_keys:
+            if key in old_data:
+                value = old_data[key]
+                if value is not None:
+                    options_payload[key] = value
+
+        if OPT_IGNORED_DEVICES in options_payload:
+            ignored_mapping, _changed = coerce_ignored_mapping(
+                options_payload[OPT_IGNORED_DEVICES]
+            )
+            options_payload[OPT_IGNORED_DEVICES] = ignored_mapping
+
+        options_payload[OPT_OPTIONS_SCHEMA_VERSION] = 2
+
+        defaults: dict[str, Any] = {
+            OPT_LOCATION_POLL_INTERVAL: DEFAULT_OPTIONS.get(
+                OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
+            ),
+            OPT_DEVICE_POLL_DELAY: DEFAULT_OPTIONS.get(
+                OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY
+            ),
+            OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_OPTIONS.get(
+                OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
+            ),
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_OPTIONS.get(
+                OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            ),
+        }
+
+        for key in (
+            OPT_MOVEMENT_THRESHOLD,
+            OPT_GOOGLE_HOME_FILTER_ENABLED,
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS,
+            OPT_ENABLE_STATS_ENTITIES,
+            OPT_ALLOW_HISTORY_FALLBACK,
+            OPT_MIN_POLL_INTERVAL,
+            OPT_CONTRIBUTOR_MODE,
+        ):
+            if key is None:
+                continue
+            if key in DEFAULT_OPTIONS:
+                defaults[key] = DEFAULT_OPTIONS[key]
+
+        option_keys = set(MIGRATE_DATA_KEYS_TO_OPTIONS)
+        option_keys.add(OPT_OPTIONS_SCHEMA_VERSION)
+
+        new_data: dict[str, Any] = {}
+        for key, value in old_data.items():
+            if key in option_keys:
+                continue
+            if value is not None:
+                new_data[key] = value
+
+        email_candidate = normalize_email_or_default(new_data.get(CONF_GOOGLE_EMAIL))
+        if not email_candidate and DATA_SECRET_BUNDLE in new_data:
+            secrets_bundle = new_data.get(DATA_SECRET_BUNDLE)
+            if isinstance(secrets_bundle, CollMapping):
+                email_candidate = normalize_email_or_default(
+                    secrets_bundle.get(CONF_GOOGLE_EMAIL)
+                )
+        if email_candidate:
+            new_data[CONF_GOOGLE_EMAIL] = email_candidate
+
+        if not isinstance(getattr(entry, "subentries", None), CollMapping):
+            setattr(entry, "subentries", {})
+
+        subentry_context = self._ensure_subentry_context()
+        subentries = getattr(entry, "subentries", {})
+        if isinstance(subentries, CollMapping):
+            for subentry in subentries.values():
+                data = getattr(subentry, "data", {}) or {}
+                group_key = data.get("group_key")
+                if isinstance(group_key, str):
+                    subentry_context.setdefault(
+                        group_key, getattr(subentry, "subentry_id", None)
+                    )
+
+        try:
+            await self._async_sync_feature_subentries(
+                entry,
+                options_payload=options_payload,
+                defaults=defaults,
+                context_map=subentry_context,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Migration failed while syncing subentries for %s: %s",
+                entry.entry_id,
+                err,
+            )
+            return self.async_abort(reason="migration_failed")
+
+        update_kwargs: dict[str, Any] = {
+            "data": new_data,
+            "options": options_payload,
+            "version": self.VERSION,
+        }
+
+        update_manager = getattr(self.hass, "config_entries", None)
+        if update_manager is not None:
+            try:
+                update_manager.async_update_entry(entry, **update_kwargs)
+            except TypeError:
+                update_kwargs.pop("version", None)
+                try:
+                    update_manager.async_update_entry(entry, **update_kwargs)
+                except TypeError:
+                    update_manager.async_update_entry(entry, data=new_data)
+                    setattr(entry, "options", options_payload)
+                else:
+                    setattr(entry, "options", options_payload)
+            else:
+                setattr(entry, "options", options_payload)
+
+        setattr(entry, "data", new_data)
+        setattr(entry, "version", self.VERSION)
+
+        if email_candidate:
+            placeholders = dict(context.get("title_placeholders", {}) or {})
+            placeholders["email"] = email_candidate
+            context["title_placeholders"] = placeholders
+
+        _LOGGER.info("Config entry %s migrated to version %s", entry.entry_id, self.VERSION)
+        return await self.async_step_migrate_complete()
+
+    async def async_step_migrate_complete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Display a confirmation screen once migration completes."""
+
+        if user_input is not None:
+            return await self._async_resolve_flow_result(
+                cast(
+                    FlowResult | Awaitable[FlowResult],
+                    self.async_abort(reason="migration_complete_confirmed"),
+                )
+            )
+
+        context_obj = getattr(self, "context", None)
+        placeholders: dict[str, str] = {}
+        if isinstance(context_obj, dict):
+            raw_placeholders = context_obj.get("title_placeholders", {}) or {}
+            if isinstance(raw_placeholders, Mapping):
+                placeholders = {
+                    key: str(value)
+                    for key, value in raw_placeholders.items()
+                    if isinstance(key, str) and value is not None
+                }
+
+        if "email" not in placeholders:
+            candidate_entry = getattr(self, "config_entry", None)
+            email_placeholder: str | None = None
+            if isinstance(candidate_entry, ConfigEntry):
+                email_placeholder = normalize_email_or_default(
+                    candidate_entry.data.get(CONF_GOOGLE_EMAIL)
+                )
+                if not email_placeholder:
+                    email_placeholder = normalize_email_or_default(
+                        candidate_entry.title if isinstance(candidate_entry.title, str) else None
+                    )
+                if not email_placeholder:
+                    email_placeholder = candidate_entry.entry_id
+            if email_placeholder:
+                placeholders["email"] = email_placeholder
+
+        return await self._async_resolve_flow_result(
+            cast(
+                FlowResult | Awaitable[FlowResult],
+                self.async_show_form(
+                    step_id="migrate_complete",
+                    data_schema=vol.Schema({}),
+                    description_placeholders=placeholders,
+                ),
+            )
+        )
+
+    async def _async_resolve_flow_result(
+        self, result: FlowResult | Awaitable[FlowResult]
+    ) -> FlowResult:
+        """Return a flow result, awaiting if the stub returns a coroutine."""
+
+        if inspect.isawaitable(result):
+            awaited = await cast(Any, result)
+            return cast(FlowResult, awaited)
+        return cast(FlowResult, result)
 
     def _clear_discovery_confirmation_state(self) -> None:
         """Reset cached discovery confirmation state.

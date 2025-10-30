@@ -50,6 +50,10 @@
           "secrets_json": "Nowy secrets.json (pełna zawartość)",
           "new_oauth_token": "Nowy token OAuth"
         }
+      },
+      "migrate_complete": {
+        "title": "Migracja zakończona",
+        "description": "Google Find My Device dla **{email}** został przeniesiony do nowej struktury grup funkcji. Sprawdź urządzenia i przeładuj integrację, jeśli jakieś encje pozostają offline."
       }
     },
     "error": {
@@ -68,7 +72,9 @@
       "already_configured": "Google Find My Device jest już skonfigurowane.",
       "cannot_connect": "Nie udało się połączyć z Google Find My Device.",
       "invalid_discovery_info": "Ładunek wykrywania jest nieprawidłowy. Sprawdź dane logowania i spróbuj ponownie.",
-      "reauth_successful": "Ponowne uwierzytelnienie zakończone pomyślnie."
+      "reauth_successful": "Ponowne uwierzytelnienie zakończone pomyślnie.",
+      "migration_complete_confirmed": "Migracja zakończona.",
+      "migration_failed": "Migracja nie powiodła się. Usuń integrację i dodaj ją ponownie."
     },
     "progress": {
       "discovery_secrets_new": "Wykryto Auth/secrets.json dla {email}",

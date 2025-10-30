@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+# tests/test_config_flow_subentry_sync.py
+
 import asyncio
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
+
+import pytest
 
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import (
@@ -15,9 +19,14 @@ from custom_components.googlefindmy.const import (
     DEFAULT_ENABLE_STATS_ENTITIES,
     DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
     DOMAIN,
+    OPT_DEVICE_POLL_DELAY,
     OPT_ENABLE_STATS_ENTITIES,
     OPT_GOOGLE_HOME_FILTER_ENABLED,
+    OPT_IGNORED_DEVICES,
+    OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_MIN_ACCURACY_THRESHOLD,
+    OPT_OPTIONS_SCHEMA_VERSION,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
@@ -41,6 +50,7 @@ class _ConfigEntriesManagerStub:
         self._entry = entry
         self.created: list[dict[str, Any]] = []
         self.updated: list[dict[str, Any]] = []
+        self.entry_updates: list[dict[str, Any]] = []
 
     def async_entries(self, domain: str | None = None) -> list[Any]:
         if domain and domain != DOMAIN:
@@ -51,6 +61,17 @@ class _ConfigEntriesManagerStub:
         if entry_id == self._entry.entry_id:
             return self._entry
         return None
+
+    def async_update_entry(self, entry: _EntryStub, **kwargs: Any) -> None:
+        assert entry is self._entry
+        payload = dict(kwargs)
+        self.entry_updates.append(payload)
+        if "data" in payload:
+            entry.data = payload["data"]
+        if "options" in payload:
+            entry.options = payload["options"]
+        if "version" in payload:
+            entry.version = payload["version"]
 
     def async_create_subentry(
         self,
@@ -129,6 +150,7 @@ class _EntryStub:
         self.options: dict[str, Any] = {}
         self.subentries: dict[str, ConfigSubentry] = {}
         self.runtime_data = SimpleNamespace()
+        self.version = 1
 
 
 def _build_flow(entry: _EntryStub) -> config_flow.ConfigFlow:
@@ -153,27 +175,26 @@ def _build_flow(entry: _EntryStub) -> config_flow.ConfigFlow:
     return flow
 
 
-def test_device_selection_creates_feature_groups_with_flags() -> None:
+@pytest.mark.asyncio
+async def test_device_selection_creates_feature_groups_with_flags() -> None:
     """Sync helper should create service and tracker subentries with expected flags."""
 
     entry = _EntryStub()
     flow = _build_flow(entry)
     context_map = flow._ensure_subentry_context()
 
-    asyncio.run(
-        flow._async_sync_feature_subentries(  # type: ignore[attr-defined]
-            entry,
-            options_payload={
-                OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
-                OPT_GOOGLE_HOME_FILTER_ENABLED: False,
-                OPT_ENABLE_STATS_ENTITIES: True,
-            },
-            defaults={
-                OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
-                OPT_ENABLE_STATS_ENTITIES: DEFAULT_ENABLE_STATS_ENTITIES,
-            },
-            context_map=context_map,
-        )
+    await flow._async_sync_feature_subentries(  # type: ignore[attr-defined]
+        entry,
+        options_payload={
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
+            OPT_GOOGLE_HOME_FILTER_ENABLED: False,
+            OPT_ENABLE_STATS_ENTITIES: True,
+        },
+        defaults={
+            OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
+            OPT_ENABLE_STATS_ENTITIES: DEFAULT_ENABLE_STATS_ENTITIES,
+        },
+        context_map=context_map,
     )
     manager = flow.hass.config_entries  # type: ignore[assignment]
     assert len(manager.created) == 2, "both service and tracker subentries should be created"
@@ -209,7 +230,8 @@ def test_device_selection_creates_feature_groups_with_flags() -> None:
     assert flags[OPT_ENABLE_STATS_ENTITIES] is True
 
 
-def test_device_selection_updates_existing_feature_group() -> None:
+@pytest.mark.asyncio
+async def test_device_selection_updates_existing_feature_group() -> None:
     """Sync helper should update an existing subentry with new feature flags."""
 
     entry = _EntryStub()
@@ -231,20 +253,18 @@ def test_device_selection_updates_existing_feature_group() -> None:
     context_map = flow._ensure_subentry_context()
     context_map[TRACKER_SUBENTRY_KEY] = existing.subentry_id
 
-    asyncio.run(
-        flow._async_sync_feature_subentries(  # type: ignore[attr-defined]
-            entry,
-            options_payload={
-                OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
-                OPT_GOOGLE_HOME_FILTER_ENABLED: True,
-                OPT_ENABLE_STATS_ENTITIES: False,
-            },
-            defaults={
-                OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
-                OPT_ENABLE_STATS_ENTITIES: DEFAULT_ENABLE_STATS_ENTITIES,
-            },
-            context_map=context_map,
-        )
+    await flow._async_sync_feature_subentries(  # type: ignore[attr-defined]
+        entry,
+        options_payload={
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+            OPT_GOOGLE_HOME_FILTER_ENABLED: True,
+            OPT_ENABLE_STATS_ENTITIES: False,
+        },
+        defaults={
+            OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
+            OPT_ENABLE_STATS_ENTITIES: DEFAULT_ENABLE_STATS_ENTITIES,
+        },
+        context_map=context_map,
     )
     manager = flow.hass.config_entries  # type: ignore[assignment]
     # Service subentry should have been created alongside updating the tracker
@@ -273,3 +293,66 @@ def test_supported_subentry_types_include_hub_handler() -> None:
     assert mapping[SUBENTRY_TYPE_SERVICE] is config_flow.ServiceSubentryFlowHandler
     assert mapping[SUBENTRY_TYPE_TRACKER] is config_flow.TrackerSubentryFlowHandler
     assert mapping["hub"] is config_flow.ServiceSubentryFlowHandler
+
+
+@pytest.mark.asyncio
+async def test_async_step_migrate_creates_subentries_and_moves_options() -> None:
+    """Migration flow should consolidate options and sync feature subentries."""
+
+    entry = _EntryStub()
+    entry.version = 0
+    entry.data = {
+        CONF_GOOGLE_EMAIL: "Legacy@Example.com",
+        CONF_OAUTH_TOKEN: "token",
+        DATA_AUTH_METHOD: "secrets_json",
+        OPT_LOCATION_POLL_INTERVAL: 900,
+        OPT_DEVICE_POLL_DELAY: 8,
+    }
+    entry.options = {
+        OPT_MIN_ACCURACY_THRESHOLD: 75,
+        OPT_OPTIONS_SCHEMA_VERSION: 1,
+    }
+
+    flow = config_flow.ConfigFlow()
+    hass = _HassStub(entry)
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow.unique_id = None  # type: ignore[attribute-defined-outside-init]
+    flow._unique_id = None  # type: ignore[attr-defined]
+    flow._available_devices = []  # type: ignore[attr-defined]
+    flow.config_entry = entry  # type: ignore[assignment]
+
+    result = await flow.async_step_migrate(entry)
+
+    assert result["type"] == "form"
+    assert entry.version == config_flow.ConfigFlow.VERSION
+    assert OPT_LOCATION_POLL_INTERVAL not in entry.data
+    assert OPT_DEVICE_POLL_DELAY not in entry.data
+    assert entry.data[CONF_GOOGLE_EMAIL] == "legacy@example.com"
+    assert entry.data[CONF_OAUTH_TOKEN] == "token"
+
+    options = entry.options
+    assert options[OPT_LOCATION_POLL_INTERVAL] == 900
+    assert options[OPT_DEVICE_POLL_DELAY] == 8
+    assert options[OPT_MIN_ACCURACY_THRESHOLD] == 75
+    assert options[OPT_OPTIONS_SCHEMA_VERSION] == 2
+    assert options[OPT_IGNORED_DEVICES] == {}
+
+    manager = flow.hass.config_entries  # type: ignore[assignment]
+    assert len(manager.created) == 2
+    assert any(
+        record["data"]["group_key"] == SERVICE_SUBENTRY_KEY for record in manager.created
+    )
+    assert any(
+        record["data"]["group_key"] == TRACKER_SUBENTRY_KEY for record in manager.created
+    )
+    assert manager.entry_updates and manager.entry_updates[-1].get(
+        "version"
+    ) == config_flow.ConfigFlow.VERSION
+
+    placeholders = flow.context.get("title_placeholders", {})
+    assert placeholders.get("email") == "legacy@example.com"
+
+    confirm = await flow.async_step_migrate_complete({})
+    assert confirm["type"] == "abort"
+    assert confirm["reason"] == "migration_complete_confirmed"

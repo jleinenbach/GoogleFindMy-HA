@@ -50,6 +50,10 @@
           "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
           "new_oauth_token": "Neuer OAuth-Token"
         }
+      },
+      "migrate_complete": {
+        "title": "Migration abgeschlossen",
+        "description": "Google Find My Device für **{email}** wurde auf die neue Struktur mit Funktionsgruppen migriert. Prüfe deine Geräte und lade die Integration neu, falls Entitäten offline bleiben."
       }
     },
     "error": {
@@ -68,7 +72,9 @@
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",
-      "reauth_successful": "Erneute Authentifizierung erfolgreich."
+      "reauth_successful": "Erneute Authentifizierung erfolgreich.",
+      "migration_complete_confirmed": "Migration abgeschlossen.",
+      "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json für {email} erkannt",
