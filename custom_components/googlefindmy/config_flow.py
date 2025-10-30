@@ -1192,6 +1192,159 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         self._pending_discovery_existing_entry: ConfigEntry | None = None
         self._discovery_confirm_pending = False
 
+    async def async_step_migrate(self, entry: ConfigEntry) -> FlowResult:
+        """Migrate pre-subentry config entries to the latest data model."""
+
+        _LOGGER.debug(
+            "Starting config entry migration for %s (version=%s)",
+            entry.entry_id,
+            entry.version,
+        )
+
+        raw_email = entry.data.get(CONF_GOOGLE_EMAIL)
+        normalized_email = normalize_email_or_default(raw_email)
+        if normalized_email:
+            placeholders = self.context.setdefault("title_placeholders", {})
+            placeholders["email"] = normalized_email
+        self.context["migrated_entry_id"] = entry.entry_id
+        self.context["migrated_entry_email"] = normalized_email
+
+        if entry.unique_id:
+            await self.async_set_unique_id(entry.unique_id, raise_on_progress=False)
+
+        if entry.version >= self.VERSION:
+            _LOGGER.debug(
+                "Config entry %s already at latest version; skipping migration.",
+                entry.entry_id,
+            )
+            return await self.async_step_migrate_complete()
+
+        self._auth_data = {}
+        for key in (
+            DATA_AUTH_METHOD,
+            CONF_OAUTH_TOKEN,
+            CONF_GOOGLE_EMAIL,
+            DATA_SECRET_BUNDLE,
+            DATA_AAS_TOKEN,
+        ):
+            value = entry.data.get(key)
+            if value is not None:
+                self._auth_data[key] = value
+
+        defaults = dict(DEFAULT_OPTIONS)
+        options_payload = dict(DEFAULT_OPTIONS)
+
+        old_options = getattr(entry, "options", {}) or {}
+        if isinstance(old_options, Mapping):
+            defaults.update({k: v for k, v in old_options.items() if v is not None})
+
+        old_data = dict(entry.data or {})
+
+        def _merge_options(source: Mapping[str, Any]) -> None:
+            for key, value in source.items():
+                if value is None:
+                    continue
+                if key in {
+                    DATA_AUTH_METHOD,
+                    CONF_OAUTH_TOKEN,
+                    CONF_GOOGLE_EMAIL,
+                    DATA_SECRET_BUNDLE,
+                    DATA_AAS_TOKEN,
+                }:
+                    continue
+                options_payload[key] = value
+
+        if isinstance(old_options, Mapping):
+            _merge_options(old_options)
+        _merge_options(old_data)
+
+        ignored_value = None
+        if OPT_IGNORED_DEVICES in old_options:
+            ignored_value = old_options.get(OPT_IGNORED_DEVICES)
+        if ignored_value is None:
+            ignored_value = old_data.get(OPT_IGNORED_DEVICES)
+        if ignored_value is not None:
+            coerced, _ = coerce_ignored_mapping(ignored_value)
+            options_payload[OPT_IGNORED_DEVICES] = coerced
+
+        schema_version = 0
+        for source in (old_options, old_data):
+            candidate = source.get(OPT_OPTIONS_SCHEMA_VERSION)
+            if isinstance(candidate, int):
+                schema_version = max(schema_version, candidate)
+            elif isinstance(candidate, str):
+                try:
+                    schema_version = max(schema_version, int(candidate))
+                except ValueError:
+                    continue
+        options_payload[OPT_OPTIONS_SCHEMA_VERSION] = max(schema_version, 2)
+
+        subentry_context = self._ensure_subentry_context()
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, Mapping):
+            for subentry in subentries.values():
+                data = getattr(subentry, "data", {}) or {}
+                group_key = data.get("group_key")
+                if isinstance(group_key, str) and group_key in subentry_context:
+                    subentry_context[group_key] = getattr(subentry, "subentry_id", None)
+
+        try:
+            await self._async_sync_feature_subentries(
+                entry,
+                options_payload=options_payload,
+                defaults=defaults,
+                context_map=subentry_context,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception(
+                "Migration failed while creating subentries for %s: %s",
+                entry.entry_id,
+                err,
+            )
+            return self.async_abort(reason="migration_failed")
+
+        new_data = {
+            key: old_data[key]
+            for key in (
+                DATA_AUTH_METHOD,
+                CONF_OAUTH_TOKEN,
+                CONF_GOOGLE_EMAIL,
+                DATA_SECRET_BUNDLE,
+                DATA_AAS_TOKEN,
+            )
+            if key in old_data and old_data[key] is not None
+        }
+
+        self.hass.config_entries.async_update_entry(
+            entry,
+            data=new_data,
+            options=options_payload,
+            version=self.VERSION,
+        )
+
+        _LOGGER.info("Config entry %s migrated to version %s", entry.entry_id, self.VERSION)
+        return await self.async_step_migrate_complete()
+
+    async def async_step_migrate_complete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Display a confirmation screen once migration completes."""
+
+        email_placeholder = normalize_email_or_default(
+            self.context.get("migrated_entry_email")
+        )
+        placeholders: dict[str, str] = {}
+        if email_placeholder:
+            placeholders["email"] = email_placeholder
+
+        if user_input is not None:
+            return self.async_abort(reason="migration_complete")
+
+        return self.async_show_form(
+            step_id="migrate_complete",
+            description_placeholders=placeholders,
+        )
+
     def _clear_discovery_confirmation_state(self) -> None:
         """Reset cached discovery confirmation state.
 

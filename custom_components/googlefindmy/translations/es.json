@@ -50,6 +50,10 @@
           "secrets_json": "Nuevo secrets.json (contenido completo)",
           "new_oauth_token": "Nuevo token OAuth"
         }
+      },
+      "migrate_complete": {
+        "title": "Migración completada",
+        "description": "La configuración de **{email}** se ha migrado al formato más reciente. Selecciona **Enviar** para finalizar."
       }
     },
     "error": {
@@ -68,7 +72,9 @@
       "already_configured": "Google Find My Device ya está configurado.",
       "cannot_connect": "No se pudo conectar con Google Find My Device.",
       "invalid_discovery_info": "La carga de descubrimiento no es válida. Verifica las credenciales y vuelve a intentarlo.",
-      "reauth_successful": "Reautenticación correcta."
+      "reauth_successful": "Reautenticación correcta.",
+      "migration_failed": "La migración falló. Consulta los registros para obtener detalles.",
+      "migration_complete": "Migración confirmada."
     },
     "progress": {
       "discovery_secrets_new": "Se detectó Auth/secrets.json para {email}",
