@@ -40,7 +40,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from types import MappingProxyType
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -258,6 +258,9 @@ class ConfigEntrySubentryDefinition:
     unload: CleanupCallback | None = None
 
 
+_AwaitableT = TypeVar("_AwaitableT")
+
+
 class ConfigEntrySubEntryManager:
     """Helper for managing config entry subentries for this integration."""
 
@@ -285,6 +288,16 @@ class ConfigEntrySubEntryManager:
         self._managed: dict[str, ConfigSubentry] = {}
         self._cleanup: dict[str, CleanupCallback | None] = {}
         self._refresh_from_entry()
+
+    @staticmethod
+    async def _await_subentry_result(
+        result: Awaitable[_AwaitableT] | _AwaitableT,
+    ) -> _AwaitableT:
+        """Return the awaited subentry operation result when needed."""
+
+        if inspect.isawaitable(result):
+            return await cast(Awaitable[_AwaitableT], result)
+        return cast(_AwaitableT, result)
 
     def _refresh_from_entry(self) -> None:
         """Populate managed mapping from the config entry."""
@@ -340,13 +353,44 @@ class ConfigEntrySubEntryManager:
         payload[self._key_field] = key
         payload["visible_device_ids"] = list(normalized)
 
-        self._hass.config_entries.async_update_subentry(
+        update_result = self._hass.config_entries.async_update_subentry(
             self._entry,
             subentry,
             data=payload,
         )
 
-        refreshed = self._entry.subentries.get(subentry.subentry_id, subentry)
+        if inspect.isawaitable(update_result):
+
+            async def _await_visibility_update() -> None:
+                resolved_subentry: ConfigSubentry | None = None
+                try:
+                    resolved = await self._await_subentry_result(update_result)
+                except Exception as err:  # pragma: no cover - defensive logging
+                    _LOGGER.debug(
+                        "Subentry visibility update for '%s' raised: %s", key, err
+                    )
+                else:
+                    if isinstance(resolved, ConfigSubentry):
+                        resolved_subentry = resolved
+                finally:
+                    refreshed_subentry = resolved_subentry or self._entry.subentries.get(
+                        subentry.subentry_id, subentry
+                    )
+                    if refreshed_subentry is None:
+                        refreshed_subentry = subentry
+                    self._managed[key] = refreshed_subentry
+
+            self._hass.async_create_task(
+                _await_visibility_update(),
+                name=f"{DOMAIN}.subentry_visibility_refresh",
+            )
+            return
+
+        refreshed = update_result if isinstance(update_result, ConfigSubentry) else None
+        if refreshed is None:
+            refreshed = self._entry.subentries.get(subentry.subentry_id, subentry)
+        if refreshed is None:
+            refreshed = subentry
         # Ensure local view reflects Home Assistant's stored subentry.
         self._managed[key] = refreshed
 
@@ -374,10 +418,18 @@ class ConfigEntrySubEntryManager:
                     title=definition.title,
                     unique_id=unique_id,
                 )
-                self._hass.config_entries.async_add_subentry(self._entry, new_subentry)
-                stored = self._entry.subentries.get(
-                    new_subentry.subentry_id, new_subentry
+                add_result = self._hass.config_entries.async_add_subentry(
+                    self._entry, new_subentry
                 )
+                resolved_add = await self._await_subentry_result(add_result)
+
+                if isinstance(resolved_add, ConfigSubentry):
+                    stored = resolved_add
+                else:
+                    stored = self._entry.subentries.get(
+                        new_subentry.subentry_id, new_subentry
+                    )
+
                 self._managed[key] = stored
             else:
                 changed = self._hass.config_entries.async_update_subentry(
@@ -387,11 +439,19 @@ class ConfigEntrySubEntryManager:
                     title=definition.title,
                     unique_id=unique_id,
                 )
-                if changed:
-                    refreshed = self._entry.subentries.get(
+                resolved_update = await self._await_subentry_result(changed)
+
+                if isinstance(resolved_update, ConfigSubentry):
+                    stored_existing = resolved_update
+                elif resolved_update:
+                    stored_existing = self._entry.subentries.get(
                         existing.subentry_id, existing
                     )
-                    self._managed[key] = refreshed
+                else:
+                    stored_existing = None
+
+                if stored_existing is not None:
+                    self._managed[key] = stored_existing
 
             self._cleanup[key] = cleanup
 
@@ -416,9 +476,10 @@ class ConfigEntrySubEntryManager:
             return
 
         try:
-            self._hass.config_entries.async_remove_subentry(
+            remove_result = self._hass.config_entries.async_remove_subentry(
                 self._entry, subentry.subentry_id
             )
+            await self._await_subentry_result(remove_result)
         except Exception as err:  # pragma: no cover - defensive logging
             _LOGGER.debug("Removing subentry '%s' failed: %s", key, err)
 
