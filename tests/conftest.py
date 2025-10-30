@@ -2,7 +2,6 @@
 """Test configuration and environment stubs for integration tests."""
 
 from __future__ import annotations
-# tests/conftest.py
 
 import sys
 from pathlib import Path
@@ -16,6 +15,78 @@ from datetime import datetime, timezone
 import json
 
 import pytest
+
+
+@pytest.fixture
+def subentry_support(monkeypatch: pytest.MonkeyPatch):
+    """Toggle config subentry support between modern and legacy cores."""
+
+    from custom_components.googlefindmy import config_flow
+
+    original_flow = getattr(config_flow, "ConfigSubentryFlow", None)
+    original_subentry = getattr(config_flow, "ConfigSubentry", None)
+    fallback_flow = getattr(config_flow, "_FALLBACK_CONFIG_SUBENTRY_FLOW", None)
+
+    class _SubentrySupportToggle:
+        """Helper exposing modern and legacy subentry configurations."""
+
+        def as_modern(self) -> object | None:
+            """Restore the module to the original subentry-capable state."""
+
+            monkeypatch.setattr(
+                config_flow,
+                "ConfigSubentryFlow",
+                original_flow,
+                raising=False,
+            )
+            monkeypatch.setattr(
+                config_flow,
+                "_FALLBACK_CONFIG_SUBENTRY_FLOW",
+                fallback_flow,
+                raising=False,
+            )
+            monkeypatch.setattr(
+                config_flow,
+                "ConfigSubentry",
+                original_subentry,
+                raising=False,
+            )
+            return original_flow
+
+        def as_legacy(self) -> type[object]:
+            """Simulate a core that lacks ConfigSubentry support."""
+
+            legacy_flow = fallback_flow
+            if legacy_flow is None:
+                legacy_flow = type(
+                    "_LegacyFallbackSubentryFlow",
+                    (),
+                    {"__doc__": "Fallback stub for legacy config subentries."},
+                )
+
+            monkeypatch.setattr(
+                config_flow,
+                "ConfigSubentryFlow",
+                legacy_flow,
+                raising=False,
+            )
+            monkeypatch.setattr(
+                config_flow,
+                "_FALLBACK_CONFIG_SUBENTRY_FLOW",
+                legacy_flow,
+                raising=False,
+            )
+            monkeypatch.setattr(
+                config_flow,
+                "ConfigSubentry",
+                None,
+                raising=False,
+            )
+            return legacy_flow
+
+    toggle = _SubentrySupportToggle()
+    toggle.as_modern()
+    return toggle
 
 # Ensure the package root is importable without installing the package.
 ROOT = Path(__file__).resolve().parents[1]

@@ -91,6 +91,11 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.data_entry_flow import FlowResult
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 try:  # pragma: no cover - compatibility shim for stripped environments
     from homeassistant.config_entries import (
@@ -159,6 +164,8 @@ except Exception:  # noqa: BLE001
     async_create_discovery_flow = _async_create_discovery_flow
 
 
+_FALLBACK_CONFIG_SUBENTRY_FLOW: type[Any] | None = None
+
 try:  # pragma: no cover - compatibility shim for stripped environments
     from homeassistant.config_entries import ConfigSubentry, ConfigSubentryFlow
 except Exception:  # noqa: BLE001
@@ -215,12 +222,9 @@ except Exception:  # noqa: BLE001
             }
 
     ConfigSubentryFlow = _FallbackConfigSubentryFlow
-
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+    _FALLBACK_CONFIG_SUBENTRY_FLOW = _FallbackConfigSubentryFlow
+else:
+    _FALLBACK_CONFIG_SUBENTRY_FLOW = None
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntriesFlowManager
@@ -1488,11 +1492,18 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
     ) -> dict[str, type[ConfigSubentryFlow]]:
         """Return mapping of supported subentry types to their flow handlers."""
 
-        return {
+        handlers: dict[str, type[ConfigSubentryFlow]] = {
             SUBENTRY_TYPE_SERVICE: ServiceSubentryFlowHandler,
             SUBENTRY_TYPE_TRACKER: TrackerSubentryFlowHandler,
-            SUBENTRY_TYPE_HUB: HubSubentryFlowHandler,
         }
+
+        if (
+            ConfigSubentry is not None
+            and ConfigSubentryFlow is not _FALLBACK_CONFIG_SUBENTRY_FLOW
+        ):
+            handlers[SUBENTRY_TYPE_HUB] = HubSubentryFlowHandler
+
+        return handlers
 
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
@@ -1647,11 +1658,14 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         supported_types = type(self).async_get_supported_subentry_types(lookup_entry)
         if SUBENTRY_TYPE_HUB not in supported_types:
             _LOGGER.error(
-                "Add Hub flow requested but no hub subentry handler is registered"
+                "Failed to load Add Hub config flow: hub subentries are unavailable on this "
+                "Home Assistant core (ConfigSubentry=%r, ConfigSubentryFlow=%r, entry_id=%s); "
+                "falling back to standard onboarding.",
+                ConfigSubentry,
+                ConfigSubentryFlow,
+                entry_hint or "<new>",
             )
-            raise HomeAssistantErrorBase(
-                "Hub subentry handler is not registered; reinstall the integration."
-            )
+            return await self.async_step_user(user_input)
 
         _LOGGER.info(
             "Add Hub flow requested; delegating to standard onboarding (entry_id=%s)",

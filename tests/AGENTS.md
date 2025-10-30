@@ -72,6 +72,15 @@ Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
 
+## Config flow subentry support fixture
+
+The :func:`subentry_support` fixture in ``tests/conftest.py`` centralizes the
+monkeypatch scaffolding required to toggle between modern Home Assistant cores
+that provide ``ConfigSubentry``/``ConfigSubentryFlow`` and legacy builds that do
+not. Request the fixture in a test and call ``toggle.as_modern()`` (the default)
+or ``toggle.as_legacy()`` before invoking the config flow under test to assert
+the correct behavior in each environment.
+
 ## AST extraction helper
 
 The :mod:`tests.helpers.ast_extract` module exposes
