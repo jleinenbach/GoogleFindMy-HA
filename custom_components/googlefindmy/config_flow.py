@@ -37,11 +37,14 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib import import_module
 from collections.abc import Mapping as CollMapping
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, TypeVar, cast
 
-from .api import GoogleFindMyAPI
+if TYPE_CHECKING:
+    from .api import GoogleFindMyAPI
 from .const import (
     # Core domain & credential keys
     DOMAIN,
@@ -226,6 +229,30 @@ if TYPE_CHECKING:
     HomeAssistantErrorBase = Exception
 else:
     HomeAssistantErrorBase = HomeAssistantError
+
+
+class DependencyNotReady(HomeAssistantErrorBase):
+    """Raised when integration dependencies are unavailable."""
+
+
+@lru_cache(maxsize=1)
+def _import_api() -> type["GoogleFindMyAPI"]:
+    """Import the API lazily so config flows load without optional deps."""
+
+    try:
+        module = import_module(f"{__package__}.api")
+    except ImportError as err:  # pragma: no cover - exercised via tests
+        raise DependencyNotReady(
+            "Google Find My Device dependencies are not installed."
+        ) from err
+
+    api_cls = getattr(module, "GoogleFindMyAPI", None)
+    if api_cls is None:
+        raise DependencyNotReady(
+            "GoogleFindMyAPI is unavailable in googlefindmy.api."
+        )
+
+    return cast(type["GoogleFindMyAPI"], api_cls)
 
 # Optional network exception typing (robust mapping without hard dependency)
 aiohttp: ModuleType | None
@@ -633,6 +660,9 @@ def _is_multi_entry_guard_error(err: Exception) -> bool:
 # ---------------------------
 def _map_api_exc_to_error_key(err: Exception) -> str:
     """Map library/network errors to HA error keys without leaking details."""
+    if isinstance(err, DependencyNotReady):
+        return "dependency_not_ready"
+
     name = err.__class__.__name__.lower()
 
     if any(k in name for k in ("auth", "unauthor", "forbidden", "credential")):
@@ -776,7 +806,7 @@ def _extract_oauth_candidates_from_secrets(
 # API probing helpers (signature-robust)
 # ---------------------------
 async def _try_probe_devices(
-    api: GoogleFindMyAPI, *, email: str, token: str
+    api: "GoogleFindMyAPI", *, email: str, token: str
 ) -> list[dict[str, Any]]:
     """Call the API to fetch a basic device list using defensive signatures."""
     caller = cast(
@@ -803,9 +833,9 @@ async def _async_new_api_for_probe(
     token: str,
     *,
     secrets_bundle: dict[str, Any] | None = None,
-) -> GoogleFindMyAPI:
+) -> "GoogleFindMyAPI":
     """Create a fresh, ephemeral API instance for pre-flight validation."""
-    factory = cast(Callable[..., GoogleFindMyAPI], GoogleFindMyAPI)
+    factory = cast(Callable[..., "GoogleFindMyAPI"], _import_api())
     try:
         return factory(
             oauth_token=token,
@@ -842,6 +872,8 @@ async def async_pick_working_token(
                 _mask_email_for_logs(email),
             )
             return token
+        except DependencyNotReady:
+            raise
         except Exception as err:  # noqa: BLE001
             if _is_multi_entry_guard_error(err):
                 _LOGGER.debug(
@@ -1130,6 +1162,8 @@ async def _ingest_discovery_credentials(
             candidates,
             secrets_bundle=secrets_bundle,
         )
+    except DependencyNotReady as err:
+        raise DiscoveryFlowError("dependency_not_ready") from err
     except Exception as err:  # noqa: BLE001
         raise DiscoveryFlowError(_map_api_exc_to_error_key(err)) from err
 
@@ -1519,6 +1553,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                 "invalid_discovery_info",
                 "cannot_connect",
                 "invalid_auth",
+                "dependency_not_ready",
             }:
                 reason = (
                     "cannot_connect" if reason != "invalid_discovery_info" else reason
@@ -1691,11 +1726,14 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     await self.async_set_unique_id(uid)
                     self._abort_if_unique_id_configured()
 
-                chosen = await async_pick_working_token(
-                    email,
-                    cands,
-                    secrets_bundle=parsed_secrets,
-                )
+                try:
+                    chosen = await async_pick_working_token(
+                        email,
+                        cands,
+                        secrets_bundle=parsed_secrets,
+                    )
+                except DependencyNotReady:
+                    return await self.async_abort(reason="dependency_not_ready")
                 if not chosen:
                     _LOGGER.warning(
                         "Token validation failed for %s. No working token found among candidates (%s).",
@@ -1756,7 +1794,10 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     await self.async_set_unique_id(uid)
                     self._abort_if_unique_id_configured()
 
-                chosen = await async_pick_working_token(email, cands)
+                try:
+                    chosen = await async_pick_working_token(email, cands)
+                except DependencyNotReady:
+                    return await self.async_abort(reason="dependency_not_ready")
                 if not chosen:
                     _LOGGER.warning(
                         "Token validation failed for %s. No working token found among candidates (%s).",
@@ -1786,7 +1827,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         )
 
     # ------------------ Shared: build API for final probe ------------------
-    async def _async_build_api_and_username(self) -> tuple[GoogleFindMyAPI, str, str]:
+    async def _async_build_api_and_username(self) -> tuple["GoogleFindMyAPI", str, str]:
         """Construct an ephemeral API client from transient flow credentials."""
         email = self._auth_data.get(CONF_GOOGLE_EMAIL)
         oauth = self._auth_data.get(CONF_OAUTH_TOKEN)
@@ -1824,6 +1865,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                         (d.get("name") or d.get("id") or "", d.get("id") or "")
                         for d in devices
                     ]
+            except DependencyNotReady:
+                return await self.async_abort(reason="dependency_not_ready")
             except Exception as err:  # noqa: BLE001
                 if not _is_multi_entry_guard_error(err):
                     key = _map_api_exc_to_error_key(err)
@@ -2141,9 +2184,14 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                 try:
                     if method == "manual":
                         token = str(payload)
-                        chosen = await async_pick_working_token(
-                            fixed_email, [("manual", token)]
-                        )
+                        try:
+                            chosen = await async_pick_working_token(
+                                fixed_email, [("manual", token)]
+                            )
+                        except DependencyNotReady:
+                            return await self.async_abort(
+                                reason="dependency_not_ready"
+                            )
                         if not chosen:
                             _LOGGER.warning(
                                 "Token validation failed for %s. No working token found among candidates (%s).",
@@ -2195,9 +2243,16 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                                     return self.async_abort(reason="already_configured")
                                 errors["base"] = "email_mismatch"
                             else:
-                                chosen = await async_pick_working_token(
-                                    fixed_email, cands, secrets_bundle=parsed
-                                )
+                                try:
+                                    chosen = await async_pick_working_token(
+                                        fixed_email,
+                                        cands,
+                                        secrets_bundle=parsed,
+                                    )
+                                except DependencyNotReady:
+                                    return await self.async_abort(
+                                        reason="dependency_not_ready"
+                                    )
                                 if not chosen:
                                     _LOGGER.warning(
                                         "Token validation failed for %s. No working token found among candidates (%s).",
@@ -2871,12 +2926,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
 
         await ConfigFlow._async_clear_cached_aas_token(self, entry)
 
-    async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
+    async def _async_build_api_from_entry(self, entry: ConfigEntry) -> "GoogleFindMyAPI":
         """Construct API object from the live entry context (cache-first)."""
         cache = self._get_entry_cache(entry)
         if cache is not None:
             session = async_get_clientsession(self.hass)
-            api_ctor = cast(Callable[..., GoogleFindMyAPI], GoogleFindMyAPI)
+            api_ctor = cast(Callable[..., "GoogleFindMyAPI"], _import_api())
             try:
                 return api_ctor(cache=cache, session=session)
             except TypeError:
@@ -2885,7 +2940,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         oauth = entry.data.get(CONF_OAUTH_TOKEN)
         email = entry.data.get(CONF_GOOGLE_EMAIL)
         if oauth and email:
-            api_ctor = cast(Callable[..., GoogleFindMyAPI], GoogleFindMyAPI)
+            api_ctor = cast(Callable[..., "GoogleFindMyAPI"], _import_api())
             try:
                 return api_ctor(oauth_token=oauth, google_email=email)
             except TypeError:
@@ -3618,9 +3673,14 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                             ):
                                 errors["base"] = "invalid_token"
                             else:
-                                chosen = await async_pick_working_token(
-                                    email, [("manual", token)]
-                                )
+                                try:
+                                    chosen = await async_pick_working_token(
+                                        email, [("manual", token)]
+                                    )
+                                except DependencyNotReady:
+                                    return await self.async_abort(
+                                        reason="dependency_not_ready"
+                                    )
                                 if not chosen:
                                     _LOGGER.warning(
                                         "Token validation failed for %s. No working token found among candidates (%s).",
@@ -3655,9 +3715,16 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                 if not cands:
                                     errors["base"] = "invalid_token"
                                 else:
-                                    chosen = await async_pick_working_token(
-                                        email, cands, secrets_bundle=parsed
-                                    )
+                                    try:
+                                        chosen = await async_pick_working_token(
+                                            email,
+                                            cands,
+                                            secrets_bundle=parsed,
+                                        )
+                                    except DependencyNotReady:
+                                        return await self.async_abort(
+                                            reason="dependency_not_ready"
+                                        )
                                     if not chosen:
                                         _LOGGER.warning(
                                             "Token validation failed for %s. No working token found among candidates (%s).",

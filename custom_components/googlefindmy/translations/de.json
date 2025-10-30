@@ -63,6 +63,7 @@
       "invalid_json": "Ungültiges JSON-Format im Inhalt der secrets.json.",
       "no_devices": "Keine Geräte gefunden. Bitte stelle sicher, dass „Mein Gerät finden“ in deinem Google-Konto aktiviert ist.",
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen. Dies ist möglicherweise ein vorübergehendes Problem – bitte versuche es später erneut.",
+      "dependency_not_ready": "Erforderliche Integrationsabhängigkeiten fehlen. Installiere die Anforderungen von Google Find My Device und starte Home Assistant neu.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
       "unknown": "Unerwarteter Fehler.",
@@ -71,6 +72,7 @@
     "abort": {
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
+      "dependency_not_ready": "Google Find My Device-Abhängigkeiten sind nicht installiert. Installiere die Anforderungen und versuche es erneut.",
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",
       "reauth_successful": "Erneute Authentifizierung erfolgreich.",
       "migration_complete_confirmed": "Migration abgeschlossen.",
@@ -188,6 +190,7 @@
       "invalid": "Validierung fehlgeschlagen. Bitte überprüfe deine Eingabe.",
       "invalid_auth": "Ungültige Authentifizierung. Bitte gib einen frischen Token ein und/oder melde dich erneut an.",
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen.",
+      "dependency_not_ready": "Erforderliche Integrationsabhängigkeiten fehlen. Installiere die Anforderungen von Google Find My Device und starte Home Assistant neu.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
       "invalid_token": "Ungültige Anmeldedaten (Token/E-Mail). Bitte prüfe Format und Inhalt.",

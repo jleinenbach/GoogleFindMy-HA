@@ -63,6 +63,7 @@
       "invalid_json": "Format JSON invalide dans le contenu de secrets.json.",
       "no_devices": "Aucun appareil trouvé. Assurez-vous que « Localiser mon appareil » est activé sur votre compte Google.",
       "cannot_connect": "Échec de la connexion à l’API Google. Il peut s’agir d’un problème temporaire — réessayez plus tard.",
+      "dependency_not_ready": "Des dépendances de l’intégration sont manquantes. Installez les dépendances requises de Google Find My Device et redémarrez Home Assistant.",
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
       "required": "Ce champ est obligatoire.",
       "unknown": "Erreur inattendue.",
@@ -71,6 +72,7 @@
     "abort": {
       "already_configured": "Google Find My Device est déjà configuré.",
       "cannot_connect": "Échec de la connexion à Google Find My Device.",
+      "dependency_not_ready": "Les dépendances de Google Find My Device ne sont pas installées. Installez les dépendances requises puis réessayez.",
       "invalid_discovery_info": "La charge de découverte est invalide. Vérifiez les identifiants et réessayez.",
       "reauth_successful": "Réauthentification réussie.",
       "migration_complete_confirmed": "Migration terminée.",
@@ -188,6 +190,7 @@
       "invalid": "Échec de la validation. Veuillez vérifier vos saisies.",
       "invalid_auth": "Authentification invalide. Fournissez un nouveau jeton et/ou reconnectez-vous.",
       "cannot_connect": "Échec de la connexion à l’API Google.",
+      "dependency_not_ready": "Des dépendances de l’intégration sont manquantes. Installez les dépendances requises de Google Find My Device et redémarrez Home Assistant.",
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
       "required": "Ce champ est obligatoire.",
       "invalid_token": "Identifiants invalides (jeton/e-mail). Veuillez vérifier le format et le contenu.",

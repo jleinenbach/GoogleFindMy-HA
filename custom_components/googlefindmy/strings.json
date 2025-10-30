@@ -63,6 +63,7 @@
       "invalid_json": "Invalid JSON format in secrets.json content.",
       "no_devices": "No devices found. Please ensure that Find My Device is enabled on your Google account.",
       "cannot_connect": "Failed to connect to the Google API. This may be temporary — please try again later.",
+      "dependency_not_ready": "Required integration dependencies are missing. Install the Google Find My Device requirements and restart Home Assistant.",
       "choose_one": "Please provide exactly one credential method.",
       "required": "This field is required.",
       "unknown": "Unexpected error occurred.",
@@ -71,6 +72,7 @@
     "abort": {
       "already_configured": "Google Find My Device is already configured.",
       "cannot_connect": "Failed to connect to Google Find My Device.",
+      "dependency_not_ready": "Google Find My Device dependencies are not installed. Install the requirements and try again.",
       "invalid_discovery_info": "The discovery payload was invalid. Check the credentials and try again.",
       "reauth_successful": "Reauthentication successful.",
       "migration_complete_confirmed": "Migration complete.",
@@ -188,6 +190,7 @@
       "invalid": "Validation failed. Please check your input.",
       "invalid_auth": "Invalid authentication. Please provide a fresh token and/or sign in again.",
       "cannot_connect": "Failed to connect to the Google API.",
+      "dependency_not_ready": "Required integration dependencies are missing. Install the Google Find My Device requirements and restart Home Assistant.",
       "choose_one": "Please provide exactly one credential method.",
       "required": "This field is required.",
       "invalid_token": "Invalid credentials (token/email). Please check format and content.",
