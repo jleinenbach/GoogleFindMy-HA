@@ -91,6 +91,11 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.data_entry_flow import FlowResult
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 try:  # pragma: no cover - compatibility shim for stripped environments
     from homeassistant.config_entries import (
@@ -220,12 +225,6 @@ except Exception:  # noqa: BLE001
     _FALLBACK_CONFIG_SUBENTRY_FLOW = _FallbackConfigSubentryFlow
 else:
     _FALLBACK_CONFIG_SUBENTRY_FLOW = None
-
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntriesFlowManager
