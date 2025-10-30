@@ -102,6 +102,10 @@ following to preserve migration coverage:
 3. **`device_id` verification** — Recorded updates are associated with the
    precise device entry under test so assertions catch accidental cross-device
    mutations.
+4. **Dual service-device identifiers** — Tests exercising the service device
+   must assert both the integration-level identifier and the derived
+   service-subentry identifier (see `_service_subentry_identifier(...)`) so
+   future expectations stay aligned with the coordinator's registry updates.
 
 ## Translation alignment checks
 

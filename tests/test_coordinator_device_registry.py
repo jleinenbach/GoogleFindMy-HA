@@ -32,6 +32,12 @@ def _stable_subentry_id(entry_id: str, key: str) -> str:
     return f"{entry_id}-{key}-subentry"
 
 
+def _service_subentry_identifier(entry: SimpleNamespace) -> tuple[str, str]:
+    """Build the service-device config-subentry identifier tuple for assertions."""
+
+    return (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service")
+
+
 class _FakeDeviceEntry:
     """Minimal stand-in for Home Assistant's DeviceEntry."""
 
@@ -425,6 +431,7 @@ def test_service_device_backfills_via_links(
 
     assert created == 2
     service_ident = service_device_identifier("entry-42")
+    service_config_identifier = _service_subentry_identifier(entry)
     assert fake_registry.created[0]["via_device"] == service_ident
     assert fake_registry.created[1]["via_device"] == service_ident
     for device_entry in fake_registry.devices:
@@ -438,19 +445,21 @@ def test_service_device_backfills_via_links(
     service_id = coordinator._service_device_id
     assert service_id is not None
     service_ident = service_device_identifier("entry-42")
+    service_subentry_ident = service_config_identifier
     service_entry = next(
         entry for entry in fake_registry.devices if service_ident in entry.identifiers
     )
     assert service_entry.translation_key == SERVICE_DEVICE_TRANSLATION_KEY
     assert service_entry.translation_placeholders == {}
     assert service_entry.config_subentry_id == entry.service_subentry_id
+    assert service_entry.identifiers == {service_ident, service_subentry_ident}
     metadata = fake_registry.created[-1]
-    assert metadata["identifiers"] == {service_ident}
+    assert metadata["identifiers"] == {service_ident, service_subentry_ident}
     assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
     assert metadata["translation_placeholders"] == {}
     assert metadata["config_subentry_id"] == entry.service_subentry_id
     for device_entry in fake_registry.devices:
-        if service_ident in device_entry.identifiers:
+        if {service_ident, service_subentry_ident} & device_entry.identifiers:
             continue
         assert device_entry.via_device_id == service_id
         assert device_entry.config_subentry_id == entry.tracker_subentry_id
@@ -486,11 +495,14 @@ def test_service_device_updates_add_translation(
     assert legacy_service.translation_key == SERVICE_DEVICE_TRANSLATION_KEY
     assert legacy_service.translation_placeholders == {}
     assert legacy_service.config_subentry_id == entry.service_subentry_id
+    service_subentry_ident = _service_subentry_identifier(entry)
+    assert legacy_service.identifiers == {service_ident, service_subentry_ident}
     assert fake_registry.updated
     metadata = fake_registry.updated[0]
     assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
     assert metadata["translation_placeholders"] == {}
     assert metadata["config_subentry_id"] == entry.service_subentry_id
+    assert metadata["new_identifiers"] == {service_ident, service_subentry_ident}
 
 
 def test_service_device_preserves_user_defined_name(
@@ -524,11 +536,14 @@ def test_service_device_preserves_user_defined_name(
     assert legacy_service.translation_key == SERVICE_DEVICE_TRANSLATION_KEY
     assert legacy_service.translation_placeholders == {}
     assert legacy_service.config_subentry_id == entry.service_subentry_id
+    service_subentry_ident = _service_subentry_identifier(entry)
+    assert legacy_service.identifiers == {service_ident, service_subentry_ident}
     assert fake_registry.updated
     metadata = fake_registry.updated[0]
     assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
     assert metadata["translation_placeholders"] == {}
     assert metadata["config_subentry_id"] == entry.service_subentry_id
+    assert metadata["new_identifiers"] == {service_ident, service_subentry_ident}
 
 
 def test_rebuild_flow_creates_devices_with_via_parent(

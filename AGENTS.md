@@ -409,6 +409,11 @@ artifacts remain exempt when explicitly flagged by repo configuration).
    configuration file is present; otherwise run `mypy -q --strict <changed-files>`.
    Install/upgrade mypy locally (`python -m pip install --upgrade mypy`) if it is
    missing.
+   *Practical note:* invoking `mypy --strict` at the repository root can trip over
+   namespace-package collisions between the integration and the `tests/`
+   package. Prefer the package-targeted invocation
+   `mypy --strict --install-types --non-interactive custom_components/googlefindmy tests`
+   so the strict run completes reliably in CI and local shells.
 4. **Resolve every diagnostic.** Add precise type annotations, tighten `Optional`
    handling, and avoid blanket `Any`. Use `# type: ignore[...]` only when the
    specific error code cannot be eliminated and document the rationale nearby.

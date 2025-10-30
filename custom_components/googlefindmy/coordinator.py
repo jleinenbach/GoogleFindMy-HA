@@ -1396,6 +1396,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         service_config_subentry_id = (
             service_meta.config_subentry_id if service_meta is not None else None
         )
+        service_subentry_identifier: tuple[str, str] | None = None
+        if service_config_subentry_id is not None:
+            service_subentry_identifier = (
+                DOMAIN,
+                f"{entry.entry_id}:{service_config_subentry_id}:service",
+            )
 
         setattr(
             self,
@@ -1408,7 +1414,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self, "_service_device_id", None
         ):
             self._apply_pending_via_updates()
-            return
+            if service_subentry_identifier is None:
+                return
 
         dev_reg = dr.async_get(hass)
         if not hasattr(dev_reg, "async_get_or_create") or not hasattr(
@@ -1418,9 +1425,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 "Service-device ensure skipped: registry stub missing create/update APIs."
             )
             return
-        identifiers = {
+        identifiers: set[tuple[str, str]] = {
             service_device_identifier(entry.entry_id)
         }  # {(DOMAIN, f"integration_<entry_id>")}
+        if service_subentry_identifier is not None:
+            identifiers.add(service_subentry_identifier)
 
         get_device = getattr(dev_reg, "async_get_device", None)
         device = None
@@ -1459,6 +1468,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # Keep metadata fresh if it drifted (rare)
             has_user_name = bool(getattr(device, "name_by_user", None))
             should_clear_name = device.name is not None and not has_user_name
+            device_identifiers = set(getattr(device, "identifiers", set()) or set())
+            needs_identifier_backfill = not identifiers.issubset(device_identifiers)
             needs_update = (
                 device.manufacturer != SERVICE_DEVICE_MANUFACTURER
                 or device.model != SERVICE_DEVICE_MODEL
@@ -1469,6 +1480,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 or device.translation_key != SERVICE_DEVICE_TRANSLATION_KEY
                 or (device.translation_placeholders or {}) != {}
                 or should_clear_name
+                or needs_identifier_backfill
             )
             if needs_update:
                 update_kwargs: dict[str, Any] = {
@@ -1482,6 +1494,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "translation_placeholders": {},
                     "config_subentry_id": service_config_subentry_id,
                 }
+                if needs_identifier_backfill:
+                    new_identifiers = set(device_identifiers)
+                    new_identifiers.update(identifiers)
+                    update_kwargs["new_identifiers"] = new_identifiers
                 if should_clear_name:
                     update_kwargs["name"] = None
                 try:
