@@ -86,6 +86,7 @@ from .api import (
 from .const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
+    CONFIG_ENTRY_VERSION,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
@@ -234,10 +235,6 @@ def _feature_name_from_platform(platform: Platform) -> str:
     if "." in candidate:
         _, candidate = candidate.split(".", 1)
     return candidate.lower()
-
-# Latest config entry schema version handled by this integration
-CONFIG_ENTRY_VERSION: int = 2
-
 
 # ---- Runtime typing helpers -------------------------------------------------
 
