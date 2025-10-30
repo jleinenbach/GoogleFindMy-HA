@@ -45,6 +45,7 @@ from .api import GoogleFindMyAPI
 from .const import (
     # Core domain & credential keys
     DOMAIN,
+    CONFIG_ENTRY_VERSION,
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
     DATA_AUTH_METHOD,
@@ -1182,7 +1183,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
     """Handle the initial config flow for Google Find My Device."""
 
     domain = DOMAIN
-    VERSION = 1
+    VERSION = CONFIG_ENTRY_VERSION
 
     def __init__(self) -> None:
         """Initialize transient flow state."""
