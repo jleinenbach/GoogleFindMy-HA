@@ -1,4 +1,6 @@
 # tests/test_services_rebuild_registry.py
+"""Regression tests for the googlefindmy.rebuild_registry service."""
+
 from __future__ import annotations
 
 import logging
@@ -103,6 +105,48 @@ async def test_rebuild_registry_skips_reload_when_migration_still_required(
 
 
 @pytest.mark.asyncio
+async def test_rebuild_registry_skips_reload_when_migration_api_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Entries stay untouched when Home Assistant lacks migration helpers."""
+
+    entry = FakeConfigEntry(entry_id="entry-2b", state=ConfigEntryState.MIGRATION_ERROR)
+    entry_manager = FakeConfigEntriesManager(
+        [entry], supports_migrate=False
+    )
+    hass = FakeHass(entry_manager)
+
+    device_registry = FakeDeviceRegistry()
+    entity_registry = FakeEntityRegistry()
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services.er, "async_get", lambda hass: entity_registry)
+
+    soft_calls: list[str] = []
+
+    async def _soft_migrate(hass_obj: Any, cfg_entry: FakeConfigEntry) -> None:
+        soft_calls.append(cfg_entry.entry_id)
+
+    ctx = {"soft_migrate_entry": _soft_migrate}
+
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.handlers[(DOMAIN, SERVICE_REBUILD_REGISTRY)]
+
+    caplog.set_level(logging.INFO)
+
+    await handler(ServiceCall({ATTR_MODE: MODE_REBUILD}))
+
+    assert entry_manager.migrate_calls == []
+    assert entry_manager.reload_calls == []
+    assert soft_calls == [entry.entry_id]
+    assert entry.state == ConfigEntryState.MIGRATION_ERROR
+    assert any(
+        "cannot retry migration automatically" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_migrate_mode_recovers_migration_error_entry(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -187,4 +231,50 @@ async def test_migrate_mode_skips_reload_when_migration_error_persists(
     assert entry.state == ConfigEntryState.MIGRATION_ERROR
     assert migration_calls.count(("soft", entry.entry_id)) >= 2
     assert migration_calls.count(("unique", entry.entry_id)) >= 2
+    assert any("manual migration" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_migrate_mode_skips_reload_without_migration_api(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """MODE_MIGRATE must not reload entries when HA cannot retry migration."""
+
+    entry = FakeConfigEntry(entry_id="entry-4b", state=ConfigEntryState.MIGRATION_ERROR)
+    entry_manager = FakeConfigEntriesManager(
+        [entry], supports_migrate=False
+    )
+    hass = FakeHass(entry_manager)
+
+    device_registry = FakeDeviceRegistry()
+    entity_registry = FakeEntityRegistry()
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services.er, "async_get", lambda hass: entity_registry)
+
+    migration_calls: list[tuple[str, str]] = []
+
+    async def _soft_migrate(hass_obj: Any, cfg_entry: FakeConfigEntry) -> None:
+        migration_calls.append(("soft", cfg_entry.entry_id))
+
+    async def _unique_id_migrate(hass_obj: Any, cfg_entry: FakeConfigEntry) -> None:
+        migration_calls.append(("unique", cfg_entry.entry_id))
+
+    ctx = {
+        "soft_migrate_entry": _soft_migrate,
+        "migrate_unique_ids": _unique_id_migrate,
+    }
+
+    await services.async_register_services(hass, ctx)
+    handler = hass.services.handlers[(DOMAIN, SERVICE_REBUILD_REGISTRY)]
+
+    caplog.set_level(logging.INFO)
+
+    await handler(ServiceCall({ATTR_MODE: MODE_MIGRATE}))
+
+    assert entry_manager.migrate_calls == []
+    assert entry_manager.reload_calls == []
+    assert migration_calls.count(("soft", entry.entry_id)) >= 2
+    assert migration_calls.count(("unique", entry.entry_id)) >= 2
+    assert entry.state == ConfigEntryState.MIGRATION_ERROR
     assert any("manual migration" in record.message for record in caplog.records)
