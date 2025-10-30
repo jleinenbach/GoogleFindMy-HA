@@ -63,6 +63,7 @@
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
       "no_devices": "No se han encontrado dispositivos. Asegúrate de que ‘Encontrar mi dispositivo’ esté activado en tu cuenta de Google.",
       "cannot_connect": "No se pudo conectar con la API de Google. Puede ser un problema temporal: inténtalo de nuevo más tarde.",
+      "dependency_not_ready": "Faltan dependencias de la integración. Instala los requisitos de Google Find My Device y reinicia Home Assistant.",
       "choose_one": "Proporciona exactamente un método de credenciales.",
       "required": "Este campo es obligatorio.",
       "unknown": "Error inesperado.",
@@ -71,6 +72,7 @@
     "abort": {
       "already_configured": "Google Find My Device ya está configurado.",
       "cannot_connect": "No se pudo conectar con Google Find My Device.",
+      "dependency_not_ready": "Las dependencias de Google Find My Device no están instaladas. Instala los requisitos e inténtalo de nuevo.",
       "invalid_discovery_info": "La carga de descubrimiento no es válida. Verifica las credenciales y vuelve a intentarlo.",
       "reauth_successful": "Reautenticación correcta.",
       "migration_complete_confirmed": "Migración completada.",
@@ -188,6 +190,7 @@
       "invalid": "Falló la validación. Revisa tus datos.",
       "invalid_auth": "Autenticación no válida. Proporciona un token nuevo y/o vuelve a iniciar sesión.",
       "cannot_connect": "No se pudo conectar con la API de Google.",
+      "dependency_not_ready": "Faltan dependencias de la integración. Instala los requisitos de Google Find My Device y reinicia Home Assistant.",
       "choose_one": "Proporciona exactamente un método de credenciales.",
       "required": "Este campo es obligatorio.",
       "invalid_token": "Credenciales no válidas (token/correo). Comprueba el formato y el contenido.",

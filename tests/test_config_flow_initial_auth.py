@@ -9,7 +9,7 @@ import inspect
 import sys
 from typing import Any
 from collections.abc import Awaitable, Callable
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -354,6 +354,49 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
     assert data[CONF_OAUTH_TOKEN] == "aas_et/MANUAL_MASTER"
     assert data[DATA_AAS_TOKEN] == "aas_et/MANUAL_MASTER"
     assert data[DATA_AUTH_METHOD] == config_flow._AUTH_METHOD_SECRETS
+
+
+@pytest.mark.asyncio
+async def test_manual_tokens_abort_when_dependency_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual token entry aborts with a clear error if dependencies are missing."""
+
+    class _ConfigEntries:
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return []
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = SimpleNamespace(config_entries=_ConfigEntries())  # type: ignore[assignment]
+    flow.context = {}
+    flow.unique_id = None  # type: ignore[attr-defined]
+
+    async def _set_unique_id(value: str) -> None:
+        flow.unique_id = value  # type: ignore[attr-defined]
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+    flow._abort_if_unique_id_configured = lambda: None  # type: ignore[assignment]
+
+    config_flow._import_api.cache_clear()
+
+    def _fail_import() -> type[Any]:
+        raise config_flow.DependencyNotReady("dependencies missing")
+
+    monkeypatch.setattr(config_flow, "_import_api", _fail_import)
+
+    result = await flow.async_step_individual_tokens(
+        {
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            CONF_OAUTH_TOKEN: "oauth-token-valid-value",
+        }
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert isinstance(result, dict)
+    assert result.get("type") == "abort"
+    assert result.get("reason") == "dependency_not_ready"
 
 
 def test_device_selection_creates_and_updates_subentry() -> None:
