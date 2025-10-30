@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -13,6 +14,7 @@ from custom_components.googlefindmy.const import (
     DATA_SECRET_BUNDLE,
     DOMAIN,
 )
+from homeassistant.core import HomeAssistant
 
 class _FakeConfigEntry:
     """Minimal ConfigEntry stub for system health tests."""
@@ -83,8 +85,7 @@ class _FakeHass:
         }
 
 
-@pytest.mark.asyncio
-async def test_async_register_uses_registration_object() -> None:
+def test_async_register_uses_registration_object() -> None:
     """Ensure the integration uses the provided registration helper when available."""
 
     class _Registration:
@@ -99,36 +100,13 @@ async def test_async_register_uses_registration_object() -> None:
             self.calls.append((handler, manage_url))
 
     registration = _Registration()
-    hass = object()
+    hass = cast(HomeAssistant, object())
 
-    await system_health.async_register(hass, registration)
+    system_health.async_register(hass, registration)
 
     assert registration.calls == [
         (system_health.async_get_system_health_info, None)
     ]
-
-
-@pytest.mark.asyncio
-async def test_async_register_registers_handler(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Ensure the integration registers its system health callback when legacy API is used."""
-
-    calls: list[tuple[object, str, object]] = []
-
-    def _capture_register(hass: object, domain: str, handler: object) -> None:
-        calls.append((hass, domain, handler))
-
-    monkeypatch.setattr(
-        system_health,
-        "system_health_component",
-        SimpleNamespace(async_register_info=_capture_register),
-    )
-
-    hass = object()
-    await system_health.async_register(hass)
-
-    assert calls == [(hass, DOMAIN, system_health.async_get_system_health_info)]
 
 
 @pytest.mark.asyncio

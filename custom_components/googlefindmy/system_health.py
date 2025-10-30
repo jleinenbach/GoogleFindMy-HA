@@ -7,19 +7,32 @@ import hashlib
 import math
 from collections.abc import Collection
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import Any, Callable, Protocol, TypeVar, cast
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 
 from .const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN, INTEGRATION_VERSION
 from .email import normalize_email
 
-if TYPE_CHECKING:
-    from homeassistant.components.system_health import SystemHealthRegistration
 
-# Module-level override for tests (patched by unit tests to capture registrations).
-system_health_component: Any | None = None
+class SystemHealthRegistration(Protocol):
+    """Structural contract for Home Assistant system health registration helpers."""
+
+    def async_register_info(
+        self,
+        handler: Any,
+        manage_url: Any | None = None,
+    ) -> None:
+        """Register the integration system health info callback."""
+
+_CallbackT = TypeVar("_CallbackT", bound=Callable[..., Any])
+
+
+def _typed_callback(func: _CallbackT) -> _CallbackT:
+    """Return a typed wrapper around Home Assistant's callback decorator."""
+
+    return cast(_CallbackT, callback(func))
 
 
 def _normalize_epoch_seconds(value: Any) -> float | None:
@@ -154,36 +167,11 @@ def _get_fcm_snapshot(coordinator: Any) -> dict[str, Any] | None:
     return data
 
 
-async def async_register(
-    hass: HomeAssistant, register: SystemHealthRegistration | None = None
-) -> None:
+@_typed_callback
+def async_register(_: HomeAssistant, register: SystemHealthRegistration) -> None:
     """Register the system health info handler for this integration."""
 
-    if register is not None and hasattr(register, "async_register_info"):
-        register.async_register_info(async_get_system_health_info)
-        return
-
-    resolved_component = system_health_component
-    if resolved_component is None:
-        try:
-            from homeassistant.components import system_health as hass_system_health
-        except ImportError:
-            resolved_component = getattr(
-                getattr(hass, "components", None), "system_health", None
-            )
-            if resolved_component is None or not hasattr(
-                resolved_component, "async_register_info"
-            ):
-                raise RuntimeError("system_health component not available")
-        else:
-            resolved_component = hass_system_health
-
-    if resolved_component is None or not hasattr(
-        resolved_component, "async_register_info"
-    ):
-        raise RuntimeError("system_health component not available")
-
-    resolved_component.async_register_info(hass, DOMAIN, async_get_system_health_info)
+    register.async_register_info(async_get_system_health_info)
 
 
 def _entry_state(entry: ConfigEntry) -> str | None:
