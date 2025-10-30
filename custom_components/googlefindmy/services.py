@@ -745,7 +745,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                         relink_completed += 1
 
             # Reload all entries to apply migrations
-            reloadable_entries: list[Any] = []
+            entries_to_reload: list[Any] = []
             for entry_ in entries:
                 state = getattr(entry_, "state", None)
                 if state == ConfigEntryState.MIGRATION_ERROR:
@@ -753,11 +753,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                         entry_
                     )
                     if should_reload and refreshed_entry is not None:
-                        reloadable_entries.append(refreshed_entry)
+                        entries_to_reload.append(refreshed_entry)
                     continue
-                reloadable_entries.append(entry_)
+                entries_to_reload.append(entry_)
 
-            for entry_ in reloadable_entries:
+            for entry_ in entries_to_reload:
                 try:
                     await hass.config_entries.async_reload(entry_.entry_id)
                 except Exception as err:
