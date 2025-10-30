@@ -96,6 +96,7 @@ from .const import (
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
     DOMAIN,
+    CONFIG_ENTRY_VERSION,
     OPTION_KEYS,
     OPT_CONTRIBUTOR_MODE,
     OPT_ALLOW_HISTORY_FALLBACK,
@@ -234,10 +235,6 @@ def _feature_name_from_platform(platform: Platform) -> str:
     if "." in candidate:
         _, candidate = candidate.split(".", 1)
     return candidate.lower()
-
-# Latest config entry schema version handled by this integration
-CONFIG_ENTRY_VERSION: int = 2
-
 
 # ---- Runtime typing helpers -------------------------------------------------
 
