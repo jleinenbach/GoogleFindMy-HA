@@ -2547,6 +2547,52 @@ def _clear_duplicate_account_issue(hass: HomeAssistant, entry: ConfigEntry) -> N
         return
 
 
+def _clear_stale_duplicate_account_issues(
+    hass: HomeAssistant,
+    *,
+    normalized_email: str | None,
+    active_entry_ids: Collection[str],
+) -> None:
+    """Remove lingering duplicate-account issues for a cleared email."""
+
+    if not normalized_email:
+        return
+
+    registry = ir.async_get(hass)
+    issues_attr = getattr(registry, "issues", None)
+    if isinstance(issues_attr, Mapping):
+        issues_iterable = list(issues_attr.items())
+    else:
+        private_issues = getattr(registry, "_issues", None)
+        if not isinstance(private_issues, Mapping):
+            return
+        issues_iterable = list(private_issues.items())
+
+    for key, payload in issues_iterable:
+        issue_id: str
+        domain = DOMAIN
+        if isinstance(key, tuple) and len(key) == 2:
+            domain, issue_id = str(key[0]), str(key[1])
+        else:
+            issue_id = str(key)
+            domain = str(payload.get("domain", domain))
+
+        if not issue_id.startswith("duplicate_account_"):
+            continue
+        if domain != DOMAIN:
+            continue
+        placeholders = payload.get("translation_placeholders") or {}
+        if placeholders.get("email") != normalized_email:
+            continue
+        suffix = issue_id.removeprefix("duplicate_account_")
+        if suffix in active_entry_ids:
+            continue
+        try:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+        except Exception:  # pragma: no cover - defensive cleanup
+            continue
+
+
 def _select_authoritative_entry_id(
     entry: ConfigEntry, duplicates: Sequence[ConfigEntry]
 ) -> str:
@@ -2699,6 +2745,12 @@ def _ensure_post_migration_consistency(
         )
     else:
         _clear_duplicate_account_issue(hass, entry)
+
+    _clear_stale_duplicate_account_issues(
+        hass,
+        normalized_email=normalized_email,
+        active_entry_ids={candidate.entry_id for candidate in candidates},
+    )
 
     should_setup = not duplicates or entry.entry_id == authoritative_entry_id
     return should_setup, normalized_email
