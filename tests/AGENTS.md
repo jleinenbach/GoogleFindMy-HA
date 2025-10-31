@@ -96,6 +96,18 @@ not. Request the fixture in a test and call ``toggle.as_modern()`` (the default)
 or ``toggle.as_legacy()`` before invoking the config flow under test to assert
 the correct behavior in each environment.
 
+### Config subentry factory contract
+
+``ConfigFlow.async_get_supported_subentry_types`` **must** expose zero-argument
+factories. Each factory returns a fresh subentry flow instance and the
+integration injects the active ``config_entry`` into the instance. Returning
+handler classes instead of factories will raise ``TypeError: missing
+'config_entry'`` when Home Assistant calls ``factory()`` during the "Add"
+interaction. Factories must always return **new** instances (no caching); tests
+assert two consecutive calls return distinct objects. Home Assistant constructs
+update flows itself using ``(config_entry, subentry)`` and does not expect the
+integration's factories to bind existing subentries.
+
 ## AST extraction helper
 
 The :mod:`tests.helpers.ast_extract` module exposes

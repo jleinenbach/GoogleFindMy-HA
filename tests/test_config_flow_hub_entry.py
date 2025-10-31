@@ -58,11 +58,13 @@ def test_supported_subentry_types_gate_hub_registration(
     assert (SUBENTRY_TYPE_HUB in mapping) is expects_hub
 
     if expects_hub:
-        handler_cls = mapping[SUBENTRY_TYPE_HUB]
-        assert handler_cls is config_flow.HubSubentryFlowHandler
-        assert handler_cls._group_key == SERVICE_SUBENTRY_KEY  # type: ignore[attr-defined]
-        assert handler_cls._subentry_type == SUBENTRY_TYPE_HUB  # type: ignore[attr-defined]
-        assert handler_cls._features == SERVICE_FEATURE_PLATFORMS  # type: ignore[attr-defined]
+        handler_factory = mapping[SUBENTRY_TYPE_HUB]
+        assert callable(handler_factory)
+        handler = handler_factory()
+        assert isinstance(handler, config_flow.HubSubentryFlowHandler)
+        assert handler._group_key == SERVICE_SUBENTRY_KEY  # type: ignore[attr-defined]
+        assert handler._subentry_type == SUBENTRY_TYPE_HUB  # type: ignore[attr-defined]
+        assert handler._features == SERVICE_FEATURE_PLATFORMS  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
