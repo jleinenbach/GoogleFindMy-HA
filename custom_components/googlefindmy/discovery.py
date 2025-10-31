@@ -93,12 +93,18 @@ def _home_assistant_discovery_sources() -> set[str]:
     if not sources:
         for attr in (
             "SOURCE_DISCOVERY",
-            "SOURCE_DISCOVERY_UPDATE",
             "SOURCE_RECONFIGURE",
         ):
             fallback = getattr(cf, attr, None)
             if isinstance(fallback, str) and fallback:
                 sources.add(fallback)
+        discovery_update_source = getattr(
+            cf,
+            "DISCOVERY_UPDATE_SOURCE",
+            "discovery_update_info",
+        )
+        if isinstance(discovery_update_source, str) and discovery_update_source:
+            sources.add(discovery_update_source)
 
     setattr(_home_assistant_discovery_sources, "_cache", sources)
     return sources
@@ -526,11 +532,17 @@ class SecretsJSONWatcher:
             except Exception as err:  # noqa: BLE001 - defensive
                 _LOGGER.debug("Failed to query existing entries for discovery: %s", err)
 
-            source = (
-                cf.SOURCE_DISCOVERY_UPDATE
-                if existing_entry is not None
-                else cf.SOURCE_DISCOVERY
+            update_source = getattr(
+                cf,
+                "DISCOVERY_UPDATE_SOURCE",
+                "discovery_update_info",
             )
+            discovery_source = getattr(
+                cf,
+                "SOURCE_DISCOVERY",
+                "discovery",
+            )
+            source = update_source if existing_entry is not None else discovery_source
             title = await self._async_render_title(
                 result.email, is_update=existing_entry is not None
             )
