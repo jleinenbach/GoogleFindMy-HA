@@ -573,6 +573,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * Diagnostics (redact sensitive data): [https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/diagnostics/](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/diagnostics/)
 * Integration diagnostics (`async_redact_data`): [https://developers.home-assistant.io/docs/core/integration_diagnostics/](https://developers.home-assistant.io/docs/core/integration_diagnostics/)
 * Repairs platform (issue registry & flows): [https://developers.home-assistant.io/docs/core/platform/repairs/](https://developers.home-assistant.io/docs/core/platform/repairs/)
+  * **Reminder for contributors:** Home Assistant's issue registry helper names use the `async_*` prefix even though they are synchronous callbacks. Call `issue_registry.async_get(hass)` and the returned registry's `async_*` methods without `await` in both production code and tests.
 * Repairs (user docs): [https://www.home-assistant.io/integrations/repairs/](https://www.home-assistant.io/integrations/repairs/)
 * Secrets (`!secret`): [https://www.home-assistant.io/docs/configuration/secrets/](https://www.home-assistant.io/docs/configuration/secrets/)
 
