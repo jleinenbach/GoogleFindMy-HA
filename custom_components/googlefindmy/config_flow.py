@@ -30,6 +30,8 @@ Docstring & comments:
 - All docstrings and inline comments are written in English.
 """
 
+# custom_components/googlefindmy/config_flow.py
+
 from __future__ import annotations
 
 import inspect
@@ -1633,19 +1635,32 @@ class ConfigFlow(
     def async_get_supported_subentry_types(
         cls,
         _config_entry: ConfigEntry,
-    ) -> dict[str, type[ConfigSubentryFlow]]:
+    ) -> dict[str, Callable[[], ConfigSubentryFlow]]:
         """Return mapping of supported subentry types to their flow handlers."""
 
-        handlers: dict[str, type[ConfigSubentryFlow]] = {
-            SUBENTRY_TYPE_SERVICE: ServiceSubentryFlowHandler,
-            SUBENTRY_TYPE_TRACKER: TrackerSubentryFlowHandler,
+        def _factory(
+            flow_cls: type[ConfigSubentryFlow],
+        ) -> Callable[[], ConfigSubentryFlow]:
+            def _new() -> ConfigSubentryFlow:
+                try:
+                    return flow_cls(_config_entry)
+                except TypeError:
+                    instance = flow_cls()
+                    setattr(instance, "config_entry", _config_entry)
+                    return instance
+
+            return _new
+
+        handlers: dict[str, Callable[[], ConfigSubentryFlow]] = {
+            SUBENTRY_TYPE_SERVICE: _factory(ServiceSubentryFlowHandler),
+            SUBENTRY_TYPE_TRACKER: _factory(TrackerSubentryFlowHandler),
         }
 
         if (
             ConfigSubentry is not None
             and ConfigSubentryFlow is not _FALLBACK_CONFIG_SUBENTRY_FLOW
         ):
-            handlers[SUBENTRY_TYPE_HUB] = HubSubentryFlowHandler
+            handlers[SUBENTRY_TYPE_HUB] = _factory(HubSubentryFlowHandler)
 
         return handlers
 
@@ -3002,15 +3017,51 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
     _subentry_type: str
     _features: tuple[str, ...]
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        config_entry: ConfigEntry | None = None,
+        subentry: ConfigSubentry | None = None,
+    ) -> None:
         super_init = cast(Callable[..., None], super().__init__)
-        try:
-            super_init(config_entry)
-        except TypeError:  # pragma: no cover - legacy stub compatibility
-            super_init()
-            self.config_entry = config_entry
+
+        if config_entry is not None and subentry is not None:
+            try:
+                super_init(config_entry, subentry)
+            except TypeError:
+                try:
+                    super_init(config_entry)
+                except TypeError:  # pragma: no cover - legacy stub compatibility
+                    try:
+                        super_init()
+                    except TypeError:
+                        pass
+                setattr(self, "subentry", subentry)
+        elif config_entry is not None:
+            try:
+                super_init(config_entry)
+            except TypeError:  # pragma: no cover - legacy stub compatibility
+                try:
+                    super_init()
+                except TypeError:
+                    pass
         else:
-            self.config_entry = getattr(self, "config_entry", config_entry)
+            try:
+                super_init()
+            except TypeError:
+                pass
+
+        if subentry is not None and not hasattr(self, "subentry"):
+            setattr(self, "subentry", subentry)
+
+        if config_entry is not None:
+            if not hasattr(self, "config_entry"):
+                setattr(self, "config_entry", config_entry)
+            self.config_entry = cast(ConfigEntry, getattr(self, "config_entry"))
+            if self.config_entry is None:  # pragma: no cover - defensive guard
+                raise RuntimeError(
+                    f"{type(self).__name__} missing 'config_entry' after initialization; "
+                    "factory/constructor signature mismatch"
+                )
 
     @property
     def _entry_id(self) -> str:

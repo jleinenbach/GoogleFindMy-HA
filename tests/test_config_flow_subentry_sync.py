@@ -290,9 +290,17 @@ def test_supported_subentry_types_include_hub_handler() -> None:
     entry = _EntryStub()
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)
 
-    assert mapping[SUBENTRY_TYPE_SERVICE] is config_flow.ServiceSubentryFlowHandler
-    assert mapping[SUBENTRY_TYPE_TRACKER] is config_flow.TrackerSubentryFlowHandler
-    assert mapping["hub"] is config_flow.HubSubentryFlowHandler
+    service_factory = mapping[SUBENTRY_TYPE_SERVICE]
+    tracker_factory = mapping[SUBENTRY_TYPE_TRACKER]
+    hub_factory = mapping["hub"]
+
+    assert callable(service_factory)
+    assert callable(tracker_factory)
+    assert callable(hub_factory)
+
+    assert isinstance(service_factory(), config_flow.ServiceSubentryFlowHandler)
+    assert isinstance(tracker_factory(), config_flow.TrackerSubentryFlowHandler)
+    assert isinstance(hub_factory(), config_flow.HubSubentryFlowHandler)
 
 
 @pytest.mark.asyncio
