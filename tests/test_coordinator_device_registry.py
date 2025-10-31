@@ -206,6 +206,67 @@ class _FakeDeviceRegistry:
         return None
 
 
+class _TranslationRejectingRegistry(_FakeDeviceRegistry):
+    """Device registry that rejects translation metadata for service devices."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_attempts: list[dict[str, bool]] = []
+        self.update_attempts: list[dict[str, bool]] = []
+
+    def async_get_or_create(
+        self,
+        *,
+        config_entry_id: str,
+        identifiers: set[tuple[str, str]],
+        manufacturer: str,
+        model: str,
+        name: str | None = None,
+        via_device_id: str | None = None,
+        via_device: tuple[str, str] | None = None,
+        **kwargs: Any,
+    ) -> _FakeDeviceEntry:
+        has_translation_key = "translation_key" in kwargs
+        has_translation_placeholders = "translation_placeholders" in kwargs
+        self.create_attempts.append(
+            {
+                "has_translation_key": has_translation_key,
+                "has_translation_placeholders": has_translation_placeholders,
+            }
+        )
+        if has_translation_key or has_translation_placeholders:
+            raise TypeError("unexpected keyword argument 'translation_key'")
+        return super().async_get_or_create(
+            config_entry_id=config_entry_id,
+            identifiers=identifiers,
+            manufacturer=manufacturer,
+            model=model,
+            name=name,
+            via_device_id=via_device_id,
+            via_device=via_device,
+            **kwargs,
+        )
+
+    def async_update_device(self, *, device_id: str, **kwargs: Any) -> None:
+        has_translation_key = "translation_key" in kwargs
+        has_translation_placeholders = "translation_placeholders" in kwargs
+        self.update_attempts.append(
+            {
+                "has_translation_key": has_translation_key,
+                "has_translation_placeholders": has_translation_placeholders,
+            }
+        )
+        if has_translation_key or has_translation_placeholders:
+            raise TypeError("unexpected keyword argument 'translation_key'")
+        return super().async_update_device(device_id=device_id, **kwargs)
+
+    def async_get(self, device_id: str) -> _FakeDeviceEntry | None:
+        for device in self.devices:
+            if device.id == device_id:
+                return device
+        return None
+
+
 @pytest.fixture
 def fake_registry(monkeypatch: pytest.MonkeyPatch) -> _FakeDeviceRegistry:
     """Patch Home Assistant's device registry helper with a lightweight stub."""
@@ -274,6 +335,8 @@ def _prepare_coordinator_for_registry(
     coordinator._feature_to_subentry = {}
     coordinator._default_subentry_key_value = TRACKER_SUBENTRY_KEY
     coordinator._subentry_manager = None
+    coordinator._reg_supports_translations = None
+    coordinator._reg_supports_config_subentry_id = None
     coordinator._warned_bad_identifier_devices = set()
     coordinator._diag = SimpleNamespace(
         add_warning=lambda **kwargs: None,
@@ -465,6 +528,127 @@ def test_service_device_backfills_via_links(
         assert device_entry.config_subentry_id == entry.tracker_subentry_id
 
     assert getattr(coordinator, "_pending_via_updates") == set()
+
+
+def test_service_device_translation_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Registry helpers rejecting translation kwargs should still create/update the device."""
+
+    _FakeDeviceEntry._counter = 0
+
+    if not hasattr(dr, "DeviceEntryType"):
+        monkeypatch.setattr(
+            dr,
+            "DeviceEntryType",
+            SimpleNamespace(SERVICE="service"),
+            raising=False,
+        )
+
+    registry = _TranslationRejectingRegistry()
+    monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-translation")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    coordinator._ensure_service_device_exists()
+
+    assert registry.create_attempts == [
+        {"has_translation_key": True, "has_translation_placeholders": True},
+        {"has_translation_key": False, "has_translation_placeholders": False},
+    ]
+
+    service_ident = service_device_identifier(entry.entry_id)
+    service_entry = next(
+        device for device in registry.devices if service_ident in device.identifiers
+    )
+    assert service_entry.translation_key is None
+    assert service_entry.translation_placeholders is None
+    assert service_entry.config_subentry_id == entry.service_subentry_id
+    assert coordinator._reg_supports_translations is False
+
+    coordinator._ensure_service_device_exists()
+
+    assert registry.update_attempts == []
+    assert registry.updated == []
+
+
+def test_service_device_translation_fallback_caches_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Translation rejection should be cached so subsequent updates skip unsupported fields."""
+
+    _FakeDeviceEntry._counter = 0
+
+    if not hasattr(dr, "DeviceEntryType"):
+        monkeypatch.setattr(
+            dr,
+            "DeviceEntryType",
+            SimpleNamespace(SERVICE="service"),
+            raising=False,
+        )
+
+    registry = _TranslationRejectingRegistry()
+    monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-translation-cache")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    coordinator._ensure_service_device_exists()
+
+    service_ident = service_device_identifier(entry.entry_id)
+    service_entry = next(
+        device for device in registry.devices if service_ident in device.identifiers
+    )
+    service_entry.sw_version = "0.0.0"
+
+    registry.update_attempts.clear()
+    registry.updated.clear()
+
+    coordinator._ensure_service_device_exists()
+
+    assert registry.update_attempts == [
+        {"has_translation_key": False, "has_translation_placeholders": False}
+    ]
+    assert len(registry.updated) == 1
+    updated_metadata = registry.updated[0]
+    assert updated_metadata["sw_version"] == INTEGRATION_VERSION
+    assert updated_metadata["translation_key"] is None
+    assert updated_metadata["translation_placeholders"] is None
+    assert coordinator._reg_supports_translations is False
+
+
+def test_service_device_no_translation_needs_update_quiet(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Service device without translation metadata should not trigger updates when unsupported."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-no-translation-update")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    coordinator._reg_supports_translations = False
+
+    service_ident = service_device_identifier(entry.entry_id)
+    service_subentry_ident = _service_subentry_identifier(entry)
+    existing_service = _FakeDeviceEntry(
+        identifiers={service_ident, service_subentry_ident},
+        config_entry_id=entry.entry_id,
+        name=None,
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        sw_version=INTEGRATION_VERSION,
+        entry_type=dr.DeviceEntryType.SERVICE,
+        translation_key=None,
+        translation_placeholders=None,
+        config_subentry_id=entry.service_subentry_id,
+    )
+    fake_registry.devices.append(existing_service)
+
+    coordinator._ensure_service_device_exists()
+
+    assert fake_registry.updated == []
+    assert coordinator._reg_supports_translations is False
 
 
 def test_service_device_updates_add_translation(
