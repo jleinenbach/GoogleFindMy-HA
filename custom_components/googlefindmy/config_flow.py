@@ -1851,6 +1851,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     )
                 except (DependencyNotReady, ImportError) as exc:
                     _register_dependency_error(errors, exc)
+                    return await self.async_abort(reason="dependency_not_ready")
                 else:
                     if not chosen:
                         _LOGGER.warning(
@@ -1918,6 +1919,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     chosen = await async_pick_working_token(email, cands)
                 except (DependencyNotReady, ImportError) as exc:
                     _register_dependency_error(errors, exc)
+                    return await self.async_abort(reason="dependency_not_ready")
                 else:
                     if not chosen:
                         _LOGGER.warning(

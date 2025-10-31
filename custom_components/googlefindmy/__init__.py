@@ -82,6 +82,7 @@ from .NovaApi.ExecuteAction.LocateTracker.location_request import (
 from .const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
+    CONFIG_ENTRY_VERSION as CONFIG_ENTRY_VERSION,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
@@ -149,9 +150,9 @@ if TYPE_CHECKING:
     from .discovery import (
         DiscoveryManager as DiscoveryManagerType,
         async_initialize_discovery_runtime as AsyncInitializeDiscoveryRuntimeType,
-        _cloud_discovery_runtime as CloudDiscoveryRuntimeType,
-        _redact_account_for_log as RedactAccountForLogType,
-        _trigger_cloud_discovery as TriggerCloudDiscoveryType,
+        _cloud_discovery_runtime as CloudDiscoveryRuntimeCallable,
+        _redact_account_for_log as RedactAccountForLogCallable,
+        _trigger_cloud_discovery as TriggerCloudDiscoveryCallable,
     )
     from .map_view import (
         GoogleFindMyMapRedirectView as GoogleFindMyMapRedirectViewType,
@@ -165,9 +166,6 @@ if TYPE_CHECKING:
     GoogleFindMyMapRedirectView = GoogleFindMyMapRedirectViewType
     async_register_services = AsyncRegisterServicesType
     async_initialize_discovery_runtime = AsyncInitializeDiscoveryRuntimeType
-    _cloud_discovery_runtime = CloudDiscoveryRuntimeType
-    _trigger_cloud_discovery = TriggerCloudDiscoveryType
-    _redact_account_for_log = RedactAccountForLogType
     api_register_fcm_provider = ApiRegisterFcmProviderType
     api_unregister_fcm_provider = ApiUnregisterFcmProviderType
 else:
@@ -175,6 +173,10 @@ else:
 
     NovaFcmReceiverProtocol = FcmReceiverHA
     ApiFcmReceiverProtocol = FcmReceiverHA
+
+    CloudDiscoveryRuntimeCallable = Callable[[HomeAssistant], Mapping[str, Any]]
+    TriggerCloudDiscoveryCallable = Callable[..., Awaitable[Any]]
+    RedactAccountForLogCallable = Callable[..., str]
 
     def _runtime_imports_not_initialized(*_args: Any, **_kwargs: Any) -> Any:
         """Raise when runtime-only imports are used before initialization."""
@@ -217,15 +219,17 @@ else:
         Callable[[HomeAssistant], Awaitable[Any]],
         _runtime_imports_not_initialized,
     )
-    _cloud_discovery_runtime: Callable[[HomeAssistant], Mapping[str, Any]] = cast(
-        Callable[[HomeAssistant], Mapping[str, Any]],
+    _cloud_discovery_runtime_callable: CloudDiscoveryRuntimeCallable = cast(
+        CloudDiscoveryRuntimeCallable,
         _runtime_imports_not_initialized,
     )
-    _trigger_cloud_discovery: Callable[..., Awaitable[Any]] = cast(
-        Callable[..., Awaitable[Any]], _runtime_imports_not_initialized
+    _trigger_cloud_discovery_callable: TriggerCloudDiscoveryCallable = cast(
+        TriggerCloudDiscoveryCallable,
+        _runtime_imports_not_initialized,
     )
-    _redact_account_for_log: Callable[..., str] = cast(
-        Callable[..., str], _runtime_imports_not_initialized
+    _redact_account_for_log_callable: RedactAccountForLogCallable = cast(
+        RedactAccountForLogCallable,
+        _runtime_imports_not_initialized,
     )
 
 _RUNTIME_IMPORTS_LOADED = False
@@ -239,9 +243,9 @@ def _ensure_runtime_imports() -> None:
     global api_unregister_fcm_provider
     global async_register_services
     global async_initialize_discovery_runtime
-    global _cloud_discovery_runtime
-    global _trigger_cloud_discovery
-    global _redact_account_for_log
+    global _cloud_discovery_runtime_callable
+    global _trigger_cloud_discovery_callable
+    global _redact_account_for_log_callable
     global GoogleFindMyCoordinator
     global DiscoveryManager
     global GoogleFindMyMapView
@@ -276,15 +280,36 @@ def _ensure_runtime_imports() -> None:
     api_unregister_fcm_provider = _api_unregister_fcm_provider
     async_register_services = _async_register_services
     async_initialize_discovery_runtime = _async_initialize_discovery_runtime
-    _cloud_discovery_runtime = _cloud_discovery_runtime_fn
-    _redact_account_for_log = _redact_account_for_log_fn
-    _trigger_cloud_discovery = _trigger_cloud_discovery_fn
+    _cloud_discovery_runtime_callable = _cloud_discovery_runtime_fn
+    _redact_account_for_log_callable = _redact_account_for_log_fn
+    _trigger_cloud_discovery_callable = _trigger_cloud_discovery_fn
     GoogleFindMyCoordinator = _GoogleFindMyCoordinator
     DiscoveryManager = _DiscoveryManager
     GoogleFindMyMapView = _GoogleFindMyMapView
     GoogleFindMyMapRedirectView = _GoogleFindMyMapRedirectView
 
     _RUNTIME_IMPORTS_LOADED = True
+
+
+def _cloud_discovery_runtime(hass: HomeAssistant) -> Mapping[str, Any]:
+    """Return the cached discovery runtime, loading dependencies if needed."""
+
+    _ensure_runtime_imports()
+    return _cloud_discovery_runtime_callable(hass)
+
+
+async def _trigger_cloud_discovery(*args: Any, **kwargs: Any) -> Any:
+    """Trigger cloud discovery with lazy dependency loading."""
+
+    _ensure_runtime_imports()
+    return await _trigger_cloud_discovery_callable(*args, **kwargs)
+
+
+def _redact_account_for_log(*args: Any, **kwargs: Any) -> str:
+    """Redact account references for logging with lazy imports."""
+
+    _ensure_runtime_imports()
+    return _redact_account_for_log_callable(*args, **kwargs)
 
 try:  # pragma: no cover - compatibility shim for stripped test envs
     from homeassistant.helpers.entity_registry import (
