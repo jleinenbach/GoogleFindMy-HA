@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 import importlib
 import json
@@ -73,6 +74,8 @@ class _StubConfigEntry:
         self.state: ConfigEntryState = ConfigEntryState.LOADED
         self.disabled_by: str | None = None
         self._unload_callbacks: list[Callable[[], None]] = []
+        self.updated_at = datetime(2024, 1, 1, 0, 0, 0)
+        self.created_at = datetime(2024, 1, 1, 0, 0, 0)
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
         self._unload_callbacks.append(callback)
@@ -1062,6 +1065,197 @@ def test_duplicate_account_issue_cleanup_on_success(
         assert cleanup_call[0] is hass
         assert cleanup_call[1] == DOMAIN
         assert create_calls == []
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_duplicate_account_mixed_states_prefer_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Loaded duplicates continue; others are held back with repair issues."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy")
+
+        config_entries_module = importlib.import_module("homeassistant.config_entries")
+        state_cls = config_entries_module.ConfigEntryState
+        if not hasattr(state_cls, "SETUP_RETRY"):
+            setattr(state_cls, "SETUP_RETRY", "setup_retry")
+
+        loaded_entry = _StubConfigEntry()
+        loaded_entry.entry_id = "entry-loaded"
+        loaded_entry.title = "Loaded Account"
+        loaded_entry.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
+        loaded_entry.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
+        loaded_entry.state = ConfigEntryState.LOADED
+        loaded_entry.updated_at = datetime(2024, 1, 2, 12, 0, 0)
+
+        retry_entry = _StubConfigEntry()
+        retry_entry.entry_id = "entry-retry"
+        retry_entry.title = "Retry Account"
+        retry_entry.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
+        retry_entry.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
+        retry_entry.state = getattr(
+            ConfigEntryState, "SETUP_RETRY", ConfigEntryState.NOT_LOADED
+        )
+        retry_entry.updated_at = datetime(2024, 1, 3, 12, 0, 0)
+
+        create_calls: list[tuple[Any, str, str, dict[str, Any]]] = []
+        delete_calls: list[tuple[Any, str, str]] = []
+
+        def _record_create(
+            hass_arg: Any, domain: str, issue_id: str, **kwargs: Any
+        ) -> None:
+            create_calls.append((hass_arg, domain, issue_id, kwargs))
+
+        def _record_delete(hass_arg: Any, domain: str, issue_id: str, **_: Any) -> None:
+            delete_calls.append((hass_arg, domain, issue_id))
+
+        monkeypatch.setattr(
+            integration.ir, "async_create_issue", _record_create, raising=False
+        )
+        monkeypatch.setattr(
+            integration.ir, "async_delete_issue", _record_delete, raising=False
+        )
+
+        hass_loaded = _StubHass(loaded_entry, loop)
+        hass_loaded.config_entries._entries.append(retry_entry)
+
+        should_setup_loaded, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass_loaded,
+            loaded_entry,
+        )
+        assert should_setup_loaded is True
+        assert normalized_email == "dup@example.com"
+
+        delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
+        assert (
+            f"duplicate_account_{loaded_entry.entry_id}" in delete_issue_ids
+        ), "Authoritative entry should clear its repair issue"
+
+        create_issue_ids = [issue_id for *_hass, _domain, issue_id, _ in create_calls]
+        assert create_issue_ids == [
+            f"duplicate_account_{retry_entry.entry_id}"
+        ], "Non-authoritative entry should record an issue"
+
+        create_calls.clear()
+        delete_calls.clear()
+
+        hass_retry = _StubHass(retry_entry, loop)
+        hass_retry.config_entries._entries.append(loaded_entry)
+
+        should_setup_retry, normalized_retry = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass_retry,
+            retry_entry,
+        )
+        assert should_setup_retry is False
+        assert normalized_retry == "dup@example.com"
+
+        create_issue_ids = [issue_id for *_hass, _domain, issue_id, _ in create_calls]
+        assert (
+            create_issue_ids.count(f"duplicate_account_{retry_entry.entry_id}") >= 1
+        ), "Retry entry should keep its repair issue"
+        assert all(
+            issue_id != f"duplicate_account_{loaded_entry.entry_id}"
+            for issue_id in create_issue_ids
+        ), "Loaded entry must not gain a duplicate repair issue"
+
+        delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
+        assert (
+            f"duplicate_account_{loaded_entry.entry_id}" in delete_issue_ids
+        ), "Loaded entry clears stale issues for other duplicates"
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_duplicate_account_all_not_loaded_prefers_newest_timestamp() -> None:
+    """Among inactive duplicates, the freshest update wins."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    primary_entry = _StubConfigEntry()
+    primary_entry.entry_id = "entry-primary"
+    primary_entry.state = ConfigEntryState.NOT_LOADED
+    primary_entry.updated_at = datetime(2024, 1, 1, 12, 0, 0)
+    primary_entry.created_at = datetime(2024, 1, 1, 11, 0, 0)
+
+    newer_entry = _StubConfigEntry()
+    newer_entry.entry_id = "entry-newer"
+    newer_entry.state = ConfigEntryState.NOT_LOADED
+    newer_entry.updated_at = datetime(2024, 1, 2, 12, 0, 0)
+    newer_entry.created_at = datetime(2024, 1, 2, 11, 0, 0)
+
+    authoritative = integration._select_authoritative_entry_id(  # type: ignore[attr-defined]
+        primary_entry,
+        [newer_entry],
+    )
+    assert authoritative == "entry-newer"
+
+
+def test_duplicate_account_tie_breaker_by_entry_id() -> None:
+    """Equal states and timestamps fall back to entry_id ordering."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+
+    candidate_a = _StubConfigEntry()
+    candidate_a.entry_id = "entry-a"
+    candidate_a.state = ConfigEntryState.NOT_LOADED
+    candidate_a.updated_at = datetime(2024, 1, 2, 12, 0, 0)
+    candidate_a.created_at = datetime(2024, 1, 1, 12, 0, 0)
+
+    candidate_b = _StubConfigEntry()
+    candidate_b.entry_id = "entry-b"
+    candidate_b.state = ConfigEntryState.NOT_LOADED
+    candidate_b.updated_at = datetime(2024, 1, 2, 12, 0, 0)
+    candidate_b.created_at = datetime(2024, 1, 1, 12, 0, 0)
+
+    authoritative = integration._select_authoritative_entry_id(  # type: ignore[attr-defined]
+        candidate_b,
+        [candidate_a],
+    )
+    assert authoritative == "entry-a"
+
+
+def test_duplicate_account_clear_stale_issues_for_all() -> None:
+    """When duplicates are gone, all related issues are purged."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy")
+
+        entry = _StubConfigEntry()
+        entry.entry_id = "entry-authoritative"
+        entry.data[CONF_GOOGLE_EMAIL] = "solo@example.com"
+        entry.data[DATA_SECRET_BUNDLE]["username"] = "solo@example.com"
+
+        hass = _StubHass(entry, loop)
+
+        registry = integration.ir.async_get(hass)
+        registry.async_create_issue(  # type: ignore[attr-defined]
+            DOMAIN,
+            "duplicate_account_entry-removed",
+            translation_key="duplicate_account_entries",
+            translation_placeholders={"email": "solo@example.com"},
+        )
+
+        integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass,
+            entry,
+        )
+
+        assert (
+            registry.async_get_issue(  # type: ignore[attr-defined]
+                DOMAIN, "duplicate_account_entry-removed"
+            )
+            is None
+        )
     finally:
         loop.close()
         asyncio.set_event_loop(None)

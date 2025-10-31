@@ -39,6 +39,7 @@ import logging
 import os
 import socket
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
@@ -2420,6 +2421,20 @@ def _format_duplicate_entries(
     return "\n".join(lines)
 
 
+def _mask_email_for_logs(email: str | None) -> str:
+    """Return a privacy-friendly representation of an email for logs."""
+
+    if not email or "@" not in email:
+        return "<unknown>"
+
+    local, domain = email.split("@", 1)
+    if not local:
+        return f"*@{domain}"
+
+    masked_local = (local[0] + "***") if len(local) > 1 else "*"
+    return f"{masked_local}@{domain}"
+
+
 def _log_duplicate_and_raise_repair_issue(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -2430,13 +2445,22 @@ def _log_duplicate_and_raise_repair_issue(
 ) -> None:
     """Create or refresh a Repair issue for duplicate account configuration."""
 
-    _LOGGER.warning(
+    issue_id = f"duplicate_account_{entry.entry_id}"
+    issue_present = False
+    async_get_issue = getattr(ir, "async_get_issue", None)
+    if callable(async_get_issue):
+        try:
+            issue_present = async_get_issue(hass, DOMAIN, issue_id) is not None
+        except Exception:  # pragma: no cover - defensive fallback
+            issue_present = False
+
+    log_fn = _LOGGER.debug if issue_present else _LOGGER.warning
+    log_fn(
         "googlefindmy %s: duplicate account %s detected (%s)",
         entry.entry_id,
-        normalized_email,
+        _mask_email_for_logs(normalized_email),
         cause,
     )
-    issue_id = f"duplicate_account_{entry.entry_id}"
     placeholders: dict[str, Any] = {
         "email": normalized_email,
         "entries": _format_duplicate_entries(entry, conflicts),
@@ -2480,11 +2504,56 @@ def _select_authoritative_entry_id(
 ) -> str:
     """Return the entry_id that should remain active for a duplicate account."""
 
-    if not duplicates:
-        return str(entry.entry_id)
     candidates = [entry, *duplicates]
-    # Deterministic ordering by entry_id keeps behaviour predictable across restarts.
-    authoritative = min(candidates, key=lambda candidate: candidate.entry_id)
+
+    def _state_rank(state: ConfigEntryState | None) -> int:
+        order: dict[object, int] = {ConfigEntryState.LOADED: 0}
+
+        setup_retry = getattr(ConfigEntryState, "SETUP_RETRY", None)
+        if setup_retry is not None:
+            order[setup_retry] = 1
+        else:  # pragma: no cover - compatibility with very old cores
+            order["setup_retry"] = 1
+
+        setup_error = getattr(ConfigEntryState, "SETUP_ERROR", None)
+        if setup_error is not None:
+            order[setup_error] = 2
+        else:  # pragma: no cover
+            order["setup_error"] = 2
+
+        migration_error = getattr(ConfigEntryState, "MIGRATION_ERROR", None)
+        if migration_error is not None:
+            order[migration_error] = 3
+        else:  # pragma: no cover
+            order["migration_error"] = 3
+
+        setup_in_progress = getattr(ConfigEntryState, "SETUP_IN_PROGRESS", None)
+        if setup_in_progress is not None:
+            order[setup_in_progress] = 4
+        else:  # pragma: no cover
+            order["setup_in_progress"] = 4
+
+        order[ConfigEntryState.NOT_LOADED] = 5
+
+        return order.get(state, 5)
+
+    def _candidate_key(candidate: ConfigEntry) -> tuple[int, float, str]:
+        state_rank = _state_rank(getattr(candidate, "state", None))
+
+        timestamp = getattr(candidate, "updated_at", None) or getattr(
+            candidate, "created_at", None
+        )
+        ts_rank = float("inf")
+        if isinstance(timestamp, datetime):
+            try:
+                ts_rank = -float(timestamp.timestamp())
+            except (OSError, ValueError):  # pragma: no cover - defensive fallback
+                ts_rank = float("inf")
+
+        entry_id = str(getattr(candidate, "entry_id", "") or "")
+        return (state_rank, ts_rank, entry_id)
+
+    authoritative = min(candidates, key=_candidate_key)
     return str(authoritative.entry_id)
 
 
@@ -2540,18 +2609,88 @@ def _ensure_post_migration_consistency(
             and _extract_email_from_entry(candidate) == normalized_email
         ]
 
+    authoritative_entry_id = _select_authoritative_entry_id(entry, duplicates)
+    candidates = [entry, *duplicates]
+
     if duplicates and normalized_email:
-        _log_duplicate_and_raise_repair_issue(
-            hass,
-            entry,
-            normalized_email,
-            cause="setup_duplicate",
-            conflicts=duplicates,
+        for candidate in candidates:
+            if candidate.entry_id == authoritative_entry_id:
+                _clear_duplicate_account_issue(hass, candidate)
+                continue
+
+            conflicts = [
+                conflict
+                for conflict in candidates
+                if conflict.entry_id != candidate.entry_id
+            ]
+            _log_duplicate_and_raise_repair_issue(
+                hass,
+                candidate,
+                normalized_email,
+                cause="setup_duplicate",
+                conflicts=conflicts,
+            )
+        _LOGGER.info(
+            "Duplicate account %s → authoritative=%s; held back=%s",
+            _mask_email_for_logs(normalized_email),
+            authoritative_entry_id,
+            [
+                candidate.entry_id
+                for candidate in candidates
+                if candidate.entry_id != authoritative_entry_id
+            ],
         )
     else:
         _clear_duplicate_account_issue(hass, entry)
+        if normalized_email:
+            get_registry = getattr(ir, "async_get", None)
+            registry: Any | None = None
+            if callable(get_registry):
+                try:
+                    registry = get_registry(hass)
+                except Exception:  # pragma: no cover - defensive fallback
+                    registry = None
+            issues: Mapping[str, Any] | None = None
+            if registry is not None:
+                issues_attr = getattr(registry, "issues", None)
+                if isinstance(issues_attr, Mapping):
+                    issues = issues_attr
+                elif isinstance(issues_attr, Collection):  # pragma: no cover
+                    issues = {
+                        getattr(item, "issue_id", str(index)): item
+                        for index, item in enumerate(issues_attr)
+                    }
+                else:
+                    internal_issues = getattr(registry, "_issues", None)
+                    if isinstance(internal_issues, Mapping):
+                        issues = internal_issues
+            if issues:
+                for issue in list(issues.values()):
+                    domain_value = getattr(issue, "domain", None)
+                    if domain_value is None and isinstance(issue, Mapping):
+                        domain_value = issue.get("domain")
+                    if domain_value != DOMAIN:
+                        continue
+                    placeholders = getattr(issue, "translation_placeholders", None)
+                    if isinstance(placeholders, Mapping):
+                        email = placeholders.get("email")
+                    elif isinstance(issue, Mapping):
+                        placeholders = cast(Mapping[str, Any] | None, issue.get("translation_placeholders"))
+                        email = placeholders.get("email") if placeholders else None
+                    else:
+                        email = None
+                    if email != normalized_email:
+                        continue
+                    issue_id = getattr(issue, "issue_id", None)
+                    if issue_id is None and isinstance(issue, Mapping):
+                        issue_id = issue.get("issue_id")
+                    if not issue_id:
+                        continue
+                    try:
+                        ir.async_delete_issue(hass, DOMAIN, str(issue_id))
+                    except Exception:  # pragma: no cover - defensive fallback
+                        continue
 
-    authoritative_entry_id = _select_authoritative_entry_id(entry, duplicates)
     should_setup = not duplicates or entry.entry_id == authoritative_entry_id
     return should_setup, normalized_email
 
@@ -2644,10 +2783,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     should_setup, normalized_email = _ensure_post_migration_consistency(hass, entry)
     if not should_setup:
-        _LOGGER.warning(
+        _LOGGER.info(
             "Skipping setup for %s due to duplicate account %s",
             entry.entry_id,
-            normalized_email or "",
+            _mask_email_for_logs(normalized_email),
         )
         return False
 
