@@ -64,6 +64,7 @@
       "no_devices": "Aucun appareil trouvé. Assurez-vous que « Localiser mon appareil » est activé sur votre compte Google.",
       "cannot_connect": "Échec de la connexion à l’API Google. Il peut s’agir d’un problème temporaire — réessayez plus tard.",
       "dependency_not_ready": "Des dépendances de l’intégration sont manquantes. Installez les dépendances requises de Google Find My Device et redémarrez Home Assistant.",
+      "import_failed": "Échec de l’importation de l’assistant d’authentification. Installez les dépendances de Google Find My Device (Selenium et pilote Chrome) puis réessayez.",
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
       "required": "Ce champ est obligatoire.",
       "unknown": "Erreur inattendue.",
@@ -75,7 +76,7 @@
       "dependency_not_ready": "Les dépendances de Google Find My Device ne sont pas installées. Installez les dépendances requises puis réessayez.",
       "invalid_discovery_info": "La charge de découverte est invalide. Vérifiez les identifiants et réessayez.",
       "reauth_successful": "Réauthentification réussie.",
-      "migration_complete_confirmed": "Migration terminée.",
+      "migration_successful": "Migration terminée.",
       "migration_failed": "Échec de la migration. Supprimez puis réajoutez l’intégration."
     },
     "progress": {

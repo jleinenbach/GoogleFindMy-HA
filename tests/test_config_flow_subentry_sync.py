@@ -355,4 +355,4 @@ async def test_async_step_migrate_creates_subentries_and_moves_options() -> None
 
     confirm = await flow.async_step_migrate_complete({})
     assert confirm["type"] == "abort"
-    assert confirm["reason"] == "migration_complete_confirmed"
+    assert confirm["reason"] == "migration_successful"
