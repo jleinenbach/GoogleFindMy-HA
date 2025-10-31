@@ -2435,6 +2435,29 @@ def _mask_email_for_logs(email: str | None) -> str:
     return f"{masked_local}@{domain}"
 
 
+def _issue_exists(hass: HomeAssistant, issue_id: str) -> bool:
+    """Return True if a repair issue with the given ID exists for this domain.
+
+    NOTE: issue_registry.async_get(...) is a synchronous callback helper in Home
+    Assistant. Do not await it. The returned registry exposes synchronous
+    "async_*" methods that operate in the event loop thread.
+    """
+
+    try:
+        registry = ir.async_get(hass)
+    except Exception:  # pragma: no cover - defensive fallback
+        return False
+
+    get_issue = getattr(registry, "async_get_issue", None)
+    if not callable(get_issue):
+        return False
+
+    try:
+        return get_issue(DOMAIN, issue_id) is not None
+    except Exception:  # pragma: no cover - defensive fallback
+        return False
+
+
 def _log_duplicate_and_raise_repair_issue(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -2446,14 +2469,7 @@ def _log_duplicate_and_raise_repair_issue(
     """Create or refresh a Repair issue for duplicate account configuration."""
 
     issue_id = f"duplicate_account_{entry.entry_id}"
-    issue_present = False
-    async_get_issue = getattr(ir, "async_get_issue", None)
-    if callable(async_get_issue):
-        try:
-            issue_present = async_get_issue(hass, DOMAIN, issue_id) is not None
-        except Exception:  # pragma: no cover - defensive fallback
-            issue_present = False
-
+    issue_present = _issue_exists(hass, issue_id)
     log_fn = _LOGGER.debug if issue_present else _LOGGER.warning
     log_fn(
         "googlefindmy %s: duplicate account %s detected (%s)",

@@ -8,6 +8,7 @@ from datetime import datetime
 
 import importlib
 import json
+import logging
 import sys
 
 from contextlib import suppress
@@ -1256,6 +1257,102 @@ def test_duplicate_account_clear_stale_issues_for_all() -> None:
             )
             is None
         )
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_issue_exists_helper_is_synchronous() -> None:
+    """_issue_exists interacts with the registry helpers without awaiting."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy")
+
+        entry = _StubConfigEntry()
+        hass = _StubHass(entry, loop)
+
+        assert (
+            integration._issue_exists(  # type: ignore[attr-defined]
+                hass,
+                "missing_issue",
+            )
+            is False
+        )
+        registry = integration.ir.async_get(hass)
+        registry.async_create_issue(  # type: ignore[attr-defined]
+            DOMAIN,
+            "duplicate_account_entry-test",
+            is_fixable=False,
+            severity="warning",
+            translation_key="duplicate_account_entries",
+            translation_placeholders={"email": "user@example.com"},
+        )
+        assert (
+            integration._issue_exists(  # type: ignore[attr-defined]
+                hass,
+                "duplicate_account_entry-test",
+            )
+            is True
+        )
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_duplicate_account_issue_log_level_downgrades_when_existing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Existing repair issues cause duplicate detection logs to drop to DEBUG."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy")
+
+        entry = _StubConfigEntry()
+        entry.entry_id = "entry-dup"
+        entry.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
+        entry.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
+
+        hass = _StubHass(entry, loop)
+
+        caplog.set_level(logging.DEBUG)
+
+        caplog.clear()
+        integration._log_duplicate_and_raise_repair_issue(  # type: ignore[attr-defined]
+            hass,
+            entry,
+            "dup@example.com",
+            cause="setup_duplicate",
+            conflicts=[],
+        )
+        warning_records = [
+            record
+            for record in caplog.records
+            if "duplicate account" in record.getMessage()
+        ]
+        assert warning_records
+        assert warning_records[-1].levelno == logging.WARNING
+
+        caplog.clear()
+        integration._log_duplicate_and_raise_repair_issue(  # type: ignore[attr-defined]
+            hass,
+            entry,
+            "dup@example.com",
+            cause="setup_duplicate",
+            conflicts=[],
+        )
+        debug_records = [
+            record
+            for record in caplog.records
+            if "duplicate account" in record.getMessage()
+        ]
+        assert debug_records
+        assert debug_records[-1].levelno == logging.DEBUG
     finally:
         loop.close()
         asyncio.set_event_loop(None)
