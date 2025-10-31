@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import types
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
@@ -406,6 +406,73 @@ def test_async_step_discovery_update_info_invalid_payload() -> None:
     assert result["reason"] == "invalid_discovery_info"
 
 
+@pytest.mark.asyncio
+async def test_async_step_discovery_update_info_reroutes_and_restores_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown discovery-update payloads should reroute and restore context."""
+
+    normalized = config_flow.CloudDiscoveryData(
+        email="user@example.org",
+        unique_id="user@example.org",
+        candidates=(),
+        secrets_bundle=None,
+    )
+
+    monkeypatch.setattr(
+        config_flow,
+        "_normalize_and_validate_discovery_payload",
+        lambda _payload: normalized,
+    )
+    monkeypatch.setattr(
+        config_flow,
+        "_find_entry_by_email",
+        lambda _hass, _email: None,
+    )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = object()  # type: ignore[assignment]
+    original_context: dict[str, Any] = {
+        "source": config_flow.SOURCE_DISCOVERY_UPDATE_INFO,
+        "marker": "preserve",
+    }
+    flow.context = original_context
+
+    async def _set_unique_id(
+        value: str,
+        *,
+        raise_on_progress: bool = False,
+    ) -> None:
+        flow.unique_id = value  # type: ignore[attr-defined]
+        flow._unique_id = value  # type: ignore[attr-defined]
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+    calls = {"discovery": 0}
+
+    async def _fake_discovery(
+        self: config_flow.ConfigFlow,
+        info: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        calls["discovery"] += 1
+        assert self.context.get("source") == config_flow.SOURCE_DISCOVERY
+        assert info == {"payload": "value"}
+        return {"type": "abort", "reason": "handled"}
+
+    flow.async_step_discovery = types.MethodType(  # type: ignore[assignment]
+        _fake_discovery,
+        flow,
+    )
+
+    payload = {"payload": "value"}
+    result = await flow.async_step_discovery_update_info(payload)
+    assert result == {"type": "abort", "reason": "handled"}
+    assert calls == {"discovery": 1}
+    assert flow.context.get("source") == config_flow.SOURCE_DISCOVERY_UPDATE_INFO
+    assert flow.context.get("marker") == "preserve"
+    assert flow.context == original_context
+
+
 def test_async_step_discovery_update_info_ingest_invalid_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -521,6 +588,33 @@ def test_async_step_discovery_update_alias() -> None:
 
     assert captured["info"] == {"source": "alias"}
     assert result == {"type": "form"}
+
+
+def test_async_step_discovery_routes_update_info_context() -> None:
+    """Discovery context from update-info should route to the update handler."""
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = object()  # type: ignore[assignment]
+    flow.context = {"source": config_flow.SOURCE_DISCOVERY_UPDATE_INFO}
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_update_info(
+        self: config_flow.ConfigFlow, info: Mapping[str, Any] | None
+    ) -> dict[str, str]:
+        captured["info"] = info
+        return {"type": "abort", "reason": "handled"}
+
+    flow.async_step_discovery_update_info = types.MethodType(  # type: ignore[assignment]
+        _fake_update_info,
+        flow,
+    )
+
+    payload = {"source": "payload"}
+    result = asyncio.run(flow.async_step_discovery(payload))
+
+    assert captured["info"] == payload
+    assert result == {"type": "abort", "reason": "handled"}
 
 
 def test_async_step_user_confirm_only_submission() -> None:

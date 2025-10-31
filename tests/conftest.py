@@ -161,6 +161,8 @@ def _stub_homeassistant() -> None:
     ha_pkg.__path__ = getattr(ha_pkg, "__path__", [])  # mark as package
 
     config_entries = ModuleType("homeassistant.config_entries")
+    config_entries.SOURCE_DISCOVERY = "discovery"
+    config_entries.SOURCE_RECONFIGURE = "reconfigure"
 
     subentry_counter = {"value": 0}
 
