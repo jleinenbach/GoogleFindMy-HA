@@ -1262,6 +1262,184 @@ def test_duplicate_account_clear_stale_issues_for_all() -> None:
         asyncio.set_event_loop(None)
 
 
+def test_duplicate_account_cleanup_keeps_active_tuple_key_issues() -> None:
+    """Only stale duplicate-account issues are removed for tuple-key registries."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy")
+
+        authoritative = _StubConfigEntry()
+        authoritative.entry_id = "entry-authoritative"
+        authoritative.state = ConfigEntryState.LOADED
+        email = "duo@example.com"
+        authoritative.data[CONF_GOOGLE_EMAIL] = email
+        authoritative.data[DATA_SECRET_BUNDLE]["username"] = email
+
+        duplicate = _StubConfigEntry()
+        duplicate.entry_id = "entry-duplicate"
+        duplicate.state = ConfigEntryState.NOT_LOADED
+        duplicate.data[CONF_GOOGLE_EMAIL] = email
+        duplicate.data[DATA_SECRET_BUNDLE]["username"] = email
+
+        hass = _StubHass(authoritative, loop)
+        hass.config_entries._entries.append(duplicate)
+
+        registry = integration.ir.async_get(hass)
+        registry.async_create_issue(  # type: ignore[attr-defined]
+            DOMAIN,
+            "duplicate_account_entry-stale",
+            translation_placeholders={"email": email},
+        )
+        registry.async_create_issue(  # type: ignore[attr-defined]
+            DOMAIN,
+            f"duplicate_account_{duplicate.entry_id}",
+            translation_placeholders={"email": email},
+        )
+
+        should_setup, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass,
+            authoritative,
+        )
+
+        assert should_setup is True
+        assert normalized_email == email
+        assert (
+            registry.async_get_issue(  # type: ignore[attr-defined]
+                DOMAIN,
+                "duplicate_account_entry-stale",
+            )
+            is None
+        )
+        active_issue = registry.async_get_issue(  # type: ignore[attr-defined]
+            DOMAIN,
+            f"duplicate_account_{duplicate.entry_id}",
+        )
+        assert active_issue is not None
+        placeholders = active_issue.get("translation_placeholders", {})
+        assert placeholders.get("email") == email
+        assert authoritative.entry_id in str(placeholders.get("entries", ""))
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_duplicate_account_cleanup_respects_string_key_issue_registries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stale cleanup handles registries that expose string-key issue mappings."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy")
+
+        class _StringKeyIssueRegistry:
+            def __init__(self) -> None:
+                self.issues: dict[str, dict[str, Any]] = {}
+
+            def async_get_issue(
+                self, domain: str, issue_id: str
+            ) -> dict[str, Any] | None:
+                issue = self.issues.get(issue_id)
+                if issue and issue.get("domain") == domain:
+                    return issue
+                return None
+
+            def async_create_issue(
+                self,
+                domain: str,
+                issue_id: str,
+                **data: Any,
+            ) -> None:
+                self.issues[issue_id] = {
+                    **data,
+                    "domain": domain,
+                    "issue_id": issue_id,
+                }
+
+            def async_delete_issue(self, domain: str, issue_id: str) -> None:
+                self.issues.pop(issue_id, None)
+
+        registry = _StringKeyIssueRegistry()
+
+        monkeypatch.setattr(
+            integration.ir,
+            "async_get",
+            lambda hass: registry,
+        )
+        monkeypatch.setattr(
+            integration.ir,
+            "async_create_issue",
+            lambda hass, domain, issue_id, **data: registry.async_create_issue(
+                domain, issue_id, **data
+            ),
+        )
+        monkeypatch.setattr(
+            integration.ir,
+            "async_delete_issue",
+            lambda hass, domain, issue_id: registry.async_delete_issue(
+                domain, issue_id
+            ),
+        )
+
+        authoritative = _StubConfigEntry()
+        authoritative.entry_id = "string-key-authoritative"
+        authoritative.state = ConfigEntryState.LOADED
+        email = "mapped@example.com"
+        authoritative.data[CONF_GOOGLE_EMAIL] = email
+        authoritative.data[DATA_SECRET_BUNDLE]["username"] = email
+
+        duplicate = _StubConfigEntry()
+        duplicate.entry_id = "string-key-duplicate"
+        duplicate.state = ConfigEntryState.NOT_LOADED
+        duplicate.data[CONF_GOOGLE_EMAIL] = email
+        duplicate.data[DATA_SECRET_BUNDLE]["username"] = email
+
+        hass = _StubHass(authoritative, loop)
+        hass.config_entries._entries.append(duplicate)
+
+        registry.async_create_issue(
+            DOMAIN,
+            "duplicate_account_retired-entry",
+            translation_placeholders={"email": email},
+        )
+        registry.async_create_issue(
+            DOMAIN,
+            f"duplicate_account_{duplicate.entry_id}",
+            translation_placeholders={"email": email},
+        )
+
+        should_setup, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass,
+            authoritative,
+        )
+
+        assert should_setup is True
+        assert normalized_email == email
+        assert (
+            registry.async_get_issue(
+                DOMAIN,
+                "duplicate_account_retired-entry",
+            )
+            is None
+        )
+        active_issue = registry.async_get_issue(
+            DOMAIN,
+            f"duplicate_account_{duplicate.entry_id}",
+        )
+        assert active_issue is not None
+        placeholders = active_issue.get("translation_placeholders", {})
+        assert placeholders.get("email") == email
+        assert authoritative.entry_id in str(placeholders.get("entries", ""))
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
 def test_issue_exists_helper_is_synchronous() -> None:
     """_issue_exists interacts with the registry helpers without awaiting."""
 

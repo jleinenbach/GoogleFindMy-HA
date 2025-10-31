@@ -9,12 +9,76 @@ import asyncio
 import importlib
 import inspect
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any, cast
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from datetime import datetime, timezone
 import json
 
 import pytest
+
+
+class _FakeIssueRegistry:
+    """Lightweight repair issue registry used across tests."""
+
+    def __init__(self) -> None:
+        self.issues: dict[str, dict[str, Any]] = {}
+
+    def async_get_issue(self, domain: str, issue_id: str) -> dict[str, Any] | None:
+        issue = self.issues.get(issue_id)
+        if issue and issue.get("domain") == domain:
+            return issue
+        return None
+
+
+@dataclass(slots=True)
+class IssueRegistryCapture:
+    """Record repair issue interactions while stubbing the registry."""
+
+    created: list[dict[str, Any]] = field(default_factory=list)
+    deleted: list[tuple[str, str]] = field(default_factory=list)
+    registry: _FakeIssueRegistry = field(default_factory=_FakeIssueRegistry)
+
+
+@pytest.fixture
+def issue_registry_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> IssueRegistryCapture:
+    """Provide a patched issue registry and capture create/delete calls."""
+
+    capture = IssueRegistryCapture()
+
+    def _create_issue(
+        hass: Any,
+        domain: str,
+        issue_id: str,
+        *,
+        translation_placeholders: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        payload = {
+            "issue_id": issue_id,
+            "domain": domain,
+            "translation_placeholders": dict(translation_placeholders or {}),
+        }
+        capture.created.append(payload)
+        capture.registry.issues[issue_id] = payload
+
+    def _delete_issue(hass: Any, domain: str, issue_id: str) -> None:
+        capture.deleted.append((domain, issue_id))
+        capture.registry.issues.pop(issue_id, None)
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.ir.async_get", lambda hass: capture.registry
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.ir.async_create_issue", _create_issue
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.ir.async_delete_issue", _delete_issue
+    )
+
+    return capture
 
 
 @pytest.fixture
@@ -775,7 +839,7 @@ def _stub_homeassistant() -> None:
             if new_identifiers is not None:
                 device.identifiers = set(new_identifiers)
             updates: dict[str, object] = {}
-            for field, value in (
+            for attr, value in (
                 ("via_device_id", via_device_id),
                 ("translation_key", translation_key),
                 ("config_subentry_id", config_subentry_id),
@@ -787,7 +851,7 @@ def _stub_homeassistant() -> None:
                 ("configuration_url", configuration_url),
             ):
                 if value is not None:
-                    updates[field] = value
+                    updates[attr] = value
             if translation_placeholders is not None:
                 updates["translation_placeholders"] = dict(translation_placeholders)
             if updates:

@@ -38,20 +38,23 @@ isolation. The recent additions mirror enough of the `ConfigFlow` contract to
 support discovery update tests and follow the real integration's behavior
 closely enough for regression coverage.
 
-## Migration shim coverage expectations
+## Migration coverage expectations
 
-> **Note:** Migration shim tests should only verify that the shim defers to the
-> config flow; leave flow internals to the dedicated config flow test modules.
->
-> When updating `tests/test_config_entry_migration.py`, assert behaviors such as
-> the shim returning `True`, forwarding calls to the flow manager, or logging the
-> deferral—avoid duplicating config flow migration assertions here.
+`tests/test_config_entry_migration.py` exercises the integration's migration
+helpers directly. Keep assertions focused on
+`custom_components.googlefindmy.__init__.async_migrate_entry` and the associated
+duplicate-detection utilities:
 
-`tests/test_config_entry_migration.py` must only assert that
-`custom_components.googlefindmy.__init__.async_migrate_entry` defers control to
-the config flow. Leave the flow's migration logic covered by the dedicated
-config flow tests so the shim remains a minimal delegator and avoids re-testing
-flow internals here.
+* Authoritative entries must soft-migrate known options before the version bump
+  and clear any lingering duplicate-account repair issues.
+* Non-authoritative duplicates should halt migration, leave options untouched,
+  and refresh their `duplicate_account_*` repair issue with the provided
+  `migration_duplicate` cause.
+* When account metadata cannot provide a usable email (for example, the
+  username is missing or whitespace only), the migration should succeed without
+  creating duplicate repair issues. The `issue_registry_capture` fixture will
+  therefore assert that `created` stays empty and that any stale
+  `duplicate_account_<entry_id>` entry is removed during the run.
 
 ### `ConfigFlow` helper methods
 
