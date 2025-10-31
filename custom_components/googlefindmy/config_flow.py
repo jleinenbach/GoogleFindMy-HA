@@ -1803,23 +1803,24 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                 _mask_email_for_logs(normalized.email),
             )
 
-            context_dict: dict[str, Any] | None = None
-            context_obj = getattr(self, "context", None)
-            if isinstance(context_obj, dict):
-                context_dict = context_obj
-            elif isinstance(context_obj, Mapping):
-                context_dict = dict(context_obj)
-                self.context = context_dict
+            prev_context = dict(getattr(self, "context", {}) or {})
+            prev_source = prev_context.get("source")
 
-            if context_dict is None:
-                context_dict = {}
-                self.context = context_dict
+            self.context = {**prev_context, "source": SOURCE_DISCOVERY}
+            _LOGGER.debug(
+                "Context source temporarily overridden: %s -> %s",
+                prev_source,
+                SOURCE_DISCOVERY,
+            )
 
-            previous_source = context_dict.pop("source", None)
-            if previous_source != SOURCE_DISCOVERY:
-                context_dict["source"] = SOURCE_DISCOVERY
-
-            return await self.async_step_discovery(discovery_info)
+            try:
+                return await self.async_step_discovery(discovery_info)
+            finally:
+                self.context = prev_context
+                _LOGGER.debug(
+                    "Context restored after discovery reroute: source=%s",
+                    prev_source,
+                )
 
         try:
             auth_data, updates = await _ingest_discovery_credentials(
