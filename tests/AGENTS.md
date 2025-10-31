@@ -38,6 +38,14 @@ isolation. The recent additions mirror enough of the `ConfigFlow` contract to
 support discovery update tests and follow the real integration's behavior
 closely enough for regression coverage.
 
+## Migration shim coverage expectations
+
+`tests/test_config_entry_migration.py` must only assert that
+`custom_components.googlefindmy.__init__.async_migrate_entry` defers control to
+the config flow. Leave the flow's migration logic covered by the dedicated
+config flow tests so the shim remains a minimal delegator and avoids re-testing
+flow internals here.
+
 ### `ConfigFlow` helper methods
 
 * `ConfigFlow.async_set_unique_id()` stores the provided ID on both

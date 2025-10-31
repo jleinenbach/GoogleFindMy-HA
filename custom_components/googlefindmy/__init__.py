@@ -82,7 +82,6 @@ from .NovaApi.ExecuteAction.LocateTracker.location_request import (
 from .const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
-    CONFIG_ENTRY_VERSION,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
