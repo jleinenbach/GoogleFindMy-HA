@@ -1802,6 +1802,23 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                 "(email=%s)",
                 _mask_email_for_logs(normalized.email),
             )
+
+            context_dict: dict[str, Any] | None = None
+            context_obj = getattr(self, "context", None)
+            if isinstance(context_obj, dict):
+                context_dict = context_obj
+            elif isinstance(context_obj, Mapping):
+                context_dict = dict(context_obj)
+                self.context = context_dict
+
+            if context_dict is None:
+                context_dict = {}
+                self.context = context_dict
+
+            previous_source = context_dict.pop("source", None)
+            if previous_source != SOURCE_DISCOVERY:
+                context_dict["source"] = SOURCE_DISCOVERY
+
             return await self.async_step_discovery(discovery_info)
 
         try:
