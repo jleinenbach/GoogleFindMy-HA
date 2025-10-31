@@ -1642,12 +1642,44 @@ async def _async_soft_migrate_data_to_options(
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Indicate that Home Assistant should route migrations through the config flow."""
+    """Migrate a config entry to the latest schema and enforce duplicate policy."""
 
     _LOGGER.debug(
-        "Config entry %s (version=%s) requested migration; deferring to config flow.",
+        "Config entry %s (version=%s) requested migration; validating account metadata.",
         entry.entry_id,
         entry.version,
+    )
+
+    should_setup, normalized_email = _ensure_post_migration_consistency(
+        hass,
+        entry,
+        duplicate_issue_cause="migration_duplicate",
+    )
+
+    if not should_setup:
+        email_for_log = (
+            _mask_email_for_logs(normalized_email) if normalized_email else "n/a"
+        )
+        _LOGGER.info(
+            "Migration halted for %s because account %s is not authoritative",
+            entry.entry_id,
+            email_for_log,
+        )
+        return False
+
+    await _async_soft_migrate_data_to_options(hass, entry)
+
+    if entry.version != CONFIG_ENTRY_VERSION:
+        update_kwargs = {"version": CONFIG_ENTRY_VERSION}
+        try:
+            hass.config_entries.async_update_entry(entry, **update_kwargs)
+        except TypeError:
+            _apply_update_entry_fallback(hass, entry, update_kwargs)
+
+    _LOGGER.debug(
+        "Config entry %s migrated to version %s",
+        entry.entry_id,
+        CONFIG_ENTRY_VERSION,
     )
     return True
 
@@ -2518,7 +2550,13 @@ def _clear_duplicate_account_issue(hass: HomeAssistant, entry: ConfigEntry) -> N
 def _select_authoritative_entry_id(
     entry: ConfigEntry, duplicates: Sequence[ConfigEntry]
 ) -> str:
-    """Return the entry_id that should remain active for a duplicate account."""
+    """Return the entry_id that should remain active for a duplicate account.
+
+    Preference order:
+    1. Config entry state (loaded > retry > error > pending > not loaded).
+    2. Most recent timestamp, preferring ``updated_at`` over ``created_at``.
+    3. Deterministic tiebreaker using ``entry_id`` for stability.
+    """
 
     candidates = [entry, *duplicates]
 
@@ -2574,7 +2612,10 @@ def _select_authoritative_entry_id(
 
 
 def _ensure_post_migration_consistency(
-    hass: HomeAssistant, entry: ConfigEntry
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    *,
+    duplicate_issue_cause: str = "setup_duplicate",
 ) -> tuple[bool, str | None]:
     """Repair stale metadata and detect duplicates before setup."""
 
@@ -2643,7 +2684,7 @@ def _ensure_post_migration_consistency(
                 hass,
                 candidate,
                 normalized_email,
-                cause="setup_duplicate",
+                cause=duplicate_issue_cause,
                 conflicts=conflicts,
             )
         _LOGGER.info(
@@ -2658,54 +2699,6 @@ def _ensure_post_migration_consistency(
         )
     else:
         _clear_duplicate_account_issue(hass, entry)
-        if normalized_email:
-            get_registry = getattr(ir, "async_get", None)
-            registry: Any | None = None
-            if callable(get_registry):
-                try:
-                    registry = get_registry(hass)
-                except Exception:  # pragma: no cover - defensive fallback
-                    registry = None
-            issues: Mapping[str, Any] | None = None
-            if registry is not None:
-                issues_attr = getattr(registry, "issues", None)
-                if isinstance(issues_attr, Mapping):
-                    issues = issues_attr
-                elif isinstance(issues_attr, Collection):  # pragma: no cover
-                    issues = {
-                        getattr(item, "issue_id", str(index)): item
-                        for index, item in enumerate(issues_attr)
-                    }
-                else:
-                    internal_issues = getattr(registry, "_issues", None)
-                    if isinstance(internal_issues, Mapping):
-                        issues = internal_issues
-            if issues:
-                for issue in list(issues.values()):
-                    domain_value = getattr(issue, "domain", None)
-                    if domain_value is None and isinstance(issue, Mapping):
-                        domain_value = issue.get("domain")
-                    if domain_value != DOMAIN:
-                        continue
-                    placeholders = getattr(issue, "translation_placeholders", None)
-                    if isinstance(placeholders, Mapping):
-                        email = placeholders.get("email")
-                    elif isinstance(issue, Mapping):
-                        placeholders = cast(Mapping[str, Any] | None, issue.get("translation_placeholders"))
-                        email = placeholders.get("email") if placeholders else None
-                    else:
-                        email = None
-                    if email != normalized_email:
-                        continue
-                    issue_id = getattr(issue, "issue_id", None)
-                    if issue_id is None and isinstance(issue, Mapping):
-                        issue_id = issue.get("issue_id")
-                    if not issue_id:
-                        continue
-                    try:
-                        ir.async_delete_issue(hass, DOMAIN, str(issue_id))
-                    except Exception:  # pragma: no cover - defensive fallback
-                        continue
 
     should_setup = not duplicates or entry.entry_id == authoritative_entry_id
     return should_setup, normalized_email

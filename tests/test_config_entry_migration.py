@@ -1,16 +1,24 @@
 # tests/test_config_entry_migration.py
-"""Regression tests for the config entry migration shim."""
-
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from importlib import import_module
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from custom_components.googlefindmy.const import DOMAIN
+from homeassistant.config_entries import ConfigEntryState
+
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+    DOMAIN,
+    OPT_MIN_POLL_INTERVAL,
+)
+
+
+if TYPE_CHECKING:
+    from tests.conftest import IssueRegistryCapture
 
 
 @dataclass(slots=True)
@@ -23,6 +31,7 @@ class _MigrationTestEntry:
     options: dict[str, Any] = field(default_factory=dict)
     version: int = 1
     unique_id: str | None = None
+    state: ConfigEntryState = ConfigEntryState.NOT_LOADED
     subentries: dict[str, Any] = field(default_factory=dict)
 
     domain: str = DOMAIN
@@ -48,6 +57,21 @@ class _MigrationConfigEntriesManager:
 
     def async_update_entry(self, entry: _MigrationTestEntry, **kwargs: Any) -> None:
         self.updated.append((entry, dict(kwargs)))
+        data = kwargs.get("data")
+        if isinstance(data, dict):
+            entry.data = dict(data)
+        title = kwargs.get("title")
+        if isinstance(title, str):
+            entry.title = title
+        unique_id = kwargs.get("unique_id")
+        if isinstance(unique_id, str):
+            entry.unique_id = unique_id
+        options = kwargs.get("options")
+        if isinstance(options, dict):
+            entry.options = dict(options)
+        version_value = kwargs.get("version")
+        if isinstance(version_value, int):
+            entry.version = version_value
 
 
 @dataclass(slots=True)
@@ -66,60 +90,135 @@ def _make_hass_with_entries(*entries: _MigrationTestEntry) -> _MigrationHass:
 
 
 @pytest.mark.asyncio
-async def test_async_migrate_entry_defers_to_config_flow(caplog: pytest.LogCaptureFixture) -> None:
-    """The migration shim should return True without mutating the entry."""
+async def test_async_migrate_entry_normalizes_metadata(
+    issue_registry_capture: IssueRegistryCapture,
+) -> None:
+    """Migration aligns metadata and upgrades the entry version."""
 
     integration = import_module("custom_components.googlefindmy")
-
     entry = _MigrationTestEntry(
         entry_id="legacy",
-        data={"secrets_data": {"username": "user@example.com"}},
+        data={
+            DATA_SECRET_BUNDLE: {"username": "User@Example.com "},
+            OPT_MIN_POLL_INTERVAL: 45,
+        },
         title="Legacy",
         version=1,
     )
     hass = _make_hass_with_entries(entry)
+    capture = issue_registry_capture
 
-    with caplog.at_level(logging.DEBUG):
-        result = await integration.async_migrate_entry(hass, entry)
+    result = await integration.async_migrate_entry(hass, entry)
 
     assert result is True
-    assert entry.version == 1
-    assert entry.unique_id is None
-    assert hass.config_entries.updated == []
-    assert "deferring to config flow" in caplog.text
+    assert entry.version == integration.CONFIG_ENTRY_VERSION
+    assert entry.title == "User@Example.com"
+    assert entry.data[CONF_GOOGLE_EMAIL] == "User@Example.com"
+    assert entry.unique_id == "acct:user@example.com"
+    assert entry.options[OPT_MIN_POLL_INTERVAL] == 45
+    assert capture.created == []
+    assert capture.deleted == [(DOMAIN, f"duplicate_account_{entry.entry_id}")]
+    assert len(hass.config_entries.updated) == 3
+    first_update = hass.config_entries.updated[0][1]
+    assert first_update["data"][CONF_GOOGLE_EMAIL] == "User@Example.com"
+    assert first_update["title"] == "User@Example.com"
+    assert first_update["unique_id"] == "acct:user@example.com"
+    options_update = hass.config_entries.updated[1][1]
+    assert options_update["options"][OPT_MIN_POLL_INTERVAL] == 45
+    assert hass.config_entries.updated[2][1]["version"] == integration.CONFIG_ENTRY_VERSION
 
 
 @pytest.mark.asyncio
-async def test_async_migrate_entry_does_not_trigger_duplicate_handling(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Duplicate accounts are handled by the config flow, not the shim."""
+async def test_async_migrate_entry_handles_duplicate_accounts(
+    issue_registry_capture: IssueRegistryCapture,
+) -> None:
+    """Non-authoritative duplicates are held back and flagged during migration."""
 
     integration = import_module("custom_components.googlefindmy")
-
-    primary = _MigrationTestEntry(
-        entry_id="primary",
-        data={"secrets_data": {"username": "primary@example.com"}},
+    migration_error_state = getattr(
+        ConfigEntryState, "MIGRATION_ERROR", ConfigEntryState.SETUP_ERROR
+    )
+    authoritative = _MigrationTestEntry(
+        entry_id="authoritative",
+        data={DATA_SECRET_BUNDLE: {"username": "duplicate@example.com"}},
         title="Primary",
-        version=integration.CONFIG_ENTRY_VERSION,
-        unique_id="acct:primary@example.com",
+        version=1,
+        state=ConfigEntryState.LOADED,
     )
     duplicate = _MigrationTestEntry(
-        entry_id="duplicate",
-        data={"secrets_data": {"username": "primary@example.com"}},
-        title="Duplicate",
+        entry_id="held_back",
+        data={
+            DATA_SECRET_BUNDLE: {"username": "duplicate@example.com"},
+            OPT_MIN_POLL_INTERVAL: 60,
+        },
+        title="Secondary",
+        version=1,
+        state=migration_error_state,
+    )
+    hass = _make_hass_with_entries(authoritative, duplicate)
+    capture = issue_registry_capture
+
+    first_result = await integration.async_migrate_entry(hass, duplicate)
+
+    assert first_result is False
+    assert duplicate.version == 1
+    assert duplicate.title == "duplicate@example.com"
+    assert duplicate.data[CONF_GOOGLE_EMAIL] == "duplicate@example.com"
+    assert duplicate.unique_id == "acct:duplicate@example.com"
+    assert duplicate.state is migration_error_state
+    assert duplicate.options == {}
+    assert authoritative.state == ConfigEntryState.LOADED
+    assert capture.created[0]["issue_id"] == f"duplicate_account_{duplicate.entry_id}"
+    placeholders = capture.created[0]["translation_placeholders"]
+    assert placeholders["email"] == "duplicate@example.com"
+    assert "held_back" in placeholders["entries"]
+    assert "authoritative" in placeholders["entries"]
+    assert placeholders["cause"] == "migration_duplicate"
+
+    updates_before = list(hass.config_entries.updated)
+    second_result = await integration.async_migrate_entry(hass, authoritative)
+
+    assert second_result is True
+    assert authoritative.version == integration.CONFIG_ENTRY_VERSION
+    assert authoritative.title == "duplicate@example.com"
+    assert authoritative.unique_id == "acct:duplicate@example.com"
+    assert duplicate.state is migration_error_state
+    new_updates = hass.config_entries.updated[len(updates_before) :]
+    assert any("version" in update[1] for update in new_updates)
+    assert capture.created[-1]["issue_id"] == f"duplicate_account_{duplicate.entry_id}"
+    refreshed = capture.created[-1]["translation_placeholders"]
+    assert refreshed["cause"] == "migration_duplicate"
+    assert (
+        capture.deleted.count((DOMAIN, f"duplicate_account_{authoritative.entry_id}"))
+        >= 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_migrate_entry_without_email_metadata(
+    issue_registry_capture: IssueRegistryCapture,
+) -> None:
+    """Migration succeeds when no email metadata can be resolved."""
+
+    integration = import_module("custom_components.googlefindmy")
+    entry = _MigrationTestEntry(
+        entry_id="no_email",
+        data={DATA_SECRET_BUNDLE: {"username": "   "}},
+        title="NoEmail",
         version=1,
     )
-    hass = _make_hass_with_entries(primary, duplicate)
+    hass = _make_hass_with_entries(entry)
+    capture = issue_registry_capture
 
-    issues_raised: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.ir.async_create_issue",
-        lambda *args, **kwargs: issues_raised.append((args, kwargs)),
-    )
-
-    result = await integration.async_migrate_entry(hass, duplicate)
+    result = await integration.async_migrate_entry(hass, entry)
 
     assert result is True
-    assert hass.config_entries.updated == []
-    assert issues_raised == []
-    assert duplicate.unique_id is None
-    assert duplicate.version == 1
+    assert entry.version == integration.CONFIG_ENTRY_VERSION
+    assert entry.title == "NoEmail"
+    assert entry.unique_id is None
+    assert entry.options == {}
+    assert capture.created == []
+    assert capture.deleted == [(DOMAIN, f"duplicate_account_{entry.entry_id}")]
+    assert hass.config_entries.updated == [
+        (entry, {"version": integration.CONFIG_ENTRY_VERSION})
+    ]
