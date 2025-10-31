@@ -79,10 +79,6 @@ from .NovaApi.ExecuteAction.LocateTracker.location_request import (
     register_fcm_receiver_provider as loc_register_fcm_provider,
     unregister_fcm_receiver_provider as loc_unregister_fcm_provider,
 )
-from .api import (
-    register_fcm_receiver_provider as api_register_fcm_provider,
-    unregister_fcm_receiver_provider as api_unregister_fcm_provider,
-)
 from .const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
@@ -122,22 +118,10 @@ from .const import (
     coerce_ignored_mapping,
     service_device_identifier,
 )
-from .coordinator import GoogleFindMyCoordinator
 from .email import normalize_email, unique_account_id
-from .map_view import GoogleFindMyMapRedirectView, GoogleFindMyMapView
-from .discovery import (
-    DiscoveryManager,
-    async_initialize_discovery_runtime,
-    _cloud_discovery_runtime,
-    _redact_account_for_log as _redact_account_for_log,
-    _trigger_cloud_discovery as _trigger_cloud_discovery,
-)
 
 # Eagerly import diagnostics to prevent blocking calls on-demand
 from . import diagnostics  # noqa: F401
-
-# Service registration has been moved to a dedicated module (clean separation of concerns)
-from .services import async_register_services
 
 if TYPE_CHECKING:
     try:  # pragma: no cover - type-checking fallback for stripped test envs
@@ -157,12 +141,151 @@ if TYPE_CHECKING:
     from .NovaApi.ExecuteAction.LocateTracker.location_request import (
         FcmReceiverProtocol as NovaFcmReceiverProtocol,
     )
-    from .api import FcmReceiverProtocol as ApiFcmReceiverProtocol
+    from .api import (
+        FcmReceiverProtocol as ApiFcmReceiverProtocol,
+        register_fcm_receiver_provider as ApiRegisterFcmProviderType,
+        unregister_fcm_receiver_provider as ApiUnregisterFcmProviderType,
+    )
+    from .coordinator import GoogleFindMyCoordinator as GoogleFindMyCoordinatorType
+    from .discovery import (
+        DiscoveryManager as DiscoveryManagerType,
+        async_initialize_discovery_runtime as AsyncInitializeDiscoveryRuntimeType,
+        _cloud_discovery_runtime as CloudDiscoveryRuntimeType,
+        _redact_account_for_log as RedactAccountForLogType,
+        _trigger_cloud_discovery as TriggerCloudDiscoveryType,
+    )
+    from .map_view import (
+        GoogleFindMyMapRedirectView as GoogleFindMyMapRedirectViewType,
+        GoogleFindMyMapView as GoogleFindMyMapViewType,
+    )
+    from .services import async_register_services as AsyncRegisterServicesType
+
+    GoogleFindMyCoordinator = GoogleFindMyCoordinatorType
+    DiscoveryManager = DiscoveryManagerType
+    GoogleFindMyMapView = GoogleFindMyMapViewType
+    GoogleFindMyMapRedirectView = GoogleFindMyMapRedirectViewType
+    async_register_services = AsyncRegisterServicesType
+    async_initialize_discovery_runtime = AsyncInitializeDiscoveryRuntimeType
+    _cloud_discovery_runtime = CloudDiscoveryRuntimeType
+    _trigger_cloud_discovery = TriggerCloudDiscoveryType
+    _redact_account_for_log = RedactAccountForLogType
+    api_register_fcm_provider = ApiRegisterFcmProviderType
+    api_unregister_fcm_provider = ApiUnregisterFcmProviderType
 else:
     from typing import Any as RegistryEntryDisablerType
 
     NovaFcmReceiverProtocol = FcmReceiverHA
     ApiFcmReceiverProtocol = FcmReceiverHA
+
+    def _runtime_imports_not_initialized(*_args: Any, **_kwargs: Any) -> Any:
+        """Raise when runtime-only imports are used before initialization."""
+
+        raise RuntimeError("Runtime components not initialized")
+
+    class _GoogleFindMyCoordinatorPlaceholder:
+        """Placeholder until the coordinator module is imported."""
+
+    class _DiscoveryManagerPlaceholder:
+        """Placeholder until the discovery module is imported."""
+
+    GoogleFindMyCoordinator: type[Any] = cast(
+        type[Any], _GoogleFindMyCoordinatorPlaceholder
+    )
+    DiscoveryManager: type[Any] = cast(type[Any], _DiscoveryManagerPlaceholder)
+    GoogleFindMyMapView: type[Any] = cast(
+        type[Any], type("GoogleFindMyMapViewPlaceholder", (object,), {})
+    )
+    GoogleFindMyMapRedirectView: type[Any] = cast(
+        type[Any], type("GoogleFindMyMapRedirectViewPlaceholder", (object,), {})
+    )
+
+    api_register_fcm_provider: Callable[[Callable[[], ApiFcmReceiverProtocol]], None] = cast(
+        Callable[[Callable[[], ApiFcmReceiverProtocol]], None],
+        _runtime_imports_not_initialized,
+    )
+    api_unregister_fcm_provider: Callable[[], None] = cast(
+        Callable[[], None], _runtime_imports_not_initialized
+    )
+    async_register_services: Callable[
+        [HomeAssistant, Mapping[str, Any]], Awaitable[None]
+    ] = cast(
+        Callable[[HomeAssistant, Mapping[str, Any]], Awaitable[None]],
+        _runtime_imports_not_initialized,
+    )
+    async_initialize_discovery_runtime: Callable[
+        [HomeAssistant], Awaitable[Any]
+    ] = cast(
+        Callable[[HomeAssistant], Awaitable[Any]],
+        _runtime_imports_not_initialized,
+    )
+    _cloud_discovery_runtime: Callable[[HomeAssistant], Mapping[str, Any]] = cast(
+        Callable[[HomeAssistant], Mapping[str, Any]],
+        _runtime_imports_not_initialized,
+    )
+    _trigger_cloud_discovery: Callable[..., Awaitable[Any]] = cast(
+        Callable[..., Awaitable[Any]], _runtime_imports_not_initialized
+    )
+    _redact_account_for_log: Callable[..., str] = cast(
+        Callable[..., str], _runtime_imports_not_initialized
+    )
+
+_RUNTIME_IMPORTS_LOADED = False
+
+
+def _ensure_runtime_imports() -> None:
+    """Load runtime-only modules when they are first required."""
+
+    global _RUNTIME_IMPORTS_LOADED
+    global api_register_fcm_provider
+    global api_unregister_fcm_provider
+    global async_register_services
+    global async_initialize_discovery_runtime
+    global _cloud_discovery_runtime
+    global _trigger_cloud_discovery
+    global _redact_account_for_log
+    global GoogleFindMyCoordinator
+    global DiscoveryManager
+    global GoogleFindMyMapView
+    global GoogleFindMyMapRedirectView
+
+    if _RUNTIME_IMPORTS_LOADED:
+        return
+
+    from .api import (  # noqa: E402
+        register_fcm_receiver_provider as _api_register_fcm_provider,
+        unregister_fcm_receiver_provider as _api_unregister_fcm_provider,
+    )
+    from .coordinator import (  # noqa: E402
+        GoogleFindMyCoordinator as _GoogleFindMyCoordinator,
+    )
+    from .discovery import (  # noqa: E402
+        DiscoveryManager as _DiscoveryManager,
+        async_initialize_discovery_runtime as _async_initialize_discovery_runtime,
+        _cloud_discovery_runtime as _cloud_discovery_runtime_fn,
+        _redact_account_for_log as _redact_account_for_log_fn,
+        _trigger_cloud_discovery as _trigger_cloud_discovery_fn,
+    )
+    from .map_view import (  # noqa: E402
+        GoogleFindMyMapRedirectView as _GoogleFindMyMapRedirectView,
+        GoogleFindMyMapView as _GoogleFindMyMapView,
+    )
+    from .services import (  # noqa: E402
+        async_register_services as _async_register_services,
+    )
+
+    api_register_fcm_provider = _api_register_fcm_provider
+    api_unregister_fcm_provider = _api_unregister_fcm_provider
+    async_register_services = _async_register_services
+    async_initialize_discovery_runtime = _async_initialize_discovery_runtime
+    _cloud_discovery_runtime = _cloud_discovery_runtime_fn
+    _redact_account_for_log = _redact_account_for_log_fn
+    _trigger_cloud_discovery = _trigger_cloud_discovery_fn
+    GoogleFindMyCoordinator = _GoogleFindMyCoordinator
+    DiscoveryManager = _DiscoveryManager
+    GoogleFindMyMapView = _GoogleFindMyMapView
+    GoogleFindMyMapRedirectView = _GoogleFindMyMapRedirectView
+
+    _RUNTIME_IMPORTS_LOADED = True
 
 try:  # pragma: no cover - compatibility shim for stripped test envs
     from homeassistant.helpers.entity_registry import (
@@ -575,6 +698,7 @@ def _get_discovery_manager(
     bucket: GoogleFindMyDomainData,
 ) -> DiscoveryManager | None:
     """Return the discovery manager if already initialized."""
+    _ensure_runtime_imports()
 
     manager = bucket.get("discovery_manager")
     if isinstance(manager, DiscoveryManager):
@@ -586,6 +710,7 @@ def _set_discovery_manager(
     bucket: GoogleFindMyDomainData, manager: DiscoveryManager
 ) -> None:
     """Store the shared discovery manager."""
+    _ensure_runtime_imports()
 
     bucket["discovery_manager"] = manager
 
@@ -1492,42 +1617,13 @@ async def _async_soft_migrate_data_to_options(
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Handle config entry migrations by delegating to the config flow."""
-
-    from .config_flow import ConfigFlow  # Local import avoids circular dependency
+    """Indicate that Home Assistant should route migrations through the config flow."""
 
     _LOGGER.debug(
-        "Config entry %s requested migration (current version=%s). Triggering config flow migrate step.",
+        "Config entry %s (version=%s) requested migration; deferring to config flow.",
         entry.entry_id,
         entry.version,
     )
-
-    flow = ConfigFlow()
-    flow.hass = hass
-    flow.context = {
-        "source": "migration",
-        "entry_id": entry.entry_id,
-    }
-
-    try:
-        initial_result = await flow.async_step_migrate(entry)
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.exception("Migration for %s failed during config flow execution: %s", entry.entry_id, err)
-        return False
-
-    result_type = str(initial_result.get("type"))
-    if result_type == "abort":
-        return initial_result.get("reason") != "migration_failed"
-
-    if result_type in {"form", "show_form"} and initial_result.get("step_id") == "migrate_complete":
-        completion = await flow.async_step_migrate_complete({})
-        if str(completion.get("type")) == "abort":
-            reason = completion.get("reason")
-            if reason == "migration_failed":
-                return False
-            return True
-        return True
-
     return True
 
 
@@ -2093,6 +2189,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         - Maintains a reference counter to support multiple entries.
         - NEW: attaches HA context to enable owner-index fallback routing.
     """
+    _ensure_runtime_imports()
     bucket = _domain_data(hass)
     fcm_lock: asyncio.Lock = _ensure_fcm_lock(bucket)
     if fcm_lock.locked():
@@ -2189,6 +2286,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
 
 async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
     """Decrease refcount; stop and unregister provider when it reaches zero."""
+    _ensure_runtime_imports()
     bucket = _domain_data(hass)
     fcm_lock: asyncio.Lock = _ensure_fcm_lock(bucket)
     async with fcm_lock:
@@ -2442,6 +2540,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         even if no config entry is loaded, which enables frontend validation of
         automations referencing these services.
     """
+    _ensure_runtime_imports()
     bucket = _domain_data(hass)
     runtime = _cloud_discovery_runtime(hass)
     discovery_manager = _get_discovery_manager(bucket)
@@ -2490,6 +2589,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
       5) Build coordinator, register views, forward platforms.
       6) Schedule initial refresh after HA is fully started.
     """
+    _ensure_runtime_imports()
     # --- Multi-entry policy: allow MA; block duplicate-account (same email) ----
     # Legacy issue cleanup: we no longer block on multiple config entries
     try:
@@ -2992,6 +3092,7 @@ async def async_remove_config_entry_device(
     - Return True to allow HA to remove the device record and its entities.
     - Never allow removing the integration's own "service" device (ident startswith 'integration').
     """
+    _ensure_runtime_imports()
     if entry.entry_id not in device_entry.config_entries:
         return False
 
@@ -3144,6 +3245,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         - TokenCache is explicitly closed here to flush and mark the cache closed.
         - Device owner index cleanup: remove all canonical_id claims for this entry (E2.5).
     """
+    _ensure_runtime_imports()
     runtime_data: RuntimeData | GoogleFindMyCoordinator | None = getattr(
         entry, "runtime_data", None
     )
