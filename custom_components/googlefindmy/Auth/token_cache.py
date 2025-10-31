@@ -266,6 +266,14 @@ class TokenCache:
         self._closed = True
         await self.flush()
 
+    async def async_remove_store(self) -> None:
+        """Remove the underlying Store file and clear in-memory state."""
+
+        await self._store.async_remove()
+        self._data.clear()
+        self._per_key_locks.clear()
+        self._closed = True
+
     # ------------------------------ Utilities --------------------------------
 
     @staticmethod

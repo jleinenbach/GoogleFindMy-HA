@@ -643,7 +643,7 @@ def _stub_homeassistant() -> None:
     setattr(helpers_pkg, "restore_state", restore_state_module)
 
     issue_registry_module = sys.modules["homeassistant.helpers.issue_registry"]
-    issue_registry_module.IssueSeverity = SimpleNamespace(ERROR="error")
+    issue_registry_module.IssueSeverity = SimpleNamespace(ERROR="error", INFO="info")
 
     class _IssueRegistry:
         """Minimal in-memory Repairs issue registry used by tests."""
@@ -913,6 +913,9 @@ def _stub_homeassistant() -> None:
 
         def async_delay_save(self, *_args, **_kwargs) -> None:
             return None
+
+        async def async_remove(self) -> None:
+            self._data = None
 
     storage_module.Store = Store
     sys.modules["homeassistant.helpers.storage"] = storage_module

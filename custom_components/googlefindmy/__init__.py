@@ -63,6 +63,7 @@ from homeassistant.helpers import (
     entity_registry as er,
     issue_registry as ir,
 )
+from homeassistant.helpers.storage import Store
 
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
 from .Auth.token_cache import (
@@ -93,8 +94,10 @@ from .const import (
     DEFAULT_MIN_ACCURACY_THRESHOLD,
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
+    DEFAULT_DELETE_CACHES_ON_REMOVE,
     DOMAIN,
     OPTION_KEYS,
+    OPT_DELETE_CACHES_ON_REMOVE,
     OPT_CONTRIBUTOR_MODE,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_DEVICE_POLL_DELAY,
@@ -118,6 +121,8 @@ from .const import (
     TRACKER_SUBENTRY_KEY,
     coerce_ignored_mapping,
     service_device_identifier,
+    STORAGE_KEY,
+    STORAGE_VERSION,
 )
 from .email import normalize_email, unique_account_id
 
@@ -3595,6 +3600,199 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     return unloaded
 
+
+async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
+    """Handle removal of a config entry and purge persisted caches if requested."""
+
+    _ensure_runtime_imports()
+
+    bucket = _domain_data(hass)
+    entries_bucket = bucket.get("entries")
+
+    runtime: RuntimeData | GoogleFindMyCoordinator | None = None
+    if isinstance(entries_bucket, dict):
+        runtime = entries_bucket.pop(entry.entry_id, None)
+
+    fallback_runtime = getattr(entry, "runtime_data", None)
+    if runtime is None and isinstance(
+        fallback_runtime, (RuntimeData, GoogleFindMyCoordinator)
+    ):
+        runtime = fallback_runtime
+
+    coordinator: GoogleFindMyCoordinator | None = None
+    token_cache: Any | None = None
+    google_home_filter: GoogleHomeFilterProtocol | None = None
+
+    if isinstance(runtime, GoogleFindMyCoordinator):
+        coordinator = runtime
+    elif isinstance(runtime, RuntimeData):
+        coordinator = runtime.coordinator
+        token_cache = runtime.token_cache
+        google_home_filter = runtime.google_home_filter
+
+    if coordinator is None and isinstance(fallback_runtime, GoogleFindMyCoordinator):
+        coordinator = fallback_runtime
+    if token_cache is None and isinstance(fallback_runtime, RuntimeData):
+        token_cache = fallback_runtime.token_cache
+        if google_home_filter is None:
+            google_home_filter = fallback_runtime.google_home_filter
+
+    if coordinator is not None:
+        try:
+            await coordinator.async_shutdown()
+        except Exception as err:
+            _LOGGER.debug("Coordinator async_shutdown raised during removal: %s", err)
+
+    if google_home_filter is not None:
+        shutdown = getattr(google_home_filter, "async_shutdown", None)
+        if callable(shutdown):
+            try:
+                result = shutdown()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as err:
+                _LOGGER.debug(
+                    "Google Home filter shutdown during removal raised: %s", err
+                )
+
+    fallback_cache = _unregister_instance(entry.entry_id)
+    if token_cache is None and fallback_cache is not None:
+        token_cache = fallback_cache
+    elif fallback_cache is not None and fallback_cache is not token_cache:
+        close_fallback = getattr(fallback_cache, "close", None)
+        if callable(close_fallback):
+            try:
+                result = close_fallback()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
+
+    try:
+        await _async_release_shared_fcm(hass)
+    except Exception as err:
+        _LOGGER.debug("FCM release during async_remove_entry raised: %s", err)
+
+    try:
+        owner_index = _ensure_device_owner_index(bucket)
+        stale = [cid for cid, eid in list(owner_index.items()) if eid == entry.entry_id]
+        for cid in stale:
+            owner_index.pop(cid, None)
+        if stale:
+            _LOGGER.debug(
+                "Cleared %d owner-index claim(s) for entry '%s' during removal",
+                len(stale),
+                entry.entry_id,
+            )
+    except Exception as err:
+        _LOGGER.debug("Owner-index cleanup during removal failed: %s", err)
+
+    entries_bucket = _ensure_entries_bucket(bucket)
+    entries_bucket.pop(entry.entry_id, None)
+
+    if isinstance(runtime, RuntimeData):
+        runtime.google_home_filter = None
+        runtime.fcm_receiver = None
+    if isinstance(fallback_runtime, RuntimeData):
+        fallback_runtime.google_home_filter = None
+        fallback_runtime.fcm_receiver = None
+
+    if hasattr(entry, "runtime_data"):
+        try:
+            setattr(entry, "runtime_data", None)
+        except Exception:
+            pass
+
+    purge_option = _opt(
+        entry, OPT_DELETE_CACHES_ON_REMOVE, DEFAULT_DELETE_CACHES_ON_REMOVE
+    )
+    try:
+        should_purge = cv.boolean(purge_option)
+    except Exception:
+        should_purge = bool(purge_option)
+
+    issue_id = f"cache_purged_{entry.entry_id}"
+    display_name = entry.title or entry.entry_id
+
+    if should_purge:
+        removed = False
+        if token_cache is not None and hasattr(token_cache, "async_remove_store"):
+            close_callable = getattr(token_cache, "close", None)
+            if callable(close_callable):
+                try:
+                    result = close_callable()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as err:
+                    _LOGGER.debug("Closing TokenCache before removal raised: %s", err)
+            try:
+                remove_callable = getattr(token_cache, "async_remove_store")
+                remove_result = remove_callable()
+                if inspect.isawaitable(remove_result):
+                    await remove_result
+                removed = True
+            except Exception as err:
+                _LOGGER.warning(
+                    "Removing TokenCache store for entry '%s' failed: %s",
+                    entry.entry_id,
+                    err,
+                )
+        else:
+            store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry.entry_id}")
+            try:
+                remove_callable = getattr(store, "async_remove", None)
+                if remove_callable is None:
+                    raise AttributeError("Store.async_remove unavailable")
+                remove_result = remove_callable()
+                if inspect.isawaitable(remove_result):
+                    await remove_result
+                removed = True
+            except Exception as err:
+                _LOGGER.warning(
+                    "Removing TokenCache store for entry '%s' failed (no cache instance): %s",
+                    entry.entry_id,
+                    err,
+                )
+
+        if removed:
+            _LOGGER.info(
+                "Removed TokenCache store for entry '%s' (%s).",
+                entry.entry_id,
+                display_name,
+            )
+            try:
+                ir.async_create_issue(
+                    hass,
+                    DOMAIN,
+                    issue_id,
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.INFO,
+                    translation_key="cache_purged",
+                    translation_placeholders={"entry_title": display_name},
+                )
+            except Exception as err:
+                _LOGGER.debug("Failed to create cache purge issue: %s", err)
+        else:
+            try:
+                ir.async_delete_issue(hass, DOMAIN, issue_id)
+            except Exception as err:
+                _LOGGER.debug(
+                    "Failed to delete cache purge issue after unsuccessful purge: %s",
+                    err,
+                )
+    else:
+        _LOGGER.info(
+            "Preserved TokenCache store for entry '%s' (%s); option disabled.",
+            entry.entry_id,
+            display_name,
+        )
+        try:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+        except Exception as err:
+            _LOGGER.debug(
+                "Failed to delete cache purge issue when retention is requested: %s",
+                err,
+            )
 
 def _get_local_ip_sync() -> str:
     """Best-effort local IP discovery via UDP connect (executor-only)."""

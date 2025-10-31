@@ -73,6 +73,7 @@ from .const import (
     OPT_IGNORED_DEVICES,
     OPT_CONTRIBUTOR_MODE,
     OPT_ENABLE_STATS_ENTITIES,
+    OPT_DELETE_CACHES_ON_REMOVE,
     OPT_ALLOW_HISTORY_FALLBACK,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -86,6 +87,7 @@ from .const import (
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_MIN_ACCURACY_THRESHOLD,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_DELETE_CACHES_ON_REMOVE,
     DEFAULT_CONTRIBUTOR_MODE,
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
@@ -2191,6 +2193,7 @@ class ConfigFlow(
             OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
             OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_MIN_ACCURACY_THRESHOLD,
             OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+            OPT_DELETE_CACHES_ON_REMOVE: DEFAULT_DELETE_CACHES_ON_REMOVE,
         }
         if (
             OPT_MOVEMENT_THRESHOLD is not None
@@ -3591,6 +3594,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             OPT_MAP_VIEW_TOKEN_EXPIRATION: _get(
                 OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             ),
+            OPT_DELETE_CACHES_ON_REMOVE: _get(
+                OPT_DELETE_CACHES_ON_REMOVE, DEFAULT_DELETE_CACHES_ON_REMOVE
+            ),
             OPT_CONTRIBUTOR_MODE: _get(OPT_CONTRIBUTOR_MODE, DEFAULT_CONTRIBUTOR_MODE),
         }
         if (
@@ -3647,6 +3653,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
         )
         _register(vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION), bool)
+        _register(vol.Optional(OPT_DELETE_CACHES_ON_REMOVE), bool)
         if OPT_MOVEMENT_THRESHOLD is not None:
             _register(
                 vol.Optional(OPT_MOVEMENT_THRESHOLD),

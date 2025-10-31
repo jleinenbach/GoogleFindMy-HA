@@ -141,11 +141,13 @@
           "google_home_filter_keywords": "Parole chiave del filtro (separate da virgole)",
           "enable_stats_entities": "Crea entità statistiche",
           "map_view_token_expiration": "Abilita scadenza dei token della vista mappa",
+          "delete_caches_on_remove": "Elimina le cache locali alla rimozione",
           "contributor_mode": "Modalità di contributo posizione",
           "subentry": "Feature group"
         },
         "data_description": {
           "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono.",
+          "delete_caches_on_remove": "Quando la voce viene rimossa, elimina il suo Store locale (token/cache).",
           "contributor_mode": "\"high_traffic\" mantiene la modalità aggregata predefinita di Google. \"in_all_areas\" abilita segnalazioni partecipative più rapide.",
           "subentry": "Salva queste opzioni nel gruppo di funzionalità selezionato. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per esempi pratici."
         }
@@ -441,6 +443,10 @@
     "auth_expired": {
       "title": "È necessaria una nuova autenticazione",
       "description": "L’autenticazione di Google Find My Device non è più valida o è scaduta.\n\n**Voce:** {entry_title}\n**Account:** {email}\n\nNella scheda dell’integrazione, scegli **Riconfigura** per riautenticarti. Se di recente hai cambiato la password di Google o hai revocato dei token, dovrai accedere di nuovo qui per ripristinare il funzionamento."
+    },
+    "cache_purged": {
+      "title": "Cache locali rimosse",
+      "description": "Le credenziali locali e i dati memorizzati nella cache per **{entry_title}** sono stati eliminati quando la voce dell’integrazione è stata rimossa. Riconfigura l’integrazione se prevedi di aggiungere nuovamente l’account."
     },
     "multiple_config_entries": {
       "title": "Rilevate più voci di configurazione",
