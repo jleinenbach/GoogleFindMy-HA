@@ -67,6 +67,7 @@
       "choose_one": "Proporciona exactamente un método de credenciales.",
       "required": "Este campo es obligatorio.",
       "unknown": "Error inesperado.",
+      "import_failed": "No se pudieron cargar los asistentes de autenticación. Instala los requisitos de Selenium y ChromeDriver e inténtalo de nuevo.",
       "email_mismatch": "Las credenciales proporcionadas pertenecen a otra cuenta de Google. Para añadir esa cuenta, crea una integración nueva; la reautenticación no puede cambiar la cuenta de esta entrada."
     },
     "abort": {
@@ -76,7 +77,8 @@
       "invalid_discovery_info": "La carga de descubrimiento no es válida. Verifica las credenciales y vuelve a intentarlo.",
       "reauth_successful": "Reautenticación correcta.",
       "migration_complete_confirmed": "Migración completada.",
-      "migration_failed": "Migración fallida. Elimina la integración y vuelve a agregarla."
+      "migration_failed": "Migración fallida. Elimina la integración y vuelve a agregarla.",
+      "migration_successful": "Migración completada."
     },
     "progress": {
       "discovery_secrets_new": "Se detectó Auth/secrets.json para {email}",

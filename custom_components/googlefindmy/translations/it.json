@@ -67,6 +67,7 @@
       "choose_one": "Fornisci esattamente un solo metodo di autenticazione.",
       "required": "Questo campo è obbligatorio.",
       "unknown": "Errore imprevisto.",
+      "import_failed": "Impossibile caricare gli helper di autenticazione. Installa i requisiti Selenium e ChromeDriver e riprova.",
       "email_mismatch": "Le credenziali fornite appartengono a un altro account Google. Per aggiungere quell’account, crea una nuova integrazione; la riautenticazione non può cambiare l’account di questa voce."
     },
     "abort": {
@@ -76,7 +77,8 @@
       "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",
       "reauth_successful": "Riautenticazione riuscita.",
       "migration_complete_confirmed": "Migrazione completata.",
-      "migration_failed": "Migrazione non riuscita. Rimuovi l'integrazione e aggiungila di nuovo."
+      "migration_failed": "Migrazione non riuscita. Rimuovi l'integrazione e aggiungila di nuovo.",
+      "migration_successful": "Migrazione completata."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json rilevato per {email}",

@@ -1238,10 +1238,11 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
     async def async_step_migrate(self, entry: ConfigEntry) -> FlowResult:
         """Migrate legacy config entries to the subentry-aware structure."""
 
-        _LOGGER.debug(
-            "Starting config entry migration for %s (version=%s)",
+        _LOGGER.info(
+            "Starting migration for %s (version=%s → %s)",
             entry.entry_id,
             entry.version,
+            self.VERSION,
         )
 
         setattr(self, "config_entry", entry)
@@ -1252,34 +1253,48 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             setattr(self, "context", context)
         context.setdefault("entry_id", entry.entry_id)
 
-        normalized_email = normalize_email_or_default(entry.data.get(CONF_GOOGLE_EMAIL))
         placeholders = dict(context.get("title_placeholders", {}) or {})
-        if normalized_email:
-            placeholders["email"] = normalized_email
+        current_email = normalize_email_or_default(entry.data.get(CONF_GOOGLE_EMAIL))
+        if current_email:
+            placeholders["email"] = current_email
         if placeholders:
             context["title_placeholders"] = placeholders
 
         if entry.version >= self.VERSION:
-            _LOGGER.debug("Entry %s already matches target version", entry.entry_id)
+            _LOGGER.debug("Entry %s already at target version", entry.entry_id)
             return await self.async_step_migrate_complete()
 
-        old_data = dict(getattr(entry, "data", {}) or {})
-        old_options = dict(getattr(entry, "options", {}) or {})
+        old_data = dict(entry.data or {})
+        old_options = dict(entry.options or {})
 
         options_payload: dict[str, Any] = dict(DEFAULT_OPTIONS)
-        managed_option_keys: set[str] = (
-            set(DEFAULT_OPTIONS.keys()) | set(MIGRATE_DATA_KEYS_TO_OPTIONS)
-        )
-
         for key, value in old_options.items():
             if value is not None:
                 options_payload[key] = value
 
+        managed_option_keys = set(MIGRATE_DATA_KEYS_TO_OPTIONS)
+        managed_option_keys.update(
+            key
+            for key in (
+                OPT_LOCATION_POLL_INTERVAL,
+                OPT_DEVICE_POLL_DELAY,
+                OPT_MIN_ACCURACY_THRESHOLD,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION,
+                OPT_CONTRIBUTOR_MODE,
+                OPT_ALLOW_HISTORY_FALLBACK,
+                OPT_MIN_POLL_INTERVAL,
+                OPT_MOVEMENT_THRESHOLD,
+                OPT_GOOGLE_HOME_FILTER_ENABLED,
+                OPT_GOOGLE_HOME_FILTER_KEYWORDS,
+                OPT_ENABLE_STATS_ENTITIES,
+                OPT_IGNORED_DEVICES,
+            )
+            if key is not None
+        )
+
         for key in managed_option_keys:
-            if key in old_data:
-                value = old_data[key]
-                if value is not None:
-                    options_payload[key] = value
+            if key in old_data and old_data[key] is not None:
+                options_payload[key] = old_data[key]
 
         if OPT_IGNORED_DEVICES in options_payload:
             ignored_mapping, _changed = coerce_ignored_mapping(
@@ -1289,54 +1304,32 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
 
         options_payload[OPT_OPTIONS_SCHEMA_VERSION] = 2
 
-        defaults: dict[str, Any] = {
-            OPT_LOCATION_POLL_INTERVAL: DEFAULT_OPTIONS.get(
-                OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
-            ),
-            OPT_DEVICE_POLL_DELAY: DEFAULT_OPTIONS.get(
-                OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY
-            ),
-            OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_OPTIONS.get(
-                OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
-            ),
-            OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_OPTIONS.get(
-                OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-            ),
+        defaults = dict(DEFAULT_OPTIONS)
+
+        data_keys_to_keep = (
+            DATA_AUTH_METHOD,
+            CONF_OAUTH_TOKEN,
+            CONF_GOOGLE_EMAIL,
+            DATA_SECRET_BUNDLE,
+            DATA_AAS_TOKEN,
+        )
+        new_data: dict[str, Any] = {
+            key: old_data[key]
+            for key in data_keys_to_keep
+            if key in old_data and old_data[key] is not None
         }
 
-        for key in (
-            OPT_MOVEMENT_THRESHOLD,
-            OPT_GOOGLE_HOME_FILTER_ENABLED,
-            OPT_GOOGLE_HOME_FILTER_KEYWORDS,
-            OPT_ENABLE_STATS_ENTITIES,
-            OPT_ALLOW_HISTORY_FALLBACK,
-            OPT_MIN_POLL_INTERVAL,
-            OPT_CONTRIBUTOR_MODE,
+        normalized_email = normalize_email_or_default(new_data.get(CONF_GOOGLE_EMAIL))
+        if not normalized_email and isinstance(
+            new_data.get(DATA_SECRET_BUNDLE), CollMapping
         ):
-            if key is None:
-                continue
-            if key in DEFAULT_OPTIONS:
-                defaults[key] = DEFAULT_OPTIONS[key]
-
-        option_keys = set(MIGRATE_DATA_KEYS_TO_OPTIONS)
-        option_keys.add(OPT_OPTIONS_SCHEMA_VERSION)
-
-        new_data: dict[str, Any] = {}
-        for key, value in old_data.items():
-            if key in option_keys:
-                continue
-            if value is not None:
-                new_data[key] = value
-
-        email_candidate = normalize_email_or_default(new_data.get(CONF_GOOGLE_EMAIL))
-        if not email_candidate and DATA_SECRET_BUNDLE in new_data:
-            secrets_bundle = new_data.get(DATA_SECRET_BUNDLE)
-            if isinstance(secrets_bundle, CollMapping):
-                email_candidate = normalize_email_or_default(
-                    secrets_bundle.get(CONF_GOOGLE_EMAIL)
+            normalized_email = normalize_email_or_default(
+                cast(CollMapping[str, Any], new_data[DATA_SECRET_BUNDLE]).get(
+                    CONF_GOOGLE_EMAIL
                 )
-        if email_candidate:
-            new_data[CONF_GOOGLE_EMAIL] = email_candidate
+            )
+        if normalized_email:
+            new_data[CONF_GOOGLE_EMAIL] = normalized_email
 
         if not isinstance(getattr(entry, "subentries", None), CollMapping):
             setattr(entry, "subentries", {})
@@ -1361,93 +1354,67 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
-                "Migration failed while syncing subentries for %s: %s",
+                "Migration failed: unable to create subentries for %s: %s",
                 entry.entry_id,
                 err,
             )
             return self.async_abort(reason="migration_failed")
 
-        update_kwargs: dict[str, Any] = {
-            "data": new_data,
-            "options": options_payload,
-            "version": self.VERSION,
-        }
-
         update_manager = getattr(self.hass, "config_entries", None)
         if update_manager is not None:
             try:
-                update_manager.async_update_entry(entry, **update_kwargs)
+                update_manager.async_update_entry(
+                    entry,
+                    data=new_data,
+                    options=options_payload,
+                    version=self.VERSION,
+                )
             except TypeError:
-                update_kwargs.pop("version", None)
-                try:
-                    update_manager.async_update_entry(entry, **update_kwargs)
-                except TypeError:
-                    update_manager.async_update_entry(entry, data=new_data)
-                    setattr(entry, "options", options_payload)
-                else:
-                    setattr(entry, "options", options_payload)
-            else:
-                setattr(entry, "options", options_payload)
+                update_manager.async_update_entry(
+                    entry,
+                    data=new_data,
+                    options=options_payload,
+                )
 
         setattr(entry, "data", new_data)
+        setattr(entry, "options", options_payload)
         setattr(entry, "version", self.VERSION)
 
-        if email_candidate:
-            placeholders = dict(context.get("title_placeholders", {}) or {})
-            placeholders["email"] = email_candidate
-            context["title_placeholders"] = placeholders
+        updated_placeholders = dict(context.get("title_placeholders", {}) or {})
+        if normalized_email:
+            updated_placeholders["email"] = normalized_email
+        elif entry.title:
+            updated_placeholders.setdefault("email", str(entry.title))
+        elif entry.entry_id:
+            updated_placeholders.setdefault("email", entry.entry_id)
+        if updated_placeholders:
+            context["title_placeholders"] = updated_placeholders
 
-        _LOGGER.info("Config entry %s migrated to version %s", entry.entry_id, self.VERSION)
-        return await self.async_step_migrate_complete()
+        _LOGGER.info(
+            "Config entry %s migrated to version %s", entry.entry_id, self.VERSION
+        )
 
-    async def async_step_migrate_complete(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Display a confirmation screen once migration completes."""
-
-        if user_input is not None:
-            return await self._async_resolve_flow_result(
-                cast(
-                    FlowResult | Awaitable[FlowResult],
-                    self.async_abort(reason="migration_complete_confirmed"),
-                )
-            )
-
-        context_obj = getattr(self, "context", None)
-        placeholders: dict[str, str] = {}
-        if isinstance(context_obj, dict):
-            raw_placeholders = context_obj.get("title_placeholders", {}) or {}
-            if isinstance(raw_placeholders, Mapping):
-                placeholders = {
-                    key: str(value)
-                    for key, value in raw_placeholders.items()
-                    if isinstance(key, str) and value is not None
-                }
-
-        if "email" not in placeholders:
-            candidate_entry = getattr(self, "config_entry", None)
-            email_placeholder: str | None = None
-            if isinstance(candidate_entry, ConfigEntry):
-                email_placeholder = normalize_email_or_default(
-                    candidate_entry.data.get(CONF_GOOGLE_EMAIL)
-                )
-                if not email_placeholder:
-                    email_placeholder = normalize_email_or_default(
-                        candidate_entry.title if isinstance(candidate_entry.title, str) else None
-                    )
-                if not email_placeholder:
-                    email_placeholder = candidate_entry.entry_id
-            if email_placeholder:
-                placeholders["email"] = email_placeholder
+        description_placeholders = dict(updated_placeholders)
 
         return await self._async_resolve_flow_result(
             cast(
                 FlowResult | Awaitable[FlowResult],
                 self.async_show_form(
                     step_id="migrate_complete",
-                    data_schema=vol.Schema({}),
-                    description_placeholders=placeholders,
+                    description_placeholders=description_placeholders or None,
                 ),
+            )
+        )
+
+    async def async_step_migrate_complete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Finish the migration flow after the confirmation screen."""
+
+        return await self._async_resolve_flow_result(
+            cast(
+                FlowResult | Awaitable[FlowResult],
+                self.async_abort(reason="migration_successful"),
             )
         )
 
@@ -1740,15 +1707,23 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     await self.async_set_unique_id(uid)
                     self._abort_if_unique_id_configured()
 
+                chosen: str | None = None
                 try:
                     chosen = await async_pick_working_token(
                         email,
                         cands,
                         secrets_bundle=parsed_secrets,
                     )
-                except DependencyNotReady:
-                    return await self.async_abort(reason="dependency_not_ready")
-                if not chosen:
+                except DependencyNotReady as err:
+                    _LOGGER.error(
+                        "Secrets step: optional authentication helpers missing: %s",
+                        err,
+                    )
+                    errors.setdefault("base", "import_failed")
+
+                if errors:
+                    pass
+                elif not chosen:
                     _LOGGER.warning(
                         "Token validation failed for %s. No working token found among candidates (%s).",
                         _mask_email_for_logs(email),
@@ -1808,11 +1783,19 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                     await self.async_set_unique_id(uid)
                     self._abort_if_unique_id_configured()
 
+                chosen: str | None = None
                 try:
                     chosen = await async_pick_working_token(email, cands)
-                except DependencyNotReady:
-                    return await self.async_abort(reason="dependency_not_ready")
-                if not chosen:
+                except DependencyNotReady as err:
+                    _LOGGER.error(
+                        "Manual token step: optional authentication helpers missing: %s",
+                        err,
+                    )
+                    errors.setdefault("base", "import_failed")
+
+                if errors:
+                    pass
+                elif not chosen:
                     _LOGGER.warning(
                         "Token validation failed for %s. No working token found among candidates (%s).",
                         _mask_email_for_logs(email),
@@ -1879,8 +1862,12 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                         (d.get("name") or d.get("id") or "", d.get("id") or "")
                         for d in devices
                     ]
-            except DependencyNotReady:
-                return await self.async_abort(reason="dependency_not_ready")
+            except DependencyNotReady as err:
+                _LOGGER.error(
+                    "Device selection probe skipped: optional authentication helpers missing: %s",
+                    err,
+                )
+                errors.setdefault("base", "import_failed")
             except Exception as err:  # noqa: BLE001
                 if not _is_multi_entry_guard_error(err):
                     key = _map_api_exc_to_error_key(err)
@@ -2198,15 +2185,21 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                 try:
                     if method == "manual":
                         token = str(payload)
+                        chosen: str | None = None
                         try:
                             chosen = await async_pick_working_token(
                                 fixed_email, [("manual", token)]
                             )
-                        except DependencyNotReady:
-                            return await self.async_abort(
-                                reason="dependency_not_ready"
+                        except DependencyNotReady as err:
+                            _LOGGER.error(
+                                "Reauth manual token step: optional authentication helpers missing: %s",
+                                err,
                             )
-                        if not chosen:
+                            errors.setdefault("base", "import_failed")
+
+                        if errors:
+                            pass
+                        elif not chosen:
                             _LOGGER.warning(
                                 "Token validation failed for %s. No working token found among candidates (%s).",
                                 _mask_email_for_logs(fixed_email),
@@ -2257,17 +2250,23 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                                     return self.async_abort(reason="already_configured")
                                 errors["base"] = "email_mismatch"
                             else:
+                                chosen: str | None = None
                                 try:
                                     chosen = await async_pick_working_token(
                                         fixed_email,
                                         cands,
                                         secrets_bundle=parsed,
                                     )
-                                except DependencyNotReady:
-                                    return await self.async_abort(
-                                        reason="dependency_not_ready"
+                                except DependencyNotReady as err:
+                                    _LOGGER.error(
+                                        "Reauth secrets step: optional authentication helpers missing: %s",
+                                        err,
                                     )
-                                if not chosen:
+                                    errors.setdefault("base", "import_failed")
+
+                                if errors:
+                                    pass
+                                elif not chosen:
                                     _LOGGER.warning(
                                         "Token validation failed for %s. No working token found among candidates (%s).",
                                         _mask_email_for_logs(fixed_email),
@@ -3687,15 +3686,21 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                             ):
                                 errors["base"] = "invalid_token"
                             else:
+                                chosen: str | None = None
                                 try:
                                     chosen = await async_pick_working_token(
                                         email, [("manual", token)]
                                     )
-                                except DependencyNotReady:
-                                    return await self.async_abort(
-                                        reason="dependency_not_ready"
+                                except DependencyNotReady as err:
+                                    _LOGGER.error(
+                                        "Options manual token step: optional authentication helpers missing: %s",
+                                        err,
                                     )
-                                if not chosen:
+                                    errors.setdefault("base", "import_failed")
+
+                                if errors:
+                                    pass
+                                elif not chosen:
                                     _LOGGER.warning(
                                         "Token validation failed for %s. No working token found among candidates (%s).",
                                         _mask_email_for_logs(email),
@@ -3729,17 +3734,23 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                 if not cands:
                                     errors["base"] = "invalid_token"
                                 else:
+                                    chosen: str | None = None
                                     try:
                                         chosen = await async_pick_working_token(
                                             email,
                                             cands,
                                             secrets_bundle=parsed,
                                         )
-                                    except DependencyNotReady:
-                                        return await self.async_abort(
-                                            reason="dependency_not_ready"
+                                    except DependencyNotReady as err:
+                                        _LOGGER.error(
+                                            "Options secrets step: optional authentication helpers missing: %s",
+                                            err,
                                         )
-                                    if not chosen:
+                                        errors.setdefault("base", "import_failed")
+
+                                    if errors:
+                                        pass
+                                    elif not chosen:
                                         _LOGGER.warning(
                                             "Token validation failed for %s. No working token found among candidates (%s).",
                                             _mask_email_for_logs(email),

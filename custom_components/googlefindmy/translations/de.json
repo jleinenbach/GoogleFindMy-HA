@@ -67,6 +67,7 @@
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
       "unknown": "Unerwarteter Fehler.",
+      "import_failed": "Authentifizierungs-Hilfsprogramme konnten nicht geladen werden. Installiere die Selenium- und ChromeDriver-Anforderungen und versuche es erneut.",
       "email_mismatch": "Die bereitgestellten Anmeldedaten gehören zu einem anderen Google-Konto. Um dieses Konto hinzuzufügen, erstelle eine neue Integration; eine erneute Authentifizierung kann das Konto für diesen Eintrag nicht ändern."
     },
     "abort": {
@@ -76,7 +77,8 @@
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",
       "reauth_successful": "Erneute Authentifizierung erfolgreich.",
       "migration_complete_confirmed": "Migration abgeschlossen.",
-      "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu."
+      "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu.",
+      "migration_successful": "Migration abgeschlossen."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json für {email} erkannt",

@@ -1492,78 +1492,14 @@ async def _async_soft_migrate_data_to_options(
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Handle config entry migrations for legacy Google Find My entries."""
+    """Signal Home Assistant that this entry requires a config-flow migration."""
 
-    raw_email, normalized_email = _resolve_entry_email(entry)
-
-    new_data = dict(entry.data)
-    if raw_email and new_data.get(CONF_GOOGLE_EMAIL) != raw_email:
-        new_data[CONF_GOOGLE_EMAIL] = raw_email
-
-    update_kwargs: dict[str, Any] = {}
-    if new_data != entry.data:
-        update_kwargs["data"] = new_data
-
-    if raw_email and entry.title != raw_email:
-        update_kwargs["title"] = raw_email
-
-    version_update_required = entry.version != CONFIG_ENTRY_VERSION
-
-    conflict: ConfigEntry | None = None
-    others = [
-        candidate
-        for candidate in hass.config_entries.async_entries(DOMAIN)
-        if candidate.entry_id != entry.entry_id
-    ]
-
-    for other in others:
-        other_normalized = _extract_email_from_entry(other)
-        if normalized_email and other_normalized == normalized_email:
-            conflict = other
-            break
-
-    unique_id = unique_account_id(normalized_email)
-    current_unique_id = getattr(entry, "unique_id", None)
-    if unique_id and current_unique_id != unique_id and not conflict:
-        update_kwargs["unique_id"] = unique_id
-
-    if conflict and normalized_email:
-        _log_duplicate_and_raise_repair_issue(
-            hass,
-            entry,
-            normalized_email,
-            cause="pre_migration_duplicate",
-            conflicts=[conflict],
-        )
-
-    if version_update_required:
-        update_kwargs["version"] = CONFIG_ENTRY_VERSION
-
-    if update_kwargs:
-        if conflict and "unique_id" in update_kwargs:
-            update_kwargs.pop("unique_id", None)
-
-        try:
-            hass.config_entries.async_update_entry(entry, **update_kwargs)
-        except ValueError:
-            if normalized_email:
-                _log_duplicate_and_raise_repair_issue(
-                    hass,
-                    entry,
-                    normalized_email,
-                    cause="unique_id_conflict",
-                )
-            update_kwargs.pop("unique_id", None)
-            if update_kwargs:
-                hass.config_entries.async_update_entry(entry, **update_kwargs)
-
-    if version_update_required:
-        entry.version = CONFIG_ENTRY_VERSION
-
-    if not conflict:
-        _clear_duplicate_account_issue(hass, entry)
-
-    await _async_soft_migrate_data_to_options(hass, entry)
+    _LOGGER.info(
+        "Config entry %s flagged for migration (version=%s → %s)",
+        entry.entry_id,
+        entry.version,
+        CONFIG_ENTRY_VERSION,
+    )
 
     return True
 
