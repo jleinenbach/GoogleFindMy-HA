@@ -110,13 +110,6 @@ except AttributeError as err:  # pragma: no cover - configuration critical
 
 SOURCE_RECONFIGURE = getattr(config_entries, "SOURCE_RECONFIGURE", "reconfigure")
 
-SOURCE_DISCOVERY_UPDATE = getattr(config_entries, "SOURCE_DISCOVERY_UPDATE", None)
-if SOURCE_DISCOVERY_UPDATE is None:  # pragma: no cover - HA 2025.10 compatibility
-    _LOGGER.debug(
-        "Optional symbol SOURCE_DISCOVERY_UPDATE not available; falling back to string "
-        "source 'discovery_update_info'",
-    )
-
 DiscoveryKey: type[Any]
 try:  # pragma: no cover - runtime optional dependency
     DiscoveryKey = cast(type[Any], getattr(config_entries, "DiscoveryKey"))
@@ -321,7 +314,7 @@ else:
     selector = cast(Callable[[Mapping[str, Any]], Any], _selector)
 
 # Standard discovery update info source exposed for helper-triggered updates.
-SOURCE_DISCOVERY_UPDATE_INFO = "discovery_update_info"
+DISCOVERY_UPDATE_SOURCE = "discovery_update_info"
 LEGACY_DISCOVERY_UPDATE_SOURCE = "discovery_update"
 
 # --- Soft optional imports for additional options (keep the flow robust) ----------
@@ -379,10 +372,7 @@ def _is_discovery_update_info(
         return False
 
     source = context.get("source")
-    if SOURCE_DISCOVERY_UPDATE is not None and source == SOURCE_DISCOVERY_UPDATE:
-        return True
-
-    return source in {SOURCE_DISCOVERY_UPDATE_INFO, LEGACY_DISCOVERY_UPDATE_SOURCE}
+    return source in {DISCOVERY_UPDATE_SOURCE, LEGACY_DISCOVERY_UPDATE_SOURCE}
 
 
 def _mask_email_for_logs(email: str | None) -> str:
@@ -1669,8 +1659,15 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             payload_keys = sorted(str(key) for key in discovery_info.keys())
 
         _LOGGER.debug(
-            "async_step_discovery invoked (context_source=%s, payload_keys=%s)",
+            "Flow entry: step=%s, context_source=%s, payload_keys=%s",
+            "discovery",
             context_source,
+            payload_keys,
+        )
+        _LOGGER.debug(
+            "discovery: context_source=%s, pending_confirm=%s, payload_keys=%s",
+            context_source,
+            getattr(self, "_discovery_confirm_pending", False),
             payload_keys,
         )
 
@@ -1776,7 +1773,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             payload_keys = sorted(str(key) for key in discovery_info.keys())
 
         _LOGGER.debug(
-            "async_step_discovery_update_info invoked (context_source=%s, payload_keys=%s)",
+            "Flow entry: step=%s, context_source=%s, payload_keys=%s",
+            "discovery_update_info",
             context_source,
             payload_keys,
         )
@@ -1796,10 +1794,15 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         await self.async_set_unique_id(normalized.unique_id, raise_on_progress=False)
 
         existing_entry = _find_entry_by_email(self.hass, normalized.email)
+        _LOGGER.debug(
+            "discovery_update_info: normalized.email=%s, unique_id=%s, has_entry=%s",
+            _mask_email_for_logs(normalized.email),
+            normalized.unique_id,
+            existing_entry is not None,
+        )
         if existing_entry is None:
             _LOGGER.info(
-                "Discovery update-info payload without entry; rerouting to discovery "
-                "(email=%s)",
+                "No existing entry for update-info; rerouting to discovery (email=%s)",
                 _mask_email_for_logs(normalized.email),
             )
 
@@ -4043,3 +4046,9 @@ class CannotConnect(HomeAssistantErrorBase):
 
 class InvalidAuth(HomeAssistantErrorBase):
     """Error to indicate invalid authentication was provided."""
+
+
+_LOGGER.debug(
+    "ConfigFlow module import OK; registered flow for domain=%s",
+    DOMAIN,
+)

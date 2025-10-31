@@ -198,6 +198,12 @@ The integration respects Google's rate limits by:
 - Sequential device polling (one device at a time)
 - Configurable delays between requests
 - Minimum poll interval enforcement
+
+### "Invalid handler specified" when adding the integration
+- Home Assistant shows this error when the config flow fails to register. Double-check that `custom_components/googlefindmy/manifest.json` sets `"domain": "googlefindmy"` and `"config_flow": true`.
+- Inspect `custom_components/googlefindmy/config_flow.py` to ensure the `ConfigFlow` class inherits from `config_entries.ConfigFlow` and exposes `domain = DOMAIN` on the class body.
+- Review the Home Assistant logs for the new debug entries (`ConfigFlow module import OK; registered flow for domain=googlefindmy`) to confirm the module imported correctly.
+- Run `pytest tests/test_config_flow_registration.py` to exercise the smoke tests that validate the handler registration and user-step initialization before retrying the flow.
 - Automatic retry with exponential backoff
 
 ### Running pip-audit behind TLS inspection

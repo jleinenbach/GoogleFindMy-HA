@@ -433,7 +433,7 @@ async def test_async_step_discovery_update_info_reroutes_and_restores_context(
     flow = config_flow.ConfigFlow()
     flow.hass = object()  # type: ignore[assignment]
     original_context: dict[str, Any] = {
-        "source": config_flow.SOURCE_DISCOVERY_UPDATE_INFO,
+        "source": config_flow.DISCOVERY_UPDATE_SOURCE,
         "marker": "preserve",
     }
     flow.context = original_context
@@ -468,7 +468,7 @@ async def test_async_step_discovery_update_info_reroutes_and_restores_context(
     result = await flow.async_step_discovery_update_info(payload)
     assert result == {"type": "abort", "reason": "handled"}
     assert calls == {"discovery": 1}
-    assert flow.context.get("source") == config_flow.SOURCE_DISCOVERY_UPDATE_INFO
+    assert flow.context.get("source") == config_flow.DISCOVERY_UPDATE_SOURCE
     assert flow.context.get("marker") == "preserve"
     assert flow.context == original_context
 
@@ -595,7 +595,7 @@ def test_async_step_discovery_routes_update_info_context() -> None:
 
     flow = config_flow.ConfigFlow()
     flow.hass = object()  # type: ignore[assignment]
-    flow.context = {"source": config_flow.SOURCE_DISCOVERY_UPDATE_INFO}
+    flow.context = {"source": config_flow.DISCOVERY_UPDATE_SOURCE}
 
     captured: dict[str, Any] = {}
 
