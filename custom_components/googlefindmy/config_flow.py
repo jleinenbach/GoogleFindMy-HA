@@ -1638,6 +1638,12 @@ class ConfigFlow(
     ) -> dict[str, Callable[[], ConfigSubentryFlow]]:
         """Return mapping of supported subentry types to their flow handlers."""
 
+        # Home Assistant's config entry manager (2025.x and later) invokes the
+        # mapping values as ``factory()`` when the user presses an "Add"
+        # subentry button. Returning bare handler classes would therefore
+        # reintroduce the previous ``TypeError: missing 'config_entry'`` that
+        # surfaced before these factories were added.
+
         def _factory(
             flow_cls: type[ConfigSubentryFlow],
         ) -> Callable[[], ConfigSubentryFlow]:
@@ -3053,15 +3059,18 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
         if subentry is not None and not hasattr(self, "subentry"):
             setattr(self, "subentry", subentry)
 
-        if config_entry is not None:
-            if not hasattr(self, "config_entry"):
-                setattr(self, "config_entry", config_entry)
-            self.config_entry = cast(ConfigEntry, getattr(self, "config_entry"))
-            if self.config_entry is None:  # pragma: no cover - defensive guard
-                raise RuntimeError(
-                    f"{type(self).__name__} missing 'config_entry' after initialization; "
-                    "factory/constructor signature mismatch"
-                )
+        existing_entry = getattr(self, "config_entry", None)
+        if existing_entry is None and config_entry is not None:
+            setattr(self, "config_entry", config_entry)
+            existing_entry = config_entry
+
+        if existing_entry is None:
+            raise RuntimeError(
+                f"{type(self).__name__} missing 'config_entry' after initialization; "
+                "factory/constructor signature mismatch"
+            )
+
+        self.config_entry = cast(ConfigEntry, existing_entry)
 
     @property
     def _entry_id(self) -> str:
