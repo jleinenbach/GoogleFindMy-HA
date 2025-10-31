@@ -1849,8 +1849,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                         cands,
                         secrets_bundle=parsed_secrets,
                     )
-                except (DependencyNotReady, ImportError) as err:
-                    _register_dependency_error(errors, err)
+                except (DependencyNotReady, ImportError) as exc:
+                    _register_dependency_error(errors, exc)
                 else:
                     if not chosen:
                         _LOGGER.warning(
@@ -1916,8 +1916,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
 
                 try:
                     chosen = await async_pick_working_token(email, cands)
-                except (DependencyNotReady, ImportError) as err:
-                    _register_dependency_error(errors, err)
+                except (DependencyNotReady, ImportError) as exc:
+                    _register_dependency_error(errors, exc)
                 else:
                     if not chosen:
                         _LOGGER.warning(
@@ -1986,8 +1986,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                         (d.get("name") or d.get("id") or "", d.get("id") or "")
                         for d in devices
                     ]
-            except (DependencyNotReady, ImportError) as err:
-                _register_dependency_error(errors, err)
+            except (DependencyNotReady, ImportError) as exc:
+                _register_dependency_error(errors, exc)
             except Exception as err:  # noqa: BLE001
                 if not _is_multi_entry_guard_error(err):
                     key = _map_api_exc_to_error_key(err)
@@ -2309,8 +2309,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                             chosen = await async_pick_working_token(
                                 fixed_email, [("manual", token)]
                             )
-                        except (DependencyNotReady, ImportError) as err:
-                            _register_dependency_error(errors, err)
+                        except (DependencyNotReady, ImportError) as exc:
+                            _register_dependency_error(errors, exc)
                         else:
                             if not chosen:
                                 _LOGGER.warning(
@@ -2369,8 +2369,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                                         cands,
                                         secrets_bundle=parsed,
                                     )
-                                except (DependencyNotReady, ImportError) as err:
-                                    _register_dependency_error(errors, err)
+                                except (DependencyNotReady, ImportError) as exc:
+                                    _register_dependency_error(errors, exc)
                                 else:
                                     if not chosen:
                                         _LOGGER.warning(
@@ -3796,8 +3796,8 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                     chosen = await async_pick_working_token(
                                         email, [("manual", token)]
                                     )
-                                except (DependencyNotReady, ImportError) as err:
-                                    _register_dependency_error(errors, err)
+                                except (DependencyNotReady, ImportError) as exc:
+                                    _register_dependency_error(errors, exc)
                                 else:
                                     if not chosen:
                                         _LOGGER.warning(
@@ -3839,8 +3839,8 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                             cands,
                                             secrets_bundle=parsed,
                                         )
-                                    except (DependencyNotReady, ImportError) as err:
-                                        _register_dependency_error(errors, err)
+                                    except (DependencyNotReady, ImportError) as exc:
+                                        _register_dependency_error(errors, exc)
                                     else:
                                         if not chosen:
                                             _LOGGER.warning(

@@ -42,6 +42,10 @@ closely enough for regression coverage.
 
 > **Note:** Migration shim tests should only verify that the shim defers to the
 > config flow; leave flow internals to the dedicated config flow test modules.
+>
+> When updating `tests/test_config_entry_migration.py`, assert behaviors such as
+> the shim returning `True`, forwarding calls to the flow manager, or logging the
+> deferral—avoid duplicating config flow migration assertions here.
 
 `tests/test_config_entry_migration.py` must only assert that
 `custom_components.googlefindmy.__init__.async_migrate_entry` defers control to
