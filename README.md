@@ -201,9 +201,21 @@ The integration respects Google's rate limits by:
 
 ### "Invalid handler specified" when adding the integration
 - Home Assistant shows this error when the config flow fails to register. Double-check that `custom_components/googlefindmy/manifest.json` sets `"domain": "googlefindmy"` and `"config_flow": true`.
-- Inspect `custom_components/googlefindmy/config_flow.py` to ensure the `ConfigFlow` class inherits from `config_entries.ConfigFlow` and exposes `domain = DOMAIN` on the class body.
-- Review the Home Assistant logs for the new debug entries (`ConfigFlow module import OK; registered flow for domain=googlefindmy`) to confirm the module imported correctly.
-- Run `pytest tests/test_config_flow_registration.py` to exercise the smoke tests that validate the handler registration and user-step initialization before retrying the flow.
+- Inspect `custom_components/googlefindmy/config_flow.py` to ensure the `ConfigFlow` class inherits from `config_entries.ConfigFlow` and declares the domain via `class ConfigFlow(..., domain=DOMAIN)` (or `domain = DOMAIN`).
+- Enable targeted debug logging while reproducing the issue to confirm the handler lifecycle:
+  ```yaml
+  logger:
+    default: info
+    logs:
+      homeassistant.config_entries: debug
+      homeassistant.data_entry_flow: debug
+      homeassistant.loader: debug
+      homeassistant.setup: debug
+      custom_components.googlefindmy: debug
+  ```
+  You can apply the same levels temporarily via **Settings → System → Logs → Configure** or by calling the `logger.set_level` service.
+- Review the Home Assistant logs for the integration's import-time entry (`ConfigFlow import OK; class=ConfigFlow, class.domain=googlefindmy, const.DOMAIN=googlefindmy, class_id=...`) followed by the registry verification messages to ensure the handler is present in `HANDLERS`.
+- Run `pytest tests/test_config_flow_basic.py -q` to exercise the smoke tests that validate the handler registration and user-step initialization before retrying the flow.
 - Automatic retry with exponential backoff
 
 ### Running pip-audit behind TLS inspection

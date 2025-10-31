@@ -198,7 +198,21 @@ def _stub_homeassistant() -> None:
         VERSION = 1
 
         def __init_subclass__(cls, **kwargs):  # type: ignore[override]
+            domain = kwargs.pop("domain", None)
             super().__init_subclass__()
+
+            if kwargs:
+                for key, value in kwargs.items():
+                    setattr(cls, key, value)
+
+            if domain is not None:
+                setattr(cls, "domain", domain)
+
+            handlers = getattr(config_entries, "HANDLERS", None)
+            if isinstance(handlers, dict):
+                registry_domain = getattr(cls, "domain", None)
+                if isinstance(registry_domain, str):
+                    handlers[registry_domain] = cls
 
         def __init__(self) -> None:
             self.context: dict[str, object] = {}
@@ -386,6 +400,7 @@ def _stub_homeassistant() -> None:
     config_entries.ConfigEntry = ConfigEntry
     config_entries.ConfigEntryState = ConfigEntryState
     config_entries.ConfigEntryAuthFailed = ConfigEntryAuthFailed
+    config_entries.HANDLERS = {}
     config_entries.ConfigSubentry = ConfigSubentry
     config_entries.ConfigSubentryFlow = ConfigSubentryFlow
     config_entries.ConfigFlow = ConfigFlow
