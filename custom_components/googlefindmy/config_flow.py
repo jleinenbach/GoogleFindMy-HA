@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, T
 
 if TYPE_CHECKING:
     from .api import GoogleFindMyAPI
+
 from .const import (
     # Core domain & credential keys
     DOMAIN,
@@ -1250,6 +1251,13 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
     async def async_step_migrate(self, entry: ConfigEntry) -> FlowResult:
         """Migrate legacy config entries to the subentry-aware structure."""
 
+        from . import (
+            _clear_duplicate_account_issue,
+            _extract_email_from_entry,
+            _log_duplicate_and_raise_repair_issue,
+            _resolve_entry_email,
+        )
+
         _LOGGER.info(
             "Starting migration for %s from version %s to %s",
             entry.entry_id,
@@ -1274,11 +1282,10 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
 
         if entry.version >= self.VERSION:
             _LOGGER.debug(
-                "Config entry %s already matches target version %s",
+                "Config entry %s already matches target version %s; performing consistency check.",
                 entry.entry_id,
                 self.VERSION,
             )
-            return await self.async_step_migrate_complete()
 
         old_data = dict(getattr(entry, "data", {}) or {})
         old_options = dict(getattr(entry, "options", {}) or {})
@@ -1345,31 +1352,142 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             if (value := old_data.get(key)) is not None
         }
 
-        email_candidate = normalize_email_or_default(new_data.get(CONF_GOOGLE_EMAIL))
-        if email_candidate:
-            new_data[CONF_GOOGLE_EMAIL] = email_candidate
+        raw_email, normalized_email = _resolve_entry_email(entry)
+        if normalized_email:
+            new_data[CONF_GOOGLE_EMAIL] = normalized_email
+        elif raw_email:
+            new_data[CONF_GOOGLE_EMAIL] = raw_email
 
-        try:
-            self.hass.config_entries.async_update_entry(
+        existing_title = (
+            entry.title.strip()
+            if isinstance(entry.title, str) and entry.title.strip()
+            else None
+        )
+
+        title_update: str | None = raw_email if raw_email else None
+        if normalized_email:
+            if (
+                existing_title
+                and existing_title.lower() == normalized_email
+                and existing_title != normalized_email
+            ):
+                title_update = existing_title
+            elif title_update is None:
+                title_update = existing_title or normalized_email
+        elif title_update is None and existing_title:
+            title_update = existing_title
+
+        manager = getattr(self.hass, "config_entries", None)
+        others: list[ConfigEntry] = []
+        if manager is not None:
+            try:
+                candidates = manager.async_entries(DOMAIN)
+            except TypeError:  # pragma: no cover - legacy signature
+                candidates = manager.async_entries()
+            for candidate in candidates:
+                if getattr(candidate, "entry_id", None) == entry.entry_id:
+                    continue
+                others.append(candidate)
+
+        conflict: ConfigEntry | None = None
+        if normalized_email:
+            for candidate in others:
+                if _extract_email_from_entry(candidate) == normalized_email:
+                    conflict = candidate
+                    break
+
+        if conflict and normalized_email:
+            _log_duplicate_and_raise_repair_issue(
+                self.hass,
                 entry,
-                data=new_data,
-                options=options_payload,
-                version=self.VERSION,
+                normalized_email,
+                cause="pre_migration_duplicate",
+                conflicts=[conflict],
             )
-        except TypeError:
-            self.hass.config_entries.async_update_entry(
-                entry,
-                data=new_data,
-                options=options_payload,
-            )
-            setattr(entry, "version", self.VERSION)
+
+        update_kwargs: dict[str, Any] = {
+            "data": new_data,
+            "options": options_payload,
+            "version": self.VERSION,
+        }
+
+        if title_update and entry.title != title_update:
+            update_kwargs["title"] = title_update
+
+        unique_id: str | None = None
+        if normalized_email:
+            unique_id = unique_account_id(normalized_email)
+        applied_unique_id = None
+        if unique_id and getattr(entry, "unique_id", None) != unique_id and conflict is None:
+            update_kwargs["unique_id"] = unique_id
+            applied_unique_id = unique_id
+
+        current_data = dict(getattr(entry, "data", {}) or {})
+        current_options = dict(getattr(entry, "options", {}) or {})
+
+        need_update = False
+        if current_data != new_data:
+            need_update = True
         else:
+            update_kwargs.pop("data", None)
+
+        if current_options != options_payload:
+            need_update = True
+        else:
+            update_kwargs.pop("options", None)
+
+        if "title" in update_kwargs:
+            need_update = True
+
+        if applied_unique_id is not None:
+            need_update = True
+
+        if getattr(entry, "version", None) != self.VERSION:
+            need_update = True
+        else:
+            update_kwargs.pop("version", None)
+
+        if need_update and update_kwargs:
+            try:
+                self.hass.config_entries.async_update_entry(entry, **update_kwargs)
+            except TypeError:
+                fallback_kwargs = dict(update_kwargs)
+                fallback_kwargs.pop("version", None)
+                if fallback_kwargs:
+                    self.hass.config_entries.async_update_entry(entry, **fallback_kwargs)
+                setattr(entry, "version", self.VERSION)
+            except ValueError:
+                if normalized_email:
+                    _log_duplicate_and_raise_repair_issue(
+                        self.hass,
+                        entry,
+                        normalized_email,
+                        cause="unique_id_conflict",
+                    )
+                update_kwargs.pop("unique_id", None)
+                applied_unique_id = None
+                if update_kwargs:
+                    self.hass.config_entries.async_update_entry(entry, **update_kwargs)
+                setattr(entry, "version", self.VERSION)
+            else:
+                if "version" in update_kwargs:
+                    setattr(entry, "version", self.VERSION)
+
+        if getattr(entry, "version", None) != self.VERSION:
             setattr(entry, "version", self.VERSION)
 
         setattr(entry, "data", new_data)
         setattr(entry, "options", options_payload)
+        if title_update:
+            entry.title = title_update
+        if applied_unique_id:
+            setattr(entry, "unique_id", applied_unique_id)
+
+        if conflict is None:
+            _clear_duplicate_account_issue(self.hass, entry)
 
         placeholders = dict(context.get("title_placeholders", {}) or {})
+        email_candidate = normalize_email_or_default(new_data.get(CONF_GOOGLE_EMAIL))
         if email_candidate:
             placeholders["email"] = email_candidate
         if placeholders:

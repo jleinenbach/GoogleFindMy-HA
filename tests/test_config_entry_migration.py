@@ -34,6 +34,7 @@ class _MigrationTestEntry:
     options: dict[str, Any] = field(default_factory=dict)
     version: int = 1
     unique_id: str | None = None
+    subentries: dict[str, Any] = field(default_factory=dict)
 
     domain: str = DOMAIN
 
@@ -95,7 +96,7 @@ def _make_hass_with_entries(
 
 
 def test_async_migrate_entry_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """async_migrate_entry now defers migration work to the config flow."""
+    """Migration should set metadata and unique_id when no duplicates exist."""
 
     integration = import_module("custom_components.googlefindmy")
 
@@ -118,19 +119,22 @@ def test_async_migrate_entry_happy_path(monkeypatch: pytest.MonkeyPatch) -> None
     result = asyncio.run(integration.async_migrate_entry(hass, entry))
 
     assert result is True
-    # The entry remains untouched so the config flow can perform the migration.
-    assert entry.unique_id is None
-    assert entry.title == "Legacy"
-    assert entry.version == 1
-    assert entry.data == {DATA_SECRET_BUNDLE: {"username": "User@Example.com"}}
+    expected_unique_id = unique_account_id(normalize_email("User@Example.com"))
+    assert entry.unique_id == expected_unique_id
+    assert entry.title == "User@Example.com"
+    assert entry.version == integration.CONFIG_ENTRY_VERSION
+    assert entry.data[CONF_GOOGLE_EMAIL] == "user@example.com"
     assert created_issues == []
-    assert hass.config_entries.updated == []
+    assert hass.config_entries.updated
+    update_payload = hass.config_entries.updated[0][1]
+    assert update_payload["unique_id"] == expected_unique_id
+    assert update_payload["version"] == integration.CONFIG_ENTRY_VERSION
 
 
 def test_async_migrate_entry_detects_duplicate_before_unique_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Duplicate detection occurs in the config flow; migration is a no-op."""
+    """Duplicate accounts should raise a repair issue and skip unique_id."""
 
     integration = import_module("custom_components.googlefindmy")
 
@@ -165,13 +169,17 @@ def test_async_migrate_entry_detects_duplicate_before_unique_id(
 
     assert result is True
     assert duplicate.unique_id is None
-    assert duplicate.version == 1
-    assert hass.config_entries.updated == []
-    assert issue_helper.call_count == 0
+    assert duplicate.version == integration.CONFIG_ENTRY_VERSION
+    assert hass.config_entries.updated
+    update_payload = hass.config_entries.updated[0][1]
+    assert "unique_id" not in update_payload
+    assert update_payload["version"] == integration.CONFIG_ENTRY_VERSION
+    assert issue_helper.call_count == 1
+    assert issue_helper.call_args.kwargs["cause"] == "pre_migration_duplicate"
 
 
 def test_async_migrate_entry_value_error_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unique ID conflicts are now handled in the config flow migration."""
+    """ValueError when writing unique_id should trigger a retry without it."""
 
     integration = import_module("custom_components.googlefindmy")
 
@@ -199,12 +207,19 @@ def test_async_migrate_entry_value_error_fallback(monkeypatch: pytest.MonkeyPatc
     result = asyncio.run(integration.async_migrate_entry(hass, entry))
 
     assert result is True
-    assert hass.config_entries.updated == []
-    assert issue_helper.call_count == 0
+    assert len(hass.config_entries.updated) == 2
+    first_payload = hass.config_entries.updated[0][1]
+    second_payload = hass.config_entries.updated[1][1]
+    assert "unique_id" in first_payload
+    assert first_payload["version"] == integration.CONFIG_ENTRY_VERSION
+    assert "unique_id" not in second_payload
+    assert second_payload["version"] == integration.CONFIG_ENTRY_VERSION
+    assert issue_helper.call_count == 1
+    assert issue_helper.call_args.kwargs["cause"] == "unique_id_conflict"
 
 
 def test_async_migrate_entry_recovers_partial_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Recovery of partially migrated entries occurs in the config flow."""
+    """An entry stuck from a previous migration should still be updated."""
 
     integration = import_module("custom_components.googlefindmy")
 
@@ -239,12 +254,16 @@ def test_async_migrate_entry_recovers_partial_state(monkeypatch: pytest.MonkeyPa
     result = asyncio.run(integration.async_migrate_entry(hass, stuck))
 
     assert result is True
-    assert hass.config_entries.updated == []
-    assert issue_helper.call_count == 0
+    assert hass.config_entries.updated
+    payload = hass.config_entries.updated[0][1]
+    assert "unique_id" not in payload
+    assert "data" in payload
+    assert issue_helper.call_count == 1
+    assert issue_helper.call_args.kwargs["cause"] == "pre_migration_duplicate"
 
 
 def test_async_migrate_entry_updates_version_without_update_call() -> None:
-    """Version bumps are managed by the config flow migration."""
+    """Entries requiring only a version bump should still persist the update."""
 
     integration = import_module("custom_components.googlefindmy")
 
@@ -262,8 +281,10 @@ def test_async_migrate_entry_updates_version_without_update_call() -> None:
     result = asyncio.run(integration.async_migrate_entry(hass, entry))
 
     assert result is True
-    assert hass.config_entries.updated == []
-    assert entry.version == 1
+    assert len(hass.config_entries.updated) == 1
+    payload = hass.config_entries.updated[0][1]
+    assert payload["version"] == integration.CONFIG_ENTRY_VERSION
+    assert entry.version == integration.CONFIG_ENTRY_VERSION
 
 
 
@@ -550,7 +571,7 @@ def relink_environment(
 
 
 def test_async_migrate_entry_populates_email_and_options() -> None:
-    """Deferred migration leaves legacy entries untouched until the flow runs."""
+    """Legacy entries should gain email metadata and soft-migrate options."""
 
     integration = import_module("custom_components.googlefindmy")
 
@@ -559,15 +580,12 @@ def test_async_migrate_entry_populates_email_and_options() -> None:
 
     result = asyncio.run(integration.async_migrate_entry(hass, entry))
     assert result is True
-    # Entry metadata is unchanged; the config flow will perform the migration later.
-    assert entry.version == 1
-    assert entry.data == {
-        DATA_SECRET_BUNDLE: {"username": "User@Example.com"},
-        OPT_DEVICE_POLL_DELAY: 7,
-    }
-    assert entry.title == ""
-    assert entry.unique_id is None
-    assert entry.options == {}
+    assert entry.version == integration.CONFIG_ENTRY_VERSION
+    assert entry.data[CONF_GOOGLE_EMAIL] == "user@example.com"
+    assert entry.title == "User@Example.com"
+    expected_unique_id = unique_account_id(normalize_email("User@Example.com"))
+    assert entry.unique_id == expected_unique_id
+    assert entry.options[OPT_DEVICE_POLL_DELAY] == 7
 
     hass_second = _StubHass(entry)
     second_result = asyncio.run(integration.async_migrate_entry(hass_second, entry))

@@ -1492,13 +1492,42 @@ async def _async_soft_migrate_data_to_options(
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Defer config entry migrations to the config flow handler."""
+    """Handle config entry migrations by delegating to the config flow."""
+
+    from .config_flow import ConfigFlow  # Local import avoids circular dependency
 
     _LOGGER.debug(
-        "Config entry %s requested migration (current version=%s). Delegating to config flow.",
+        "Config entry %s requested migration (current version=%s). Triggering config flow migrate step.",
         entry.entry_id,
         entry.version,
     )
+
+    flow = ConfigFlow()
+    flow.hass = hass
+    flow.context = {
+        "source": "migration",
+        "entry_id": entry.entry_id,
+    }
+
+    try:
+        initial_result = await flow.async_step_migrate(entry)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.exception("Migration for %s failed during config flow execution: %s", entry.entry_id, err)
+        return False
+
+    result_type = str(initial_result.get("type"))
+    if result_type == "abort":
+        return initial_result.get("reason") != "migration_failed"
+
+    if result_type in {"form", "show_form"} and initial_result.get("step_id") == "migrate_complete":
+        completion = await flow.async_step_migrate_complete({})
+        if str(completion.get("type")) == "abort":
+            reason = completion.get("reason")
+            if reason == "migration_failed":
+                return False
+            return True
+        return True
+
     return True
 
 
