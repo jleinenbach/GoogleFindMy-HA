@@ -99,6 +99,8 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+
+
 try:
     SOURCE_DISCOVERY = config_entries.SOURCE_DISCOVERY
 except AttributeError as err:  # pragma: no cover - configuration critical
@@ -368,7 +370,7 @@ def _is_discovery_update_info(
 ) -> bool:
     """Return True if the flow context indicates a discovery-update-info source."""
 
-    if not isinstance(context, Mapping):
+    if not isinstance(context, CollMapping):
         return False
 
     source = context.get("source")
@@ -1267,7 +1269,10 @@ async def _ingest_discovery_credentials(
 # ---------------------------
 # Config Flow
 # ---------------------------
-class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[misc]
+class ConfigFlow(
+    config_entries.ConfigFlow,  # type: ignore[misc]
+    _ConfigFlowMixin,
+):
     """Handle the initial config flow for Google Find My Device."""
 
     domain = DOMAIN
@@ -1658,9 +1663,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         if isinstance(discovery_info, Mapping):
             payload_keys = sorted(str(key) for key in discovery_info.keys())
 
-        _LOGGER.debug(
-            "Flow entry: step=%s, context_source=%s, payload_keys=%s",
-            "discovery",
+        _LOGGER.info(
+            "Flow start: async_step_discovery (context_source=%s, payload_keys=%s)",
             context_source,
             payload_keys,
         )
@@ -1772,9 +1776,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         if isinstance(discovery_info, Mapping):
             payload_keys = sorted(str(key) for key in discovery_info.keys())
 
-        _LOGGER.debug(
-            "Flow entry: step=%s, context_source=%s, payload_keys=%s",
-            "discovery_update_info",
+        _LOGGER.info(
+            "Flow start: async_step_discovery_update_info (context_source=%s, payload_keys=%s)",
             context_source,
             payload_keys,
         )
@@ -1806,10 +1809,16 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                 _mask_email_for_logs(normalized.email),
             )
 
-            prev_context = dict(getattr(self, "context", {}) or {})
-            prev_source = prev_context.get("source")
+            ctx: dict[str, Any]
+            if isinstance(self.context, dict):
+                ctx = self.context
+            else:
+                ctx = dict(getattr(self, "context", {}) or {})
 
-            self.context = {**prev_context, "source": SOURCE_DISCOVERY}
+            prev_source = ctx.get("source")
+
+            ctx["source"] = SOURCE_DISCOVERY
+            self.context = ctx
             _LOGGER.debug(
                 "Context source temporarily overridden: %s -> %s",
                 prev_source,
@@ -1819,7 +1828,11 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             try:
                 return await self.async_step_discovery(discovery_info)
             finally:
-                self.context = prev_context
+                if prev_source is not None:
+                    ctx["source"] = prev_source
+                else:
+                    ctx.pop("source", None)
+                self.context = ctx
                 _LOGGER.debug(
                     "Context restored after discovery reroute: source=%s",
                     prev_source,
@@ -1902,6 +1915,15 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Ask the user to choose how to provide credentials."""
+
+        context_obj = getattr(self, "context", None)
+        context_snapshot: dict[str, Any]
+        if isinstance(context_obj, Mapping):
+            context_snapshot = {str(key): context_obj[key] for key in context_obj}
+        else:
+            context_snapshot = {}
+        _LOGGER.info("Flow start: async_step_user (context=%s)", context_snapshot)
+
         if user_input is not None:
             method = user_input.get("auth_method")
             _LOGGER.debug("User step: method selected = %s", method)
@@ -4048,7 +4070,43 @@ class InvalidAuth(HomeAssistantErrorBase):
     """Error to indicate invalid authentication was provided."""
 
 
+# --- Final flow-handler verification & fallback (import-time) -----------------
+try:
+    from homeassistant import config_entries as _ce
+    from .const import DOMAIN as _GFMD
+
+    handlers = getattr(_ce, "HANDLERS", None)
+    if handlers is None:
+        _LOGGER.warning(
+            "ConfigFlow handler registry unavailable; unable to verify registration"
+        )
+    else:
+        _registered = handlers.get(_GFMD)
+        if _registered is not ConfigFlow:
+            _LOGGER.warning(
+                "ConfigFlow metaclass registration not reflected in HANDLERS; "
+                "registering fallback (domain=%s, had=%r)",
+                _GFMD,
+                _registered,
+            )
+            handlers[_GFMD] = ConfigFlow
+
+        handler = handlers.get(_GFMD)
+        _LOGGER.debug(
+            "ConfigFlow handler registry state OK; keys=%s, handler=%r, ids(handler,class)=(%s,%s)",
+            sorted(list(handlers.keys())),
+            handler,
+            id(handler) if handler is not None else None,
+            id(ConfigFlow),
+        )
+except Exception as err:  # noqa: BLE001
+    _LOGGER.exception("Unable to verify/register ConfigFlow handler: %s", err)
+# -----------------------------------------------------------------------------
+
 _LOGGER.debug(
-    "ConfigFlow module import OK; registered flow for domain=%s",
+    "ConfigFlow import OK; class=%s, class.domain=%s, const.DOMAIN=%s, class_id=%s",
+    ConfigFlow.__name__,
+    getattr(ConfigFlow, "domain", None),
     DOMAIN,
+    id(ConfigFlow),
 )

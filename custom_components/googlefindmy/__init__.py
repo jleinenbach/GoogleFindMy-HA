@@ -2564,6 +2564,27 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         even if no config entry is loaded, which enables frontend validation of
         automations referencing these services.
     """
+    try:
+        from homeassistant import config_entries as _ce
+
+        handlers = getattr(_ce, "HANDLERS", None)
+        if handlers is None:
+            _LOGGER.warning("HANDLERS registry unavailable during async_setup")
+        elif DOMAIN not in handlers:
+            _LOGGER.warning(
+                "ConfigFlow not present in HANDLERS at setup; registering fallback"
+            )
+            from .config_flow import ConfigFlow as _ConfigFlow
+
+            handlers[DOMAIN] = _ConfigFlow
+            _LOGGER.info(
+                "Fallback ConfigFlow registration complete (domain=%s, handler=%r)",
+                DOMAIN,
+                handlers.get(DOMAIN),
+            )
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.exception("Fallback ConfigFlow registration failed: %s", err)
+
     _ensure_runtime_imports()
     bucket = _domain_data(hass)
     runtime = _cloud_discovery_runtime(hass)
