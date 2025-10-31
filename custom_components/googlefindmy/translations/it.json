@@ -64,6 +64,7 @@
       "no_devices": "Nessun dispositivo trovato. Assicurati che ‘Trova il mio dispositivo’ sia attivato nel tuo account Google.",
       "cannot_connect": "Impossibile connettersi all’API di Google. Potrebbe trattarsi di un problema temporaneo — riprova più tardi.",
       "dependency_not_ready": "Mancano le dipendenze dell'integrazione. Installa i requisiti di Google Find My Device e riavvia Home Assistant.",
+      "import_failed": "Impossibile importare l'helper di autenticazione. Installa i requisiti di Google Find My Device (Selenium e driver Chrome) e riprova.",
       "choose_one": "Fornisci esattamente un solo metodo di autenticazione.",
       "required": "Questo campo è obbligatorio.",
       "unknown": "Errore imprevisto.",
@@ -75,7 +76,7 @@
       "dependency_not_ready": "Le dipendenze di Google Find My Device non sono installate. Installa i requisiti e riprova.",
       "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",
       "reauth_successful": "Riautenticazione riuscita.",
-      "migration_complete_confirmed": "Migrazione completata.",
+      "migration_successful": "Migrazione completata.",
       "migration_failed": "Migrazione non riuscita. Rimuovi l'integrazione e aggiungila di nuovo."
     },
     "progress": {

@@ -64,6 +64,7 @@
       "no_devices": "Keine Geräte gefunden. Bitte stelle sicher, dass „Mein Gerät finden“ in deinem Google-Konto aktiviert ist.",
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen. Dies ist möglicherweise ein vorübergehendes Problem – bitte versuche es später erneut.",
       "dependency_not_ready": "Erforderliche Integrationsabhängigkeiten fehlen. Installiere die Anforderungen von Google Find My Device und starte Home Assistant neu.",
+      "import_failed": "Authentifizierungshilfen konnten nicht importiert werden. Installiere die Anforderungen für Google Find My Device (Selenium + Chrome-Treiber) und versuche es erneut.",
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
       "unknown": "Unerwarteter Fehler.",
@@ -73,9 +74,10 @@
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
       "dependency_not_ready": "Google Find My Device-Abhängigkeiten sind nicht installiert. Installiere die Anforderungen und versuche es erneut.",
+      "import_failed": "Authentifizierungs-Hilfsbibliothek konnte nicht importiert werden. Installiere die Google Find My Device-Anforderungen (Selenium und Chrome-Treiber) und versuche es erneut.",
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",
       "reauth_successful": "Erneute Authentifizierung erfolgreich.",
-      "migration_complete_confirmed": "Migration abgeschlossen.",
+      "migration_successful": "Migration abgeschlossen.",
       "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu."
     },
     "progress": {

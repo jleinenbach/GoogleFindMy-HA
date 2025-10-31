@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, T
 
 if TYPE_CHECKING:
     from .api import GoogleFindMyAPI
+
 from .const import (
     # Core domain & credential keys
     DOMAIN,
@@ -80,7 +81,6 @@ from .const import (
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     OPT_OPTIONS_SCHEMA_VERSION,
-    MIGRATE_DATA_KEYS_TO_OPTIONS,
     coerce_ignored_mapping,
     DEFAULT_OPTIONS,
     DEFAULT_ENABLE_STATS_ENTITIES,
@@ -237,6 +237,19 @@ else:
 
 class DependencyNotReady(HomeAssistantErrorBase):
     """Raised when integration dependencies are unavailable."""
+
+
+def _register_dependency_error(
+    errors: dict[str, str],
+    err: Exception,
+    *,
+    field: str = "base",
+) -> None:
+    """Record an import-related dependency error for the current form."""
+
+    if field not in errors:
+        _LOGGER.error("Failed to import Google Find My dependencies: %s", err)
+        errors[field] = "import_failed"
 
 
 @lru_cache(maxsize=1)
@@ -1238,10 +1251,18 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
     async def async_step_migrate(self, entry: ConfigEntry) -> FlowResult:
         """Migrate legacy config entries to the subentry-aware structure."""
 
-        _LOGGER.debug(
-            "Starting config entry migration for %s (version=%s)",
+        from . import (
+            _clear_duplicate_account_issue,
+            _extract_email_from_entry,
+            _log_duplicate_and_raise_repair_issue,
+            _resolve_entry_email,
+        )
+
+        _LOGGER.info(
+            "Starting migration for %s from version %s to %s",
             entry.entry_id,
             entry.version,
+            self.VERSION,
         )
 
         setattr(self, "config_entry", entry)
@@ -1260,26 +1281,38 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             context["title_placeholders"] = placeholders
 
         if entry.version >= self.VERSION:
-            _LOGGER.debug("Entry %s already matches target version", entry.entry_id)
-            return await self.async_step_migrate_complete()
+            _LOGGER.debug(
+                "Config entry %s already matches target version %s; performing consistency check.",
+                entry.entry_id,
+                self.VERSION,
+            )
 
         old_data = dict(getattr(entry, "data", {}) or {})
         old_options = dict(getattr(entry, "options", {}) or {})
 
         options_payload: dict[str, Any] = dict(DEFAULT_OPTIONS)
-        managed_option_keys: set[str] = (
-            set(DEFAULT_OPTIONS.keys()) | set(MIGRATE_DATA_KEYS_TO_OPTIONS)
+        all_option_keys = (
+            OPT_LOCATION_POLL_INTERVAL,
+            OPT_DEVICE_POLL_DELAY,
+            OPT_MIN_ACCURACY_THRESHOLD,
+            OPT_MAP_VIEW_TOKEN_EXPIRATION,
+            OPT_CONTRIBUTOR_MODE,
+            OPT_MOVEMENT_THRESHOLD,
+            OPT_GOOGLE_HOME_FILTER_ENABLED,
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS,
+            OPT_ENABLE_STATS_ENTITIES,
+            OPT_ALLOW_HISTORY_FALLBACK,
+            OPT_MIN_POLL_INTERVAL,
+            OPT_IGNORED_DEVICES,
         )
 
-        for key, value in old_options.items():
-            if value is not None:
-                options_payload[key] = value
-
-        for key in managed_option_keys:
-            if key in old_data:
-                value = old_data[key]
-                if value is not None:
-                    options_payload[key] = value
+        for key in all_option_keys:
+            if key is None:
+                continue
+            if key in old_options and old_options[key] is not None:
+                options_payload[key] = old_options[key]
+            elif key in old_data and old_data[key] is not None:
+                options_payload[key] = old_data[key]
 
         if OPT_IGNORED_DEVICES in options_payload:
             ignored_mapping, _changed = coerce_ignored_mapping(
@@ -1289,83 +1322,88 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
 
         options_payload[OPT_OPTIONS_SCHEMA_VERSION] = 2
 
-        defaults: dict[str, Any] = {
-            OPT_LOCATION_POLL_INTERVAL: DEFAULT_OPTIONS.get(
-                OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
-            ),
-            OPT_DEVICE_POLL_DELAY: DEFAULT_OPTIONS.get(
-                OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY
-            ),
-            OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_OPTIONS.get(
-                OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
-            ),
-            OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_OPTIONS.get(
-                OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-            ),
-        }
-
-        for key in (
-            OPT_MOVEMENT_THRESHOLD,
-            OPT_GOOGLE_HOME_FILTER_ENABLED,
-            OPT_GOOGLE_HOME_FILTER_KEYWORDS,
-            OPT_ENABLE_STATS_ENTITIES,
-            OPT_ALLOW_HISTORY_FALLBACK,
-            OPT_MIN_POLL_INTERVAL,
-            OPT_CONTRIBUTOR_MODE,
-        ):
-            if key is None:
-                continue
-            if key in DEFAULT_OPTIONS:
-                defaults[key] = DEFAULT_OPTIONS[key]
-
-        option_keys = set(MIGRATE_DATA_KEYS_TO_OPTIONS)
-        option_keys.add(OPT_OPTIONS_SCHEMA_VERSION)
-
-        new_data: dict[str, Any] = {}
-        for key, value in old_data.items():
-            if key in option_keys:
-                continue
-            if value is not None:
-                new_data[key] = value
-
-        email_candidate = normalize_email_or_default(new_data.get(CONF_GOOGLE_EMAIL))
-        if not email_candidate and DATA_SECRET_BUNDLE in new_data:
-            secrets_bundle = new_data.get(DATA_SECRET_BUNDLE)
-            if isinstance(secrets_bundle, CollMapping):
-                email_candidate = normalize_email_or_default(
-                    secrets_bundle.get(CONF_GOOGLE_EMAIL)
-                )
-        if email_candidate:
-            new_data[CONF_GOOGLE_EMAIL] = email_candidate
-
-        if not isinstance(getattr(entry, "subentries", None), CollMapping):
-            setattr(entry, "subentries", {})
-
         subentry_context = self._ensure_subentry_context()
-        subentries = getattr(entry, "subentries", {})
-        if isinstance(subentries, CollMapping):
-            for subentry in subentries.values():
-                data = getattr(subentry, "data", {}) or {}
-                group_key = data.get("group_key")
-                if isinstance(group_key, str):
-                    subentry_context.setdefault(
-                        group_key, getattr(subentry, "subentry_id", None)
-                    )
 
         try:
             await self._async_sync_feature_subentries(
                 entry,
                 options_payload=options_payload,
-                defaults=defaults,
+                defaults=dict(DEFAULT_OPTIONS),
                 context_map=subentry_context,
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
-                "Migration failed while syncing subentries for %s: %s",
+                "Migration failed while creating subentries for %s: %s",
                 entry.entry_id,
                 err,
             )
             return self.async_abort(reason="migration_failed")
+
+        allowed_data_keys = (
+            DATA_AUTH_METHOD,
+            CONF_OAUTH_TOKEN,
+            CONF_GOOGLE_EMAIL,
+            DATA_SECRET_BUNDLE,
+            DATA_AAS_TOKEN,
+        )
+        new_data: dict[str, Any] = {
+            key: value
+            for key in allowed_data_keys
+            if (value := old_data.get(key)) is not None
+        }
+
+        raw_email, normalized_email = _resolve_entry_email(entry)
+        if normalized_email:
+            new_data[CONF_GOOGLE_EMAIL] = normalized_email
+        elif raw_email:
+            new_data[CONF_GOOGLE_EMAIL] = raw_email
+
+        existing_title = (
+            entry.title.strip()
+            if isinstance(entry.title, str) and entry.title.strip()
+            else None
+        )
+
+        title_update: str | None = raw_email if raw_email else None
+        if normalized_email:
+            if (
+                existing_title
+                and existing_title.lower() == normalized_email
+                and existing_title != normalized_email
+            ):
+                title_update = existing_title
+            elif title_update is None:
+                title_update = existing_title or normalized_email
+        elif title_update is None and existing_title:
+            title_update = existing_title
+
+        manager = getattr(self.hass, "config_entries", None)
+        others: list[ConfigEntry] = []
+        if manager is not None:
+            try:
+                candidates = manager.async_entries(DOMAIN)
+            except TypeError:  # pragma: no cover - legacy signature
+                candidates = manager.async_entries()
+            for candidate in candidates:
+                if getattr(candidate, "entry_id", None) == entry.entry_id:
+                    continue
+                others.append(candidate)
+
+        conflict: ConfigEntry | None = None
+        if normalized_email:
+            for candidate in others:
+                if _extract_email_from_entry(candidate) == normalized_email:
+                    conflict = candidate
+                    break
+
+        if conflict and normalized_email:
+            _log_duplicate_and_raise_repair_issue(
+                self.hass,
+                entry,
+                normalized_email,
+                cause="pre_migration_duplicate",
+                conflicts=[conflict],
+            )
 
         update_kwargs: dict[str, Any] = {
             "data": new_data,
@@ -1373,32 +1411,97 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             "version": self.VERSION,
         }
 
-        update_manager = getattr(self.hass, "config_entries", None)
-        if update_manager is not None:
+        if title_update and entry.title != title_update:
+            update_kwargs["title"] = title_update
+
+        unique_id: str | None = None
+        if normalized_email:
+            unique_id = unique_account_id(normalized_email)
+        applied_unique_id = None
+        if unique_id and getattr(entry, "unique_id", None) != unique_id and conflict is None:
+            update_kwargs["unique_id"] = unique_id
+            applied_unique_id = unique_id
+
+        current_data = dict(getattr(entry, "data", {}) or {})
+        current_options = dict(getattr(entry, "options", {}) or {})
+
+        need_update = False
+        if current_data != new_data:
+            need_update = True
+        else:
+            update_kwargs.pop("data", None)
+
+        if current_options != options_payload:
+            need_update = True
+        else:
+            update_kwargs.pop("options", None)
+
+        if "title" in update_kwargs:
+            need_update = True
+
+        if applied_unique_id is not None:
+            need_update = True
+
+        if getattr(entry, "version", None) != self.VERSION:
+            need_update = True
+        else:
+            update_kwargs.pop("version", None)
+
+        if need_update and update_kwargs:
             try:
-                update_manager.async_update_entry(entry, **update_kwargs)
+                self.hass.config_entries.async_update_entry(entry, **update_kwargs)
             except TypeError:
-                update_kwargs.pop("version", None)
-                try:
-                    update_manager.async_update_entry(entry, **update_kwargs)
-                except TypeError:
-                    update_manager.async_update_entry(entry, data=new_data)
-                    setattr(entry, "options", options_payload)
-                else:
-                    setattr(entry, "options", options_payload)
+                fallback_kwargs = dict(update_kwargs)
+                fallback_kwargs.pop("version", None)
+                if fallback_kwargs:
+                    self.hass.config_entries.async_update_entry(entry, **fallback_kwargs)
+                setattr(entry, "version", self.VERSION)
+            except ValueError:
+                if normalized_email:
+                    _log_duplicate_and_raise_repair_issue(
+                        self.hass,
+                        entry,
+                        normalized_email,
+                        cause="unique_id_conflict",
+                    )
+                update_kwargs.pop("unique_id", None)
+                applied_unique_id = None
+                if update_kwargs:
+                    self.hass.config_entries.async_update_entry(entry, **update_kwargs)
+                setattr(entry, "version", self.VERSION)
             else:
-                setattr(entry, "options", options_payload)
+                if "version" in update_kwargs:
+                    setattr(entry, "version", self.VERSION)
+
+        if getattr(entry, "version", None) != self.VERSION:
+            setattr(entry, "version", self.VERSION)
 
         setattr(entry, "data", new_data)
-        setattr(entry, "version", self.VERSION)
+        setattr(entry, "options", options_payload)
+        if title_update:
+            entry.title = title_update
+        if applied_unique_id:
+            setattr(entry, "unique_id", applied_unique_id)
 
+        if conflict is None:
+            _clear_duplicate_account_issue(self.hass, entry)
+
+        placeholders = dict(context.get("title_placeholders", {}) or {})
+        email_candidate = normalize_email_or_default(new_data.get(CONF_GOOGLE_EMAIL))
         if email_candidate:
-            placeholders = dict(context.get("title_placeholders", {}) or {})
             placeholders["email"] = email_candidate
+        if placeholders:
             context["title_placeholders"] = placeholders
 
-        _LOGGER.info("Config entry %s migrated to version %s", entry.entry_id, self.VERSION)
-        return await self.async_step_migrate_complete()
+        _LOGGER.info(
+            "Config entry %s migrated successfully to version %s",
+            entry.entry_id,
+            self.VERSION,
+        )
+
+        return await self._async_resolve_flow_result(
+            self.async_show_form(step_id="migrate_complete")
+        )
 
     async def async_step_migrate_complete(
         self, user_input: dict[str, Any] | None = None
@@ -1409,7 +1512,7 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             return await self._async_resolve_flow_result(
                 cast(
                     FlowResult | Awaitable[FlowResult],
-                    self.async_abort(reason="migration_complete_confirmed"),
+                    self.async_abort(reason="migration_successful"),
                 )
             )
 
@@ -1746,41 +1849,45 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                         cands,
                         secrets_bundle=parsed_secrets,
                     )
-                except DependencyNotReady:
+                except (DependencyNotReady, ImportError) as exc:
+                    _register_dependency_error(errors, exc)
                     return await self.async_abort(reason="dependency_not_ready")
-                if not chosen:
-                    _LOGGER.warning(
-                        "Token validation failed for %s. No working token found among candidates (%s).",
-                        _mask_email_for_logs(email),
-                        _cand_labels(cands),
-                    )
-                    errors["base"] = "cannot_connect"
                 else:
-                    # Persist validated token; prefer non-JWT candidate when possible
-                    to_persist = chosen
-                    bad_reason = _disqualifies_for_persistence(to_persist)
-                    if bad_reason:
-                        alt = next(
-                            (
-                                v
-                                for (_src, v) in cands
-                                if not _disqualifies_for_persistence(v)
-                            ),
-                            None,
+                    if not chosen:
+                        _LOGGER.warning(
+                            "Token validation failed for %s. No working token found among candidates (%s).",
+                            _mask_email_for_logs(email),
+                            _cand_labels(cands),
                         )
-                        if alt:
-                            to_persist = alt
+                        errors["base"] = "cannot_connect"
+                    else:
+                        # Persist validated token; prefer non-JWT candidate when possible
+                        to_persist = chosen
+                        bad_reason = _disqualifies_for_persistence(to_persist)
+                        if bad_reason:
+                            alt = next(
+                                (
+                                    v
+                                    for (_src, v) in cands
+                                    if not _disqualifies_for_persistence(v)
+                                ),
+                                None,
+                            )
+                            if alt:
+                                to_persist = alt
 
-                    self._auth_data = {
-                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                        CONF_OAUTH_TOKEN: to_persist,
-                        CONF_GOOGLE_EMAIL: email,
-                    }
-                    if parsed_secrets is not None:
-                        self._auth_data[DATA_SECRET_BUNDLE] = parsed_secrets
-                    if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
-                        self._auth_data[DATA_AAS_TOKEN] = to_persist
-                    return await self.async_step_device_selection()
+                        self._auth_data = {
+                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                            CONF_OAUTH_TOKEN: to_persist,
+                            CONF_GOOGLE_EMAIL: email,
+                        }
+                        if parsed_secrets is not None:
+                            self._auth_data[DATA_SECRET_BUNDLE] = parsed_secrets
+                        if isinstance(to_persist, str) and to_persist.startswith(
+                            "aas_et/"
+                        ):
+                            self._auth_data[DATA_AAS_TOKEN] = to_persist
+                        return await self.async_step_device_selection()
 
         return self.async_show_form(
             step_id="secrets_json", data_schema=schema, errors=errors
@@ -1810,29 +1917,31 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
 
                 try:
                     chosen = await async_pick_working_token(email, cands)
-                except DependencyNotReady:
+                except (DependencyNotReady, ImportError) as exc:
+                    _register_dependency_error(errors, exc)
                     return await self.async_abort(reason="dependency_not_ready")
-                if not chosen:
-                    _LOGGER.warning(
-                        "Token validation failed for %s. No working token found among candidates (%s).",
-                        _mask_email_for_logs(email),
-                        _cand_labels(cands),
-                    )
-                    errors["base"] = "cannot_connect"
                 else:
-                    auth_method = _AUTH_METHOD_INDIVIDUAL
-                    self._auth_data = {
-                        CONF_OAUTH_TOKEN: chosen,
-                        CONF_GOOGLE_EMAIL: email,
-                    }
-                    if isinstance(chosen, str) and chosen.startswith("aas_et/"):
-                        auth_method = _AUTH_METHOD_SECRETS
-                        self._auth_data[DATA_AAS_TOKEN] = chosen
+                    if not chosen:
+                        _LOGGER.warning(
+                            "Token validation failed for %s. No working token found among candidates (%s).",
+                            _mask_email_for_logs(email),
+                            _cand_labels(cands),
+                        )
+                        errors["base"] = "cannot_connect"
                     else:
-                        self._auth_data.pop(DATA_AAS_TOKEN, None)
-                    self._auth_data[DATA_AUTH_METHOD] = auth_method
-                    self._auth_data.pop(DATA_SECRET_BUNDLE, None)
-                    return await self.async_step_device_selection()
+                        auth_method = _AUTH_METHOD_INDIVIDUAL
+                        self._auth_data = {
+                            CONF_OAUTH_TOKEN: chosen,
+                            CONF_GOOGLE_EMAIL: email,
+                        }
+                        if isinstance(chosen, str) and chosen.startswith("aas_et/"):
+                            auth_method = _AUTH_METHOD_SECRETS
+                            self._auth_data[DATA_AAS_TOKEN] = chosen
+                        else:
+                            self._auth_data.pop(DATA_AAS_TOKEN, None)
+                        self._auth_data[DATA_AUTH_METHOD] = auth_method
+                        self._auth_data.pop(DATA_SECRET_BUNDLE, None)
+                        return await self.async_step_device_selection()
 
         return self.async_show_form(
             step_id="individual_tokens",
@@ -1879,8 +1988,8 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                         (d.get("name") or d.get("id") or "", d.get("id") or "")
                         for d in devices
                     ]
-            except DependencyNotReady:
-                return await self.async_abort(reason="dependency_not_ready")
+            except (DependencyNotReady, ImportError) as exc:
+                _register_dependency_error(errors, exc)
             except Exception as err:  # noqa: BLE001
                 if not _is_multi_entry_guard_error(err):
                     key = _map_api_exc_to_error_key(err)
@@ -2202,42 +2311,41 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                             chosen = await async_pick_working_token(
                                 fixed_email, [("manual", token)]
                             )
-                        except DependencyNotReady:
-                            return await self.async_abort(
-                                reason="dependency_not_ready"
-                            )
-                        if not chosen:
-                            _LOGGER.warning(
-                                "Token validation failed for %s. No working token found among candidates (%s).",
-                                _mask_email_for_logs(fixed_email),
-                                _cand_labels([("manual", token)]),
-                            )
-                            errors["base"] = "cannot_connect"
+                        except (DependencyNotReady, ImportError) as exc:
+                            _register_dependency_error(errors, exc)
                         else:
-                            if _disqualifies_for_persistence(chosen):
+                            if not chosen:
                                 _LOGGER.warning(
-                                    "Reauth: token looks like a JWT; persisting anyway due to validation."
+                                    "Token validation failed for %s. No working token found among candidates (%s).",
+                                    _mask_email_for_logs(fixed_email),
+                                    _cand_labels([("manual", token)]),
                                 )
-                            updated_data = {
-                                **entry.data,
-                                DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                CONF_OAUTH_TOKEN: chosen,
-                            }
-                            if isinstance(chosen, str) and chosen.startswith("aas_et/"):
-                                updated_data[DATA_AAS_TOKEN] = chosen
+                                errors["base"] = "cannot_connect"
                             else:
-                                updated_data.pop(DATA_AAS_TOKEN, None)
-                            updated_data.pop(DATA_SECRET_BUNDLE, None)
-                            await self._async_clear_cached_aas_token(entry)
-                            success_reason = self.context.get(
-                                "reauth_success_reason_override",
-                                "reauth_successful",
-                            )
-                            return self.async_update_reload_and_abort(
-                                entry=entry,
-                                data=updated_data,
-                                reason=success_reason,
-                            )
+                                if _disqualifies_for_persistence(chosen):
+                                    _LOGGER.warning(
+                                        "Reauth: token looks like a JWT; persisting anyway due to validation."
+                                    )
+                                updated_data = {
+                                    **entry.data,
+                                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                    CONF_OAUTH_TOKEN: chosen,
+                                }
+                                if isinstance(chosen, str) and chosen.startswith("aas_et/"):
+                                    updated_data[DATA_AAS_TOKEN] = chosen
+                                else:
+                                    updated_data.pop(DATA_AAS_TOKEN, None)
+                                updated_data.pop(DATA_SECRET_BUNDLE, None)
+                                await self._async_clear_cached_aas_token(entry)
+                                success_reason = self.context.get(
+                                    "reauth_success_reason_override",
+                                    "reauth_successful",
+                                )
+                                return self.async_update_reload_and_abort(
+                                    entry=entry,
+                                    data=updated_data,
+                                    reason=success_reason,
+                                )
 
                     elif method == "secrets":
                         if not isinstance(payload, Mapping):
@@ -2263,57 +2371,56 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
                                         cands,
                                         secrets_bundle=parsed,
                                     )
-                                except DependencyNotReady:
-                                    return await self.async_abort(
-                                        reason="dependency_not_ready"
-                                    )
-                                if not chosen:
-                                    _LOGGER.warning(
-                                        "Token validation failed for %s. No working token found among candidates (%s).",
-                                        _mask_email_for_logs(fixed_email),
-                                        _cand_labels(cands),
-                                    )
-                                    errors["base"] = "cannot_connect"
+                                except (DependencyNotReady, ImportError) as exc:
+                                    _register_dependency_error(errors, exc)
                                 else:
-                                    # Prefer non-JWT if available
-                                    to_persist = chosen
-                                    bad_reason = _disqualifies_for_persistence(
-                                        to_persist
-                                    )
-                                    if bad_reason:
-                                        alt = next(
-                                            (
-                                                v
-                                                for (_src, v) in cands
-                                                if not _disqualifies_for_persistence(v)
-                                            ),
-                                            None,
+                                    if not chosen:
+                                        _LOGGER.warning(
+                                            "Token validation failed for %s. No working token found among candidates (%s).",
+                                            _mask_email_for_logs(fixed_email),
+                                            _cand_labels(cands),
                                         )
-                                        if alt:
-                                            to_persist = alt
-                                    updated_data = {
-                                        **entry.data,
-                                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                        CONF_OAUTH_TOKEN: to_persist,
-                                        DATA_SECRET_BUNDLE: parsed,
-                                    }
-                                    if (
-                                        isinstance(to_persist, str)
-                                        and to_persist.startswith("aas_et/")
-                                    ):
-                                        updated_data[DATA_AAS_TOKEN] = to_persist
-                                    elif DATA_AAS_TOKEN in updated_data:
-                                        updated_data.pop(DATA_AAS_TOKEN, None)
-                                    await self._async_clear_cached_aas_token(entry)
-                                    success_reason = self.context.get(
-                                        "reauth_success_reason_override",
-                                        "reauth_successful",
-                                    )
-                                    return self.async_update_reload_and_abort(
-                                        entry=entry,
-                                        data=updated_data,
-                                        reason=success_reason,
-                                    )
+                                        errors["base"] = "cannot_connect"
+                                    else:
+                                        # Prefer non-JWT if available
+                                        to_persist = chosen
+                                        bad_reason = _disqualifies_for_persistence(
+                                            to_persist
+                                        )
+                                        if bad_reason:
+                                            alt = next(
+                                                (
+                                                    v
+                                                    for (_src, v) in cands
+                                                    if not _disqualifies_for_persistence(v)
+                                                ),
+                                                None,
+                                            )
+                                            if alt:
+                                                to_persist = alt
+                                        updated_data = {
+                                            **entry.data,
+                                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                            CONF_OAUTH_TOKEN: to_persist,
+                                            DATA_SECRET_BUNDLE: parsed,
+                                        }
+                                        if (
+                                            isinstance(to_persist, str)
+                                            and to_persist.startswith("aas_et/")
+                                        ):
+                                            updated_data[DATA_AAS_TOKEN] = to_persist
+                                        elif DATA_AAS_TOKEN in updated_data:
+                                            updated_data.pop(DATA_AAS_TOKEN, None)
+                                        await self._async_clear_cached_aas_token(entry)
+                                        success_reason = self.context.get(
+                                            "reauth_success_reason_override",
+                                            "reauth_successful",
+                                        )
+                                        return self.async_update_reload_and_abort(
+                                            entry=entry,
+                                            data=updated_data,
+                                            reason=success_reason,
+                                        )
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept first candidate and reload
@@ -3691,31 +3798,30 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                     chosen = await async_pick_working_token(
                                         email, [("manual", token)]
                                     )
-                                except DependencyNotReady:
-                                    return await self.async_abort(
-                                        reason="dependency_not_ready"
-                                    )
-                                if not chosen:
-                                    _LOGGER.warning(
-                                        "Token validation failed for %s. No working token found among candidates (%s).",
-                                        _mask_email_for_logs(email),
-                                        _cand_labels([("manual", token)]),
-                                    )
-                                    errors["base"] = "cannot_connect"
+                                except (DependencyNotReady, ImportError) as exc:
+                                    _register_dependency_error(errors, exc)
                                 else:
-                                    updated_data = {
-                                        **entry.data,
-                                        DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                        CONF_OAUTH_TOKEN: chosen,
-                                    }
-                                    updated_data.pop(DATA_SECRET_BUNDLE, None)
-                                    if isinstance(chosen, str) and chosen.startswith(
-                                        "aas_et/"
-                                    ):
-                                        updated_data[DATA_AAS_TOKEN] = chosen
+                                    if not chosen:
+                                        _LOGGER.warning(
+                                            "Token validation failed for %s. No working token found among candidates (%s).",
+                                            _mask_email_for_logs(email),
+                                            _cand_labels([("manual", token)]),
+                                        )
+                                        errors["base"] = "cannot_connect"
                                     else:
-                                        updated_data.pop(DATA_AAS_TOKEN, None)
-                                    return await _finalize_success(updated_data)
+                                        updated_data = {
+                                            **entry.data,
+                                            DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                            CONF_OAUTH_TOKEN: chosen,
+                                        }
+                                        updated_data.pop(DATA_SECRET_BUNDLE, None)
+                                        if isinstance(chosen, str) and chosen.startswith(
+                                            "aas_et/"
+                                        ):
+                                            updated_data[DATA_AAS_TOKEN] = chosen
+                                        else:
+                                            updated_data.pop(DATA_AAS_TOKEN, None)
+                                        return await _finalize_success(updated_data)
 
                         if has_secrets and "new_secrets_json" in user_input:
                             try:
@@ -3735,45 +3841,44 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                             cands,
                                             secrets_bundle=parsed,
                                         )
-                                    except DependencyNotReady:
-                                        return await self.async_abort(
-                                            reason="dependency_not_ready"
-                                        )
-                                    if not chosen:
-                                        _LOGGER.warning(
-                                            "Token validation failed for %s. No working token found among candidates (%s).",
-                                            _mask_email_for_logs(email),
-                                            _cand_labels(cands),
-                                        )
-                                        errors["base"] = "cannot_connect"
+                                    except (DependencyNotReady, ImportError) as exc:
+                                        _register_dependency_error(errors, exc)
                                     else:
-                                        to_persist = chosen
-                                        if _disqualifies_for_persistence(to_persist):
-                                            alt = next(
-                                                (
-                                                    v
-                                                    for (_src, v) in cands
-                                                    if not _disqualifies_for_persistence(
-                                                        v
-                                                    )
-                                                ),
-                                                None,
+                                        if not chosen:
+                                            _LOGGER.warning(
+                                                "Token validation failed for %s. No working token found among candidates (%s).",
+                                                _mask_email_for_logs(email),
+                                                _cand_labels(cands),
                                             )
-                                            if alt:
-                                                to_persist = alt
-                                        updated_data = {
-                                            **entry.data,
-                                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                            CONF_OAUTH_TOKEN: to_persist,
-                                            DATA_SECRET_BUNDLE: parsed,
-                                        }
-                                        if isinstance(
-                                            to_persist, str
-                                        ) and to_persist.startswith("aas_et/"):
-                                            updated_data[DATA_AAS_TOKEN] = to_persist
+                                            errors["base"] = "cannot_connect"
                                         else:
-                                            updated_data.pop(DATA_AAS_TOKEN, None)
-                                        return await _finalize_success(updated_data)
+                                            to_persist = chosen
+                                            if _disqualifies_for_persistence(to_persist):
+                                                alt = next(
+                                                    (
+                                                        v
+                                                        for (_src, v) in cands
+                                                        if not _disqualifies_for_persistence(
+                                                            v
+                                                        )
+                                                    ),
+                                                    None,
+                                                )
+                                                if alt:
+                                                    to_persist = alt
+                                            updated_data = {
+                                                **entry.data,
+                                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                                CONF_OAUTH_TOKEN: to_persist,
+                                                DATA_SECRET_BUNDLE: parsed,
+                                            }
+                                            if isinstance(
+                                                to_persist, str
+                                            ) and to_persist.startswith("aas_et/"):
+                                                updated_data[DATA_AAS_TOKEN] = to_persist
+                                            else:
+                                                updated_data.pop(DATA_AAS_TOKEN, None)
+                                            return await _finalize_success(updated_data)
                     except Exception as err2:  # noqa: BLE001
                         if _is_multi_entry_guard_error(err2):
                             entry = self.config_entry

@@ -64,6 +64,7 @@
       "no_devices": "No devices found. Please ensure that Find My Device is enabled on your Google account.",
       "cannot_connect": "Failed to connect to the Google API. This may be temporary — please try again later.",
       "dependency_not_ready": "Required integration dependencies are missing. Install the Google Find My Device requirements and restart Home Assistant.",
+      "import_failed": "Failed to import the authentication helper. Install the Google Find My Device requirements (Selenium + Chrome driver) and try again.",
       "choose_one": "Please provide exactly one credential method.",
       "required": "This field is required.",
       "unknown": "Unexpected error occurred.",
@@ -75,7 +76,7 @@
       "dependency_not_ready": "Google Find My Device dependencies are not installed. Install the requirements and try again.",
       "invalid_discovery_info": "The discovery payload was invalid. Check the credentials and try again.",
       "reauth_successful": "Reauthentication successful.",
-      "migration_complete_confirmed": "Migration complete.",
+      "migration_successful": "Migration complete.",
       "migration_failed": "Migration failed. Please remove and re-add the integration."
     },
     "progress": {
