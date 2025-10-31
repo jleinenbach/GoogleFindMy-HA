@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import types
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
@@ -521,6 +521,33 @@ def test_async_step_discovery_update_alias() -> None:
 
     assert captured["info"] == {"source": "alias"}
     assert result == {"type": "form"}
+
+
+def test_async_step_discovery_routes_update_info_context() -> None:
+    """Discovery context from update-info should route to the update handler."""
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = object()  # type: ignore[assignment]
+    flow.context = {"source": config_flow.SOURCE_DISCOVERY_UPDATE_INFO}
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_update_info(
+        self: config_flow.ConfigFlow, info: Mapping[str, Any] | None
+    ) -> dict[str, str]:
+        captured["info"] = info
+        return {"type": "abort", "reason": "handled"}
+
+    flow.async_step_discovery_update_info = types.MethodType(  # type: ignore[assignment]
+        _fake_update_info,
+        flow,
+    )
+
+    payload = {"source": "payload"}
+    result = asyncio.run(flow.async_step_discovery(payload))
+
+    assert captured["info"] == payload
+    assert result == {"type": "abort", "reason": "handled"}
 
 
 def test_async_step_user_confirm_only_submission() -> None:

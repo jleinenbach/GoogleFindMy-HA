@@ -43,8 +43,15 @@ from collections.abc import Mapping as CollMapping
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, TypeVar, cast
 
-if TYPE_CHECKING:
-    from .api import GoogleFindMyAPI
+import voluptuous as vol
+
+from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.data_entry_flow import FlowResult
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     # Core domain & credential keys
@@ -87,29 +94,33 @@ from .const import (
 )
 from .email import normalize_email, normalize_email_or_default, unique_account_id
 
-import voluptuous as vol
+if TYPE_CHECKING:
+    from .api import GoogleFindMyAPI
 
-from homeassistant import config_entries
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+_LOGGER = logging.getLogger(__name__)
 
-try:  # pragma: no cover - compatibility shim for stripped environments
-    from homeassistant.config_entries import (
-        SOURCE_DISCOVERY,
-        SOURCE_DISCOVERY_UPDATE,
-        SOURCE_RECONFIGURE,
-        DiscoveryKey,
-        async_create_discovery_flow,
+try:
+    SOURCE_DISCOVERY = config_entries.SOURCE_DISCOVERY
+except AttributeError as err:  # pragma: no cover - configuration critical
+    _LOGGER.exception(
+        "Critical import failure: SOURCE_DISCOVERY not available: %s",
+        err,
     )
-except Exception:  # noqa: BLE001
-    SOURCE_DISCOVERY = "discovery"
-    SOURCE_DISCOVERY_UPDATE = "discovery_update"
-    SOURCE_RECONFIGURE = "reconfigure"
+    raise
 
+SOURCE_RECONFIGURE = getattr(config_entries, "SOURCE_RECONFIGURE", "reconfigure")
+
+SOURCE_DISCOVERY_UPDATE = getattr(config_entries, "SOURCE_DISCOVERY_UPDATE", None)
+if SOURCE_DISCOVERY_UPDATE is None:  # pragma: no cover - HA 2025.10 compatibility
+    _LOGGER.debug(
+        "Optional symbol SOURCE_DISCOVERY_UPDATE not available; falling back to string "
+        "source 'discovery_update_info'",
+    )
+
+DiscoveryKey: type[Any]
+try:  # pragma: no cover - runtime optional dependency
+    DiscoveryKey = cast(type[Any], getattr(config_entries, "DiscoveryKey"))
+except AttributeError:
     try:  # pragma: no cover - runtime optional dependency
         from homeassistant.helpers.discovery_flow import DiscoveryKey as _DiscoveryKey
     except Exception:  # noqa: BLE001
@@ -122,9 +133,25 @@ except Exception:  # noqa: BLE001
             key: str | tuple[str, ...]
             version: int = 1
 
-        DiscoveryKey = _FallbackDiscoveryKey
+        DiscoveryKey = cast(type[Any], _FallbackDiscoveryKey)
     else:  # pragma: no cover - simple aliasing
-        DiscoveryKey = _DiscoveryKey
+        DiscoveryKey = cast(type[Any], _DiscoveryKey)
+
+_DiscoveryFlowHelper = Callable[
+    [HomeAssistant, str, Mapping[str, Any] | None, Mapping[str, Any]],
+    Awaitable[None],
+]
+
+_discovery_flow_helper = cast(
+    _DiscoveryFlowHelper | None,
+    getattr(
+        config_entries,
+        "async_create_discovery_flow",
+        None,
+    ),
+)
+
+if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
 
     async def _async_create_discovery_flow(
         hass: HomeAssistant,
@@ -132,7 +159,7 @@ except Exception:  # noqa: BLE001
         context: Mapping[str, Any] | None,
         data: Mapping[str, Any],
         *,
-        discovery_key: DiscoveryKey | None = None,
+        discovery_key: Any | None = None,
     ) -> None:
         """Fallback helper mirroring modern discovery flow creation."""
 
@@ -161,7 +188,13 @@ except Exception:  # noqa: BLE001
             discovery_key=discovery_key,
         )
 
-    async_create_discovery_flow = _async_create_discovery_flow
+    _discovery_flow_helper = cast(
+        _DiscoveryFlowHelper,
+        _async_create_discovery_flow,
+    )
+
+assert _discovery_flow_helper is not None
+async_create_discovery_flow: _DiscoveryFlowHelper = _discovery_flow_helper
 
 
 _FALLBACK_CONFIG_SUBENTRY_FLOW: type[Any] | None = None
@@ -289,6 +322,7 @@ else:
 
 # Standard discovery update info source exposed for helper-triggered updates.
 SOURCE_DISCOVERY_UPDATE_INFO = "discovery_update_info"
+LEGACY_DISCOVERY_UPDATE_SOURCE = "discovery_update"
 
 # --- Soft optional imports for additional options (keep the flow robust) ----------
 # If these constants are not present in your build, the fields are omitted.
@@ -327,9 +361,6 @@ except Exception:  # noqa: BLE001
     ignored_choices_for_ui = None
 # -----------------------------------------------------------------------------------
 
-_LOGGER = logging.getLogger(__name__)
-
-
 _CallbackT = TypeVar("_CallbackT", bound=Callable[..., Any])
 
 
@@ -337,6 +368,21 @@ def _typed_callback(func: _CallbackT) -> _CallbackT:
     """Return a callback decorator that preserves type information."""
 
     return cast(_CallbackT, callback(func))
+
+
+def _is_discovery_update_info(
+    context: Mapping[str, Any] | None,
+) -> bool:
+    """Return True if the flow context indicates a discovery-update-info source."""
+
+    if not isinstance(context, Mapping):
+        return False
+
+    source = context.get("source")
+    if SOURCE_DISCOVERY_UPDATE is not None and source == SOURCE_DISCOVERY_UPDATE:
+        return True
+
+    return source in {SOURCE_DISCOVERY_UPDATE_INFO, LEGACY_DISCOVERY_UPDATE_SOURCE}
 
 
 def _mask_email_for_logs(email: str | None) -> str:
@@ -1613,6 +1659,29 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
     ) -> FlowResult:
         """Handle cloud-triggered discovery payloads."""
 
+        context_obj = getattr(self, "context", None)
+        context_source: str | None = None
+        if isinstance(context_obj, Mapping):
+            context_source = context_obj.get("source")
+
+        payload_keys: list[str] = []
+        if isinstance(discovery_info, Mapping):
+            payload_keys = sorted(str(key) for key in discovery_info.keys())
+
+        _LOGGER.debug(
+            "async_step_discovery invoked (context_source=%s, payload_keys=%s)",
+            context_source,
+            payload_keys,
+        )
+
+        if _is_discovery_update_info(context_obj):
+            _LOGGER.info(
+                "Routing discovery payload to discovery-update-info handler "
+                "(context_source=%s)",
+                context_source,
+            )
+            return await self.async_step_discovery_update_info(discovery_info)
+
         if self._discovery_confirm_pending:
             pending_payload = self._pending_discovery_payload
             is_submission = not discovery_info
@@ -1651,7 +1720,10 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
             _LOGGER.debug("Discovery ignored due to invalid payload: %s", err.reason)
             return await self.async_abort(reason=err.reason)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Discovery ignored due to unexpected payload: %s", err)
+            _LOGGER.exception(
+                "Discovery ignored due to unexpected payload: %s",
+                err,
+            )
             return await self.async_abort(reason="invalid_discovery_info")
 
         await self.async_set_unique_id(normalized.unique_id, raise_on_progress=False)
@@ -1694,19 +1766,42 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
     ) -> FlowResult:
         """Handle discovery updates for already configured entries."""
 
+        context_obj = getattr(self, "context", None)
+        context_source: str | None = None
+        if isinstance(context_obj, Mapping):
+            context_source = context_obj.get("source")
+
+        payload_keys: list[str] = []
+        if isinstance(discovery_info, Mapping):
+            payload_keys = sorted(str(key) for key in discovery_info.keys())
+
+        _LOGGER.debug(
+            "async_step_discovery_update_info invoked (context_source=%s, payload_keys=%s)",
+            context_source,
+            payload_keys,
+        )
+
         try:
             normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
         except DiscoveryFlowError as err:
             _LOGGER.debug("Discovery update ignored: %s", err.reason)
             return await self.async_abort(reason=err.reason)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Discovery update invalid: %s", err)
+            _LOGGER.exception(
+                "Discovery update invalid: %s",
+                err,
+            )
             return await self.async_abort(reason="invalid_discovery_info")
 
         await self.async_set_unique_id(normalized.unique_id, raise_on_progress=False)
 
         existing_entry = _find_entry_by_email(self.hass, normalized.email)
         if existing_entry is None:
+            _LOGGER.info(
+                "Discovery update-info payload without entry; rerouting to discovery "
+                "(email=%s)",
+                _mask_email_for_logs(normalized.email),
+            )
             return await self.async_step_discovery(discovery_info)
 
         try:
@@ -1729,6 +1824,11 @@ class ConfigFlow(config_entries.ConfigFlow, _ConfigFlowMixin):  # type: ignore[m
 
         if updates is None:
             updates = {"data": dict(existing_entry.data)}
+
+        _LOGGER.info(
+            "Handling discovery-update-info flow for %s",  # noqa: G004 - logging mask helper
+            _mask_email_for_logs(normalized.email),
+        )
 
         self._abort_if_unique_id_configured(updates=updates)
         return await self.async_abort(reason="already_configured")
