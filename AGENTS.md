@@ -170,6 +170,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 
   * **Auto-corrections applied:** trivial test failures (syntax, imports, obvious assertion drift) are automatically fixed when unambiguous (§3.1).
   * **Regression test added:** for `fix:` commits (or `fix/...` branches), add a minimal regression test if none existed (§3.2).
+* **Ruff linting parity.** Treat `ruff check` as co-equal with `pytest -q` and `mypy --strict`; run it before presenting results and resolve every reported issue in-tree.
 * **Deprecation remediation.** Investigate and resolve every `DeprecationWarning` observed during implementation, local verification, or CI. Prefer code changes over warning filters; if a warning must persist, document the upstream blocker in the PR description with a follow-up issue reference.
 * **Coverage targets.** Keep **config flow at 100 %**; repo total **≥ 95 %**. If temporarily lower due to necessary code removal, **open a follow-up issue** to restore coverage and reference it in the PR.
 * **Behavioral safety.** No secrets/PII in logs; user-visible errors use translated `translation_key`s; entities report `unavailable` on communication failures.
