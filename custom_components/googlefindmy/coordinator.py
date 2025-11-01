@@ -2893,13 +2893,39 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
 
             # 1) Always fetch the lightweight FULL device list using native async API
-            all_devices = await self.api.async_get_basic_device_list()
+            payload = await self.api.async_get_basic_device_list()
 
             # Success path: if we were in an auth error state, clear it now.
             self._set_auth_state(failed=False)
             self._set_api_status(ApiStatus.OK)
 
-            all_devices = all_devices or []
+            # Normalize payloads that may arrive as mappings or sequences.
+            devices_source: Any
+            if isinstance(payload, Mapping):
+                devices_source = payload.get("devices")
+            else:
+                devices_source = payload
+
+            if devices_source is None:
+                device_candidates: list[Any] = []
+            elif isinstance(devices_source, Mapping):
+                device_candidates = [devices_source]
+            elif isinstance(devices_source, Sequence) and not isinstance(
+                devices_source, (str, bytes, bytearray)
+            ):
+                device_candidates = list(devices_source)
+            else:
+                device_candidates = []
+
+            all_devices: list[dict[str, Any]] = []
+            for item in device_candidates:
+                if not isinstance(item, Mapping):
+                    continue
+                normalized = dict(item)
+                dev_id = normalized.get("id")
+                if not isinstance(dev_id, str) or not dev_id:
+                    continue
+                all_devices.append(normalized)
 
             # Minimal hardening against false empties (keep prior behaviour)
             if not all_devices:
@@ -3103,14 +3129,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 reason=self._short_error_message(update_err),
             )
             raise
-        except Exception as exc:
+        except Exception as err:
             # Record and raise as UpdateFailed per coordinator contract
-            self.note_error(exc, where="_async_update_data")
-            message = self._short_error_message(exc)
+            self.note_error(err, where="_async_update_data")
+            message = self._short_error_message(err)
             self._set_api_status(ApiStatus.ERROR, reason=message)
-            raise UpdateFailed(
-                f"Unexpected error during coordinator update: {message}"
-            ) from exc
+            _LOGGER.exception("Unexpected error during coordinator update")
+            raise UpdateFailed(f"{type(err).__name__}: {err}") from err
 
     # ---------------------------- Polling Cycle -----------------------------
     async def _async_start_poll_cycle(
