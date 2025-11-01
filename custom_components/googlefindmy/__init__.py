@@ -47,6 +47,10 @@ from types import MappingProxyType
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
+try:  # pragma: no cover - ConfigEntryDisabler introduced in HA 2023.12
+    from homeassistant.config_entries import ConfigEntryDisabler as _ConfigEntryDisabler
+except ImportError:  # pragma: no cover - legacy Home Assistant builds
+    _ConfigEntryDisabler = None
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STARTED,
     EVENT_HOMEASSISTANT_STOP,
@@ -2436,6 +2440,10 @@ def _apply_update_entry_fallback(
     if isinstance(version_value, int):
         entry.version = version_value
 
+    disabled_by_value = update_kwargs.get("disabled_by")
+    if disabled_by_value is not None:
+        setattr(entry, "disabled_by", disabled_by_value)
+
 
 def _format_duplicate_entries(
     entry: ConfigEntry, conflicts: Sequence[ConfigEntry] | None
@@ -2550,6 +2558,55 @@ def _clear_duplicate_account_issue(hass: HomeAssistant, entry: ConfigEntry) -> N
         ir.async_delete_issue(hass, DOMAIN, f"duplicate_account_{entry.entry_id}")
     except Exception:
         return
+
+
+def _integration_disabled_by_value() -> object:
+    """Return the ConfigEntry disabled marker for integration-managed entries."""
+
+    if _ConfigEntryDisabler is None:
+        return "integration"
+
+    return getattr(_ConfigEntryDisabler, "INTEGRATION", "integration")
+
+
+def _is_user_disabled(entry: ConfigEntry) -> bool:
+    """Return True if the entry has been disabled explicitly by the user."""
+
+    disabled = getattr(entry, "disabled_by", None)
+    if disabled is None:
+        return False
+
+    disabled_text = str(disabled).lower()
+    return "user" in disabled_text
+
+
+def _is_integration_disabled(entry: ConfigEntry) -> bool:
+    """Return True if the entry has already been disabled by the integration."""
+
+    disabled = getattr(entry, "disabled_by", None)
+    if disabled is None:
+        return False
+
+    disabled_text = str(disabled).lower()
+    return "integration" in disabled_text
+
+
+def _schedule_duplicate_unload(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Schedule an asynchronous unload for a duplicate config entry."""
+
+    unload_candidates = (
+        ConfigEntryState.LOADED,
+        getattr(ConfigEntryState, "SETUP_RETRY", None),
+        getattr(ConfigEntryState, "SETUP_ERROR", None),
+    )
+
+    if entry.state not in unload_candidates:
+        return
+
+    hass.async_create_task(
+        hass.config_entries.async_unload(entry.entry_id),
+        name=f"{DOMAIN}.unload_duplicate.{entry.entry_id}",
+    )
 
 
 def _clear_stale_duplicate_account_issues(
@@ -2718,43 +2775,75 @@ def _ensure_post_migration_consistency(
         ]
 
     authoritative_entry_id = _select_authoritative_entry_id(entry, duplicates)
-    candidates = [entry, *duplicates]
+
+    active_issue_entry_ids: set[str] = {authoritative_entry_id}
 
     if duplicates and normalized_email:
-        for candidate in candidates:
+        disabled_by_integration: list[str] = []
+        retained_user_disabled: list[str] = []
+        manual_action_required: list[str] = []
+
+        _clear_duplicate_account_issue(hass, entry)
+
+        for candidate in duplicates:
             if candidate.entry_id == authoritative_entry_id:
-                _clear_duplicate_account_issue(hass, candidate)
                 continue
 
-            conflicts = [
-                conflict
-                for conflict in candidates
-                if conflict.entry_id != candidate.entry_id
-            ]
-            _log_duplicate_and_raise_repair_issue(
-                hass,
-                candidate,
-                normalized_email,
-                cause=duplicate_issue_cause,
-                conflicts=conflicts,
+            if _is_user_disabled(candidate):
+                retained_user_disabled.append(candidate.entry_id)
+                _clear_duplicate_account_issue(hass, candidate)
+                _schedule_duplicate_unload(hass, candidate)
+                continue
+
+            if _is_integration_disabled(candidate):
+                disabled_by_integration.append(candidate.entry_id)
+                _clear_duplicate_account_issue(hass, candidate)
+                _schedule_duplicate_unload(hass, candidate)
+                continue
+
+            try:
+                hass.config_entries.async_update_entry(
+                    candidate,
+                    disabled_by=_integration_disabled_by_value(),
+                )
+            except TypeError:
+                manual_action_required.append(candidate.entry_id)
+                _LOGGER.warning(
+                    "Duplicate entry %s could not be disabled via API (legacy Core). "
+                    "Left unloaded; issued repair for manual action.",
+                    candidate.entry_id,
+                )
+                _schedule_duplicate_unload(hass, candidate)
+                _log_duplicate_and_raise_repair_issue(
+                    hass,
+                    candidate,
+                    normalized_email,
+                    cause=duplicate_issue_cause,
+                    conflicts=[entry, *duplicates],
+                )
+                active_issue_entry_ids.add(candidate.entry_id)
+                continue
+
+            disabled_by_integration.append(candidate.entry_id)
+            _clear_duplicate_account_issue(hass, candidate)
+            _schedule_duplicate_unload(hass, candidate)
+
+        if disabled_by_integration or retained_user_disabled or manual_action_required:
+            _LOGGER.info(
+                "Duplicate account %s → authoritative=%s; disabled=%s; user_disabled=%s; manual_action_required=%s",
+                _mask_email_for_logs(normalized_email),
+                authoritative_entry_id,
+                disabled_by_integration,
+                retained_user_disabled,
+                manual_action_required,
             )
-        _LOGGER.info(
-            "Duplicate account %s → authoritative=%s; held back=%s",
-            _mask_email_for_logs(normalized_email),
-            authoritative_entry_id,
-            [
-                candidate.entry_id
-                for candidate in candidates
-                if candidate.entry_id != authoritative_entry_id
-            ],
-        )
     else:
         _clear_duplicate_account_issue(hass, entry)
 
     _clear_stale_duplicate_account_issues(
         hass,
         normalized_email=normalized_email,
-        active_entry_ids={candidate.entry_id for candidate in candidates},
+        active_entry_ids=active_issue_entry_ids,
     )
 
     should_setup = not duplicates or entry.entry_id == authoritative_entry_id

@@ -401,6 +401,11 @@ Add to the PR description:
 
 * `pre-commit run --all-files`
 * `pytest -q`
+* `mypy --strict --install-types --non-interactive custom_components/googlefindmy tests`
+
+  > Running mypy with `--install-types --non-interactive` pre-approves the stub
+  > installations strict mode requires, eliminating interactive prompts during
+  > local or CI runs.
 
 > **Hassfest runs in CI.** The `.github/workflows/hassfest-auto-fix.yml` workflow
 > validates manifests on every push/PR and auto-commits any key ordering fixes.
