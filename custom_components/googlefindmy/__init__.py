@@ -1659,7 +1659,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.version,
     )
 
-    should_setup, normalized_email = _ensure_post_migration_consistency(
+    should_setup, normalized_email = await _ensure_post_migration_consistency(
         hass,
         entry,
         duplicate_issue_cause="migration_duplicate",
@@ -2440,10 +2440,6 @@ def _apply_update_entry_fallback(
     if isinstance(version_value, int):
         entry.version = version_value
 
-    disabled_by_value = update_kwargs.get("disabled_by")
-    if disabled_by_value is not None:
-        setattr(entry, "disabled_by", disabled_by_value)
-
 
 def _format_duplicate_entries(
     entry: ConfigEntry, conflicts: Sequence[ConfigEntry] | None
@@ -2719,7 +2715,7 @@ def _select_authoritative_entry_id(
     return str(authoritative.entry_id)
 
 
-def _ensure_post_migration_consistency(
+async def _ensure_post_migration_consistency(
     hass: HomeAssistant,
     entry: ConfigEntry,
     *,
@@ -2805,11 +2801,11 @@ def _ensure_post_migration_consistency(
                 continue
 
             try:
-                hass.config_entries.async_update_entry(
-                    candidate,
-                    disabled_by=_integration_disabled_by_value(),
+                await hass.config_entries.async_set_disabled_by(
+                    candidate.entry_id,
+                    _integration_disabled_by_value(),
                 )
-            except TypeError:
+            except Exception:
                 manual_action_required.append(candidate.entry_id)
                 _LOGGER.warning(
                     "Duplicate entry %s could not be disabled via API (legacy Core). "
@@ -2947,7 +2943,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     except Exception:
         pass
 
-    should_setup, normalized_email = _ensure_post_migration_consistency(hass, entry)
+    should_setup, normalized_email = await _ensure_post_migration_consistency(
+        hass, entry
+    )
     if not should_setup:
         _LOGGER.info(
             "Skipping setup for %s due to duplicate account %s",

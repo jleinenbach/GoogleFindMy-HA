@@ -33,6 +33,7 @@ class _MigrationTestEntry:
     unique_id: str | None = None
     state: ConfigEntryState = ConfigEntryState.NOT_LOADED
     subentries: dict[str, Any] = field(default_factory=dict)
+    disabled_by: object | None = None
 
     domain: str = DOMAIN
 
@@ -46,6 +47,7 @@ class _MigrationConfigEntriesManager:
     def __init__(self) -> None:
         self._entries: dict[str, _MigrationTestEntry] = {}
         self.updated: list[tuple[_MigrationTestEntry, dict[str, Any]]] = []
+        self.disabled: list[tuple[str, object | None]] = []
 
     def add_entry(self, entry: _MigrationTestEntry) -> None:
         self._entries[entry.entry_id] = entry
@@ -72,6 +74,13 @@ class _MigrationConfigEntriesManager:
         version_value = kwargs.get("version")
         if isinstance(version_value, int):
             entry.version = version_value
+
+    async def async_set_disabled_by(
+        self, entry_id: str, disabled_by: object | None
+    ) -> None:
+        entry = self._entries[entry_id]
+        entry.disabled_by = disabled_by
+        self.disabled.append((entry_id, disabled_by))
 
 
 @dataclass(slots=True)

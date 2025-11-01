@@ -113,6 +113,7 @@ class _StubConfigEntries:
         self.removed_subentries: list[tuple[_StubConfigEntry, str]] = []
         self.entry_update_calls: list[tuple[_StubConfigEntry, dict[str, Any]]] = []
         self.unload_calls: list[str] = []
+        self.set_disabled_by_calls: list[tuple[str, object | None]] = []
 
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
         return list(self._entries)
@@ -181,9 +182,6 @@ class _StubConfigEntries:
         if isinstance(unique_id, str):
             setattr(entry, "unique_id", unique_id)
 
-        if "disabled_by" in kwargs:
-            entry.disabled_by = kwargs["disabled_by"]
-
         version_value = kwargs.get("version")
         if isinstance(version_value, int):
             entry.version = version_value
@@ -194,6 +192,15 @@ class _StubConfigEntries:
     async def async_unload(self, entry_id: str) -> bool:
         self.unload_calls.append(entry_id)
         return True
+
+    async def async_set_disabled_by(
+        self, entry_id: str, disabled_by: object | None
+    ) -> None:
+        for entry in self._entries:
+            if entry.entry_id == entry_id:
+                entry.disabled_by = disabled_by
+                self.set_disabled_by_calls.append((entry_id, disabled_by))
+                break
 
 
 class _StubServices:
@@ -998,19 +1005,15 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         hass = _StubHass(new_entry, loop)
         hass.config_entries._entries.extend([existing_entry, legacy_duplicate])
 
-        original_update = hass.config_entries.__class__.async_update_entry
-
-        def _legacy_update_entry(
-            self: _StubConfigEntries, entry: _StubConfigEntry, **kwargs: Any
+        async def _legacy_set_disabled_by(
+            self: _StubConfigEntries, entry_id: str, disabled_by: object | None
         ) -> None:
-            if "disabled_by" in kwargs:
-                raise TypeError("disabled_by is not supported")
-            return original_update(self, entry, **kwargs)
+            raise TypeError("async_set_disabled_by is not supported")
 
         monkeypatch.setattr(
             hass.config_entries.__class__,
-            "async_update_entry",
-            _legacy_update_entry,
+            "async_set_disabled_by",
+            _legacy_set_disabled_by,
         )
 
         recorded_issues: list[dict[str, Any]] = []
@@ -1183,9 +1186,11 @@ def test_duplicate_account_mixed_states_prefer_loaded(
         hass_loaded = _StubHass(loaded_entry, loop)
         hass_loaded.config_entries._entries.append(retry_entry)
 
-        should_setup_loaded, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-            hass_loaded,
-            loaded_entry,
+        should_setup_loaded, normalized_email = loop.run_until_complete(
+            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+                hass_loaded,
+                loaded_entry,
+            )
         )
         assert should_setup_loaded is True
         assert normalized_email == "dup@example.com"
@@ -1213,9 +1218,11 @@ def test_duplicate_account_mixed_states_prefer_loaded(
         hass_retry = _StubHass(retry_entry, loop)
         hass_retry.config_entries._entries.append(loaded_entry)
 
-        should_setup_retry, normalized_retry = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-            hass_retry,
-            retry_entry,
+        should_setup_retry, normalized_retry = loop.run_until_complete(
+            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+                hass_retry,
+                retry_entry,
+            )
         )
         assert should_setup_retry is False
         assert normalized_retry == "dup@example.com"
@@ -1299,9 +1306,11 @@ def test_duplicate_account_auto_disables_duplicates(
             [duplicate_loaded, duplicate_error, duplicate_user]
         )
 
-        should_setup, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-            hass,
-            authoritative,
+        should_setup, normalized_email = loop.run_until_complete(
+            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+                hass,
+                authoritative,
+            )
         )
         assert should_setup is True
         assert normalized_email == "dup@example.com"
@@ -1367,19 +1376,15 @@ def test_duplicate_account_legacy_core_disable_fallback(
         hass = _StubHass(authoritative, loop)
         hass.config_entries._entries.append(duplicate_legacy)
 
-        original_update = hass.config_entries.__class__.async_update_entry
-
-        def _legacy_update_entry(
-            self: _StubConfigEntries, entry: _StubConfigEntry, **kwargs: Any
+        async def _legacy_set_disabled_by(
+            self: _StubConfigEntries, entry_id: str, disabled_by: object | None
         ) -> None:
-            if "disabled_by" in kwargs:
-                raise TypeError("disabled_by is not supported")
-            return original_update(self, entry, **kwargs)
+            raise TypeError("async_set_disabled_by is not supported")
 
         monkeypatch.setattr(
             hass.config_entries.__class__,
-            "async_update_entry",
-            _legacy_update_entry,
+            "async_set_disabled_by",
+            _legacy_set_disabled_by,
         )
 
         create_calls: list[tuple[Any, str, str, dict[str, Any]]] = []
@@ -1402,9 +1407,11 @@ def test_duplicate_account_legacy_core_disable_fallback(
 
         caplog.set_level(logging.INFO)
 
-        should_setup, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-            hass,
-            authoritative,
+        should_setup, normalized_email = loop.run_until_complete(
+            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+                hass,
+                authoritative,
+            )
         )
         assert should_setup is True
         assert normalized_email == "legacy@example.com"
@@ -1520,9 +1527,11 @@ def test_duplicate_account_clear_stale_issues_for_all() -> None:
             translation_placeholders={"email": "solo@example.com"},
         )
 
-        integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-            hass,
-            entry,
+        loop.run_until_complete(
+            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+                hass,
+                entry,
+            )
         )
 
         assert (
@@ -1563,19 +1572,15 @@ def test_duplicate_account_cleanup_keeps_active_tuple_key_issues(
         hass = _StubHass(authoritative, loop)
         hass.config_entries._entries.append(duplicate)
 
-        original_update = hass.config_entries.__class__.async_update_entry
-
-        def _legacy_update_entry(
-            self: _StubConfigEntries, entry: _StubConfigEntry, **kwargs: Any
+        async def _legacy_set_disabled_by(
+            self: _StubConfigEntries, entry_id: str, disabled_by: object | None
         ) -> None:
-            if "disabled_by" in kwargs:
-                raise TypeError("disabled_by is not supported")
-            return original_update(self, entry, **kwargs)
+            raise TypeError("async_set_disabled_by is not supported")
 
         monkeypatch.setattr(
             hass.config_entries.__class__,
-            "async_update_entry",
-            _legacy_update_entry,
+            "async_set_disabled_by",
+            _legacy_set_disabled_by,
         )
 
         registry = integration.ir.async_get(hass)
@@ -1590,9 +1595,11 @@ def test_duplicate_account_cleanup_keeps_active_tuple_key_issues(
             translation_placeholders={"email": email},
         )
 
-        should_setup, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-            hass,
-            authoritative,
+        should_setup, normalized_email = loop.run_until_complete(
+            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+                hass,
+                authoritative,
+            )
         )
 
         assert should_setup is True
@@ -1693,19 +1700,15 @@ def test_duplicate_account_cleanup_respects_string_key_issue_registries(
         hass = _StubHass(authoritative, loop)
         hass.config_entries._entries.append(duplicate)
 
-        original_update = hass.config_entries.__class__.async_update_entry
-
-        def _legacy_update_entry(
-            self: _StubConfigEntries, entry: _StubConfigEntry, **kwargs: Any
+        async def _legacy_set_disabled_by(
+            self: _StubConfigEntries, entry_id: str, disabled_by: object | None
         ) -> None:
-            if "disabled_by" in kwargs:
-                raise TypeError("disabled_by is not supported")
-            return original_update(self, entry, **kwargs)
+            raise TypeError("async_set_disabled_by is not supported")
 
         monkeypatch.setattr(
             hass.config_entries.__class__,
-            "async_update_entry",
-            _legacy_update_entry,
+            "async_set_disabled_by",
+            _legacy_set_disabled_by,
         )
 
         registry.async_create_issue(
@@ -1719,9 +1722,11 @@ def test_duplicate_account_cleanup_respects_string_key_issue_registries(
             translation_placeholders={"email": email},
         )
 
-        should_setup, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-            hass,
-            authoritative,
+        should_setup, normalized_email = loop.run_until_complete(
+            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+                hass,
+                authoritative,
+            )
         )
 
         assert should_setup is True
