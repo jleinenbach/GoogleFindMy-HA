@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from types import MappingProxyType, SimpleNamespace
-from typing import Any
+from typing import Any, Mapping, cast
 from collections.abc import Iterable
 
 import pytest
@@ -86,6 +87,12 @@ class _FakeDeviceRegistry:
         self.created: list[dict[str, Any]] = []
         self.updated: list[dict[str, Any]] = []
         self.devices: list[_FakeDeviceEntry] = []
+
+    def async_get(self, device_id: str) -> _FakeDeviceEntry | None:
+        for device in self.devices:
+            if device.id == device_id:
+                return device
+        return None
 
     def async_get_device(
         self, *, identifiers: set[tuple[str, str]]
@@ -199,11 +206,195 @@ class _FakeDeviceRegistry:
                 return
         raise AssertionError(f"Unknown device_id {device_id}")
 
-    def async_get(self, device_id: str) -> _FakeDeviceEntry | None:
-        for device in self.devices:
-            if device.id == device_id:
-                return device
+
+_UNSET = object()
+
+
+@dataclass(frozen=True)
+class _FrozenDeviceEntry:
+    """Frozen stand-in mirroring Home Assistant's DeviceEntry dataclass."""
+
+    id: str
+    identifiers: frozenset[tuple[str, str]]
+    config_entries: frozenset[str]
+    name: str | None = None
+    name_by_user: str | None = None
+    disabled_by: Any | None = None
+    via_device_id: str | None = None
+    via_device: tuple[str, str] | None = None
+    manufacturer: str | None = None
+    model: str | None = None
+    sw_version: str | None = None
+    entry_type: Any | None = None
+    configuration_url: str | None = None
+    translation_key: str | None = None
+    translation_placeholders: Mapping[str, str] | None = None
+    config_subentry_id: str | None = None
+
+
+class _FrozenDeviceRegistry:
+    """Device registry stub that returns frozen entries and clones on update."""
+
+    def __init__(self) -> None:
+        self.created: list[dict[str, Any]] = []
+        self.updated: list[dict[str, Any]] = []
+        self.devices: list[_FrozenDeviceEntry] = []
+        self._devices: dict[str, _FrozenDeviceEntry] = {}
+        self._counter = 0
+
+    def _next_id(self, entry_id: str) -> str:
+        self._counter += 1
+        return f"frozen-{entry_id}-{self._counter}"
+
+    def _store(self, entry: _FrozenDeviceEntry) -> None:
+        self._devices[entry.id] = entry
+        for idx, existing in enumerate(self.devices):
+            if existing.id == entry.id:
+                self.devices[idx] = entry
+                break
+        else:
+            self.devices.append(entry)
+
+    def async_get(self, device_id: str) -> _FrozenDeviceEntry | None:
+        return self._devices.get(device_id)
+
+    def async_get_device(
+        self, *, identifiers: set[tuple[str, str]]
+    ) -> _FrozenDeviceEntry | None:
+        for entry in self._devices.values():
+            if identifiers & set(entry.identifiers):
+                return entry
         return None
+
+    def async_get_or_create(
+        self,
+        *,
+        config_entry_id: str,
+        identifiers: set[tuple[str, str]],
+        manufacturer: str,
+        model: str,
+        name: str | None = None,
+        via_device_id: str | None = None,
+        via_device: tuple[str, str] | None = None,
+        **kwargs: Any,
+    ) -> _FrozenDeviceEntry:
+        existing = self.async_get_device(identifiers=identifiers)
+        if existing is not None:
+            return existing
+
+        device_id = self._next_id(config_entry_id)
+        entry = _FrozenDeviceEntry(
+            id=device_id,
+            identifiers=frozenset(identifiers),
+            config_entries=frozenset({config_entry_id}),
+            name=name,
+            via_device_id=via_device_id,
+            via_device=via_device,
+            manufacturer=manufacturer,
+            model=model,
+            sw_version=kwargs.get("sw_version"),
+            entry_type=kwargs.get("entry_type"),
+            configuration_url=kwargs.get("configuration_url"),
+            translation_key=kwargs.get("translation_key"),
+            translation_placeholders=cast(
+                Mapping[str, str] | None, kwargs.get("translation_placeholders")
+            ),
+            config_subentry_id=kwargs.get("config_subentry_id"),
+        )
+        self._store(entry)
+        self.created.append(
+            {
+                "config_entry_id": config_entry_id,
+                "identifiers": set(identifiers),
+                "manufacturer": manufacturer,
+                "model": model,
+                "name": name,
+                "via_device_id": via_device_id,
+                "via_device": via_device,
+                "sw_version": kwargs.get("sw_version"),
+                "entry_type": kwargs.get("entry_type"),
+                "configuration_url": kwargs.get("configuration_url"),
+                "translation_key": kwargs.get("translation_key"),
+                "translation_placeholders": kwargs.get("translation_placeholders"),
+                "config_subentry_id": kwargs.get("config_subentry_id"),
+            }
+        )
+        return entry
+
+    def async_update_device(
+        self,
+        *,
+        device_id: str,
+        new_identifiers: Iterable[tuple[str, str]] | None = None,
+        via_device_id: str | None = None,
+        name: str | None | object = _UNSET,
+        translation_key: str | None = None,
+        translation_placeholders: Mapping[str, str] | None = None,
+        config_subentry_id: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        entry = self._devices.get(device_id)
+        if entry is None:
+            raise AssertionError(f"Unknown device_id {device_id}")
+
+        replace_kwargs: dict[str, Any] = {}
+        if new_identifiers is not None:
+            replace_kwargs["identifiers"] = frozenset(new_identifiers)
+        if via_device_id is not None:
+            replace_kwargs["via_device_id"] = via_device_id
+        if name is not _UNSET:
+            replace_kwargs["name"] = cast(str | None, name)
+        if translation_key is not None:
+            replace_kwargs["translation_key"] = translation_key
+        if translation_placeholders is not None:
+            replace_kwargs["translation_placeholders"] = dict(translation_placeholders)
+        if config_subentry_id is not None:
+            replace_kwargs["config_subentry_id"] = config_subentry_id
+        for field in ("manufacturer", "model", "sw_version", "entry_type", "configuration_url"):
+            if field in kwargs:
+                replace_kwargs[field] = kwargs[field]
+
+        new_entry = replace(entry, **replace_kwargs)
+        self._store(new_entry)
+        self.updated.append(
+            {
+                "device_id": device_id,
+                "new_identifiers": None
+                if new_identifiers is None
+                else set(new_identifiers),
+                "via_device_id": via_device_id,
+                "name": None if name is _UNSET else cast(str | None, name),
+                "translation_key": translation_key,
+                "translation_placeholders": translation_placeholders,
+                "config_subentry_id": config_subentry_id,
+                "manufacturer": kwargs.get("manufacturer"),
+                "model": kwargs.get("model"),
+                "sw_version": kwargs.get("sw_version"),
+                "entry_type": kwargs.get("entry_type"),
+                "configuration_url": kwargs.get("configuration_url"),
+            }
+        )
+
+    def seed_device(
+        self,
+        *,
+        identifiers: Iterable[tuple[str, str]],
+        config_entry_id: str,
+        name: str | None = None,
+        via_device_id: str | None = None,
+        config_subentry_id: str | None = None,
+    ) -> _FrozenDeviceEntry:
+        device_id = self._next_id(config_entry_id)
+        entry = _FrozenDeviceEntry(
+            id=device_id,
+            identifiers=frozenset(identifiers),
+            config_entries=frozenset({config_entry_id}),
+            name=name,
+            via_device_id=via_device_id,
+            config_subentry_id=config_subentry_id,
+        )
+        self._store(entry)
+        return entry
 
 
 class _TranslationRejectingRegistry(_FakeDeviceRegistry):
@@ -280,6 +471,22 @@ def fake_registry(monkeypatch: pytest.MonkeyPatch) -> _FakeDeviceRegistry:
             raising=False,
         )
     registry = _FakeDeviceRegistry()
+    monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
+    return registry
+
+
+@pytest.fixture
+def frozen_registry(monkeypatch: pytest.MonkeyPatch) -> _FrozenDeviceRegistry:
+    """Patch the device registry helper with a frozen-entry stub."""
+
+    if not hasattr(dr, "DeviceEntryType"):
+        monkeypatch.setattr(
+            dr,
+            "DeviceEntryType",
+            SimpleNamespace(SERVICE="service"),
+            raising=False,
+        )
+    registry = _FrozenDeviceRegistry()
     monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
     return registry
 
@@ -406,6 +613,66 @@ def test_legacy_device_migrates_to_service_parent(
     assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
     assert legacy.name == "Pixel"
     assert legacy.config_subentry_id == entry.tracker_subentry_id
+
+
+def test_frozen_registry_updates_do_not_raise(
+    frozen_registry: _FrozenDeviceRegistry,
+) -> None:
+    """Registry sync handles frozen DeviceEntry objects without direct mutation."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    coordinator._ensure_service_device_exists()
+
+    legacy = frozen_registry.seed_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id="entry-42",
+    )
+
+    devices = [{"id": "abc123", "name": "Pixel"}]
+    coordinator.data = devices
+
+    created = coordinator._ensure_registry_for_devices(
+        devices=devices,
+        ignored=set(),
+    )
+
+    assert created == 2
+    assert frozen_registry.updated
+    assert frozen_registry.async_get(legacy.id) is not None
+
+
+def test_frozen_legacy_device_merges_identifiers(
+    frozen_registry: _FrozenDeviceRegistry,
+) -> None:
+    """Legacy identifiers merge into a single frozen DeviceEntry with full metadata."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    coordinator._ensure_service_device_exists()
+
+    legacy = frozen_registry.seed_device(
+        identifiers={(DOMAIN, "abc123")},
+        config_entry_id="entry-42",
+    )
+
+    devices = [{"id": "abc123", "name": "Pixel"}]
+    coordinator.data = devices
+
+    coordinator._ensure_registry_for_devices(
+        devices=devices,
+        ignored=set(),
+    )
+
+    refreshed = frozen_registry.async_get(legacy.id)
+    assert refreshed is not None
+    assert refreshed.identifiers == frozenset(
+        {(DOMAIN, "abc123"), (DOMAIN, "entry-42:abc123")}
+    )
+    assert refreshed.via_device_id == coordinator._service_device_id
+    assert refreshed.config_subentry_id == entry.tracker_subentry_id
 
 
 def test_existing_device_backfills_via_link(fake_registry: _FakeDeviceRegistry) -> None:

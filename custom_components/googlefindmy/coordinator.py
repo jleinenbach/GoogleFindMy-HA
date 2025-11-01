@@ -1657,6 +1657,24 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self, "_reg_supports_config_subentry_id", None
         )
 
+        def _refresh_service_device_entry(candidate: Any) -> Any:
+            """Return a fresh copy of the service device entry when possible."""
+
+            if candidate is None:
+                return None
+
+            getter = getattr(dev_reg, "async_get", None)
+            device_id = getattr(candidate, "id", None)
+            if not callable(getter) or not isinstance(device_id, str) or not device_id:
+                return candidate
+
+            try:
+                refreshed = getter(device_id)
+            except TypeError:
+                return candidate
+
+            return candidate if refreshed is None else refreshed
+
         if device is None:
             create_kwargs: dict[str, Any] = {
                 "config_entry_id": entry.entry_id,
@@ -1677,6 +1695,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 dev_reg.async_get_or_create,
                 base_kwargs=create_kwargs,
             )
+            device = _refresh_service_device_entry(device)
             _LOGGER.debug(
                 "Created Google Find My service device for entry %s (device_id=%s)",
                 entry.entry_id,
@@ -1737,6 +1756,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 self._call_service_device_registry_api(
                     dev_reg.async_update_device, base_kwargs=update_kwargs
                 )
+                device = _refresh_service_device_entry(device)
                 _LOGGER.debug(
                     "Updated Google Find My service device metadata for entry %s",
                     entry.entry_id,
@@ -1973,6 +1993,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return 0
         update_device = getattr(dev_reg, "async_update_device", None)
         get_device = getattr(dev_reg, "async_get_device", None)
+        get_device_by_id = getattr(dev_reg, "async_get", None)
         created_or_updated = 0
 
         supports_via_kw = getattr(self, "_dr_supports_via_device_kw", None)
@@ -1986,16 +2007,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 supports_via_kw = "via_device" in params
             setattr(self, "_dr_supports_via_device_kw", supports_via_kw)
 
-        def _update_device_with_kwargs(kwargs: dict[str, Any]) -> Any:
+        def _update_device_with_kwargs(kwargs: dict[str, Any]) -> None:
             if not callable(update_device):
-                return None
+                return
             try:
-                return update_device(**kwargs)
+                update_device(**kwargs)
             except TypeError as err:
                 if "config_subentry_id" in str(err):
                     kwargs.pop("config_subentry_id", None)
-                    return update_device(**kwargs)
+                    update_device(**kwargs)
+                    return
                 raise
+
+        def _refresh_device_entry(device_id: str, fallback: Any) -> Any:
+            if not callable(get_device_by_id) or not device_id:
+                return fallback
+            try:
+                refreshed = get_device_by_id(device_id)
+            except TypeError:
+                return fallback
+            return fallback if refreshed is None else refreshed
 
         for d in devices:
             dev_id = d.get("id")
@@ -2038,10 +2069,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             getattr(legacy_dev, "config_subentry_id", None)
                             != tracker_config_subentry_id
                         )
+                        raw_name = (d.get("name") or "").strip()
+                        use_name = (
+                            raw_name
+                            if raw_name and raw_name != "Google Find My Device"
+                            else None
+                        )
+                        needs_name = (
+                            bool(use_name)
+                            and not getattr(legacy_dev, "name_by_user", None)
+                            and getattr(legacy_dev, "name", None) != use_name
+                        )
                         if (
                             needs_identifiers
                             or needs_via
                             or needs_config_subentry
+                            or needs_name
                         ):
                             update_kwargs: dict[str, Any] = {
                                 "device_id": legacy_dev.id,
@@ -2051,26 +2094,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 update_kwargs["new_identifiers"] = new_idents
                             if needs_via:
                                 update_kwargs["via_device_id"] = service_device_id
-                            updated = _update_device_with_kwargs(update_kwargs)
-                            if updated is not None:
-                                legacy_dev = updated
-                            if (
-                                needs_identifiers
-                                and getattr(legacy_dev, "identifiers", None)
-                                != new_idents
-                            ):
-                                legacy_dev.identifiers = new_idents
-                            if (
-                                needs_via
-                                and getattr(legacy_dev, "via_device_id", None)
-                                != service_device_id
-                            ):
-                                legacy_dev.via_device_id = service_device_id
-                            if needs_config_subentry:
-                                legacy_dev.config_subentry_id = tracker_config_subentry_id
-                            created_or_updated += 1
-                        if service_device_id is None:
-                            self._note_pending_via_update(legacy_dev.id)
+                            if needs_name:
+                                update_kwargs["name"] = use_name
+                            legacy_id = getattr(legacy_dev, "id", None)
+                            _update_device_with_kwargs(update_kwargs)
+                            legacy_dev = _refresh_device_entry(
+                                legacy_id or "",
+                                legacy_dev,
+                            )
+                        created_or_updated += 1
+                    if service_device_id is None:
+                        self._note_pending_via_update(legacy_dev.id)
                         dev = legacy_dev
                     else:
                         # Belongs to another entry → create a new device with namespaced ident (no merge).
@@ -2138,17 +2172,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         "via_device_id": service_device_id,
                         "config_subentry_id": tracker_config_subentry_id,
                     }
-                    updated = _update_device_with_kwargs(update_kwargs)
-                    if updated is not None:
-                        dev = updated
-                    else:
-                        if getattr(dev, "via_device_id", None) != service_device_id:
-                            dev.via_device_id = service_device_id
-                        if (
-                            getattr(dev, "config_subentry_id", None)
-                            != tracker_config_subentry_id
-                        ):
-                            dev.config_subentry_id = tracker_config_subentry_id
+                    device_id = getattr(dev, "id", None)
+                    _update_device_with_kwargs(update_kwargs)
+                    dev = _refresh_device_entry(device_id or "", dev)
             else:
                 # Keep name fresh if not user-overridden and a new upstream label is available
                 raw_name = (d.get("name") or "").strip()
@@ -2190,24 +2216,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     update_existing_kwargs["config_subentry_id"] = (
                         tracker_config_subentry_id
                     )
-                    updated = _update_device_with_kwargs(update_existing_kwargs)
-                    if updated is not None:
-                        dev = updated
-                    if (
-                        "name" in update_existing_kwargs
-                        and getattr(dev, "name", None) != update_existing_kwargs["name"]
-                    ):
-                        dev.name = update_existing_kwargs["name"]
-                    if (
-                        needs_via_update
-                        and getattr(dev, "via_device_id", None) != service_device_id
-                    ):
-                        dev.via_device_id = service_device_id
-                    if (
-                        getattr(dev, "config_subentry_id", None)
-                        != tracker_config_subentry_id
-                    ):
-                        dev.config_subentry_id = tracker_config_subentry_id
+                    _update_device_with_kwargs(update_existing_kwargs)
+                    dev = _refresh_device_entry(device_id or "", dev)
                     created_or_updated += 1
 
                 if service_device_id is None and dev is not None:
