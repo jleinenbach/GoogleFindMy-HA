@@ -56,13 +56,6 @@ duplicate-detection utilities:
   therefore assert that `created` stays empty and that any stale
   `duplicate_account_<entry_id>` entry is removed during the run.
 
-### Duplicate disable fallbacks
-
-Legacy-core scenarios are simulated in tests by monkeypatching
-`hass.config_entries.async_set_disabled_by` to raise `TypeError`. This ensures
-manual-action repair issues remain covered whenever the disable API is
-unavailable.
-
 ### `ConfigFlow` helper methods
 
 * `ConfigFlow.async_set_unique_id()` stores the provided ID on both

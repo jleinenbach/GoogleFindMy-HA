@@ -15,7 +15,7 @@ from contextlib import suppress
 from pathlib import Path
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock, call
 
 import pytest
@@ -111,9 +111,6 @@ class _StubConfigEntries:
         self.added_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
         self.updated_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
         self.removed_subentries: list[tuple[_StubConfigEntry, str]] = []
-        self.entry_update_calls: list[tuple[_StubConfigEntry, dict[str, Any]]] = []
-        self.unload_calls: list[str] = []
-        self.set_disabled_by_calls: list[tuple[str, object | None]] = []
 
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
         return list(self._entries)
@@ -163,44 +160,13 @@ class _StubConfigEntries:
         self.removed_subentries.append((entry, subentry_id))
         return True
 
-    def async_update_entry(self, entry: _StubConfigEntry, **kwargs: Any) -> None:
-        self.entry_update_calls.append((entry, dict(kwargs)))
-
-        options = kwargs.get("options")
-        if isinstance(options, Mapping):
-            entry.options = dict(options)
-
-        data = kwargs.get("data")
-        if isinstance(data, Mapping):
-            entry.data = dict(data)
-
-        title = kwargs.get("title")
-        if isinstance(title, str):
-            entry.title = title
-
-        unique_id = kwargs.get("unique_id")
-        if isinstance(unique_id, str):
-            setattr(entry, "unique_id", unique_id)
-
-        version_value = kwargs.get("version")
-        if isinstance(version_value, int):
-            entry.version = version_value
+    def async_update_entry(
+        self, entry: _StubConfigEntry, *, options: dict[str, Any]
+    ) -> None:
+        entry.options = options
 
     async def async_reload(self, entry_id: str) -> None:
         self.reload_calls.append(entry_id)
-
-    async def async_unload(self, entry_id: str) -> bool:
-        self.unload_calls.append(entry_id)
-        return True
-
-    async def async_set_disabled_by(
-        self, entry_id: str, disabled_by: object | None
-    ) -> None:
-        for entry in self._entries:
-            if entry.entry_id == entry_id:
-                entry.disabled_by = disabled_by
-                self.set_disabled_by_calls.append((entry_id, disabled_by))
-                break
 
 
 class _StubServices:
@@ -988,7 +954,6 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         existing_entry.title = "Primary Account"
         existing_entry.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
         existing_entry.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
-        existing_entry.updated_at = datetime(2024, 2, 2, 0, 0, 0)
 
         new_entry = _StubConfigEntry()
         new_entry.entry_id = "entry-new"
@@ -996,25 +961,8 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         new_entry.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
         new_entry.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
 
-        legacy_duplicate = _StubConfigEntry()
-        legacy_duplicate.entry_id = "entry-legacy"
-        legacy_duplicate.title = "Legacy Duplicate"
-        legacy_duplicate.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
-        legacy_duplicate.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
-
         hass = _StubHass(new_entry, loop)
-        hass.config_entries._entries.extend([existing_entry, legacy_duplicate])
-
-        async def _legacy_set_disabled_by(
-            self: _StubConfigEntries, entry_id: str, disabled_by: object | None
-        ) -> None:
-            raise TypeError("async_set_disabled_by is not supported")
-
-        monkeypatch.setattr(
-            hass.config_entries.__class__,
-            "async_set_disabled_by",
-            _legacy_set_disabled_by,
-        )
+        hass.config_entries._entries.append(existing_entry)
 
         recorded_issues: list[dict[str, Any]] = []
 
@@ -1037,14 +985,6 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         result = loop.run_until_complete(_exercise())
         assert result is False
         assert recorded_issues, "Expected duplicate-account issue to be recorded"
-        issue = recorded_issues[0]
-        assert issue["id"] == f"duplicate_account_{legacy_duplicate.entry_id}"
-        placeholders = issue.get("translation_placeholders", {})
-        assert placeholders.get("email") == "dup@example.com"
-        entries_placeholder = str(placeholders.get("entries", ""))
-        assert existing_entry.entry_id in entries_placeholder
-        assert legacy_duplicate.entry_id in entries_placeholder
-        assert placeholders.get("cause") == "setup_duplicate"
 
         issue = recorded_issues[-1]
         assert issue["translation_key"] == "duplicate_account_entries"
@@ -1134,7 +1074,7 @@ def test_duplicate_account_issue_cleanup_on_success(
 def test_duplicate_account_mixed_states_prefer_loaded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Loaded duplicates remain authoritative; others auto-disable and clean up."""
+    """Loaded duplicates continue; others are held back with repair issues."""
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1186,31 +1126,22 @@ def test_duplicate_account_mixed_states_prefer_loaded(
         hass_loaded = _StubHass(loaded_entry, loop)
         hass_loaded.config_entries._entries.append(retry_entry)
 
-        should_setup_loaded, normalized_email = loop.run_until_complete(
-            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-                hass_loaded,
-                loaded_entry,
-            )
+        should_setup_loaded, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass_loaded,
+            loaded_entry,
         )
         assert should_setup_loaded is True
         assert normalized_email == "dup@example.com"
-
-        if hass_loaded._tasks:
-            loop.run_until_complete(asyncio.gather(*hass_loaded._tasks))
 
         delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
         assert (
             f"duplicate_account_{loaded_entry.entry_id}" in delete_issue_ids
         ), "Authoritative entry should clear its repair issue"
-        assert (
-            f"duplicate_account_{retry_entry.entry_id}" in delete_issue_ids
-        ), "Duplicate entry repair issue should be cleared after auto-disable"
 
-        assert (
-            hass_loaded.config_entries.unload_calls.count(retry_entry.entry_id) >= 1
-        ), "Duplicate entry should be unloaded when disabled"
-        assert not create_calls, "Auto-disabled duplicates must not raise new issues"
-        assert "integration" in str(retry_entry.disabled_by).lower()
+        create_issue_ids = [issue_id for *_hass, _domain, issue_id, _ in create_calls]
+        assert create_issue_ids == [
+            f"duplicate_account_{retry_entry.entry_id}"
+        ], "Non-authoritative entry should record an issue"
 
         create_calls.clear()
         delete_calls.clear()
@@ -1218,238 +1149,26 @@ def test_duplicate_account_mixed_states_prefer_loaded(
         hass_retry = _StubHass(retry_entry, loop)
         hass_retry.config_entries._entries.append(loaded_entry)
 
-        should_setup_retry, normalized_retry = loop.run_until_complete(
-            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-                hass_retry,
-                retry_entry,
-            )
+        should_setup_retry, normalized_retry = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass_retry,
+            retry_entry,
         )
         assert should_setup_retry is False
         assert normalized_retry == "dup@example.com"
-        assert "integration" in str(retry_entry.disabled_by).lower()
-        assert not create_calls, "Duplicate should remain disabled without new issues"
 
-        if hass_retry._tasks:
-            loop.run_until_complete(asyncio.gather(*hass_retry._tasks))
+        create_issue_ids = [issue_id for *_hass, _domain, issue_id, _ in create_calls]
+        assert (
+            create_issue_ids.count(f"duplicate_account_{retry_entry.entry_id}") >= 1
+        ), "Retry entry should keep its repair issue"
+        assert all(
+            issue_id != f"duplicate_account_{loaded_entry.entry_id}"
+            for issue_id in create_issue_ids
+        ), "Loaded entry must not gain a duplicate repair issue"
 
         delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
         assert (
-            f"duplicate_account_{retry_entry.entry_id}" in delete_issue_ids
-        ), "Duplicate entry issues should stay cleared"
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
-
-def test_duplicate_account_auto_disables_duplicates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Non-authoritative entries are disabled, unloaded, and cleaned up."""
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    try:
-        integration = importlib.import_module("custom_components.googlefindmy")
-
-        authoritative = _StubConfigEntry()
-        authoritative.entry_id = "entry-authoritative"
-        authoritative.title = "Authoritative"
-        authoritative.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
-        authoritative.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
-        authoritative.state = ConfigEntryState.LOADED
-
-        duplicate_loaded = _StubConfigEntry()
-        duplicate_loaded.entry_id = "entry-duplicate-loaded"
-        duplicate_loaded.title = "Loaded Duplicate"
-        duplicate_loaded.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
-        duplicate_loaded.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
-        duplicate_loaded.state = ConfigEntryState.LOADED
-
-        duplicate_error = _StubConfigEntry()
-        duplicate_error.entry_id = "entry-duplicate-error"
-        duplicate_error.title = "Error Duplicate"
-        duplicate_error.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
-        duplicate_error.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
-        duplicate_error.state = getattr(
-            ConfigEntryState, "SETUP_ERROR", ConfigEntryState.LOADED
-        )
-
-        duplicate_user = _StubConfigEntry()
-        duplicate_user.entry_id = "entry-duplicate-user"
-        duplicate_user.title = "User Disabled"
-        duplicate_user.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
-        duplicate_user.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
-        duplicate_user.state = ConfigEntryState.LOADED
-        duplicate_user.disabled_by = "user"
-
-        create_calls: list[tuple[Any, str, str, dict[str, Any]]] = []
-        delete_calls: list[tuple[Any, str, str]] = []
-
-        def _record_create(
-            hass_arg: Any, domain: str, issue_id: str, **kwargs: Any
-        ) -> None:
-            create_calls.append((hass_arg, domain, issue_id, kwargs))
-
-        def _record_delete(hass_arg: Any, domain: str, issue_id: str, **_: Any) -> None:
-            delete_calls.append((hass_arg, domain, issue_id))
-
-        monkeypatch.setattr(
-            integration.ir, "async_create_issue", _record_create, raising=False
-        )
-        monkeypatch.setattr(
-            integration.ir, "async_delete_issue", _record_delete, raising=False
-        )
-
-        hass = _StubHass(authoritative, loop)
-        hass.config_entries._entries.extend(
-            [duplicate_loaded, duplicate_error, duplicate_user]
-        )
-
-        should_setup, normalized_email = loop.run_until_complete(
-            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-                hass,
-                authoritative,
-            )
-        )
-        assert should_setup is True
-        assert normalized_email == "dup@example.com"
-
-        if hass._tasks:
-            loop.run_until_complete(asyncio.gather(*hass._tasks))
-
-        assert "integration" in str(duplicate_loaded.disabled_by).lower()
-        assert "integration" in str(duplicate_error.disabled_by).lower()
-        assert "user" in str(duplicate_user.disabled_by).lower()
-
-        for duplicate in (duplicate_loaded, duplicate_error, duplicate_user):
-            assert (
-                hass.config_entries.unload_calls.count(duplicate.entry_id) >= 1
-            ), "Every duplicate should be unloaded"
-
-        delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
-        assert (
-            f"duplicate_account_{duplicate_loaded.entry_id}" in delete_issue_ids
-        )
-        assert (
-            f"duplicate_account_{duplicate_error.entry_id}" in delete_issue_ids
-        )
-        assert (
-            f"duplicate_account_{duplicate_user.entry_id}" in delete_issue_ids
-        )
-        assert (
-            f"duplicate_account_{authoritative.entry_id}" in delete_issue_ids
-        )
-
-        assert not create_calls
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
-
-
-def test_duplicate_account_legacy_core_disable_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Legacy cores raise TypeError but still unload and raise repair issues."""
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    try:
-        integration = importlib.import_module("custom_components.googlefindmy")
-
-        authoritative = _StubConfigEntry()
-        authoritative.entry_id = "entry-authoritative"
-        authoritative.title = "Authoritative"
-        authoritative.data[CONF_GOOGLE_EMAIL] = "legacy@example.com"
-        authoritative.data[DATA_SECRET_BUNDLE]["username"] = "legacy@example.com"
-        authoritative.state = ConfigEntryState.LOADED
-
-        duplicate_legacy = _StubConfigEntry()
-        duplicate_legacy.entry_id = "entry-duplicate-legacy"
-        duplicate_legacy.title = "Legacy Duplicate"
-        duplicate_legacy.data[CONF_GOOGLE_EMAIL] = "legacy@example.com"
-        duplicate_legacy.data[DATA_SECRET_BUNDLE]["username"] = "legacy@example.com"
-        duplicate_legacy.state = ConfigEntryState.LOADED
-
-        hass = _StubHass(authoritative, loop)
-        hass.config_entries._entries.append(duplicate_legacy)
-
-        async def _legacy_set_disabled_by(
-            self: _StubConfigEntries, entry_id: str, disabled_by: object | None
-        ) -> None:
-            raise TypeError("async_set_disabled_by is not supported")
-
-        monkeypatch.setattr(
-            hass.config_entries.__class__,
-            "async_set_disabled_by",
-            _legacy_set_disabled_by,
-        )
-
-        create_calls: list[tuple[Any, str, str, dict[str, Any]]] = []
-        delete_calls: list[tuple[Any, str, str]] = []
-
-        def _record_create(
-            hass_arg: Any, domain: str, issue_id: str, **kwargs: Any
-        ) -> None:
-            create_calls.append((hass_arg, domain, issue_id, kwargs))
-
-        def _record_delete(hass_arg: Any, domain: str, issue_id: str, **_: Any) -> None:
-            delete_calls.append((hass_arg, domain, issue_id))
-
-        monkeypatch.setattr(
-            integration.ir, "async_create_issue", _record_create, raising=False
-        )
-        monkeypatch.setattr(
-            integration.ir, "async_delete_issue", _record_delete, raising=False
-        )
-
-        caplog.set_level(logging.INFO)
-
-        should_setup, normalized_email = loop.run_until_complete(
-            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-                hass,
-                authoritative,
-            )
-        )
-        assert should_setup is True
-        assert normalized_email == "legacy@example.com"
-
-        if hass._tasks:
-            loop.run_until_complete(asyncio.gather(*hass._tasks))
-
-        assert hass.config_entries.unload_calls.count(duplicate_legacy.entry_id) >= 1
-        assert duplicate_legacy.disabled_by is None
-
-        warning_messages = [
-            record.getMessage()
-            for record in caplog.records
-            if record.levelno == logging.WARNING
-        ]
-        assert any(
-            "could not be disabled via API" in message for message in warning_messages
-        ), "Fallback warning should be emitted for legacy disable handling"
-
-        info_messages = [
-            record.getMessage()
-            for record in caplog.records
-            if record.levelno == logging.INFO
-        ]
-        assert any(
-            "manual_action_required=['entry-duplicate-legacy']" in message
-            for message in info_messages
-        ), "Manual action list should log the legacy duplicate entry"
-
-        create_issue_ids = [issue_id for *_hass, _domain, issue_id, _kwargs in create_calls]
-        assert (
-            f"duplicate_account_{duplicate_legacy.entry_id}" in create_issue_ids
-        ), "Repair issue should be created for the legacy duplicate"
-
-        delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
-        assert (
-            f"duplicate_account_{duplicate_legacy.entry_id}" not in delete_issue_ids
-        ), "Legacy duplicate issues should remain open for manual action"
+            f"duplicate_account_{loaded_entry.entry_id}" in delete_issue_ids
+        ), "Loaded entry clears stale issues for other duplicates"
     finally:
         loop.close()
         asyncio.set_event_loop(None)
@@ -1527,11 +1246,9 @@ def test_duplicate_account_clear_stale_issues_for_all() -> None:
             translation_placeholders={"email": "solo@example.com"},
         )
 
-        loop.run_until_complete(
-            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-                hass,
-                entry,
-            )
+        integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass,
+            entry,
         )
 
         assert (
@@ -1545,9 +1262,7 @@ def test_duplicate_account_clear_stale_issues_for_all() -> None:
         asyncio.set_event_loop(None)
 
 
-def test_duplicate_account_cleanup_keeps_active_tuple_key_issues(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_duplicate_account_cleanup_keeps_active_tuple_key_issues() -> None:
     """Only stale duplicate-account issues are removed for tuple-key registries."""
 
     loop = asyncio.new_event_loop()
@@ -1572,17 +1287,6 @@ def test_duplicate_account_cleanup_keeps_active_tuple_key_issues(
         hass = _StubHass(authoritative, loop)
         hass.config_entries._entries.append(duplicate)
 
-        async def _legacy_set_disabled_by(
-            self: _StubConfigEntries, entry_id: str, disabled_by: object | None
-        ) -> None:
-            raise TypeError("async_set_disabled_by is not supported")
-
-        monkeypatch.setattr(
-            hass.config_entries.__class__,
-            "async_set_disabled_by",
-            _legacy_set_disabled_by,
-        )
-
         registry = integration.ir.async_get(hass)
         registry.async_create_issue(  # type: ignore[attr-defined]
             DOMAIN,
@@ -1595,11 +1299,9 @@ def test_duplicate_account_cleanup_keeps_active_tuple_key_issues(
             translation_placeholders={"email": email},
         )
 
-        should_setup, normalized_email = loop.run_until_complete(
-            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-                hass,
-                authoritative,
-            )
+        should_setup, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass,
+            authoritative,
         )
 
         assert should_setup is True
@@ -1700,17 +1402,6 @@ def test_duplicate_account_cleanup_respects_string_key_issue_registries(
         hass = _StubHass(authoritative, loop)
         hass.config_entries._entries.append(duplicate)
 
-        async def _legacy_set_disabled_by(
-            self: _StubConfigEntries, entry_id: str, disabled_by: object | None
-        ) -> None:
-            raise TypeError("async_set_disabled_by is not supported")
-
-        monkeypatch.setattr(
-            hass.config_entries.__class__,
-            "async_set_disabled_by",
-            _legacy_set_disabled_by,
-        )
-
         registry.async_create_issue(
             DOMAIN,
             "duplicate_account_retired-entry",
@@ -1722,11 +1413,9 @@ def test_duplicate_account_cleanup_respects_string_key_issue_registries(
             translation_placeholders={"email": email},
         )
 
-        should_setup, normalized_email = loop.run_until_complete(
-            integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
-                hass,
-                authoritative,
-            )
+        should_setup, normalized_email = integration._ensure_post_migration_consistency(  # type: ignore[attr-defined]
+            hass,
+            authoritative,
         )
 
         assert should_setup is True
