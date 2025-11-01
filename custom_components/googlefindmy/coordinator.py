@@ -2917,18 +2917,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             else:
                 device_candidates = []
 
-            all_devices: list[dict[str, Any]] = []
+            filtered_devices: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
             for item in device_candidates:
                 if not isinstance(item, Mapping):
                     continue
                 normalized = dict(item)
-                dev_id = normalized.get("id")
-                if not isinstance(dev_id, str) or not dev_id:
+                dev_id_value = normalized.get("id")
+                if not isinstance(dev_id_value, str) or not dev_id_value.strip():
+                    _LOGGER.debug(
+                        "Skipping device without valid id (keys=%s)",
+                        list(normalized)[:6],
+                    )
                     continue
-                all_devices.append(normalized)
+                dev_id = dev_id_value.strip()
+                normalized["id"] = dev_id
+                if dev_id in seen_ids:
+                    # Duplicate policy: first-wins (skip subsequent duplicates).
+                    _LOGGER.debug("Skipping duplicate device entry for id=%s", dev_id)
+                    continue
+                seen_ids.add(dev_id)
+                filtered_devices.append(normalized)
 
             # Minimal hardening against false empties (keep prior behaviour)
-            if not all_devices:
+            if not filtered_devices:
                 self._empty_list_streak += 1
                 if (
                     self._empty_list_streak < _EMPTY_LIST_QUORUM
@@ -2940,7 +2952,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         self._empty_list_streak,
                         _EMPTY_LIST_QUORUM,
                     )
-                    all_devices = list(self._last_device_list)
+                    filtered_devices = list(self._last_device_list)
                 else:
                     _LOGGER.debug(
                         "Accepting empty device list after %d consecutive empties.",
@@ -2951,7 +2963,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             else:
                 # Non-empty result: reset streak and remember latest good list.
                 self._empty_list_streak = 0
-                self._last_device_list = list(all_devices)
+                self._last_device_list = list(filtered_devices)
 
             # Presence TTL derives from the effective poll cadence
             effective_interval = max(
@@ -2961,31 +2973,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             now_mono = time.monotonic()
 
             # Cold-start guard: if the very first seen list is empty, treat it as transient
-            if not all_devices and self._last_nonempty_wall == 0.0:
+            if not filtered_devices and self._last_nonempty_wall == 0.0:
                 raise UpdateFailed(
                     "Cold start: empty device list; treating as transient."
                 )
 
             # Maintain owner index for FCM fallback routing (entry-scoped).
-            self._sync_owner_index(all_devices)
+            self._sync_owner_index(filtered_devices)
 
             ignored = self._get_ignored_set()
 
             # Record presence timestamps from the full list (unfiltered by ignore)
-            if all_devices:
-                for d in all_devices:
-                    dev_id = d.get("id")
-                    if isinstance(dev_id, str):
-                        self._present_last_seen[dev_id] = now_mono
+            if filtered_devices:
+                for dev in filtered_devices:
+                    dev_id = dev["id"]
+                    self._present_last_seen[dev_id] = now_mono
                 # Keep a diagnostics-only set mirroring the latest non-empty list
                 self._present_device_ids = {
-                    d["id"] for d in all_devices if isinstance(d.get("id"), str)
+                    dev["id"] for dev in filtered_devices
                 }
                 self._last_nonempty_wall = now_mono
             # If the list is empty, leave _present_last_seen untouched; TTL will decide availability.
 
             # 2) Update internal name/capability caches for ALL devices
-            for dev in all_devices:
+            for dev in filtered_devices:
                 dev_id = dev["id"]
                 raw_name = dev.get("name")
                 if isinstance(raw_name, str) and raw_name.strip():
@@ -3001,7 +3012,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             # 2.5) Ensure Device Registry entries exist (service device + end-devices, namespaced)
             self._ensure_service_device_exists()
-            created = self._ensure_registry_for_devices(all_devices, ignored)
+            created = self._ensure_registry_for_devices(filtered_devices, ignored)
             if created:
                 _LOGGER.debug(
                     "Device Registry ensured/updated for %d device(s).", created
@@ -3011,15 +3022,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # Build list of devices to POLL:
             # Poll devices that have at least one enabled DR entry for this config entry;
             # if a device has no DR entry yet, include it to allow initial discovery.
-            devices_to_poll = [
-                d
-                for d in all_devices
-                if (d["id"] not in ignored)
-                and (
-                    d["id"] in self._enabled_poll_device_ids
-                    or d["id"] not in self._devices_with_entry
-                )
-            ]
+            devices_to_poll: list[dict[str, Any]] = []
+            for dev in filtered_devices:
+                dev_id = dev["id"]
+                if dev_id in ignored:
+                    continue
+                if (
+                    dev_id in self._enabled_poll_device_ids
+                    or dev_id not in self._devices_with_entry
+                ):
+                    devices_to_poll.append(dev)
 
             # Apply per-device poll cooldowns
             if self._device_poll_cooldown_until and devices_to_poll:
@@ -3079,7 +3091,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
 
             # 4) Build data snapshot for devices visible to the user (ignore-filter applied)
-            visible_devices = [d for d in all_devices if d["id"] not in ignored]
+            visible_devices = [
+                dev for dev in filtered_devices if dev["id"] not in ignored
+            ]
             for dev in visible_devices:
                 dev_id = dev["id"]
                 cached_name = self._device_names.get(dev_id)
@@ -3093,7 +3107,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._store_subentry_snapshots(snapshot)
 
             # 4.5) Close the initial discovery window once we have a non-empty full list
-            if not self._initial_discovery_done and all_devices:
+            if not self._initial_discovery_done and filtered_devices:
                 self._initial_discovery_done = True
                 _LOGGER.info(
                     "Initial discovery window closed; newly discovered devices will be created disabled by default."

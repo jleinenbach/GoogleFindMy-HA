@@ -384,3 +384,40 @@ def test_poll_cycle_forces_after_fcm_timeout(
     assert call is not None
     assert call.args and call.args[0][0]["id"] == "dev-1"
     assert call.kwargs.get("force") is True
+
+
+def test_update_skips_devices_without_valid_id(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Invalid or duplicate device entries should be ignored during updates."""
+
+    caplog.set_level("DEBUG")
+    coordinator._async_build_device_snapshot_with_fallbacks.return_value = []
+    dummy_api.device_list = [
+        {},
+        {"id": 123, "name": "Numeric identifier"},
+        {"id": "  dev-1  ", "name": "Pixel 9"},
+        {"id": "dev-1", "name": "Pixel 9 duplicate"},
+        {"id": "dev-2", "name": "Pixel 9 Pro"},
+    ]
+
+    loop = coordinator.hass.loop
+    result = loop.run_until_complete(coordinator._async_update_data())
+
+    assert result == []
+
+    await_args = coordinator._async_build_device_snapshot_with_fallbacks.await_args
+    assert await_args is not None
+    visible_devices = list(await_args.args[0])
+    assert [dev["id"] for dev in visible_devices] == ["dev-1", "dev-2"]
+    assert coordinator._present_device_ids == {"dev-1", "dev-2"}
+    assert any(
+        "Skipping device without valid id" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "Skipping duplicate device entry for id=dev-1" in record.message
+        for record in caplog.records
+    )
