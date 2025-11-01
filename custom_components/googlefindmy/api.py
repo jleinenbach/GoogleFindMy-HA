@@ -791,7 +791,20 @@ class GoogleFindMyAPI:
                 else:
                     result_hex = await legacy_request(username)
 
-            return self._process_device_list_response(result_hex)
+            payload = self._process_device_list_response(result_hex)
+            sample_keys: tuple[str, ...] = ()
+            if payload:
+                first_row = payload[0]
+                if isinstance(first_row, dict):
+                    sample_keys = tuple(sorted(str(key) for key in first_row.keys()))
+                else:
+                    sample_keys = (type(first_row).__name__,)
+            _LOGGER.debug(
+                "nbe_list_devices: count=%d, sample_keys=%s",
+                len(payload),
+                sample_keys,
+            )
+            return payload
 
         except asyncio.CancelledError:
             raise
