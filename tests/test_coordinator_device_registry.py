@@ -10,6 +10,7 @@ from collections.abc import Iterable
 
 import pytest
 
+from custom_components.googlefindmy import _async_relink_subentry_entities
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.const import (
     DOMAIN,
@@ -24,7 +25,7 @@ from custom_components.googlefindmy.const import (
     service_device_identifier,
 )
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -1026,3 +1027,156 @@ def test_rebuild_flow_creates_devices_with_via_parent(
     assert metadata["config_subentry_id"] == entry.tracker_subentry_id
     pending = getattr(coordinator, "_pending_via_updates")
     assert pending == {fake_registry.devices[0].id}
+
+
+@pytest.mark.asyncio
+async def test_relink_subentry_entities_repairs_mislinked_devices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entity healing re-links tracker/service entities to the correct devices."""
+
+    entry = _build_entry_with_subentries("entry-heal")
+    hass = SimpleNamespace(data={})
+
+    service_identifier = service_device_identifier(entry.entry_id)
+    service_device = SimpleNamespace(
+        id="device-service",
+        identifiers={
+            service_identifier,
+            (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service"),
+        },
+        config_entries={entry.entry_id},
+        entry_type=getattr(dr.DeviceEntryType, "SERVICE", "service"),
+        config_subentry_id=entry.service_subentry_id,
+    )
+
+    tracker_device = SimpleNamespace(
+        id="device-tracker",
+        identifiers={
+            (DOMAIN, f"{entry.entry_id}:{entry.tracker_subentry_id}:abc123"),
+            (DOMAIN, f"{entry.entry_id}:abc123"),
+            (DOMAIN, "abc123"),
+        },
+        config_entries={entry.entry_id},
+        entry_type=None,
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+
+    class _DeviceRegistryStub:
+        def __init__(self) -> None:
+            self.devices = {
+                service_device.id: service_device,
+                tracker_device.id: tracker_device,
+            }
+
+        def async_get(self, device_id: str) -> Any | None:
+            return self.devices.get(device_id)
+
+        def async_get_device(
+            self, *, identifiers: set[tuple[str, str]]
+        ) -> Any | None:
+            for device in self.devices.values():
+                device_idents = getattr(device, "identifiers", set())
+                if identifiers & set(device_idents):
+                    return device
+            return None
+
+    class _EntityRegistryStub:
+        def __init__(self, entries: list[Any]) -> None:
+            self.entities = {entry.entity_id: entry for entry in entries}
+            self.updated: list[tuple[str, dict[str, Any]]] = []
+
+        def async_entries_for_config_entry(
+            self, config_entry_id: str
+        ) -> tuple[Any, ...]:
+            return tuple(
+                entry
+                for entry in self.entities.values()
+                if getattr(entry, "config_entry_id", None) == config_entry_id
+            )
+
+        def async_update_entity(self, entity_id: str, **changes: Any) -> None:
+            entry = self.entities[entity_id]
+            if "device_id" in changes:
+                entry.device_id = changes["device_id"]
+            self.updated.append((entity_id, dict(changes)))
+
+    tracker_entity = SimpleNamespace(
+        entity_id="device_tracker.googlefindmy_tracker",
+        domain="device_tracker",
+        platform=DOMAIN,
+        unique_id=f"{entry.entry_id}:{entry.tracker_subentry_id}:abc123",
+        config_entry_id=entry.entry_id,
+        device_id=service_device.id,
+    )
+
+    sensor_entity = SimpleNamespace(
+        entity_id="sensor.googlefindmy_last_seen",
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=(
+            f"{DOMAIN}_{entry.entry_id}_{entry.tracker_subentry_id}_abc123_last_seen"
+        ),
+        config_entry_id=entry.entry_id,
+        device_id=service_device.id,
+    )
+
+    legacy_sensor_entity = SimpleNamespace(
+        entity_id="sensor.googlefindmy_legacy_last_seen",
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=(
+            f"{DOMAIN}_{entry.tracker_subentry_id}_abc123_last_seen"
+        ),
+        config_entry_id=entry.entry_id,
+        device_id=service_device.id,
+    )
+
+    stats_entity = SimpleNamespace(
+        entity_id="sensor.googlefindmy_background_updates",
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=(
+            f"{DOMAIN}_{entry.entry_id}_{entry.service_subentry_id}_background_updates"
+        ),
+        config_entry_id=entry.entry_id,
+        device_id=tracker_device.id,
+    )
+
+    binary_sensor_entity = SimpleNamespace(
+        entity_id="binary_sensor.googlefindmy_polling",
+        domain="binary_sensor",
+        platform=DOMAIN,
+        unique_id=f"{entry.entry_id}:{entry.service_subentry_id}:polling",
+        config_entry_id=entry.entry_id,
+        device_id=tracker_device.id,
+    )
+
+    entity_registry = _EntityRegistryStub(
+        [
+            tracker_entity,
+            sensor_entity,
+            legacy_sensor_entity,
+            stats_entity,
+            binary_sensor_entity,
+        ]
+    )
+    device_registry = _DeviceRegistryStub()
+
+    monkeypatch.setattr(dr, "async_get", lambda _hass: device_registry)
+    monkeypatch.setattr(er, "async_get", lambda _hass: entity_registry)
+
+    await _async_relink_subentry_entities(hass, entry)
+
+    assert tracker_entity.device_id == tracker_device.id
+    assert sensor_entity.device_id == tracker_device.id
+    assert legacy_sensor_entity.device_id == tracker_device.id
+    assert stats_entity.device_id == service_device.id
+    assert binary_sensor_entity.device_id == service_device.id
+    assert {entity_id for entity_id, _ in entity_registry.updated} == {
+        tracker_entity.entity_id,
+        sensor_entity.entity_id,
+        legacy_sensor_entity.entity_id,
+        stats_entity.entity_id,
+        binary_sensor_entity.entity_id,
+    }

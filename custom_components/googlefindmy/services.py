@@ -555,6 +555,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         soft_migrate = ctx.get("soft_migrate_entry")
         unique_id_migrate = ctx.get("migrate_unique_ids")
         relink_button_devices = ctx.get("relink_button_devices")
+        relink_subentry_entities = ctx.get("relink_subentry_entities")
         manager = getattr(hass, "config_entries", None)
 
         allowed_reload_states: set[ConfigEntryState] = {
@@ -735,10 +736,15 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 _LOGGER.warning(
                     "relink_button_devices not provided in context; button relinking will be skipped."
                 )
+            if not callable(relink_subentry_entities):
+                _LOGGER.warning(
+                    "relink_subentry_entities not provided in context; tracker/service relinking will be skipped."
+                )
 
             soft_completed = 0
             unique_completed = 0
             relink_completed = 0
+            subentry_relink_completed = 0
 
             for entry_ in entries:
                 if callable(soft_migrate):
@@ -775,6 +781,18 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     else:
                         relink_completed += 1
 
+                if callable(relink_subentry_entities):
+                    try:
+                        await relink_subentry_entities(hass, entry_)
+                    except Exception as err:
+                        _LOGGER.error(
+                            "Tracker/service relink failed for entry %s: %s",
+                            entry_.entry_id,
+                            err,
+                        )
+                    else:
+                        subentry_relink_completed += 1
+
             # Reload all entries to apply migrations
             entries_to_reload: list[Any] = []
             migrate_skipped_states: list[tuple[Any, str | ConfigEntryState | None]] = []
@@ -809,11 +827,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     )
 
             _LOGGER.info(
-                "googlefindmy.rebuild_registry: migrate completed for %d config entrie(s) (data/options=%d, unique_ids=%d, button_relinks=%d)",
+                "googlefindmy.rebuild_registry: migrate completed for %d config entrie(s) (data/options=%d, unique_ids=%d, button_relinks=%d, subentry_relinks=%d)",
                 len(entries),
                 soft_completed,
                 unique_completed,
                 relink_completed,
+                subentry_relink_completed,
             )
             return
 

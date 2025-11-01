@@ -585,6 +585,9 @@ def test_hass_data_layout(
         monkeypatch.setattr(
             integration, "_async_relink_button_devices", AsyncMock()
         )
+        monkeypatch.setattr(
+            integration, "_async_relink_subentry_entities", AsyncMock()
+        )
         monkeypatch.setattr(integration, "_async_save_secrets_data", AsyncMock())
         monkeypatch.setattr(integration, "_async_seed_manual_credentials", AsyncMock())
         monkeypatch.setattr(integration, "_async_normalize_device_names", AsyncMock())
@@ -733,6 +736,11 @@ def test_hass_data_layout(
             assert integration._async_relink_button_devices.await_count == 2
             assert (
                 integration._async_relink_button_devices.await_args_list[-1]
+                == call(hass, entry)
+            )
+            assert integration._async_relink_subentry_entities.await_count == 2
+            assert (
+                integration._async_relink_subentry_entities.await_args_list[-1]
                 == call(hass, entry)
             )
             assert hass.config_entries.reload_calls == [entry.entry_id]
