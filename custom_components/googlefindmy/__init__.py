@@ -2599,6 +2599,12 @@ def _schedule_duplicate_unload(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if entry.state not in unload_candidates:
         return
 
+    _LOGGER.debug(
+        "Scheduling unload for duplicate entry %s (state=%s)",
+        entry.entry_id,
+        entry.state,
+    )
+
     hass.async_create_task(
         hass.config_entries.async_unload(entry.entry_id),
         name=f"{DOMAIN}.unload_duplicate.{entry.entry_id}",
@@ -2805,7 +2811,7 @@ async def _ensure_post_migration_consistency(
                     candidate.entry_id,
                     _integration_disabled_by_value(),
                 )
-            except Exception:
+            except (TypeError, AttributeError):
                 manual_action_required.append(candidate.entry_id)
                 _LOGGER.warning(
                     "Duplicate entry %s could not be disabled via API (legacy Core). "
