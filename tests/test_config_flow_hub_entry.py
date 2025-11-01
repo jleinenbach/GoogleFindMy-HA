@@ -1,0 +1,166 @@
+# tests/test_config_flow_hub_entry.py
+from __future__ import annotations
+
+# Tests covering hub subentry registration, delegation, and legacy-core fallbacks.
+
+import inspect
+import logging
+from types import SimpleNamespace
+from typing import Protocol
+
+import pytest
+
+from custom_components.googlefindmy import config_flow
+from custom_components.googlefindmy.const import (
+    SERVICE_FEATURE_PLATFORMS,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_HUB,
+    SUBENTRY_TYPE_TRACKER,
+)
+
+
+class _SubentrySupportToggle(Protocol):
+    """Protocol covering the shared fixture interface for subentry toggles."""
+
+    def as_modern(self) -> object | None:
+        """Restore native subentry support."""
+
+    def as_legacy(self) -> type[object]:
+        """Simulate legacy cores lacking subentry support."""
+
+
+@pytest.mark.parametrize(
+    ("simulate_legacy_core", "expects_hub"),
+    [
+        (False, True),
+        (True, False),
+    ],
+)
+def test_supported_subentry_types_gate_hub_registration(
+    subentry_support: _SubentrySupportToggle,
+    simulate_legacy_core: bool,
+    expects_hub: bool,
+) -> None:
+    """Config flow should only expose hub subentries when supported."""
+
+    if simulate_legacy_core:
+        subentry_support.as_legacy()
+    else:
+        subentry_support.as_modern()
+
+    mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(  # type: ignore[arg-type]
+        SimpleNamespace()
+    )
+
+    assert SUBENTRY_TYPE_SERVICE in mapping
+    assert SUBENTRY_TYPE_TRACKER in mapping
+    assert (SUBENTRY_TYPE_HUB in mapping) is expects_hub
+
+    if expects_hub:
+        handler_factory = mapping[SUBENTRY_TYPE_HUB]
+        assert callable(handler_factory)
+        handler = handler_factory()
+        assert isinstance(handler, config_flow.HubSubentryFlowHandler)
+        assert handler._group_key == SERVICE_SUBENTRY_KEY  # type: ignore[attr-defined]
+        assert handler._subentry_type == SUBENTRY_TYPE_HUB  # type: ignore[attr-defined]
+        assert handler._features == SERVICE_FEATURE_PLATFORMS  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_hub_flow_logs_and_returns_user_step(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Add Hub entry point should log and present the standard user form."""
+
+    caplog.set_level(logging.INFO)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = SimpleNamespace()  # type: ignore[assignment]
+    flow.context = {"source": "hub", "entry_id": "entry-123"}
+    flow.unique_id = None  # type: ignore[attr-defined]
+
+    result = await flow.async_step_hub()
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "form"
+    assert any(
+        "Add Hub flow requested" in record.getMessage() for record in caplog.records
+    ), "Expected Add Hub request to be logged"
+
+
+@pytest.mark.asyncio
+async def test_hub_flow_falls_back_when_hub_unavailable(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    subentry_support: _SubentrySupportToggle,
+) -> None:
+    """Legacy cores without hub subentries should reuse the user step."""
+
+    caplog.set_level(logging.ERROR)
+
+    subentry_support.as_legacy()
+
+    sentinel: dict[str, object] = {"type": "form", "step_id": "user"}
+
+    async def _fake_user_step(self, user_input=None):  # type: ignore[unused-argument]
+        return sentinel
+
+    monkeypatch.setattr(
+        config_flow.ConfigFlow,
+        "async_step_user",
+        _fake_user_step,
+        raising=False,
+    )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = SimpleNamespace()  # type: ignore[assignment]
+    flow.context = {"source": "hub", "entry_id": "entry-legacy"}
+    flow.unique_id = None  # type: ignore[attr-defined]
+
+    result = await flow.async_step_hub()
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result is sentinel
+    assert any(
+        record.levelno >= logging.ERROR
+        and "Failed to load Add Hub config flow" in record.getMessage()
+        for record in caplog.records
+    ), "Expected legacy fallback to log the degraded behaviour with an error"
+
+
+@pytest.mark.asyncio
+async def test_hub_subentry_flow_logs_and_delegates(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hub subentry handler should log and delegate to the base flow implementation."""
+
+    caplog.set_level(logging.INFO)
+
+    sentinel: dict[str, object] = {"type": "create_entry", "data": {}}
+
+    async def _fake_async_step_user(self, user_input=None):  # type: ignore[unused-argument]
+        return sentinel
+
+    monkeypatch.setattr(
+        config_flow._BaseSubentryFlow,  # type: ignore[attr-defined]
+        "async_step_user",
+        _fake_async_step_user,
+        raising=False,
+    )
+
+    handler = object.__new__(config_flow.HubSubentryFlowHandler)
+    handler.config_entry = SimpleNamespace(entry_id="entry-1")  # type: ignore[attr-defined]
+    handler.subentry = None  # type: ignore[attr-defined]
+    handler.hass = SimpleNamespace()  # type: ignore[assignment]
+
+    result = await config_flow.HubSubentryFlowHandler.async_step_user(handler, None)
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result is sentinel
+    assert any(
+        "Hub subentry flow requested" in record.getMessage() for record in caplog.records
+    ), "Expected hub subentry flow to log when invoked"

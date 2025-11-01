@@ -19,16 +19,17 @@ Notes:
   y = a^((p+1)/4) mod p (used by rx_to_ry).  See references in docs.
 """
 
+# custom_components/googlefindmy/FMDNCrypto/foreign_tracker_cryptor.py
+
 from __future__ import annotations
 
 import asyncio
 import secrets
 from binascii import unhexlify
-from typing import Tuple
 
 from Cryptodome.Cipher import AES
 from ecdsa import SECP160r1
-from ecdsa.ellipticcurve import Point
+from ecdsa.ellipticcurve import CurveFp, Point
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
@@ -54,7 +55,8 @@ _NONCE_LEN: int = 16
 # Helpers
 # ---------------------------------------------------------------------------
 
-def rx_to_ry(Rx: int, curve) -> int:
+
+def rx_to_ry(Rx: int, curve: CurveFp) -> int:
     """Recover the even Y coordinate for a given X on a short Weierstrass curve.
 
     This reconstructs a point from a compressed representation by solving
@@ -71,20 +73,27 @@ def rx_to_ry(Rx: int, curve) -> int:
     Raises:
         ValueError: If the provided X does not yield a valid point on the curve.
     """
+    p: int = int(curve.p())
+    a: int = int(curve.a())
+    b: int = int(curve.b())
+
+    Rx_mod: int = Rx % p
+
     # Compute y^2 = x^3 + a·x + b (mod p)
-    Ryy = (Rx ** 3 + curve.a() * Rx + curve.b()) % curve.p()
+    Ryy: int = (pow(Rx_mod, 3, p) + (a * Rx_mod) + b) % p
 
     # For p ≡ 3 (mod 4): y = (y^2)^((p+1)//4) mod p is a square root
-    Ry = pow(Ryy, (curve.p() + 1) // 4, curve.p())
+    sqrt_candidate: int = pow(Ryy, (p + 1) // 4, p)
 
     # Verify root
-    if (Ry * Ry) % curve.p() != Ryy:
+    if (sqrt_candidate * sqrt_candidate) % p != Ryy:
         raise ValueError("The provided X coordinate is not on the curve.")
 
     # Ensure even y (standardized choice)
-    if Ry % 2 != 0:
-        Ry = curve.p() - Ry
+    if sqrt_candidate % 2 != 0:
+        sqrt_candidate = p - sqrt_candidate
 
+    Ry: int = int(sqrt_candidate)
     return Ry
 
 
@@ -98,7 +107,8 @@ def _require_len(name: str, b: bytes, expected: int) -> None:
 # AES-EAX wrappers (authenticated encryption)
 # ---------------------------------------------------------------------------
 
-def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> Tuple[bytes, bytes]:
+
+def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> tuple[bytes, bytes]:
     """Encrypt and authenticate with AES-EAX-256.
 
     Args:
@@ -152,7 +162,8 @@ def decrypt_aes_eax(data: bytes, tag: bytes, nonce: bytes, key: bytes) -> bytes:
 # ECIES-like envelope (domain-specific construction)
 # ---------------------------------------------------------------------------
 
-def encrypt(message: bytes, random: bytes, eid: bytes) -> Tuple[bytes, bytes]:
+
+def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
     """Encrypt a payload to an ephemeral EID on SECP160r1 using AES-EAX-256.
 
     Construction (as implemented in the original code and preserved):
@@ -198,19 +209,22 @@ def encrypt(message: bytes, random: bytes, eid: bytes) -> Tuple[bytes, bytes]:
 
     # Derive AES-256 key via HKDF-SHA256 over (s·R).x (20 bytes)
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
-    k = hkdf.derive((s * R).x().to_bytes(_COORD_LEN, "big"))
+    k: bytes = hkdf.derive((s * R).x().to_bytes(_COORD_LEN, "big"))
 
     # Nonce = LRx(8) || LSx(8)
     LRx = Rx.to_bytes(_COORD_LEN, "big")[-8:]
     LSx = S.x().to_bytes(_COORD_LEN, "big")[-8:]
-    nonce = LRx + LSx  # 16 bytes
+    nonce: bytes = LRx + LSx  # 16 bytes
 
     # Encrypt (AES-EAX-256) → m' || tag
     m_dash, tag = encrypt_aes_eax(message, nonce, k)
-    return m_dash + tag, S.x().to_bytes(_COORD_LEN, "big")
+    encrypted_with_tag: bytes = m_dash + tag
+    return encrypted_with_tag, S.x().to_bytes(_COORD_LEN, "big")
 
 
-def decrypt(identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_counter: int) -> bytes:
+def decrypt(
+    identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_counter: int
+) -> bytes:
     """Decrypt a payload sent to a tracker identity on SECP160r1 with AES-EAX-256.
 
     Construction (mirrors `encrypt` above):
@@ -239,8 +253,8 @@ def decrypt(identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_
         raise ValueError("encryptedAndTag must be at least 16 bytes (contains tag).")
 
     # Split ciphertext and tag
-    m_dash = encryptedAndTag[:-_AES_TAG_LEN]
-    tag = encryptedAndTag[-_AES_TAG_LEN:]
+    m_dash: bytes = encryptedAndTag[:-_AES_TAG_LEN]
+    tag: bytes = encryptedAndTag[-_AES_TAG_LEN:]
 
     # Curve and scalar r
     curve = SECP160r1
@@ -256,12 +270,12 @@ def decrypt(identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_
 
     # Derive AES-256 key via HKDF-SHA256 over (r·S).x
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
-    k = hkdf.derive((r * S).x().to_bytes(_COORD_LEN, "big"))
+    k: bytes = hkdf.derive((r * S).x().to_bytes(_COORD_LEN, "big"))
 
     # Nonce = LRx(8) || LSx(8)
     LRx = R.x().to_bytes(_COORD_LEN, "big")[-8:]
     LSx = S.x().to_bytes(_COORD_LEN, "big")[-8:]
-    nonce = LRx + LSx  # 16 bytes
+    nonce: bytes = LRx + LSx  # 16 bytes
 
     # AES-EAX-256 decrypt & verify
     return decrypt_aes_eax(m_dash, tag, nonce, k)
@@ -271,7 +285,10 @@ def decrypt(identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_
 # Optional async wrapper (non-breaking): offload CPU work to a worker thread
 # ---------------------------------------------------------------------------
 
-async def async_decrypt(identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_counter: int) -> bytes:
+
+async def async_decrypt(
+    identity_key: bytes, encryptedAndTag: bytes, Sx: bytes, beacon_time_counter: int
+) -> bytes:
     """Async convenience wrapper for `decrypt(...)` using `asyncio.to_thread`.
 
     This preserves the original sync API while allowing async call sites

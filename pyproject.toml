@@ -1,0 +1,136 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "googlefindmy-ha"
+version = "1.6.0"
+description = "Home Assistant integration for Google's Find My Device network."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "BSkando" }]
+dependencies = [
+    "aiohttp>=3.11.8",
+    "beautifulsoup4>=4.12.3",
+    "cryptography>=43.0.3",
+    "ecdsa>=0.19.1",
+    "gpsoauth>=2.0.0",
+    "h2>=4.1.0",
+    "http-ece>=1.2.1",
+    "httpx[http2]>=0.28.0",
+    "protobuf>=6.32.0",
+    "pycryptodomex>=3.23.0",
+    "pyscrypt>=1.6.2",
+    "selenium>=4.37.0",
+    "undetected_chromedriver>=3.5.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.11",
+    "pre-commit>=3.7",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.14.1",
+    "types-requests>=2.32.0.20240712",
+]
+
+[project.urls]
+homepage = "https://github.com/BSkando/GoogleFindMy-HA"
+documentation = "https://github.com/BSkando/GoogleFindMy-HA"
+repository = "https://github.com/BSkando/GoogleFindMy-HA"
+issue-tracker = "https://github.com/BSkando/GoogleFindMy-HA/issues"
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = [
+    "custom_components/googlefindmy/ProtoDecoders",
+    "custom_components/googlefindmy/Auth/firebase_messaging/proto",
+]
+
+[tool.pytest.ini_options]
+addopts = ["-q"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+ignore_missing_imports = true
+show_error_codes = true
+namespace_packages = true
+mypy_path = ["."]
+exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
+
+[[tool.mypy.overrides]]
+module = [
+    "custom_components.googlefindmy.Auth",
+    "custom_components.googlefindmy.Auth.*",
+    "custom_components.googlefindmy.Auth.fcm_receiver_ha",
+    "custom_components.googlefindmy.FMDNCrypto",
+    "custom_components.googlefindmy.FMDNCrypto.*",
+    "custom_components.googlefindmy.KeyBackup",
+    "custom_components.googlefindmy.KeyBackup.*",
+    "custom_components.googlefindmy.ProtoDecoders",
+    "custom_components.googlefindmy.ProtoDecoders.*",
+    "custom_components.googlefindmy.SpotApi",
+    "custom_components.googlefindmy.SpotApi.*",
+    "custom_components.googlefindmy.__init__",
+    "custom_components.googlefindmy.api",
+    "custom_components.googlefindmy.binary_sensor",
+    "custom_components.googlefindmy.button",
+    "custom_components.googlefindmy.chrome_driver",
+    "custom_components.googlefindmy.const",
+    "custom_components.googlefindmy.coordinator",
+    "custom_components.googlefindmy.device_tracker",
+    "custom_components.googlefindmy.diagnostics",
+    "custom_components.googlefindmy.discovery",
+    "custom_components.googlefindmy.entity",
+    "custom_components.googlefindmy.example_data_provider",
+    "custom_components.googlefindmy.exceptions",
+    "custom_components.googlefindmy.get_oauth_token",
+    "custom_components.googlefindmy.google_home_filter",
+    "custom_components.googlefindmy.ha_typing",
+    "custom_components.googlefindmy.location_recorder",
+    "custom_components.googlefindmy.map_view",
+    "custom_components.googlefindmy.sensor",
+    "custom_components.googlefindmy.services",
+    "custom_components.googlefindmy.system_health",
+    "custom_components.googlefindmy.util_services",
+]
+ignore_errors = false
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["tests.test_fcm_receiver_guard"]
+ignore_errors = false
+
+[tool.coverage.run]
+branch = true
+source = [
+    "custom_components/googlefindmy",
+    "tests",
+]
+omit = [
+    "custom_components/googlefindmy/ProtoDecoders/*",
+    "custom_components/googlefindmy/Auth/firebase_messaging/proto/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "if __name__ == \"__main__\":",
+    "pragma: no cover",
+]
+
+[tool.coverage.paths]
+source = [
+    "custom_components/googlefindmy",
+    "*/site-packages/custom_components/googlefindmy",
+]

@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/NovaApi/ExecuteAction/nbe_execute_action.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
@@ -6,12 +7,16 @@
 from __future__ import annotations
 
 import binascii
-from typing import Any, Optional
+from typing import TYPE_CHECKING
 
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 
+# Typing-only imports to avoid expensive protobuf imports during runtime startup.
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
+
 # Session-stable client UUID (created lazily to avoid import-time side effects)
-_CLIENT_UUID: Optional[str] = None
+_CLIENT_UUID: str | None = None
 
 
 def _get_client_uuid() -> str:
@@ -26,9 +31,9 @@ def create_action_request(
     canonic_device_id: str,
     gcm_registration_id: str,
     *,
-    request_uuid: Optional[str] = None,
-    fmd_client_uuid: Optional[str] = None,
-) -> Any:
+    request_uuid: str | None = None,
+    fmd_client_uuid: str | None = None,
+) -> "DeviceUpdate_pb2.ExecuteActionRequest":
     """Build an ExecuteActionRequest protobuf for Nova (pure builder, no I/O).
 
     Args:
@@ -73,7 +78,9 @@ def create_action_request(
     return action_request
 
 
-def serialize_action_request(action_request: Any) -> str:
+def serialize_action_request(
+    action_request: "DeviceUpdate_pb2.ExecuteActionRequest",
+) -> str:
     """Serialize an ExecuteActionRequest to hex for Nova transport."""
     # Serialize to bytes
     binary_payload = action_request.SerializeToString()

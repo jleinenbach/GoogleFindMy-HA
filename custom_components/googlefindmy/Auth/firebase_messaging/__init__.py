@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/Auth/firebase_messaging/__init__.py
 #
 # firebase-messaging
 # https://github.com/sdb9696/firebase-messaging
