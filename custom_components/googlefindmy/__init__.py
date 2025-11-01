@@ -2776,7 +2776,7 @@ def _ensure_post_migration_consistency(
 
     authoritative_entry_id = _select_authoritative_entry_id(entry, duplicates)
 
-    active_issue_entry_ids: set[str] = {authoritative_entry_id}
+    active_issue_entry_ids: set[str] = set()
 
     if duplicates and normalized_email:
         disabled_by_integration: list[str] = []
@@ -2785,8 +2785,11 @@ def _ensure_post_migration_consistency(
 
         _clear_duplicate_account_issue(hass, entry)
 
+        conflicts: list[ConfigEntry] = [entry, *duplicates]
+
         for candidate in duplicates:
             if candidate.entry_id == authoritative_entry_id:
+                _clear_duplicate_account_issue(hass, candidate)
                 continue
 
             if _is_user_disabled(candidate):
@@ -2819,7 +2822,7 @@ def _ensure_post_migration_consistency(
                     candidate,
                     normalized_email,
                     cause=duplicate_issue_cause,
-                    conflicts=[entry, *duplicates],
+                    conflicts=conflicts,
                 )
                 active_issue_entry_ids.add(candidate.entry_id)
                 continue
@@ -2828,7 +2831,7 @@ def _ensure_post_migration_consistency(
             _clear_duplicate_account_issue(hass, candidate)
             _schedule_duplicate_unload(hass, candidate)
 
-        if disabled_by_integration or retained_user_disabled or manual_action_required:
+        if manual_action_required:
             _LOGGER.info(
                 "Duplicate account %s → authoritative=%s; disabled=%s; user_disabled=%s; manual_action_required=%s",
                 _mask_email_for_logs(normalized_email),
@@ -2836,6 +2839,14 @@ def _ensure_post_migration_consistency(
                 disabled_by_integration,
                 retained_user_disabled,
                 manual_action_required,
+            )
+        elif disabled_by_integration or retained_user_disabled:
+            _LOGGER.info(
+                "Duplicate account %s → authoritative=%s; disabled=%s; user_disabled=%s",
+                _mask_email_for_logs(normalized_email),
+                authoritative_entry_id,
+                disabled_by_integration,
+                retained_user_disabled,
             )
     else:
         _clear_duplicate_account_issue(hass, entry)

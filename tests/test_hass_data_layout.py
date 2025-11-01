@@ -981,6 +981,7 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         existing_entry.title = "Primary Account"
         existing_entry.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
         existing_entry.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
+        existing_entry.updated_at = datetime(2024, 2, 2, 0, 0, 0)
 
         new_entry = _StubConfigEntry()
         new_entry.entry_id = "entry-new"
@@ -988,8 +989,29 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         new_entry.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
         new_entry.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
 
+        legacy_duplicate = _StubConfigEntry()
+        legacy_duplicate.entry_id = "entry-legacy"
+        legacy_duplicate.title = "Legacy Duplicate"
+        legacy_duplicate.data[CONF_GOOGLE_EMAIL] = "dup@example.com"
+        legacy_duplicate.data[DATA_SECRET_BUNDLE]["username"] = "dup@example.com"
+
         hass = _StubHass(new_entry, loop)
-        hass.config_entries._entries.append(existing_entry)
+        hass.config_entries._entries.extend([existing_entry, legacy_duplicate])
+
+        original_update = hass.config_entries.__class__.async_update_entry
+
+        def _legacy_update_entry(
+            self: _StubConfigEntries, entry: _StubConfigEntry, **kwargs: Any
+        ) -> None:
+            if "disabled_by" in kwargs:
+                raise TypeError("disabled_by is not supported")
+            return original_update(self, entry, **kwargs)
+
+        monkeypatch.setattr(
+            hass.config_entries.__class__,
+            "async_update_entry",
+            _legacy_update_entry,
+        )
 
         recorded_issues: list[dict[str, Any]] = []
 
@@ -1012,6 +1034,14 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         result = loop.run_until_complete(_exercise())
         assert result is False
         assert recorded_issues, "Expected duplicate-account issue to be recorded"
+        issue = recorded_issues[0]
+        assert issue["id"] == f"duplicate_account_{legacy_duplicate.entry_id}"
+        placeholders = issue.get("translation_placeholders", {})
+        assert placeholders.get("email") == "dup@example.com"
+        entries_placeholder = str(placeholders.get("entries", ""))
+        assert existing_entry.entry_id in entries_placeholder
+        assert legacy_duplicate.entry_id in entries_placeholder
+        assert placeholders.get("cause") == "setup_duplicate"
 
         issue = recorded_issues[-1]
         assert issue["translation_key"] == "duplicate_account_entries"
@@ -1506,7 +1536,9 @@ def test_duplicate_account_clear_stale_issues_for_all() -> None:
         asyncio.set_event_loop(None)
 
 
-def test_duplicate_account_cleanup_keeps_active_tuple_key_issues() -> None:
+def test_duplicate_account_cleanup_keeps_active_tuple_key_issues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Only stale duplicate-account issues are removed for tuple-key registries."""
 
     loop = asyncio.new_event_loop()
@@ -1530,6 +1562,21 @@ def test_duplicate_account_cleanup_keeps_active_tuple_key_issues() -> None:
 
         hass = _StubHass(authoritative, loop)
         hass.config_entries._entries.append(duplicate)
+
+        original_update = hass.config_entries.__class__.async_update_entry
+
+        def _legacy_update_entry(
+            self: _StubConfigEntries, entry: _StubConfigEntry, **kwargs: Any
+        ) -> None:
+            if "disabled_by" in kwargs:
+                raise TypeError("disabled_by is not supported")
+            return original_update(self, entry, **kwargs)
+
+        monkeypatch.setattr(
+            hass.config_entries.__class__,
+            "async_update_entry",
+            _legacy_update_entry,
+        )
 
         registry = integration.ir.async_get(hass)
         registry.async_create_issue(  # type: ignore[attr-defined]
@@ -1645,6 +1692,21 @@ def test_duplicate_account_cleanup_respects_string_key_issue_registries(
 
         hass = _StubHass(authoritative, loop)
         hass.config_entries._entries.append(duplicate)
+
+        original_update = hass.config_entries.__class__.async_update_entry
+
+        def _legacy_update_entry(
+            self: _StubConfigEntries, entry: _StubConfigEntry, **kwargs: Any
+        ) -> None:
+            if "disabled_by" in kwargs:
+                raise TypeError("disabled_by is not supported")
+            return original_update(self, entry, **kwargs)
+
+        monkeypatch.setattr(
+            hass.config_entries.__class__,
+            "async_update_entry",
+            _legacy_update_entry,
+        )
 
         registry.async_create_issue(
             DOMAIN,
