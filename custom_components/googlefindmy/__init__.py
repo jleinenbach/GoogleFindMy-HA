@@ -809,6 +809,43 @@ class ConfigEntrySubEntryManager:
             if isinstance(key, str):
                 self._managed[key] = subentry
 
+    async def _async_adopt_existing_unique_id(
+        self,
+        key: str,
+        definition: ConfigEntrySubentryDefinition,
+        unique_id: str,
+        payload: dict[str, Any],
+    ) -> ConfigSubentry:
+        """Adopt the existing subentry that already owns ``unique_id``."""
+
+        owner: ConfigSubentry | None = None
+        for subentry in getattr(self._entry, "subentries", {}).values():
+            if subentry.unique_id == unique_id:
+                owner = subentry
+                break
+
+        if owner is None:
+            raise HomeAssistantError(
+                f"Subentry with unique_id '{unique_id}' not found while trying to "
+                f"adopt it for key '{key}' in entry {self._entry.entry_id}"
+            )
+
+        update_result = self._hass.config_entries.async_update_subentry(
+            self._entry,
+            owner,
+            data=payload,
+            title=definition.title,
+        )
+        resolved = await self._await_subentry_result(update_result)
+
+        if isinstance(resolved, ConfigSubentry):
+            stored = resolved
+        else:
+            stored = self._entry.subentries.get(owner.subentry_id, owner)
+
+        self._managed[key] = stored
+        return stored
+
     async def _deduplicate_subentries(self) -> None:
         """Remove duplicate subentries so each logical group has a single entry."""
 
@@ -1010,7 +1047,7 @@ class ConfigEntrySubEntryManager:
             cleanup = definition.unload
 
             existing = self._managed.get(key)
-            dedup_attempted = False
+            deduplicated = False
 
             conflict_key = next(
                 (
@@ -1022,7 +1059,7 @@ class ConfigEntrySubEntryManager:
             )
             if conflict_key is not None:
                 await self._deduplicate_subentries()
-                dedup_attempted = True
+                deduplicated = True
                 existing = self._managed.get(key)
 
             while True:
@@ -1033,9 +1070,37 @@ class ConfigEntrySubEntryManager:
                         title=definition.title,
                         unique_id=unique_id,
                     )
-                    add_result = self._hass.config_entries.async_add_subentry(
-                        self._entry, new_subentry
-                    )
+                    try:
+                        add_result = self._hass.config_entries.async_add_subentry(
+                            self._entry, new_subentry
+                        )
+                    except data_entry_flow.AbortFlow as err:
+                        if err.reason != "already_configured":
+                            raise
+
+                        if not deduplicated:
+                            await self._deduplicate_subentries()
+                            self._refresh_from_entry()
+                            deduplicated = True
+                            existing = self._managed.get(key)
+                            continue
+
+                        _LOGGER.warning(
+                            "Subentry sync for key '%s' in entry %s encountered repeated "
+                            "unique_id collision for '%s'; adopting existing owner.",
+                            key,
+                            self._entry.entry_id,
+                            unique_id,
+                        )
+
+                        existing = await self._async_adopt_existing_unique_id(
+                            key,
+                            definition,
+                            unique_id,
+                            payload,
+                        )
+                        break
+
                     resolved_add = await self._await_subentry_result(add_result)
 
                     if isinstance(resolved_add, ConfigSubentry):
@@ -1057,13 +1122,32 @@ class ConfigEntrySubEntryManager:
                         unique_id=unique_id,
                     )
                 except data_entry_flow.AbortFlow as err:
-                    if err.reason != "already_configured" or dedup_attempted:
+                    if err.reason != "already_configured":
                         raise
 
-                    await self._deduplicate_subentries()
-                    dedup_attempted = True
-                    existing = self._managed.get(key)
-                    continue
+                    if not deduplicated:
+                        await self._deduplicate_subentries()
+                        self._refresh_from_entry()
+                        deduplicated = True
+                        existing = self._managed.get(key)
+                        continue
+
+                    _LOGGER.warning(
+                        "Subentry sync for key '%s' in entry %s encountered repeated "
+                        "unique_id collision for '%s'; adopting existing owner.",
+                        key,
+                        self._entry.entry_id,
+                        unique_id,
+                    )
+
+                    stored_existing = await self._async_adopt_existing_unique_id(
+                        key,
+                        definition,
+                        unique_id,
+                        payload,
+                    )
+                    existing = stored_existing
+                    break
 
                 resolved_update = await self._await_subentry_result(changed)
 
