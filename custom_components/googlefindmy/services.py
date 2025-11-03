@@ -74,6 +74,8 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         - "soft_migrate_entry": Callable[[HomeAssistant, Any], Any]  # awaited per entry
         - "migrate_unique_ids": Callable[[HomeAssistant, Any], Any]
         - "relink_button_devices": Callable[[HomeAssistant, Any], Any]
+        - "coalesce_account_entries": Callable[[HomeAssistant, ConfigEntry], Awaitable[ConfigEntry]]
+        - "extract_normalized_email": Callable[[ConfigEntry], str | None]
     """
 
     # ---- Small local helpers (no circular imports) ---------------------------
@@ -541,6 +543,37 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         dev_reg = dr.async_get(hass)
         ent_reg = er.async_get(hass)
         entries = hass.config_entries.async_entries(DOMAIN)
+
+        coalesce_accounts = ctx.get("coalesce_account_entries")
+        extract_email = ctx.get("extract_normalized_email")
+        if callable(coalesce_accounts):
+            processed_accounts: set[str] = set()
+            for candidate in list(entries):
+                entry_id = getattr(candidate, "entry_id", "<unknown>")
+                normalized_email: str | None = None
+                if callable(extract_email):
+                    try:
+                        normalized_email = extract_email(candidate)
+                    except Exception as err:  # pragma: no cover - defensive logging
+                        _LOGGER.debug(
+                            "Failed to resolve normalized email for %s during rebuild: %s",
+                            entry_id,
+                            err,
+                        )
+                account_key = normalized_email or f"id:{entry_id}"
+                if account_key in processed_accounts:
+                    continue
+                processed_accounts.add(account_key)
+                try:
+                    await coalesce_accounts(hass, canonical_entry=candidate)
+                except Exception as err:
+                    _LOGGER.error(
+                        "googlefindmy.rebuild_registry: account deduplication failed for entry %s: %s",
+                        entry_id,
+                        err,
+                    )
+                    raise
+            entries = hass.config_entries.async_entries(DOMAIN)
 
         _LOGGER.info(
             "googlefindmy.rebuild_registry requested: mode=%s, device_ids=%s",

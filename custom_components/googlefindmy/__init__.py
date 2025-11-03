@@ -39,9 +39,10 @@ import logging
 import os
 import socket
 import time
+from contextlib import suppress
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from types import MappingProxyType, SimpleNamespace
@@ -135,6 +136,10 @@ from .email import normalize_email, unique_account_id
 # Eagerly import diagnostics to prevent blocking calls on-demand
 from . import diagnostics  # noqa: F401
 
+CloudDiscoveryRuntimeCallable = Callable[[HomeAssistant], Mapping[str, Any]]
+TriggerCloudDiscoveryCallable = Callable[..., Awaitable[Any]]
+RedactAccountForLogCallable = Callable[..., str]
+
 if TYPE_CHECKING:
     try:  # pragma: no cover - type-checking fallback for stripped test envs
         from homeassistant.helpers.entity_registry import (
@@ -162,9 +167,9 @@ if TYPE_CHECKING:
     from .discovery import (
         DiscoveryManager as DiscoveryManagerType,
         async_initialize_discovery_runtime as AsyncInitializeDiscoveryRuntimeType,
-        _cloud_discovery_runtime as CloudDiscoveryRuntimeCallable,
-        _redact_account_for_log as RedactAccountForLogCallable,
-        _trigger_cloud_discovery as TriggerCloudDiscoveryCallable,
+        _cloud_discovery_runtime as cloud_discovery_runtime_impl,
+        _redact_account_for_log as redact_account_for_log_impl,
+        _trigger_cloud_discovery as trigger_cloud_discovery_impl,
     )
     from .map_view import (
         GoogleFindMyMapRedirectView as GoogleFindMyMapRedirectViewType,
@@ -180,15 +185,20 @@ if TYPE_CHECKING:
     async_initialize_discovery_runtime = AsyncInitializeDiscoveryRuntimeType
     api_register_fcm_provider = ApiRegisterFcmProviderType
     api_unregister_fcm_provider = ApiUnregisterFcmProviderType
+    _cloud_discovery_runtime_callable = cast(
+        CloudDiscoveryRuntimeCallable, cloud_discovery_runtime_impl
+    )
+    _redact_account_for_log_callable = cast(
+        RedactAccountForLogCallable, redact_account_for_log_impl
+    )
+    _trigger_cloud_discovery_callable = cast(
+        TriggerCloudDiscoveryCallable, trigger_cloud_discovery_impl
+    )
 else:
     from typing import Any as RegistryEntryDisablerType
 
     NovaFcmReceiverProtocol = FcmReceiverHA
     ApiFcmReceiverProtocol = FcmReceiverHA
-
-    CloudDiscoveryRuntimeCallable = Callable[[HomeAssistant], Mapping[str, Any]]
-    TriggerCloudDiscoveryCallable = Callable[..., Awaitable[Any]]
-    RedactAccountForLogCallable = Callable[..., str]
 
     def _runtime_imports_not_initialized(*_args: Any, **_kwargs: Any) -> Any:
         """Raise when runtime-only imports are used before initialization."""
@@ -370,6 +380,340 @@ except AttributeError:
         CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
 
 _LOGGER = logging.getLogger(__name__)
+
+_CONFIG_FLOW_HELPERS: dict[str, Any] | None = None
+# Keep the per-entry health probe timeout small so rebuilds remain responsive.
+# Adjust cautiously if probing strategy changes—this is a per-entry budget, not
+# a global backoff.
+_ENTRY_HEALTH_TIMEOUT = 10.0
+
+
+@dataclass(slots=True)
+class _EntryHealth:
+    """Summarize the credential health of a config entry."""
+
+    status: Literal["valid", "invalid", "unknown"]
+    reason: str | None = None
+    token_source: str | None = None
+
+
+def _load_config_flow_helpers() -> dict[str, Any] | None:
+    """Lazily import config flow helpers used for credential probes."""
+
+    global _CONFIG_FLOW_HELPERS
+    if _CONFIG_FLOW_HELPERS is not None:
+        return _CONFIG_FLOW_HELPERS
+
+    try:  # pragma: no cover - exercised indirectly in tests
+        from . import config_flow as _config_flow
+    except Exception as err:  # noqa: BLE001 - defensive import guard
+        _LOGGER.debug("Config flow helpers unavailable: %s", err)
+        _CONFIG_FLOW_HELPERS = {}
+        return _CONFIG_FLOW_HELPERS
+
+    _CONFIG_FLOW_HELPERS = {
+        "extract_oauth": getattr(
+            _config_flow, "_extract_oauth_candidates_from_secrets", None
+        ),
+        "new_api": getattr(_config_flow, "_async_new_api_for_probe", None),
+        "try_probe": getattr(_config_flow, "_try_probe_devices", None),
+        "map_error": getattr(_config_flow, "_map_api_exc_to_error_key", None),
+        "guard_error": getattr(_config_flow, "_is_multi_entry_guard_error", None),
+        "dependency_not_ready": getattr(_config_flow, "DependencyNotReady", None),
+    }
+    return _CONFIG_FLOW_HELPERS
+
+
+def _entry_schema_score(entry: ConfigEntry) -> int:
+    """Return an integer describing how complete the entry schema is."""
+
+    score = 0
+    for container in (entry.data, entry.options):
+        if not isinstance(container, Mapping):
+            continue
+        if isinstance(container.get(DATA_SECRET_BUNDLE), Mapping):
+            score += 5
+        elif container.get(DATA_SECRET_BUNDLE) is not None:
+            score += 2
+        if container.get(DATA_AUTH_METHOD):
+            score += 2
+        if container.get(CONF_OAUTH_TOKEN):
+            score += 1
+        if container.get(DATA_AAS_TOKEN):
+            score += 1
+    if isinstance(getattr(entry, "options", None), Mapping):
+        score += len(entry.options)
+    return score
+
+
+def _entry_creation_timestamp(entry: ConfigEntry) -> float:
+    """Return the creation timestamp (epoch seconds) or ``inf`` when unknown."""
+
+    timestamp = getattr(entry, "created_at", None)
+    if not isinstance(timestamp, datetime):
+        timestamp = getattr(entry, "updated_at", None)
+    if isinstance(timestamp, datetime):
+        try:
+            return float(timestamp.timestamp())
+        except (OSError, ValueError):  # pragma: no cover - defensive fallback
+            return float("inf")
+    return float("inf")
+
+
+async def _async_collect_entry_tokens(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> tuple[list[tuple[str, str]], Mapping[str, Any] | None]:
+    """Collect candidate OAuth tokens for ``entry`` from all known sources."""
+
+    helpers = _load_config_flow_helpers() or {}
+    extract_oauth = helpers.get("extract_oauth")
+
+    seen: set[str] = set()
+    tokens: list[tuple[str, str]] = []
+    secrets_bundle: Mapping[str, Any] | None = None
+
+    def _add(label: str, value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        candidate = value.strip()
+        if not candidate or candidate in seen:
+            return
+        seen.add(candidate)
+        tokens.append((label, candidate))
+
+    for container_label, container in ("data", entry.data), ("options", entry.options):
+        if not isinstance(container, Mapping):
+            continue
+        bundle = container.get(DATA_SECRET_BUNDLE)
+        if isinstance(bundle, Mapping):
+            secrets_bundle = secrets_bundle or cast(Mapping[str, Any], bundle)
+            if callable(extract_oauth):
+                try:
+                    for source, token in extract_oauth(dict(bundle)):
+                        _add(f"{container_label}.secrets.{source}", token)
+                except Exception as err:  # pragma: no cover - defensive logging
+                    _LOGGER.debug(
+                        "Secret token extraction failed for %s.%s: %s",
+                        entry.entry_id,
+                        container_label,
+                        err,
+                    )
+        _add(f"{container_label}.oauth_token", container.get(CONF_OAUTH_TOKEN))
+        _add(f"{container_label}.aas_token", container.get(DATA_AAS_TOKEN))
+
+    runtime = getattr(entry, "runtime_data", None)
+    cache: TokenCache | None = getattr(runtime, "token_cache", None)
+    created_cache: TokenCache | None = None
+    if cache is None:
+        try:
+            created_cache = await TokenCache.create(hass, entry.entry_id)
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug(
+                "Token cache load failed for entry %s: %s", entry.entry_id, err
+            )
+        else:
+            cache = created_cache
+
+    if cache is not None:
+        try:
+            cached_values = await cache.all()
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug(
+                "Token cache read failed for entry %s: %s", entry.entry_id, err
+            )
+        else:
+            if isinstance(cached_values, Mapping):
+                _add("cache.oauth_token", cached_values.get(CONF_OAUTH_TOKEN))
+                _add("cache.aas_token", cached_values.get(DATA_AAS_TOKEN))
+                cached_bundle = cached_values.get(DATA_SECRET_BUNDLE)
+                if isinstance(cached_bundle, Mapping) and secrets_bundle is None:
+                    secrets_bundle = cast(Mapping[str, Any], cached_bundle)
+                    if callable(extract_oauth):
+                        try:
+                            for source, token in extract_oauth(dict(cached_bundle)):
+                                _add(f"cache.secrets.{source}", token)
+                        except Exception as err:  # pragma: no cover - defensive
+                            _LOGGER.debug(
+                                "Secret token extraction failed for cache (%s): %s",
+                                entry.entry_id,
+                                err,
+                            )
+
+    if created_cache is not None:
+        with suppress(Exception):  # pragma: no cover - defensive cleanup
+            await created_cache.close()
+
+    return tokens, secrets_bundle
+
+
+async def _async_assess_entry_health(
+    hass: HomeAssistant, entry: ConfigEntry, *, normalized_email: str
+) -> _EntryHealth:
+    """Probe stored credentials to determine whether ``entry`` is usable."""
+
+    tokens, secrets_bundle = await _async_collect_entry_tokens(hass, entry)
+    if not tokens:
+        return _EntryHealth(status="unknown", reason="no_tokens")
+
+    helpers = _load_config_flow_helpers() or {}
+    new_api = helpers.get("new_api")
+    try_probe = helpers.get("try_probe")
+    map_error = helpers.get("map_error")
+    guard_error = helpers.get("guard_error")
+    dependency_not_ready = helpers.get("dependency_not_ready")
+
+    if not callable(new_api) or not callable(try_probe) or not callable(map_error):
+        return _EntryHealth(status="unknown", reason="helpers_missing")
+
+    invalid_seen = False
+    unknown_reason: str | None = None
+
+    for source, token in tokens:
+        try:
+            async with asyncio.timeout(_ENTRY_HEALTH_TIMEOUT):
+                api = await new_api(
+                    email=normalized_email,
+                    token=token,
+                    secrets_bundle=secrets_bundle,
+                )
+                await try_probe(api, email=normalized_email, token=token)
+        except asyncio.TimeoutError:
+            unknown_reason = "timeout"
+            continue
+        except Exception as err:  # noqa: BLE001 - deliberate broad guard
+            if dependency_not_ready and isinstance(err, dependency_not_ready):
+                return _EntryHealth(status="unknown", reason="dependency_not_ready")
+            if callable(guard_error) and guard_error(err):
+                return _EntryHealth(status="valid", reason="guard", token_source=source)
+            error_key = map_error(err)
+            if error_key == "invalid_auth":
+                invalid_seen = True
+                continue
+            unknown_reason = error_key or "unknown"
+            continue
+        else:
+            return _EntryHealth(status="valid", reason="probe_ok", token_source=source)
+
+    if unknown_reason is not None:
+        return _EntryHealth(status="unknown", reason=unknown_reason)
+    if invalid_seen:
+        return _EntryHealth(status="invalid", reason="invalid_auth")
+    return _EntryHealth(status="unknown", reason="no_result")
+
+
+async def async_coalesce_account_entries(
+    hass: HomeAssistant,
+    *,
+    canonical_entry: ConfigEntry,
+) -> ConfigEntry:
+    """Ensure only one config entry remains for the account represented by ``canonical_entry``."""
+
+    raw_email, normalized_email = _resolve_entry_email(canonical_entry)
+    if not normalized_email:
+        _LOGGER.warning(
+            "Cannot deduplicate config entry %s: missing normalized email (raw=%s)",
+            canonical_entry.entry_id,
+            raw_email or "n/a",
+        )
+        return canonical_entry
+
+    all_entries = hass.config_entries.async_entries(DOMAIN)
+    candidates: dict[str, ConfigEntry] = {}
+    for candidate in all_entries:
+        if _extract_email_from_entry(candidate) == normalized_email:
+            candidates[candidate.entry_id] = candidate
+
+    candidates.setdefault(canonical_entry.entry_id, canonical_entry)
+
+    candidate_list = list(candidates.values())
+    if len(candidate_list) == 1:
+        return candidate_list[0]
+
+    health: dict[str, _EntryHealth] = {}
+    for candidate in candidate_list:
+        health[candidate.entry_id] = await _async_assess_entry_health(
+            hass, candidate, normalized_email=normalized_email
+        )
+
+    canonical_id = canonical_entry.entry_id
+
+    def _valid_sort_key(entry: ConfigEntry) -> tuple[Any, ...]:
+        """Order valid entries by version, enabled state, schema richness, then caller."""
+        not_disabled = 1 if getattr(entry, "disabled_by", None) is None else 0
+        return (
+            -int(getattr(entry, "version", 0)),
+            -not_disabled,
+            -_entry_schema_score(entry),
+            -1 if entry.entry_id == canonical_id else 0,
+            entry.entry_id,
+        )
+
+    valid_candidates = [
+        candidate
+        for candidate in candidate_list
+        if health[candidate.entry_id].status == "valid"
+    ]
+    if valid_candidates:
+        winner = sorted(valid_candidates, key=_valid_sort_key)[0]
+    else:
+        def _fallback_sort_key(entry: ConfigEntry) -> tuple[Any, ...]:
+            """Order unknown/invalid entries by schema version, enabled flag, and age."""
+            not_disabled = 1 if getattr(entry, "disabled_by", None) is None else 0
+            return (
+                -int(getattr(entry, "version", 0)),
+                -not_disabled,
+                _entry_creation_timestamp(entry),
+                entry.entry_id,
+            )
+
+        winner = sorted(candidate_list, key=_fallback_sort_key)[0]
+        _LOGGER.warning(
+            "Account %s has no verified credentials; selected entry %s via heuristics",
+            _mask_email_for_logs(normalized_email),
+            winner.entry_id,
+        )
+
+    winner_health = health[winner.entry_id]
+    _LOGGER.info(
+        "Selected canonical entry %s for account %s with status %s",
+        winner.entry_id,
+        _mask_email_for_logs(normalized_email),
+        winner_health.status,
+    )
+
+    _LOGGER.debug(
+        "Credential health for account %s → %s",
+        _mask_email_for_logs(normalized_email),
+        {entry_id: report.status for entry_id, report in health.items()},
+    )
+
+    for candidate in candidate_list:
+        if candidate.entry_id == winner.entry_id:
+            continue
+        _LOGGER.info(
+            "Removing duplicate Google Find My Device entry %s (account %s); canonical entry is %s",
+            candidate.entry_id,
+            _mask_email_for_logs(normalized_email),
+            winner.entry_id,
+        )
+        try:
+            await hass.config_entries.async_remove(candidate.entry_id)
+        except Exception as err:  # noqa: BLE001 - surface unexpected failure
+            _LOGGER.error(
+                "Failed to remove duplicate entry %s for account %s: %s",
+                candidate.entry_id,
+                _mask_email_for_logs(normalized_email),
+                err,
+            )
+            raise
+
+    refreshed_getter = getattr(hass.config_entries, "async_get_entry", None)
+    if callable(refreshed_getter):
+        refreshed = refreshed_getter(winner.entry_id)
+        if refreshed is not None:
+            winner = refreshed
+
+    return winner
 
 # Platforms provided by this integration
 PLATFORMS: list[Platform] = [
@@ -1379,7 +1723,9 @@ async def _async_relink_subentry_entities(
                 device = get_device(identifiers={identifier})
             except TypeError:
                 try:
-                    device = get_device({identifier})  # type: ignore[misc]
+                    device = cast(Callable[[Collection[tuple[str, str]]], Any], get_device)(
+                        {identifier}
+                    )
                 except TypeError:
                     device = None
         else:
@@ -1390,9 +1736,9 @@ async def _async_relink_subentry_entities(
 
         devices_iterable = getattr(device_registry, "devices", {})
         if isinstance(devices_iterable, Mapping):
-            candidates = devices_iterable.values()
+            candidates: Iterable[Any] = devices_iterable.values()
         else:
-            candidates = devices_iterable or []
+            candidates = cast(Iterable[Any], devices_iterable) or ()
 
         for candidate in candidates:
             identifiers = getattr(candidate, "identifiers", None)
@@ -1441,9 +1787,9 @@ async def _async_relink_subentry_entities(
 
         devices_iterable = getattr(device_registry, "devices", {})
         if isinstance(devices_iterable, Mapping):
-            candidates = devices_iterable.values()
+            candidates = cast(Iterable[Any], devices_iterable.values())
         else:
-            candidates = devices_iterable or []
+            candidates = cast(Iterable[Any], devices_iterable) or ()
 
         for device in candidates:
             config_entries = cast(
@@ -1567,7 +1913,7 @@ async def _async_relink_subentry_entities(
     ) -> dr.DeviceEntry | Any | None:
         """Return the tracker device for ``google_device_id`` when present."""
 
-        parts = SimpleNamespace(
+        parts = _ButtonUniqueIdParts(
             entry_id=entry_id,
             subentry_id=subentry_id,
             google_device_id=google_device_id,
@@ -2123,6 +2469,19 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.entry_id,
         entry.version,
     )
+
+    canonical_entry = await async_coalesce_account_entries(
+        hass, canonical_entry=entry
+    )
+    if canonical_entry.entry_id != entry.entry_id:
+        _LOGGER.info(
+            "Config entry %s removed during migration; canonical entry is %s",
+            entry.entry_id,
+            canonical_entry.entry_id,
+        )
+        return True
+
+    entry = canonical_entry
 
     should_setup, normalized_email = await _ensure_post_migration_consistency(
         hass,
@@ -2855,13 +3214,23 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
 def _resolve_entry_email(entry: ConfigEntry) -> tuple[str | None, str | None]:
     """Return the raw and normalized e-mail associated with a config entry."""
 
-    email_value = entry.data.get(CONF_GOOGLE_EMAIL)
-    raw_email: str | None
-    if isinstance(email_value, str) and email_value.strip():
-        raw_email = email_value.strip()
-    else:
-        raw_email = None
-        secrets_bundle = entry.data.get(DATA_SECRET_BUNDLE)
+    raw_email: str | None = None
+    for container in (entry.data, entry.options):
+        if not isinstance(container, Mapping):
+            continue
+        email_value = container.get(CONF_GOOGLE_EMAIL)
+        if isinstance(email_value, str) and email_value.strip():
+            raw_email = email_value.strip()
+            break
+
+    if raw_email is None:
+        secrets_bundle = None
+        for container in (entry.data, entry.options):
+            if isinstance(container, Mapping):
+                bundle_candidate = container.get(DATA_SECRET_BUNDLE)
+                if isinstance(bundle_candidate, Mapping):
+                    secrets_bundle = bundle_candidate
+                    break
         if isinstance(secrets_bundle, Mapping):
             for key in ("google_email", "username", "Email", "email"):
                 candidate = secrets_bundle.get(key)
@@ -3388,6 +3757,8 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                 "migrate_unique_ids": _async_migrate_unique_ids,
                 "relink_button_devices": _async_relink_button_devices,
                 "relink_subentry_entities": _async_relink_subentry_entities,
+                "coalesce_account_entries": async_coalesce_account_entries,
+                "extract_normalized_email": _extract_email_from_entry,
             }
             await async_register_services(hass, svc_ctx)
             bucket["services_registered"] = True

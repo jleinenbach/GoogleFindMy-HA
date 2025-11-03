@@ -48,6 +48,7 @@ class _MigrationConfigEntriesManager:
         self._entries: dict[str, _MigrationTestEntry] = {}
         self.updated: list[tuple[_MigrationTestEntry, dict[str, Any]]] = []
         self.disabled: list[tuple[str, object | None]] = []
+        self.removed: list[str] = []
 
     def add_entry(self, entry: _MigrationTestEntry) -> None:
         self._entries[entry.entry_id] = entry
@@ -56,6 +57,9 @@ class _MigrationConfigEntriesManager:
         if domain is None:
             return list(self._entries.values())
         return [entry for entry in self._entries.values() if entry.domain == domain]
+
+    def async_get_entry(self, entry_id: str) -> _MigrationTestEntry | None:
+        return self._entries.get(entry_id)
 
     def async_update_entry(self, entry: _MigrationTestEntry, **kwargs: Any) -> None:
         self.updated.append((entry, dict(kwargs)))
@@ -81,6 +85,10 @@ class _MigrationConfigEntriesManager:
         entry = self._entries[entry_id]
         entry.disabled_by = disabled_by
         self.disabled.append((entry_id, disabled_by))
+
+    async def async_remove(self, entry_id: str) -> None:
+        self.removed.append(entry_id)
+        self._entries.pop(entry_id, None)
 
 
 @dataclass(slots=True)
@@ -169,19 +177,11 @@ async def test_async_migrate_entry_handles_duplicate_accounts(
 
     first_result = await integration.async_migrate_entry(hass, duplicate)
 
-    assert first_result is False
-    assert duplicate.version == 1
-    assert duplicate.title == "duplicate@example.com"
-    assert duplicate.data[CONF_GOOGLE_EMAIL] == "duplicate@example.com"
-    assert duplicate.unique_id == "acct:duplicate@example.com"
-    assert duplicate.state is migration_error_state
-    assert duplicate.options == {}
+    assert first_result is True
+    assert duplicate.entry_id in hass.config_entries.removed
+    assert hass.config_entries.async_get_entry(duplicate.entry_id) is None
     assert authoritative.state == ConfigEntryState.LOADED
     assert capture.created == []
-    assert (
-        DOMAIN,
-        f"duplicate_account_{duplicate.entry_id}",
-    ) in capture.deleted
 
     updates_before = list(hass.config_entries.updated)
     second_result = await integration.async_migrate_entry(hass, authoritative)
@@ -190,17 +190,12 @@ async def test_async_migrate_entry_handles_duplicate_accounts(
     assert authoritative.version == integration.CONFIG_ENTRY_VERSION
     assert authoritative.title == "duplicate@example.com"
     assert authoritative.unique_id == "acct:duplicate@example.com"
-    assert duplicate.state is migration_error_state
     new_updates = hass.config_entries.updated[len(updates_before) :]
     assert any("version" in update[1] for update in new_updates)
     assert capture.created == []
     assert (
         capture.deleted.count((DOMAIN, f"duplicate_account_{authoritative.entry_id}"))
         >= 1
-    )
-    assert (
-        capture.deleted.count((DOMAIN, f"duplicate_account_{duplicate.entry_id}"))
-        >= 2
     )
 
 
