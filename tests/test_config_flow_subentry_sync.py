@@ -3,15 +3,17 @@
 
 from __future__ import annotations
 
-# tests/test_config_flow_subentry_sync.py
-
 import asyncio
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy import config_flow
+from custom_components.googlefindmy import (
+    ConfigEntrySubEntryManager,
+    ConfigEntrySubentryDefinition,
+    config_flow,
+)
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
@@ -34,6 +36,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
 )
+from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigSubentry
 
 
@@ -51,6 +54,7 @@ class _ConfigEntriesManagerStub:
         self.created: list[dict[str, Any]] = []
         self.updated: list[dict[str, Any]] = []
         self.entry_updates: list[dict[str, Any]] = []
+        self.removed: list[str] = []
 
     def async_entries(self, domain: str | None = None) -> list[Any]:
         if domain and domain != DOMAIN:
@@ -61,6 +65,11 @@ class _ConfigEntriesManagerStub:
         if entry_id == self._entry.entry_id:
             return self._entry
         return None
+
+    def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
+        if entry_id != self._entry.entry_id:
+            return []
+        return list(self._entry.subentries.values())
 
     def async_update_entry(self, entry: _EntryStub, **kwargs: Any) -> None:
         assert entry is self._entry
@@ -90,13 +99,26 @@ class _ConfigEntriesManagerStub:
             unique_id=unique_id,
             subentry_id=_stable_subentry_id(entry.entry_id, data["group_key"]),
         )
-        self._entry.subentries[subentry.subentry_id] = subentry
+        return self.async_add_subentry(entry, subentry)
+
+    def async_add_subentry(
+        self, entry: _EntryStub, subentry: ConfigSubentry
+    ) -> ConfigSubentry:
+        assert entry is self._entry
+        if isinstance(subentry.unique_id, str):
+            for existing in entry.subentries.values():
+                if existing is subentry:
+                    continue
+                if existing.unique_id == subentry.unique_id:
+                    raise data_entry_flow.AbortFlow("already_configured")
+
+        entry.subentries[subentry.subentry_id] = subentry
         self.created.append(
             {
-                "data": dict(data),
-                "title": title,
-                "unique_id": unique_id,
-                "subentry_type": subentry_type,
+                "data": dict(subentry.data),
+                "title": subentry.title,
+                "unique_id": subentry.unique_id,
+                "subentry_type": subentry.subentry_type,
                 "config_subentry_id": subentry.subentry_id,
                 "object": subentry,
             }
@@ -113,6 +135,12 @@ class _ConfigEntriesManagerStub:
         unique_id: str | None = None,
     ) -> None:
         assert entry is self._entry
+        if unique_id is not None:
+            for existing in entry.subentries.values():
+                if existing is subentry:
+                    continue
+                if existing.unique_id == unique_id:
+                    raise data_entry_flow.AbortFlow("already_configured")
         subentry.data = MappingProxyType(dict(data))
         if title is not None:
             subentry.title = title
@@ -127,6 +155,16 @@ class _ConfigEntriesManagerStub:
                 "subentry": subentry,
             }
         )
+
+    async def async_remove_subentry(
+        self, entry: _EntryStub, *, subentry_id: str
+    ) -> bool:
+        assert entry is self._entry
+        removed = self._entry.subentries.pop(subentry_id, None)
+        if removed is None:
+            return False
+        self.removed.append(subentry_id)
+        return True
 
 
 class _HassStub:
@@ -228,6 +266,75 @@ async def test_device_selection_creates_feature_groups_with_flags() -> None:
     assert flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] is False
     assert flags[OPT_GOOGLE_HOME_FILTER_ENABLED] is False
     assert flags[OPT_ENABLE_STATS_ENTITIES] is True
+
+
+@pytest.mark.asyncio
+async def test_subentry_manager_deduplicates_colliding_tracker_entries() -> None:
+    """ConfigEntrySubEntryManager should remove duplicates before retrying updates."""
+
+    entry = _EntryStub()
+    tracker_unique_id = f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}"
+    canonical = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "feature_flags": {"example": True},
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Primary trackers",
+        unique_id=tracker_unique_id,
+        subentry_id=_stable_subentry_id(entry.entry_id, "tracker-primary"),
+    )
+    duplicate = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "feature_flags": {"stale": True},
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Duplicate trackers",
+        unique_id=tracker_unique_id,
+        subentry_id=_stable_subentry_id(entry.entry_id, "tracker-duplicate"),
+    )
+    entry.subentries[canonical.subentry_id] = canonical
+    entry.subentries[duplicate.subentry_id] = duplicate
+
+    hass = _HassStub(entry)
+    manager = ConfigEntrySubEntryManager(hass, entry)
+
+    tracker_definition = ConfigEntrySubentryDefinition(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Google Find My devices",
+        data={
+            "feature_flags": {},
+            "features": sorted(TRACKER_FEATURE_PLATFORMS),
+            "visible_device_ids": ["dev-1"],
+        },
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        unique_id=tracker_unique_id,
+    )
+    service_definition = ConfigEntrySubentryDefinition(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Google Find My service",
+        data={"features": sorted(SERVICE_FEATURE_PLATFORMS)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+    )
+
+    await manager.async_sync([tracker_definition, service_definition])
+
+    tracker_subentries = [
+        subentry
+        for subentry in hass.config_entries.async_get_subentries(entry.entry_id)
+        if subentry.data.get("group_key") == TRACKER_SUBENTRY_KEY
+    ]
+    assert len(tracker_subentries) == 1
+    tracker = tracker_subentries[0]
+    assert tracker.unique_id == tracker_unique_id
+    assert manager.get(TRACKER_SUBENTRY_KEY) is tracker
+    assert duplicate.subentry_id in hass.config_entries.removed
 
 
 @pytest.mark.asyncio
