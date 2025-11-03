@@ -38,6 +38,7 @@ from custom_components.googlefindmy.const import (
 )
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigSubentry
+from homeassistant.exceptions import HomeAssistantError
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -384,6 +385,108 @@ async def test_device_selection_updates_existing_feature_group() -> None:
     assert flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
     assert flags[OPT_GOOGLE_HOME_FILTER_ENABLED] is True
     assert flags[OPT_ENABLE_STATS_ENTITIES] is False
+
+
+@pytest.mark.asyncio
+async def test_subentry_manager_adopts_existing_owner_on_repeated_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated unique_id collisions should adopt the existing owner subentry."""
+
+    entry = _EntryStub()
+    shared_unique_id = f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
+    owner = ConfigSubentry(
+        data=MappingProxyType({"group_key": "service-legacy"}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Legacy service",
+        unique_id=shared_unique_id,
+        subentry_id=_stable_subentry_id(entry.entry_id, "service-owner"),
+    )
+    existing = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service placeholder",
+        unique_id=f"{shared_unique_id}-old",
+        subentry_id=_stable_subentry_id(entry.entry_id, "service-existing"),
+    )
+    entry.subentries[owner.subentry_id] = owner
+    entry.subentries[existing.subentry_id] = existing
+
+    hass = _HassStub(entry)
+    manager = ConfigEntrySubEntryManager(hass, entry)
+
+    definition = ConfigEntrySubentryDefinition(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Google Find My service",
+        data={"features": sorted(SERVICE_FEATURE_PLATFORMS)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        unique_id=shared_unique_id,
+    )
+
+    adoption_calls: list[tuple[str, str, dict[str, Any]]] = []
+    original_adopt = ConfigEntrySubEntryManager._async_adopt_existing_unique_id
+
+    async def _instrumented_adopt(
+        self: ConfigEntrySubEntryManager,
+        key: str,
+        definition: ConfigEntrySubentryDefinition,
+        unique_id: str,
+        payload: dict[str, Any],
+    ) -> ConfigSubentry:
+        adoption_calls.append((key, unique_id, dict(payload)))
+        return await original_adopt(self, key, definition, unique_id, payload)
+
+    monkeypatch.setattr(
+        ConfigEntrySubEntryManager,
+        "_async_adopt_existing_unique_id",
+        _instrumented_adopt,
+    )
+
+    await manager.async_sync([definition])
+
+    assert adoption_calls, "adoption helper should be invoked after repeated collision"
+    adopted = manager.get(SERVICE_SUBENTRY_KEY)
+    assert adopted is owner
+    assert dict(owner.data)["group_key"] == SERVICE_SUBENTRY_KEY
+    assert owner.title == definition.title
+    assert hass.config_entries.updated[-1]["unique_id"] is None
+    assert hass.config_entries.updated[-1]["data"]["features"] == definition.data["features"]
+
+
+@pytest.mark.asyncio
+async def test_subentry_manager_adoption_missing_owner_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adoption should raise a HomeAssistantError when no owner exists."""
+
+    entry = _EntryStub()
+    existing = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Google Find My service",
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}-legacy",
+        subentry_id=_stable_subentry_id(entry.entry_id, "service-legacy"),
+    )
+    entry.subentries[existing.subentry_id] = existing
+
+    hass = _HassStub(entry)
+    manager = ConfigEntrySubEntryManager(hass, entry)
+
+    definition = ConfigEntrySubentryDefinition(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Google Find My service",
+        data={"features": sorted(SERVICE_FEATURE_PLATFORMS)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+    )
+
+    def _always_abort(*args: Any, **kwargs: Any) -> None:
+        raise data_entry_flow.AbortFlow("already_configured")
+
+    monkeypatch.setattr(hass.config_entries, "async_update_subentry", _always_abort)
+
+    with pytest.raises(HomeAssistantError):
+        await manager.async_sync([definition])
 
 
 def test_supported_subentry_types_include_hub_handler() -> None:
