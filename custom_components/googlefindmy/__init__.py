@@ -42,10 +42,12 @@ import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast
+from collections import defaultdict
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from types import MappingProxyType, SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
 try:  # pragma: no cover - ConfigEntryDisabler introduced in HA 2023.12
     from homeassistant.config_entries import ConfigEntryDisabler as _ConfigEntryDisabler
@@ -463,6 +465,100 @@ class ConfigEntrySubEntryManager:
             if isinstance(key, str):
                 self._managed[key] = subentry
 
+    async def _deduplicate_subentries(self) -> None:
+        """Remove duplicate subentries so each logical group has a single entry."""
+
+        subentries = list(
+            self._hass.config_entries.async_get_subentries(self._entry.entry_id)
+        )
+        if not subentries:
+            return
+
+        grouped_by_unique: dict[str, list[ConfigSubentry]] = defaultdict(list)
+        grouped_by_group: dict[tuple[str | None, str], list[ConfigSubentry]] = (
+            defaultdict(list)
+        )
+
+        for subentry in subentries:
+            if isinstance(subentry.unique_id, str):
+                grouped_by_unique[subentry.unique_id].append(subentry)
+
+            group_value = subentry.data.get(self._key_field)
+            key_value = group_value if isinstance(group_value, str) and group_value else None
+            grouped_by_group[(key_value, subentry.subentry_type)].append(subentry)
+
+        def _select_canonical(candidates: list[ConfigSubentry]) -> ConfigSubentry:
+            indexed = list(enumerate(candidates))
+            index, winner = min(
+                indexed,
+                key=lambda item: (
+                    0 if isinstance(item[1].unique_id, str) else 1,
+                    item[1].unique_id or "",
+                    item[0],
+                    item[1].subentry_id or "",
+                ),
+            )
+            return winner
+
+        removal_targets: set[str] = set()
+        duplicate_descriptors: set[str] = set()
+
+        for unique_id, candidates in grouped_by_unique.items():
+            if len(candidates) <= 1:
+                continue
+            canonical = _select_canonical(candidates)
+            duplicate_descriptors.add(f"unique_id={unique_id}")
+            for candidate in candidates:
+                if candidate is canonical:
+                    continue
+                removal_targets.add(candidate.subentry_id)
+
+        for (key_value, subentry_type), candidates in grouped_by_group.items():
+            if len(candidates) <= 1:
+                continue
+            canonical = _select_canonical(candidates)
+            descriptor_key = key_value or "<unset>"
+            duplicate_descriptors.add(f"group={descriptor_key}:{subentry_type}")
+            for candidate in candidates:
+                if candidate is canonical:
+                    continue
+                removal_targets.add(candidate.subentry_id)
+
+        if not removal_targets:
+            return
+
+        removed_ids: list[str] = []
+        for subentry in subentries:
+            if subentry.subentry_id not in removal_targets:
+                continue
+
+            removal = self._hass.config_entries.async_remove_subentry(
+                self._entry,
+                subentry_id=subentry.subentry_id,
+            )
+
+            try:
+                await self._await_subentry_result(removal)
+            except Exception as err:  # pragma: no cover - defensive logging
+                _LOGGER.error(
+                    "Failed to remove duplicate subentry '%s': %s",
+                    subentry.subentry_id,
+                    err,
+                )
+                raise
+
+            removed_ids.append(subentry.subentry_id)
+
+        if removed_ids:
+            _LOGGER.info(
+                "Removed %s duplicate config subentries for %s (%s)",
+                len(removed_ids),
+                self._entry.entry_id,
+                ", ".join(sorted(duplicate_descriptors)),
+            )
+
+        self._refresh_from_entry()
+
     @property
     def managed_subentries(self) -> dict[str, ConfigSubentry]:
         """Return a copy of the managed subentry mapping."""
@@ -566,34 +662,61 @@ class ConfigEntrySubEntryManager:
             cleanup = definition.unload
 
             existing = self._managed.get(key)
-            if existing is None:
-                new_subentry = ConfigSubentry(
-                    data=MappingProxyType(payload),
-                    subentry_type=subentry_type,
-                    title=definition.title,
-                    unique_id=unique_id,
-                )
-                add_result = self._hass.config_entries.async_add_subentry(
-                    self._entry, new_subentry
-                )
-                resolved_add = await self._await_subentry_result(add_result)
+            dedup_attempted = False
 
-                if isinstance(resolved_add, ConfigSubentry):
-                    stored = resolved_add
-                else:
-                    stored = self._entry.subentries.get(
-                        new_subentry.subentry_id, new_subentry
+            conflict_key = next(
+                (
+                    managed_key
+                    for managed_key, managed_subentry in self._managed.items()
+                    if managed_key != key and managed_subentry.unique_id == unique_id
+                ),
+                None,
+            )
+            if conflict_key is not None:
+                await self._deduplicate_subentries()
+                dedup_attempted = True
+                existing = self._managed.get(key)
+
+            while True:
+                if existing is None:
+                    new_subentry = ConfigSubentry(
+                        data=MappingProxyType(payload),
+                        subentry_type=subentry_type,
+                        title=definition.title,
+                        unique_id=unique_id,
                     )
+                    add_result = self._hass.config_entries.async_add_subentry(
+                        self._entry, new_subentry
+                    )
+                    resolved_add = await self._await_subentry_result(add_result)
 
-                self._managed[key] = stored
-            else:
-                changed = self._hass.config_entries.async_update_subentry(
-                    self._entry,
-                    existing,
-                    data=payload,
-                    title=definition.title,
-                    unique_id=unique_id,
-                )
+                    if isinstance(resolved_add, ConfigSubentry):
+                        stored = resolved_add
+                    else:
+                        stored = self._entry.subentries.get(
+                            new_subentry.subentry_id, new_subentry
+                        )
+
+                    self._managed[key] = stored
+                    break
+
+                try:
+                    changed = self._hass.config_entries.async_update_subentry(
+                        self._entry,
+                        existing,
+                        data=payload,
+                        title=definition.title,
+                        unique_id=unique_id,
+                    )
+                except data_entry_flow.AbortFlow as err:
+                    if err.reason != "already_configured" or dedup_attempted:
+                        raise
+
+                    await self._deduplicate_subentries()
+                    dedup_attempted = True
+                    existing = self._managed.get(key)
+                    continue
+
                 resolved_update = await self._await_subentry_result(changed)
 
                 if isinstance(resolved_update, ConfigSubentry):
@@ -607,6 +730,7 @@ class ConfigEntrySubEntryManager:
 
                 if stored_existing is not None:
                     self._managed[key] = stored_existing
+                break
 
             self._cleanup[key] = cleanup
 

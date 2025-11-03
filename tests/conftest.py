@@ -517,6 +517,15 @@ def _stub_homeassistant() -> None:
     sys.modules["voluptuous"] = vol_module
 
     data_entry_flow = ModuleType("homeassistant.data_entry_flow")
+
+    class _AbortFlow(Exception):
+        """Stub AbortFlow matching Home Assistant's interface."""
+
+        def __init__(self, reason: str) -> None:
+            super().__init__(reason)
+            self.reason = reason
+
+    data_entry_flow.AbortFlow = _AbortFlow  # type: ignore[attr-defined]
     data_entry_flow.FlowResult = dict  # type: ignore[assignment]
     sys.modules["homeassistant.data_entry_flow"] = data_entry_flow
 

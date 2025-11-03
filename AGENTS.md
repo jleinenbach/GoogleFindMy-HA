@@ -226,6 +226,11 @@ Prefer the executable name when it is available; fall back to the module form wh
 * **Configuration alignment:** Ensure configuration files (`pyproject.toml`, `.pre-commit-config.yaml`, `manifest.json`, requirement files) reflect the same dependency versions and document the synchronization.
 * **Completion notice:** When finished, report whether another maintenance run is required (for example, due to pending upstream fixes) or maintenance mode can be closed. Capture any remaining TODOs or follow-up tasks.
 
+### Config subentry maintenance helper
+
+* `custom_components/googlefindmy/__init__.py::ConfigEntrySubEntryManager._deduplicate_subentries()` removes redundant config subentries while preserving a single canonical group/member pair. Call it when migrations or recovery paths encounter Home Assistant's `AbortFlow("already_configured")` errors to converge on a stable state before retrying updates.
+* The helper is **idempotent** and refreshes the manager's internal `_managed` mapping after cleanup. Avoid creating new subentries inside the helper; it only removes duplicates reported by Home Assistant.
+
 ---
 
 ## 2) Roles (right-sized)
