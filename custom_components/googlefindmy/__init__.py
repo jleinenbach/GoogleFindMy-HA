@@ -812,9 +812,13 @@ class ConfigEntrySubEntryManager:
     async def _deduplicate_subentries(self) -> None:
         """Remove duplicate subentries so each logical group has a single entry."""
 
-        subentries = list(
-            self._hass.config_entries.async_get_subentries(self._entry.entry_id)
-        )
+        raw_subentries = getattr(self._entry, "subentries", None)
+        if isinstance(raw_subentries, Mapping):
+            subentries = list(raw_subentries.values())
+        elif isinstance(raw_subentries, dict):
+            subentries = list(raw_subentries.values())
+        else:
+            subentries = []
         if not subentries:
             return
 
