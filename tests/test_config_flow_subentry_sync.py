@@ -66,11 +66,6 @@ class _ConfigEntriesManagerStub:
             return self._entry
         return None
 
-    def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
-        if entry_id != self._entry.entry_id:
-            return []
-        return list(self._entry.subentries.values())
-
     def async_update_entry(self, entry: _EntryStub, **kwargs: Any) -> None:
         assert entry is self._entry
         payload = dict(kwargs)
@@ -327,7 +322,7 @@ async def test_subentry_manager_deduplicates_colliding_tracker_entries() -> None
 
     tracker_subentries = [
         subentry
-        for subentry in hass.config_entries.async_get_subentries(entry.entry_id)
+        for subentry in entry.subentries.values()
         if subentry.data.get("group_key") == TRACKER_SUBENTRY_KEY
     ]
     assert len(tracker_subentries) == 1
