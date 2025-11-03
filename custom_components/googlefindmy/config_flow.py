@@ -1397,11 +1397,13 @@ class ConfigFlow(
             if (value := old_data.get(key)) is not None
         }
 
-        raw_email, normalized_email = _resolve_entry_email(entry)
-        if normalized_email:
-            new_data[CONF_GOOGLE_EMAIL] = normalized_email
-        elif raw_email:
-            new_data[CONF_GOOGLE_EMAIL] = raw_email
+        resolved_raw_email: str | None
+        resolved_normalized_email: str | None
+        resolved_raw_email, resolved_normalized_email = _resolve_entry_email(entry)
+        if resolved_normalized_email:
+            new_data[CONF_GOOGLE_EMAIL] = resolved_normalized_email
+        elif resolved_raw_email:
+            new_data[CONF_GOOGLE_EMAIL] = resolved_raw_email
 
         existing_title = (
             entry.title.strip()
@@ -1409,12 +1411,12 @@ class ConfigFlow(
             else None
         )
 
-        title_update: str | None = raw_email if raw_email else None
-        if normalized_email:
+        title_update: str | None = resolved_raw_email if resolved_raw_email else None
+        if resolved_normalized_email:
             if (
                 existing_title
-                and existing_title.lower() == normalized_email
-                and existing_title != normalized_email
+                and existing_title.lower() == resolved_normalized_email
+                and existing_title != resolved_normalized_email
             ):
                 title_update = existing_title
             elif title_update is None:
