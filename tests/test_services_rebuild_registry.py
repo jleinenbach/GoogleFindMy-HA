@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from custom_components.googlefindmy.const import (
     MODE_MIGRATE,
     MODE_REBUILD,
     SERVICE_REBUILD_REGISTRY,
+    service_device_identifier,
 )
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import ServiceCall
@@ -278,3 +280,50 @@ async def test_migrate_mode_skips_reload_without_migration_api(
     assert migration_calls.count(("unique", entry.entry_id)) >= 2
     assert entry.state == ConfigEntryState.MIGRATION_ERROR
     assert any("manual migration" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_rebuild_registry_preserves_service_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Orphan cleanup should keep the service device while dropping trackers."""
+
+    entry = FakeConfigEntry(entry_id="entry-service")
+    entry_manager = FakeConfigEntriesManager([entry])
+    hass = FakeHass(entry_manager)
+
+    device_registry = FakeDeviceRegistry()
+    entity_registry = FakeEntityRegistry()
+
+    service_id = "device-service"
+    tracker_id = "device-tracker"
+
+    device_registry.devices[service_id] = SimpleNamespace(
+        id=service_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        config_entries={entry.entry_id},
+    )
+    device_registry.devices[tracker_id] = SimpleNamespace(
+        id=tracker_id,
+        identifiers={(DOMAIN, "tracker-device")},
+        config_entries={entry.entry_id},
+    )
+
+    removed_devices: list[str] = []
+
+    def _remove_device(device_id: str) -> None:
+        removed_devices.append(device_id)
+        device_registry.devices.pop(device_id, None)
+
+    device_registry.async_remove_device = _remove_device  # type: ignore[assignment]
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass_obj: device_registry)
+    monkeypatch.setattr(services.er, "async_get", lambda hass_obj: entity_registry)
+
+    await services.async_register_services(hass, {})
+    handler = hass.services.handlers[(DOMAIN, SERVICE_REBUILD_REGISTRY)]
+
+    await handler(ServiceCall({ATTR_MODE: MODE_REBUILD}))
+
+    assert removed_devices == [tracker_id]
+    assert service_id in device_registry.devices

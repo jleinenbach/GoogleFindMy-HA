@@ -7,7 +7,7 @@ import asyncio
 import importlib
 import inspect
 import sys
-from typing import Any
+from typing import Any, Mapping
 from collections.abc import Awaitable, Callable
 from types import MappingProxyType, SimpleNamespace
 
@@ -34,7 +34,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.Auth.username_provider import username_string
-from homeassistant import config_entries as ha_config_entries
+from homeassistant import config_entries as ha_config_entries, data_entry_flow
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.config_entries import ConfigSubentry
 
@@ -59,18 +59,10 @@ def test_config_flow_import_without_gpsoauth(
         assert getattr(flow_cls, "domain", None) == DOMAIN
 
 
-def test_async_step_hub_delegates_to_user() -> None:
-    """Add Hub flows must reuse the standard user onboarding form."""
+def test_async_step_hub_requires_home_assistant_context() -> None:
+    """Add Hub flows invoked without Home Assistant must abort."""
 
-    async def _exercise() -> tuple[Any, Any]:
-        user_flow = config_flow.ConfigFlow()
-        user_flow.hass = object()  # type: ignore[assignment]
-        user_flow.context = {}
-        user_flow.unique_id = None  # type: ignore[attr-defined]
-        user_result = await user_flow.async_step_user()
-        if inspect.isawaitable(user_result):
-            user_result = await user_result
-
+    async def _exercise() -> dict[str, Any]:
         hub_flow = config_flow.ConfigFlow()
         hub_flow.hass = object()  # type: ignore[assignment]
         hub_flow.context = {"source": "hub"}
@@ -78,13 +70,12 @@ def test_async_step_hub_delegates_to_user() -> None:
         hub_result = await hub_flow.async_step_hub()
         if inspect.isawaitable(hub_result):
             hub_result = await hub_result
+        return hub_result
 
-        return user_result, hub_result
+    hub_result = asyncio.run(_exercise())
 
-    user_result, hub_result = asyncio.run(_exercise())
-
-    assert hub_result == user_result
-    assert hub_result.get("type") == "form"
+    assert hub_result["type"] == "abort"
+    assert hub_result["reason"] == "unknown"
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -321,11 +312,14 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
         flow.context = {}
         flow.unique_id = None  # type: ignore[attr-defined]
 
-        async def _set_unique_id(value: str) -> None:
+        async def _set_unique_id(
+            value: str, *, raise_on_progress: bool = False
+        ) -> None:
+            assert raise_on_progress is False
             flow.unique_id = value  # type: ignore[attr-defined]
 
         flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
-        flow._abort_if_unique_id_configured = lambda: None  # type: ignore[assignment]
+        flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[assignment]
         flow.async_create_entry = _create_entry  # type: ignore[assignment]
 
         manual_token = "aas_et/MANUAL_MASTER"
@@ -372,11 +366,14 @@ async def test_manual_tokens_abort_when_dependency_missing(
     flow.context = {}
     flow.unique_id = None  # type: ignore[attr-defined]
 
-    async def _set_unique_id(value: str) -> None:
+    async def _set_unique_id(
+        value: str, *, raise_on_progress: bool = False
+    ) -> None:
+        assert raise_on_progress is False
         flow.unique_id = value  # type: ignore[attr-defined]
 
     flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
-    flow._abort_if_unique_id_configured = lambda: None  # type: ignore[assignment]
+    flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[assignment]
 
     config_flow._import_api.cache_clear()
 
@@ -397,6 +394,67 @@ async def test_manual_tokens_abort_when_dependency_missing(
     assert isinstance(result, dict)
     assert result.get("type") == "abort"
     assert result.get("reason") == "dependency_not_ready"
+
+
+@pytest.mark.asyncio
+async def test_manual_tokens_abort_when_account_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual token flow should abort when the account is already configured."""
+
+    existing_entry = SimpleNamespace(
+        entry_id="entry-existing",
+        data={CONF_GOOGLE_EMAIL: "dup@example.com"},
+        options={},
+    )
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.entries = [existing_entry]
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return list(self.entries)
+
+    hass = SimpleNamespace(config_entries=_ConfigEntries())
+
+    async def _fake_pick(
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        assert email == "dup@example.com"
+        return candidates[0][1]
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow.unique_id = None  # type: ignore[attr-defined]
+
+    async def _set_unique_id(value: str, *, raise_on_progress: bool = False) -> None:
+        flow.unique_id = value  # type: ignore[attr-defined]
+        flow._unique_id = value  # type: ignore[attr-defined]
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+
+    async def _never_create_entry(**_: Any) -> Mapping[str, Any]:
+        raise AssertionError("async_create_entry must not be called when aborting")
+
+    flow.async_create_entry = _never_create_entry  # type: ignore[assignment]
+
+    with pytest.raises(data_entry_flow.AbortFlow) as captured:
+        await flow.async_step_individual_tokens(
+            {
+                CONF_GOOGLE_EMAIL: "dup@example.com",
+                CONF_OAUTH_TOKEN: "aas_et/DUPLICATE",
+            }
+        )
+
+    assert captured.value.reason == "already_configured"
+    assert len(hass.config_entries.entries) == 1
 
 
 def test_device_selection_creates_and_updates_subentry() -> None:
@@ -728,7 +786,8 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
     initial_result, final_result = asyncio.run(_exercise())
 
     assert initial_result["type"] == "form"
-    assert final_result == {"type": "abort", "reason": "reconfigure_successful"}
+    assert final_result["type"] == "abort"
+    assert final_result["reason"] == "reconfigure_successful"
 
     assert sync_calls and sync_calls[0][0] is entry
 
