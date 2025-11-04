@@ -43,17 +43,44 @@ def test_subentry_factories_return_configured_flows() -> None:
 
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)  # type: ignore[arg-type]
 
-    assert mapping, "Expected supported subentry mapping to include at least service/tracker flows"
+    assert set(mapping) == {config_flow.SUBENTRY_TYPE_HUB}, "UI should only expose the hub subentry type"
 
-    for key, factory in mapping.items():
-        assert callable(factory), f"Factory for subentry '{key}' should be callable"
-        first = factory()
-        second = factory()
-        assert isinstance(first, config_flow.ConfigSubentryFlow)
-        assert isinstance(second, config_flow.ConfigSubentryFlow)
-        assert first is not second, f"Factory for subentry '{key}' must yield a new flow instance per call"
-        assert getattr(first, "config_entry", None) is entry
-        assert getattr(second, "config_entry", None) is entry
+    factory = mapping[config_flow.SUBENTRY_TYPE_HUB]
+    assert callable(factory)
+    first = factory()
+    second = factory()
+    assert isinstance(first, config_flow.ConfigSubentryFlow)
+    assert isinstance(second, config_flow.ConfigSubentryFlow)
+    assert first is not second, "Factory must yield a fresh flow instance"
+    assert getattr(first, "config_entry", None) is entry
+    assert getattr(second, "config_entry", None) is entry
+
+
+def test_subentry_factories_include_hidden_types_for_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Service and tracker factories remain available to the flow manager."""
+
+    import custom_components.googlefindmy.config_flow as config_flow  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        config_flow.ConfigFlow,
+        "_should_expose_hidden_subentry_types",
+        staticmethod(lambda: True),
+    )
+
+    entry = SimpleNamespace(
+        entry_id="entry-manager",
+        data={},
+        options={},
+        subentries={},
+    )
+
+    mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)  # type: ignore[arg-type]
+
+    assert set(mapping) == {
+        config_flow.SUBENTRY_TYPE_SERVICE,
+        config_flow.SUBENTRY_TYPE_TRACKER,
+        config_flow.SUBENTRY_TYPE_HUB,
+    }
 
 
 def test_subentry_update_constructor_allows_config_entry_and_subentry() -> None:

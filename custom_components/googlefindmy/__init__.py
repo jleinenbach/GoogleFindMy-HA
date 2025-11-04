@@ -872,6 +872,15 @@ class ConfigEntrySubEntryManager:
     async def _deduplicate_subentries(self) -> None:
         """Remove duplicate subentries so each logical group has a single entry."""
 
+        manager = getattr(self._hass, "config_entries", None)
+        remove_subentry = (
+            getattr(manager, "async_remove_subentry", None)
+            if manager is not None
+            else None
+        )
+        if not callable(remove_subentry):
+            return
+
         raw_subentries = getattr(self._entry, "subentries", None)
         if isinstance(raw_subentries, Mapping):
             subentries = list(raw_subentries.values())
@@ -940,7 +949,7 @@ class ConfigEntrySubEntryManager:
             if subentry.subentry_id not in removal_targets:
                 continue
 
-            removal = self._hass.config_entries.async_remove_subentry(
+            removal = remove_subentry(
                 self._entry,
                 subentry_id=subentry.subentry_id,
             )
@@ -1061,6 +1070,15 @@ class ConfigEntrySubEntryManager:
         desired: dict[str, ConfigEntrySubentryDefinition] = {}
         for definition in definitions:
             desired[definition.key] = definition
+
+        try:
+            await self._deduplicate_subentries()
+        except Exception as err:  # pragma: no cover - defensive warning
+            _LOGGER.warning(
+                "[%s] async_sync: Failed to pre-deduplicate subentries: %s",
+                self._entry.entry_id,
+                err,
+            )
 
         create_subentry = getattr(
             self._hass.config_entries, "async_create_subentry", None
