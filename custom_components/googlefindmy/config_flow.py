@@ -2210,7 +2210,10 @@ class ConfigFlow(
         # as the parent for all accounts (Hubs).
         # If *any* entry for this domain already exists, abort immediately.
         # Do not wait for auth data; the presence of an entry is enough.
-        if self.hass.config_entries.async_entries(DOMAIN):
+        config_entries = getattr(self.hass, "config_entries", None)
+        async_entries = getattr(config_entries, "async_entries", None)
+
+        if callable(async_entries) and async_entries(DOMAIN):
             _LOGGER.debug(
                 "async_step_user: Aborting new flow, an entry already exists"
             )
