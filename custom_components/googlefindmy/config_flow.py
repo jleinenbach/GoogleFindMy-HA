@@ -533,7 +533,7 @@ async def _async_import_api(hass: HomeAssistant) -> type["GoogleFindMyAPI"]:
     executor = getattr(hass, "async_add_executor_job", None)
     if not callable(executor):
         return _import_api()
-    return await executor(_import_api)
+    return cast(type["GoogleFindMyAPI"], await executor(_import_api))
 
 # Optional network exception typing (robust mapping without hard dependency)
 aiohttp: ModuleType | None
