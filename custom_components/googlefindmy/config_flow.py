@@ -1,4 +1,7 @@
 # custom_components/googlefindmy/config_flow.py
+#
+#  GoogleFindMyTools - A set of tools to interact with the Google Find My API
+#  Copyright © 2024 Leon Böttger. All rights reserved.
 
 """Config flow for the Google Find My Device custom integration.
 
@@ -148,7 +151,7 @@ except AttributeError:
 
 _DiscoveryFlowHelper = Callable[
     [HomeAssistant, str, Mapping[str, Any] | None, Mapping[str, Any]],
-    Awaitable[None],
+    Awaitable[FlowResult],
 ]
 
 _discovery_flow_helper = cast(
@@ -169,7 +172,7 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
         data: Mapping[str, Any],
         *,
         discovery_key: Any | None = None,
-    ) -> None:
+    ) -> FlowResult:
         """Fallback helper mirroring modern discovery flow creation."""
 
         try:
@@ -181,21 +184,89 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
                 "ConfigEntriesFlowManager",
                 getattr(hass.config_entries, "flow"),
             )
-            await flow_manager.async_init(
-                domain,
-                context=context,
-                data=data,
-            )
-            return
+            init = getattr(flow_manager, "async_init", None)
+            if not callable(init):
+                return cast(
+                    FlowResult,
+                    {
+                        "type": data_entry_flow.FlowResultType.ABORT,
+                        "reason": "unknown",
+                    },
+                )
+            try:
+                init_result = await init(
+                    domain,
+                    context=context,
+                    data=data,
+                )
+            except Exception:
+                _LOGGER.error(
+                    "Legacy discovery flow init failed (domain=%s, context=%s)",
+                    domain,
+                    context,
+                    exc_info=True,
+                )
+                return cast(
+                    FlowResult,
+                    {
+                        "type": data_entry_flow.FlowResultType.ABORT,
+                        "reason": "unknown",
+                    },
+                )
 
-        create_flow: Callable[..., Awaitable[None]] = _async_create_flow
-        await create_flow(
-            hass,
-            domain,
-            context,
-            data,
-            discovery_key=discovery_key,
-        )
+            if init_result is None:
+                _LOGGER.error(
+                    "Legacy discovery flow init returned None (domain=%s, context=%s)",
+                    domain,
+                    context,
+                )
+                return cast(
+                    FlowResult,
+                    {
+                        "type": data_entry_flow.FlowResultType.ABORT,
+                        "reason": "unknown",
+                    },
+                )
+
+            return cast(FlowResult, init_result)
+
+        create_flow: Callable[..., Awaitable[FlowResult]] = _async_create_flow
+        try:
+            result = await create_flow(
+                hass,
+                domain,
+                context,
+                data,
+                discovery_key=discovery_key,
+            )
+        except Exception:
+            _LOGGER.error(
+                "Discovery flow creation failed (domain=%s, context=%s)",
+                domain,
+                context,
+                exc_info=True,
+            )
+            return cast(
+                FlowResult,
+                {
+                    "type": data_entry_flow.FlowResultType.ABORT,
+                    "reason": "unknown",
+                },
+            )
+        if result is None:
+            _LOGGER.error(
+                "Discovery flow create_flow returned None (domain=%s, context=%s)",
+                domain,
+                context,
+            )
+            return cast(
+                FlowResult,
+                {
+                    "type": data_entry_flow.FlowResultType.ABORT,
+                    "reason": "unknown",
+                },
+            )
+        return cast(FlowResult, result)
 
     _discovery_flow_helper = cast(
         _DiscoveryFlowHelper,
@@ -2138,10 +2209,7 @@ class ConfigFlow(
     ) -> FlowResult:
         """Ask the user to choose how to provide credentials."""
 
-        try:
-            self._abort_if_unique_id_configured()
-        except data_entry_flow.AbortFlow:
-            return self.async_abort(reason="already_configured")
+        # Do NOT check for duplicates here; self._auth_data is not yet populated.
 
         context_obj = getattr(self, "context", None)
         context_snapshot: dict[str, Any]
@@ -2150,15 +2218,6 @@ class ConfigFlow(
         else:
             context_snapshot = {}
         _LOGGER.info("Flow start: async_step_user (context=%s)", context_snapshot)
-
-        if user_input is None and isinstance(
-            self._auth_data.get(CONF_GOOGLE_EMAIL), str
-        ):
-            email = cast(str, self._auth_data[CONF_GOOGLE_EMAIL])
-            try:
-                await self._async_prepare_account_context(email=email)
-            except data_entry_flow.AbortFlow:
-                return self.async_abort(reason="already_configured")
 
         if user_input is not None:
             method = user_input.get("auth_method")
@@ -2175,12 +2234,16 @@ class ConfigFlow(
                 _LOGGER.debug(
                     "User step: confirm-only submission detected; proceeding to device selection.",
                 )
+
+                # CRITICAL FIX: Check for duplicates *after* auth data is present.
                 email = cast(str, self._auth_data.get(CONF_GOOGLE_EMAIL))
                 try:
                     await self._async_prepare_account_context(email=email)
                 except data_entry_flow.AbortFlow:
                     return self.async_abort(reason="already_configured")
+
                 return await self.async_step_device_selection()
+
         _LOGGER.debug("User step: presenting auth method selection form.")
         return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
 

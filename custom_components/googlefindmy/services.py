@@ -1,4 +1,8 @@
 # custom_components/googlefindmy/services.py
+#
+#  GoogleFindMyTools - A set of tools to interact with the Google Find My API
+#  Copyright © 2024 Leon Böttger. All rights reserved.
+
 """Service handlers & registration for Google Find My Device (Home Assistant).
 
 Design goals
@@ -544,8 +548,8 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         ent_reg = er.async_get(hass)
         entries = hass.config_entries.async_entries(DOMAIN)
 
-        affected_entry_ids: set[str] = set()
-        candidate_devices: set[str] = set()
+        affected_entry_ids: set[str]
+        candidate_devices: set[str]
 
         coalesce_accounts = ctx.get("coalesce_account_entries")
         extract_email = ctx.get("extract_normalized_email")
@@ -963,6 +967,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
         # 1) Determine candidate devices (strictly ours), optionally filtered by passed HA device_ids.
         if target_device_ids:
+            _LOGGER.debug(
+                "Scoped registry rebuild requested for %d device(s)",
+                len(target_device_ids),
+            )
+            affected_entry_ids = set()
+            candidate_devices = set()
             for d in target_device_ids:
                 dev = dev_reg.async_get(d)
                 if dev and _dev_is_ours(dev):
@@ -979,6 +989,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     if isinstance(entry_id, str) and entry_id:
                         affected_entry_ids.add(entry_id)
         else:
+            _LOGGER.debug(
+                "Global registry rebuild requested; scanning all Google Find My entities/devices",
+            )
+            affected_entry_ids = set()
+            candidate_devices = set()
             for ent in list(ent_reg.entities.values()):
                 if getattr(ent, "platform", None) != DOMAIN:
                     continue
