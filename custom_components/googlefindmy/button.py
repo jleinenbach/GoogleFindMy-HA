@@ -99,7 +99,7 @@ async def async_setup_entry(
             register_entity_service(
                 platform,
                 "trigger_device_refresh",
-                vol.Schema({}),
+                None,
                 "async_trigger_coordinator_refresh",
             )
 

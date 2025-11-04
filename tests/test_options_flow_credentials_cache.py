@@ -190,6 +190,7 @@ def test_options_flow_rotating_token_clears_cached_aas(
         flow.config_entry = entry  # type: ignore[attr-defined]
 
         async def _fake_pick(
+            hass: Any,
             email: str,
             candidates: list[tuple[str, str]],
             *,
