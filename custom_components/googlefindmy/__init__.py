@@ -1062,6 +1062,10 @@ class ConfigEntrySubEntryManager:
         for definition in definitions:
             desired[definition.key] = definition
 
+        create_subentry = getattr(
+            self._hass.config_entries, "async_create_subentry", None
+        )
+
         for key, definition in desired.items():
             payload = dict(definition.data)
             payload[self._key_field] = key
@@ -1087,16 +1091,29 @@ class ConfigEntrySubEntryManager:
 
             while True:
                 if existing is None:
-                    new_subentry = ConfigSubentry(
-                        data=MappingProxyType(payload),
-                        subentry_type=subentry_type,
-                        title=definition.title,
-                        unique_id=unique_id,
-                    )
+                    new_subentry: ConfigSubentry | None = None
+                    add_result: Awaitable[ConfigSubentry] | ConfigSubentry
                     try:
-                        add_result = self._hass.config_entries.async_add_subentry(
-                            self._entry, new_subentry
-                        )
+                        if callable(create_subentry):
+                            add_result = create_subentry(
+                                self._entry,
+                                data=payload,
+                                title=definition.title,
+                                unique_id=unique_id,
+                                subentry_type=subentry_type,
+                            )
+                        else:
+                            new_subentry = ConfigSubentry(
+                                data=MappingProxyType(payload),
+                                subentry_type=subentry_type,
+                                title=definition.title,
+                                unique_id=unique_id,
+                            )
+                            add_result = self._hass.config_entries.async_add_subentry(
+                                self._entry, new_subentry
+                            )
+
+                        resolved_add = await self._await_subentry_result(add_result)
                     except data_entry_flow.AbortFlow as err:
                         if err.reason != "already_configured":
                             raise
@@ -1124,14 +1141,27 @@ class ConfigEntrySubEntryManager:
                         )
                         break
 
-                    resolved_add = await self._await_subentry_result(add_result)
-
                     if isinstance(resolved_add, ConfigSubentry):
                         stored = resolved_add
                     else:
-                        stored = self._entry.subentries.get(
-                            new_subentry.subentry_id, new_subentry
-                        )
+                        if new_subentry is not None:
+                            stored = self._entry.subentries.get(
+                                new_subentry.subentry_id, new_subentry
+                            )
+                        else:
+                            stored = next(
+                                (
+                                    sub
+                                    for sub in self._entry.subentries.values()
+                                    if sub.unique_id == unique_id
+                                ),
+                                None,
+                            )
+                        if stored is None:
+                            raise HomeAssistantError(
+                                "Failed to locate created subentry for key "
+                                f"'{key}' (unique_id={unique_id!r})"
+                            )
 
                     self._managed[key] = stored
                     break

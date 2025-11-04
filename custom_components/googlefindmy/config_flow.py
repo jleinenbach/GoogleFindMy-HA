@@ -2205,6 +2205,20 @@ class ConfigFlow(
     ) -> FlowResult:
         """Ask the user to choose how to provide credentials."""
 
+        # CRITICAL FIX (ROOT CAUSE 1): Prevent duplicate entries.
+        # This integration only supports a *single* config entry, which acts
+        # as the parent for all accounts (Hubs).
+        # If *any* entry for this domain already exists, abort immediately.
+        # Do not wait for auth data; the presence of an entry is enough.
+        config_entries = getattr(self.hass, "config_entries", None)
+        async_entries = getattr(config_entries, "async_entries", None)
+
+        if callable(async_entries) and async_entries(DOMAIN):
+            _LOGGER.debug(
+                "async_step_user: Aborting new flow, an entry already exists"
+            )
+            return self.async_abort(reason="already_configured")
+
         # Do NOT check for duplicates here; self._auth_data is not yet populated.
 
         context_obj = getattr(self, "context", None)
