@@ -1092,6 +1092,7 @@ class ConfigEntrySubEntryManager:
             while True:
                 if existing is None:
                     new_subentry: ConfigSubentry | None = None
+                    add_result: Awaitable[ConfigSubentry] | ConfigSubentry
                     try:
                         if callable(create_subentry):
                             add_result = create_subentry(
@@ -1111,6 +1112,8 @@ class ConfigEntrySubEntryManager:
                             add_result = self._hass.config_entries.async_add_subentry(
                                 self._entry, new_subentry
                             )
+
+                        resolved_add = await self._await_subentry_result(add_result)
                     except data_entry_flow.AbortFlow as err:
                         if err.reason != "already_configured":
                             raise
@@ -1137,8 +1140,6 @@ class ConfigEntrySubEntryManager:
                             payload,
                         )
                         break
-
-                    resolved_add = await self._await_subentry_result(add_result)
 
                     if isinstance(resolved_add, ConfigSubentry):
                         stored = resolved_add
