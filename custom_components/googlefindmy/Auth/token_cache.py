@@ -77,7 +77,25 @@ class TokenCache:
             raise ValueError("TokenCache requires a non-empty entry_id.")
 
         self._hass = hass
-        self._loop: asyncio.AbstractEventLoop = hass.loop
+
+        loop: asyncio.AbstractEventLoop | None = getattr(hass, "loop", None)
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError as err:  # pragma: no cover - defensive
+                raise RuntimeError(
+                    "TokenCache requires an active event loop when Home Assistant does not expose hass.loop"
+                ) from err
+            if not hasattr(hass, "loop"):
+                try:
+                    setattr(hass, "loop", loop)
+                except Exception:  # noqa: BLE001 - defensive best-effort for stubs
+                    _LOGGER.debug("Unable to attach detected loop to hass stub", exc_info=True)
+
+        if loop is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("TokenCache could not determine the Home Assistant event loop")
+
+        self._loop = loop
         self.entry_id = normalized_entry_id
         # Each entry gets its own storage file: f"{STORAGE_KEY}_{entry_id}"
         self._store: Store[CacheData] = Store(
