@@ -73,7 +73,7 @@ from homeassistant.helpers import (
     entity_registry as er,
     issue_registry as ir,
 )
-from homeassistant.helpers.entity_component import split_entity_id
+from homeassistant.helpers.entity import split_entity_id
 from homeassistant.helpers.storage import Store
 
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
