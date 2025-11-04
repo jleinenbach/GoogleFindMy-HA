@@ -22,7 +22,6 @@ Quality & design notes (HA Platinum guidelines)
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
 from typing import Any
 
 from homeassistant.components.button import ButtonEntityDescription
@@ -35,7 +34,6 @@ import voluptuous as vol
 from .const import (
     DOMAIN,
     SERVICE_LOCATE_DEVICE,
-    SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator
@@ -105,193 +103,100 @@ async def async_setup_entry(
                 "async_trigger_coordinator_refresh",
             )
 
-    def _iter_tracker_subentries() -> list[Any]:
-        """Return tracker subentries associated with this config entry."""
-
-        subentries = getattr(config_entry, "subentries", None)
-        if subentries is None:
-            return []
-
-        getter = getattr(subentries, "get_subentries", None)
-        candidates: Iterable[Any]
-        if callable(getter):
-            try:
-                candidates = getter(subentry_type=SUBENTRY_TYPE_TRACKER)
-            except TypeError:
-                try:
-                    candidates = getter(SUBENTRY_TYPE_TRACKER)
-                except Exception:  # noqa: BLE001 - defensive fallback
-                    candidates = ()
-        elif isinstance(subentries, Mapping):
-            candidates = subentries.values()
-        else:
-            values = getattr(subentries, "values", None)
-            if callable(values):
-                candidates = values()
-            else:
-                candidates = ()
-
-        tracker_entries: list[Any] = []
-        for subentry in candidates:
-            if getattr(subentry, "subentry_type", None) == SUBENTRY_TYPE_TRACKER:
-                tracker_entries.append(subentry)
-        return tracker_entries
-
-    def _normalize_visible_ids(raw: Any) -> tuple[str, ...]:
-        if not isinstance(raw, (list, tuple, set)):
-            return ()
-        ordered = []
-        for candidate in raw:
-            if isinstance(candidate, str):
-                normalized = candidate.strip()
-                if normalized and normalized not in ordered:
-                    ordered.append(normalized)
-        return tuple(ordered)
-
-    def _coordinator_device_name(device_id: str) -> str | None:
-        getter = getattr(coordinator, "get_device_display_name", None)
-        if callable(getter):
-            try:
-                result = getter(device_id)
-            except Exception:  # noqa: BLE001 - defensive best effort
-                result = None
-            if isinstance(result, str) and result:
-                return result
-        name_map_getter = getattr(coordinator, "get_device_name_map", None)
-        if callable(name_map_getter):
-            try:
-                mapping = name_map_getter()
-            except Exception:  # noqa: BLE001 - defensive best effort
-                mapping = None
-            if isinstance(mapping, Mapping):
-                value = mapping.get(device_id)
-                if isinstance(value, str) and value:
-                    return value
-        return None
-
-    def _tracker_groups() -> list[tuple[str, str, tuple[str, ...]]]:
-        groups: list[tuple[str, str, tuple[str, ...]]] = []
-        for subentry in _iter_tracker_subentries():
-            data = getattr(subentry, "data", {}) or {}
-            group_key = data.get("group_key")
-            if not isinstance(group_key, str) or not group_key:
-                group_key = TRACKER_SUBENTRY_KEY
-            metadata = coordinator.get_subentry_metadata(key=group_key)
-            if metadata is not None and hasattr(metadata, "stable_identifier"):
-                stable_identifier = metadata.stable_identifier()
-            else:
-                stable_identifier = coordinator.stable_subentry_identifier(
-                    key=group_key
-                )
-            if metadata is not None and hasattr(metadata, "visible_device_ids"):
-                visible = getattr(metadata, "visible_device_ids")
-            else:
-                visible = _normalize_visible_ids(data.get("visible_device_ids"))
-            groups.append((group_key, stable_identifier, visible))
-
-        if groups:
-            return groups
-
-        fallback_meta = coordinator.get_subentry_metadata(feature="button")
-        fallback_key = (
-            fallback_meta.key if fallback_meta is not None else TRACKER_SUBENTRY_KEY
-        )
-        if fallback_meta is not None and hasattr(fallback_meta, "stable_identifier"):
-            fallback_identifier = fallback_meta.stable_identifier()
-        else:
-            fallback_identifier = coordinator.stable_subentry_identifier(
-                key=fallback_key
-            )
-        if fallback_meta is not None and hasattr(fallback_meta, "visible_device_ids"):
-            fallback_visible = getattr(fallback_meta, "visible_device_ids")
-        else:
-            fallback_visible = ()
-        return [(fallback_key, fallback_identifier, fallback_visible)]
-
-    def _iter_tracker_devices() -> Iterable[tuple[str, dict[str, Any], str, str]]:
-        for group_key, subentry_identifier, visible_ids in _tracker_groups():
-            snapshot = coordinator.get_subentry_snapshot(group_key)
-            snapshot_by_id: dict[str, dict[str, Any]] = {}
-            for row in snapshot:
-                dev_id = row.get("id") if isinstance(row, dict) else None
-                if isinstance(dev_id, str) and dev_id:
-                    snapshot_by_id.setdefault(dev_id, dict(row))
-
-            ordered_ids: list[str] = list(dict.fromkeys(visible_ids))
-            for dev_id in snapshot_by_id:
-                if dev_id not in ordered_ids:
-                    ordered_ids.append(dev_id)
-
-            for dev_id in ordered_ids:
-                if not isinstance(dev_id, str) or not dev_id:
-                    continue
-                payload = snapshot_by_id.get(dev_id, {"id": dev_id})
-                if "id" not in payload:
-                    payload = {"id": dev_id, **payload}
-                if not isinstance(payload.get("name"), str):
-                    fallback_name = _coordinator_device_name(dev_id)
-                    if fallback_name:
-                        payload = dict(payload)
-                        payload.setdefault("name", fallback_name)
-                yield dev_id, dict(payload), group_key, subentry_identifier
-
+    tracker_meta = coordinator.get_subentry_metadata(feature="button")
+    tracker_subentry_key = (
+        tracker_meta.key if tracker_meta is not None else TRACKER_SUBENTRY_KEY
+    )
+    tracker_subentry_identifier = coordinator.stable_subentry_identifier(
+        key=tracker_subentry_key
+    )
     known_ids: set[str] = set()
+    entities: list[ButtonEntity] = []
 
-    def _build_entities_for_new_devices() -> list[ButtonEntity]:
+    # Initial population from coordinator.data (if already available)
+    for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+        dev_id = device.get("id")
+        if not dev_id or dev_id in known_ids:
+            continue
+
+        label = _derive_device_label(device)
+        entities.append(
+            GoogleFindMyPlaySoundButton(
+                coordinator,
+                device,
+                label,
+                subentry_key=tracker_subentry_key,
+                subentry_identifier=tracker_subentry_identifier,
+            )
+        )
+        entities.append(
+            GoogleFindMyStopSoundButton(
+                coordinator,
+                device,
+                label,
+                subentry_key=tracker_subentry_key,
+                subentry_identifier=tracker_subentry_identifier,
+            )
+        )
+        entities.append(
+            GoogleFindMyLocateButton(
+                coordinator,
+                device,
+                label,
+                subentry_key=tracker_subentry_key,
+                subentry_identifier=tracker_subentry_identifier,
+            )
+        )
+        known_ids.add(dev_id)
+
+    if entities:
+        _LOGGER.debug("Adding %d initial button entity(ies)", len(entities))
+        async_add_entities(entities, True)
+
+    # Dynamically add buttons when new devices appear later
+    @callback
+    def _add_new_devices() -> None:
         new_entities: list[ButtonEntity] = []
-        for dev_id, device, subentry_key, subentry_identifier in _iter_tracker_devices():
-            if dev_id in known_ids:
+        for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+            dev_id = device.get("id")
+            if not dev_id or dev_id in known_ids:
                 continue
+
             label = _derive_device_label(device)
-            if not label:
-                fallback = _coordinator_device_name(dev_id)
-                if fallback:
-                    device.setdefault("name", fallback)
-                    label = fallback
-            fallback_label = label or _coordinator_device_name(dev_id) or dev_id
-            new_entities.extend(
-                (
-                    GoogleFindMyPlaySoundButton(
-                        coordinator,
-                        dict(device),
-                        fallback_label,
-                        subentry_key=subentry_key,
-                        subentry_identifier=subentry_identifier,
-                    ),
-                    GoogleFindMyStopSoundButton(
-                        coordinator,
-                        dict(device),
-                        fallback_label,
-                        subentry_key=subentry_key,
-                        subentry_identifier=subentry_identifier,
-                    ),
-                    GoogleFindMyLocateButton(
-                        coordinator,
-                        dict(device),
-                        fallback_label,
-                        subentry_key=subentry_key,
-                        subentry_identifier=subentry_identifier,
-                    ),
+            new_entities.append(
+                GoogleFindMyPlaySoundButton(
+                    coordinator,
+                    device,
+                    label,
+                    subentry_key=tracker_subentry_key,
+                    subentry_identifier=tracker_subentry_identifier,
+                )
+            )
+            new_entities.append(
+                GoogleFindMyStopSoundButton(
+                    coordinator,
+                    device,
+                    label,
+                    subentry_key=tracker_subentry_key,
+                    subentry_identifier=tracker_subentry_identifier,
+                )
+            )
+            new_entities.append(
+                GoogleFindMyLocateButton(
+                    coordinator,
+                    device,
+                    label,
+                    subentry_key=tracker_subentry_key,
+                    subentry_identifier=tracker_subentry_identifier,
                 )
             )
             known_ids.add(dev_id)
-        return new_entities
 
-    initial_entities = _build_entities_for_new_devices()
-    if initial_entities:
-        _LOGGER.debug("Adding %d initial button entity(ies)", len(initial_entities))
-        async_add_entities(initial_entities, True)
-
-    @callback
-    def _handle_coordinator_update() -> None:
-        new_entities = _build_entities_for_new_devices()
         if new_entities:
-            _LOGGER.debug(
-                "Dynamically adding %d button entity(ies)", len(new_entities)
-            )
+            _LOGGER.debug("Dynamically adding %d button entity(ies)", len(new_entities))
             async_add_entities(new_entities, True)
 
-    unsub = coordinator.async_add_listener(_handle_coordinator_update)
+    unsub = coordinator.async_add_listener(_add_new_devices)
     config_entry.async_on_unload(unsub)
 
 

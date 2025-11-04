@@ -1,4 +1,5 @@
 # custom_components/googlefindmy/__init__.py
+
 """Google Find My Device integration for Home Assistant.
 
 Version: 2.6.6 — Multi-account enabled (E3) + owner-index routing attach
@@ -27,8 +28,6 @@ Notes
 This module aims to be self-documenting. All public functions include precise docstrings
 (purpose, parameters, errors, security considerations). Keep comments/docstrings in English.
 """
-
-# custom_components/googlefindmy/__init__.py
 
 from __future__ import annotations
 
@@ -4142,6 +4141,91 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         contributor_mode_switch_epoch=last_mode_switch_epoch,
     )
     coordinator.config_entry = entry  # convenience for platforms
+
+    subentry_accessor = getattr(entry, "subentries", None)
+    if subentry_accessor is not None:
+        getter = getattr(subentry_accessor, "get_subentries", None)
+        if callable(getter):
+            try:
+                sub_entries = tuple(getter())
+            except Exception:  # noqa: BLE001 - defensive fallback
+                _LOGGER.debug(
+                    "[%s] Failed to enumerate subentries; assuming none exist.",
+                    entry.entry_id,
+                    exc_info=True,
+                )
+                sub_entries = ()
+        else:
+            values = getattr(subentry_accessor, "values", None)
+            if callable(values):
+                try:
+                    sub_entries = tuple(values())
+                except Exception:  # noqa: BLE001 - defensive fallback
+                    _LOGGER.debug(
+                        "[%s] subentries.values() raised; assuming no pre-existing subentries.",
+                        entry.entry_id,
+                        exc_info=True,
+                    )
+                    sub_entries = ()
+            elif isinstance(subentry_accessor, Mapping):
+                sub_entries = tuple(subentry_accessor.values())
+            else:
+                sub_entries = ()
+    else:
+        sub_entries = ()
+
+    has_service_sub = any(
+        getattr(subentry, "subentry_type", None) == SUBENTRY_TYPE_SERVICE
+        for subentry in sub_entries
+    )
+    has_tracker_sub = any(
+        getattr(subentry, "subentry_type", None) == SUBENTRY_TYPE_TRACKER
+        for subentry in sub_entries
+    )
+
+    if subentry_accessor is not None and not has_service_sub:
+        _LOGGER.info(
+            "[%s] Service subentry missing, creating default...",
+            entry.entry_id,
+        )
+        try:
+            await subentry_accessor.async_add_subentry(
+                hass,
+                subentry_type=SUBENTRY_TYPE_SERVICE,
+                data={
+                    "group_key": SERVICE_SUBENTRY_KEY,
+                },
+                title="Service",
+                unique_id=f"{entry.unique_id}_service",
+            )
+        except Exception:  # noqa: BLE001 - defensive logging
+            _LOGGER.error(
+                "Failed to create default service subentry for %s",
+                entry.entry_id,
+                exc_info=True,
+            )
+
+    if subentry_accessor is not None and not has_tracker_sub:
+        _LOGGER.info(
+            "[%s] Tracker subentry missing, creating default...",
+            entry.entry_id,
+        )
+        try:
+            await subentry_accessor.async_add_subentry(
+                hass,
+                subentry_type=SUBENTRY_TYPE_TRACKER,
+                data={
+                    "group_key": TRACKER_SUBENTRY_KEY,
+                },
+                title="Trackers",
+                unique_id=f"{entry.unique_id}_trackers",
+            )
+        except Exception:  # noqa: BLE001 - defensive logging
+            _LOGGER.error(
+                "Failed to create default tracker subentry for %s",
+                entry.entry_id,
+                exc_info=True,
+            )
 
     # Performance metrics injection
     try:
