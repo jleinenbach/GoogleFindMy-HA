@@ -1275,6 +1275,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             key: tuple(entries) for key, entries in grouped.items()
         }
 
+    def _resolve_subentry_key_for_feature(self, feature: str) -> str:
+        """Return the subentry key for a platform feature without warnings."""
+
+        return self._feature_to_subentry.get(feature, self._default_subentry_key())
+
     def get_subentry_key_for_feature(self, feature: str) -> str:
         """Return the subentry key responsible for a platform feature."""
 
@@ -1284,7 +1289,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             DeprecationWarning,
             stacklevel=2,
         )
-        return self._feature_to_subentry.get(feature, self._default_subentry_key())
+        return self._resolve_subentry_key_for_feature(feature)
 
     def get_subentry_metadata(
         self, *, key: str | None = None, feature: str | None = None
@@ -1293,7 +1298,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         lookup_key = key
         if lookup_key is None and feature is not None:
-            lookup_key = self.get_subentry_key_for_feature(feature)
+            lookup_key = self._resolve_subentry_key_for_feature(feature)
         if lookup_key is None:
             return None
         return self._subentry_metadata.get(lookup_key)
@@ -1319,7 +1324,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         lookup_key = key
         if lookup_key is None and feature is not None:
-            lookup_key = self.get_subentry_key_for_feature(feature)
+            lookup_key = self._resolve_subentry_key_for_feature(feature)
         if lookup_key is None:
             lookup_key = self._default_subentry_key()
         entries = self._subentry_snapshots.get(lookup_key)

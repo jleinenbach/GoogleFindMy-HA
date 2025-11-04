@@ -63,6 +63,18 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import CoreState, Event, HomeAssistant
+
+try:
+    from homeassistant.core import split_entity_id
+except ImportError:  # pragma: no cover - fallback for test environments
+
+    def split_entity_id(entity_id: str) -> tuple[str, str]:
+        """Split an entity_id into its domain and object ID parts."""
+
+        if "." not in entity_id:
+            raise ValueError(entity_id)
+        domain, object_id = entity_id.split(".", 1)
+        return domain, object_id
 from homeassistant.exceptions import (
     ConfigEntryNotReady,
     HomeAssistantError,
@@ -73,7 +85,6 @@ from homeassistant.helpers import (
     entity_registry as er,
     issue_registry as ir,
 )
-from homeassistant.helpers.entity import split_entity_id
 from homeassistant.helpers.storage import Store
 
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
@@ -158,7 +169,6 @@ def __getattr__(name: str) -> Any:
 CloudDiscoveryRuntimeCallable = Callable[[HomeAssistant], Mapping[str, Any]]
 TriggerCloudDiscoveryCallable = Callable[..., Awaitable[Any]]
 RedactAccountForLogCallable = Callable[..., str]
-
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_registry import (
         RegistryEntryDisabler as RegistryEntryDisablerType,
