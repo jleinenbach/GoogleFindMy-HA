@@ -41,6 +41,27 @@ class IssueRegistryCapture:
 
 
 @pytest.fixture
+def hass_executor_stub() -> Callable[..., SimpleNamespace]:
+    """Return a factory that yields hass stubs with executor support."""
+
+    async def _async_add_executor_job(
+        func: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        result = func(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    def _factory(**attrs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            async_add_executor_job=_async_add_executor_job,
+            **attrs,
+        )
+
+    return _factory
+
+
+@pytest.fixture
 def issue_registry_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> IssueRegistryCapture:

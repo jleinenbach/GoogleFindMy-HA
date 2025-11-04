@@ -261,14 +261,32 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
 
             return cast(FlowResult, init_result)
 
-        create_flow: Callable[..., Awaitable[FlowResult]] = _async_create_flow
-        try:
-            result = await create_flow(
-                hass,
+        create_flow: Callable[..., Awaitable[FlowResult] | FlowResult] = (
+            _async_create_flow
+        )
+        if not callable(create_flow):
+            _LOGGER.error(
+                "Discovery flow helper 'async_create_flow' is not callable (domain=%s, context=%s)",
                 domain,
                 context,
-                data,
-                discovery_key=discovery_key,
+            )
+            return cast(
+                FlowResult,
+                {
+                    "type": data_entry_flow.FlowResultType.ABORT,
+                    "reason": "unknown",
+                },
+            )
+
+        try:
+            result = await _resolve_flow_result(
+                create_flow(
+                    hass,
+                    domain,
+                    context,
+                    data,
+                    discovery_key=discovery_key,
+                )
             )
         except Exception:
             _LOGGER.error(
@@ -507,6 +525,15 @@ def _import_api() -> type["GoogleFindMyAPI"]:
         )
 
     return cast(type["GoogleFindMyAPI"], api_cls)
+
+
+async def _async_import_api(hass: HomeAssistant) -> type["GoogleFindMyAPI"]:
+    """Import the API in an executor to avoid blocking the event loop."""
+
+    executor = getattr(hass, "async_add_executor_job", None)
+    if not callable(executor):
+        return _import_api()
+    return cast(type["GoogleFindMyAPI"], await executor(_import_api))
 
 # Optional network exception typing (robust mapping without hard dependency)
 aiohttp: ModuleType | None
@@ -1093,13 +1120,14 @@ async def _try_probe_devices(
 
 
 async def _async_new_api_for_probe(
+    hass: HomeAssistant,
     email: str,
     token: str,
     *,
     secrets_bundle: dict[str, Any] | None = None,
 ) -> "GoogleFindMyAPI":
     """Create a fresh, ephemeral API instance for pre-flight validation."""
-    factory = cast(Callable[..., "GoogleFindMyAPI"], _import_api())
+    factory = cast(Callable[..., "GoogleFindMyAPI"], await _async_import_api(hass))
     try:
         return factory(
             oauth_token=token,
@@ -1118,6 +1146,7 @@ async def _async_new_api_for_probe(
 
 
 async def async_pick_working_token(
+    hass: HomeAssistant,
     email: str,
     candidates: list[tuple[str, str]],
     *,
@@ -1127,7 +1156,10 @@ async def async_pick_working_token(
     for source, token in candidates:
         try:
             api = await _async_new_api_for_probe(
-                email=email, token=token, secrets_bundle=secrets_bundle
+                hass,
+                email=email,
+                token=token,
+                secrets_bundle=secrets_bundle,
             )
             await _try_probe_devices(api, email=email, token=token)
             _LOGGER.debug(
@@ -1510,8 +1542,13 @@ async def _ingest_discovery_credentials(
         dict(discovery.secrets_bundle) if discovery.secrets_bundle is not None else None
     )
 
+    hass = cast(HomeAssistant, getattr(flow, "hass", None))
+    if hass is None:
+        raise DiscoveryFlowError("unknown")
+
     try:
         chosen = await async_pick_working_token(
+            hass,
             discovery.email,
             candidates,
             secrets_bundle=secrets_bundle,
@@ -2427,6 +2464,7 @@ class ConfigFlow(
 
                 try:
                     chosen = await async_pick_working_token(
+                        self.hass,
                         email,
                         cands,
                         secrets_bundle=parsed_secrets,
@@ -2495,7 +2533,7 @@ class ConfigFlow(
                 await self._async_prepare_account_context(email=email)
 
                 try:
-                    chosen = await async_pick_working_token(email, cands)
+                    chosen = await async_pick_working_token(self.hass, email, cands)
                 except (DependencyNotReady, ImportError) as exc:
                     _register_dependency_error(errors, exc)
                     return self.async_abort(reason="dependency_not_ready")
@@ -2536,6 +2574,7 @@ class ConfigFlow(
         if not (email and oauth):
             raise HomeAssistantError("Missing credentials in setup flow.")
         api = await _async_new_api_for_probe(
+            self.hass,
             email=email,
             token=oauth,
             secrets_bundle=self._auth_data.get(DATA_SECRET_BUNDLE),
@@ -2886,7 +2925,9 @@ class ConfigFlow(
                         token = str(payload)
                         try:
                             chosen = await async_pick_working_token(
-                                fixed_email, [("manual", token)]
+                                self.hass,
+                                fixed_email,
+                                [("manual", token)],
                             )
                         except (DependencyNotReady, ImportError) as exc:
                             _register_dependency_error(errors, exc)
@@ -2944,6 +2985,7 @@ class ConfigFlow(
                             else:
                                 try:
                                     chosen = await async_pick_working_token(
+                                        self.hass,
                                         fixed_email,
                                         cands,
                                         secrets_bundle=parsed,
@@ -3668,7 +3710,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         cache = self._get_entry_cache(entry)
         if cache is not None:
             session = async_get_clientsession(self.hass)
-            api_ctor = cast(Callable[..., "GoogleFindMyAPI"], _import_api())
+            api_ctor = cast(
+                Callable[..., "GoogleFindMyAPI"],
+                await _async_import_api(self.hass),
+            )
             try:
                 return api_ctor(cache=cache, session=session)
             except TypeError:
@@ -3677,7 +3722,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         oauth = entry.data.get(CONF_OAUTH_TOKEN)
         email = entry.data.get(CONF_GOOGLE_EMAIL)
         if oauth and email:
-            api_ctor = cast(Callable[..., "GoogleFindMyAPI"], _import_api())
+            api_ctor = cast(
+                Callable[..., "GoogleFindMyAPI"],
+                await _async_import_api(self.hass),
+            )
             try:
                 return api_ctor(oauth_token=oauth, google_email=email)
             except TypeError:
@@ -4416,7 +4464,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                             else:
                                 try:
                                     chosen = await async_pick_working_token(
-                                        email, [("manual", token)]
+                                        self.hass,
+                                        email,
+                                        [("manual", token)],
                                     )
                                 except (DependencyNotReady, ImportError) as exc:
                                     _register_dependency_error(errors, exc)
@@ -4457,6 +4507,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                 else:
                                     try:
                                         chosen = await async_pick_working_token(
+                                            self.hass,
                                             email,
                                             cands,
                                             secrets_bundle=parsed,

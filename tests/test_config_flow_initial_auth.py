@@ -86,13 +86,18 @@ def _stable_subentry_id(entry_id: str, key: str) -> str:
 
 def test_async_pick_working_token_accepts_guard(
     monkeypatch: pytest.MonkeyPatch,
+    hass_executor_stub: Callable[..., SimpleNamespace],
 ) -> None:
     """Guard errors must allow candidate tokens to pass during validation."""
 
     attempts: list[tuple[str, str]] = []
 
     async def _fake_new_api(
-        *, email: str, token: str, secrets_bundle: dict[str, Any] | None = None
+        hass: object,
+        *,
+        email: str,
+        token: str,
+        secrets_bundle: dict[str, Any] | None = None,
     ) -> object:
         attempts.append((email, token))
         return object()
@@ -112,9 +117,13 @@ def test_async_pick_working_token_accepts_guard(
         _fake_probe,
     )
 
+    dummy_hass = hass_executor_stub()
+
     token = asyncio.run(
         config_flow.async_pick_working_token(
-            "guard@example.com", [("cache", "aas_et/GUARD")]
+            dummy_hass,
+            "guard@example.com",
+            [("cache", "aas_et/GUARD")],
         )
     )
 
@@ -264,6 +273,7 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
     """Manual flow must store aas_et tokens like the secrets path."""
 
     async def _fake_pick(
+        hass: Any,
         email: str,
         candidates: list[tuple[str, str]],
         *,
@@ -419,6 +429,7 @@ async def test_manual_tokens_abort_when_account_exists(
     hass = SimpleNamespace(config_entries=_ConfigEntries())
 
     async def _fake_pick(
+        hass: Any,
         email: str,
         candidates: list[tuple[str, str]],
         *,

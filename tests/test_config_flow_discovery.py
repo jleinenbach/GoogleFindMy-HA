@@ -50,6 +50,7 @@ def test_async_step_discovery_new_entry(
     """Discovery for a new account should confirm before creating an entry."""
 
     async def _fake_pick(
+        hass: Any,
         email: str,
         candidates: list[tuple[str, str]],
         *,
@@ -142,6 +143,7 @@ def test_async_step_discovery_existing_entry_updates(
     """Discovery for an existing entry should update data via abort helper."""
 
     async def _fake_pick(
+        hass: Any,
         email: str,
         candidates: list[tuple[str, str]],
         *,

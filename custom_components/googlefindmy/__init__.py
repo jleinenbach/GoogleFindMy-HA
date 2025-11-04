@@ -4173,6 +4173,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     coordinator.config_entry = entry  # convenience for platforms
 
     subentry_accessor = getattr(entry, "subentries", None)
+    hass_subentry_manager = getattr(hass.config_entries, "subentries", None)
+    if hass_subentry_manager is not None and not callable(
+        getattr(hass_subentry_manager, "async_add", None)
+    ):
+        hass_subentry_manager = None
     if subentry_accessor is not None:
         getter = getattr(subentry_accessor, "get_subentries", None)
         if callable(getter):
@@ -4213,20 +4218,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         for subentry in sub_entries
     )
 
-    if subentry_accessor is not None and not has_service_sub:
+    if (
+        subentry_accessor is not None
+        and hass_subentry_manager is not None
+        and not has_service_sub
+    ):
         _LOGGER.info(
             "[%s] Service subentry missing, creating default...",
             entry.entry_id,
         )
         try:
-            await subentry_accessor.async_add_subentry(
-                hass,
+            await hass_subentry_manager.async_add(
+                entry,
                 subentry_type=SUBENTRY_TYPE_SERVICE,
                 data={
                     "group_key": SERVICE_SUBENTRY_KEY,
                 },
                 title="Service",
                 unique_id=f"{entry.unique_id}_service",
+            )
+        except AttributeError as err:
+            _LOGGER.error(
+                "Subentry manager API missing, cannot create default service subentry: %s",
+                err,
             )
         except Exception:  # noqa: BLE001 - defensive logging
             _LOGGER.error(
@@ -4235,20 +4249,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 exc_info=True,
             )
 
-    if subentry_accessor is not None and not has_tracker_sub:
+    if (
+        subentry_accessor is not None
+        and hass_subentry_manager is not None
+        and not has_tracker_sub
+    ):
         _LOGGER.info(
             "[%s] Tracker subentry missing, creating default...",
             entry.entry_id,
         )
         try:
-            await subentry_accessor.async_add_subentry(
-                hass,
+            await hass_subentry_manager.async_add(
+                entry,
                 subentry_type=SUBENTRY_TYPE_TRACKER,
                 data={
                     "group_key": TRACKER_SUBENTRY_KEY,
                 },
                 title="Trackers",
                 unique_id=f"{entry.unique_id}_trackers",
+            )
+        except AttributeError as err:
+            _LOGGER.error(
+                "Subentry manager API missing, cannot create default tracker subentry: %s",
+                err,
             )
         except Exception:  # noqa: BLE001 - defensive logging
             _LOGGER.error(
@@ -4283,14 +4306,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
         )
 
-    subentry_manager = ConfigEntrySubEntryManager(hass, entry)
-    coordinator.attach_subentry_manager(subentry_manager)
+    runtime_subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+    coordinator.attach_subentry_manager(runtime_subentry_manager)
 
     # Expose runtime object via the typed container (preferred access pattern)
     runtime_data = RuntimeData(
         coordinator=coordinator,
         token_cache=cache,
-        subentry_manager=subentry_manager,
+        subentry_manager=runtime_subentry_manager,
         fcm_receiver=fcm,
     )
     entry.runtime_data = runtime_data
@@ -4338,7 +4361,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     fcm_push_enabled = runtime_data.fcm_receiver is not None
     has_google_home_filter = runtime_data.google_home_filter is not None
     entry_title = entry.title
-    await subentry_manager.async_sync(
+    # Use the runtime-attached manager here; the hass-level helper above only
+    # creates defaults when the API is available but does not drive runtime sync.
+    await runtime_subentry_manager.async_sync(
         [
             ConfigEntrySubentryDefinition(
                 key=TRACKER_SUBENTRY_KEY,
