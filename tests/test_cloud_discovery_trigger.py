@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock
 
 import importlib
 
+import pytest
+
 from custom_components.googlefindmy import config_flow, discovery
 from custom_components.googlefindmy.const import DOMAIN
 
@@ -150,6 +152,34 @@ def test_trigger_cloud_discovery_falls_back(
         for record in caplog.records
         if record.levelno == logging.INFO
     ), "fallback trigger log should redact identifiers"
+
+
+@pytest.mark.asyncio
+async def test_async_create_discovery_flow_propagates_helper_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Helper errors should bubble up so callers can trigger fallbacks."""
+
+    hass = _make_hass()
+
+    async def _helper(*args, **kwargs):
+        raise AttributeError("missing helper attribute")
+
+    monkeypatch.setattr(
+        config_flow.config_entries,
+        "async_create_discovery_flow",
+        _helper,
+        raising=False,
+    )
+    monkeypatch.setattr(config_flow, "_fallback_discovery_flow_helper", None)
+
+    with pytest.raises(AttributeError):
+        await config_flow.async_create_discovery_flow(
+            hass,
+            DOMAIN,
+            context=None,
+            data={},
+        )
 
 
 def test_trigger_cloud_discovery_deduplicates(

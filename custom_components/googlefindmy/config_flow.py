@@ -295,13 +295,30 @@ async def async_create_discovery_flow(
                 data,
                 discovery_key=discovery_key,
             )
-        except Exception:  # noqa: BLE001 - fall back to legacy path on failure
+        except AttributeError:  # fall back to legacy path on missing helpers
+            _LOGGER.debug(
+                "Discovery flow helper raised AttributeError (domain=%s, context=%s)",
+                domain,
+                context,
+                exc_info=True,
+            )
+            raise
+        except NotImplementedError:  # fall back when helper is not implemented
+            _LOGGER.debug(
+                "Discovery flow helper raised NotImplementedError (domain=%s, context=%s)",
+                domain,
+                context,
+                exc_info=True,
+            )
+            raise
+        except Exception:  # noqa: BLE001 - surface unexpected failures to callers
             _LOGGER.error(
                 "Discovery flow helper raised unexpectedly (domain=%s, context=%s)",
                 domain,
                 context,
                 exc_info=True,
             )
+            raise
         else:
             if inspect.isawaitable(result):
                 awaited = await cast(Awaitable[FlowResult], result)
