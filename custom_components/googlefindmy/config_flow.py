@@ -150,6 +150,7 @@ _DiscoveryFlowHelper = Callable[
     Awaitable[FlowResult],
 ]
 
+
 _discovery_flow_helper = cast(
     _DiscoveryFlowHelper | None,
     getattr(
@@ -158,6 +159,8 @@ _discovery_flow_helper = cast(
         None,
     ),
 )
+
+_fallback_discovery_flow_helper: _DiscoveryFlowHelper | None
 
 if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
 
@@ -264,13 +267,74 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
             )
         return cast(FlowResult, result)
 
-    _discovery_flow_helper = cast(
+    _fallback_discovery_flow_helper = cast(
         _DiscoveryFlowHelper,
         _async_create_discovery_flow,
     )
+else:
+    _fallback_discovery_flow_helper = None
 
-assert _discovery_flow_helper is not None
-async_create_discovery_flow: _DiscoveryFlowHelper = _discovery_flow_helper
+
+async def async_create_discovery_flow(
+    hass: HomeAssistant,
+    domain: str,
+    context: Mapping[str, Any] | None,
+    data: Mapping[str, Any],
+    *,
+    discovery_key: Any | None = None,
+) -> FlowResult:
+    """Proxy helper that tolerates runtime helper resolution failures."""
+
+    helper = getattr(config_entries, "async_create_discovery_flow", None)
+    if callable(helper):
+        try:
+            result = helper(
+                hass,
+                domain,
+                context,
+                data,
+                discovery_key=discovery_key,
+            )
+        except Exception:  # noqa: BLE001 - fall back to legacy path on failure
+            _LOGGER.error(
+                "Discovery flow helper raised unexpectedly (domain=%s, context=%s)",
+                domain,
+                context,
+                exc_info=True,
+            )
+        else:
+            if inspect.isawaitable(result):
+                awaited = await cast(Awaitable[FlowResult], result)
+                return awaited
+            if result is not None:
+                return cast(FlowResult, result)
+            _LOGGER.error(
+                "Discovery flow helper returned None (domain=%s, context=%s)",
+                domain,
+                context,
+            )
+
+    if _fallback_discovery_flow_helper is not None:
+        return await _fallback_discovery_flow_helper(
+            hass,
+            domain,
+            context,
+            data,
+            discovery_key=discovery_key,
+        )
+
+    _LOGGER.error(
+        "Discovery flow helper unavailable; aborting flow creation (domain=%s, context=%s)",
+        domain,
+        context,
+    )
+    return cast(
+        FlowResult,
+        {
+            "type": data_entry_flow.FlowResultType.ABORT,
+            "reason": "unknown",
+        },
+    )
 
 
 _FALLBACK_CONFIG_SUBENTRY_FLOW: type[Any] | None = None
