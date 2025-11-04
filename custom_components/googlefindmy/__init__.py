@@ -4361,7 +4361,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     fcm_push_enabled = runtime_data.fcm_receiver is not None
     has_google_home_filter = runtime_data.google_home_filter is not None
     entry_title = entry.title
-    await subentry_manager.async_sync(
+    await runtime_subentry_manager.async_sync(
         [
             ConfigEntrySubentryDefinition(
                 key=TRACKER_SUBENTRY_KEY,

@@ -29,7 +29,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-import voluptuous as vol
 
 from .const import (
     DOMAIN,
