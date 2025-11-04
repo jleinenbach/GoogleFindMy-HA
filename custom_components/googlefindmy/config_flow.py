@@ -1,8 +1,4 @@
 # custom_components/googlefindmy/config_flow.py
-#
-#  GoogleFindMyTools - A set of tools to interact with the Google Find My API
-#  Copyright © 2024 Leon Böttger. All rights reserved.
-
 """Config flow for the Google Find My Device custom integration.
 
 This module implements the complete configuration and options flows for the
