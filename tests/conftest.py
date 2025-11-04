@@ -1095,6 +1095,7 @@ def _stub_homeassistant() -> None:
             return registry
         return _StubEntityRegistry()
 
+    entity_registry_module.RegistryEntry = _StubEntityRegistryEntry
     entity_registry_module.async_get = _entity_registry_for
 
     util_pkg = sys.modules.setdefault(
@@ -1124,6 +1125,7 @@ def _stub_homeassistant() -> None:
         def __init__(self, *_args, **_kwargs) -> None:
             pass
 
+    device_tracker_module.DOMAIN = "device_tracker"
     device_tracker_module.SourceType = SourceType
     device_tracker_module.TrackerEntity = TrackerEntity
     sys.modules["homeassistant.components.device_tracker"] = device_tracker_module

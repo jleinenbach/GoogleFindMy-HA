@@ -50,6 +50,7 @@ Authentication handling and HA best practices (Platinum standard):
   3) Clear the internal flag and push an update so the sensor flips back to `off`.
 
 This module must not log secrets and must keep user-facing strings out of code; use translations instead.
+# custom_components/googlefindmy/coordinator.py
 """
 
 from __future__ import annotations
@@ -76,6 +77,7 @@ else:  # pragma: no cover - typing fallback for runtime imports
     Event = Any
     GoogleHomeFilterProtocol = Any
 
+from homeassistant.components.device_tracker import DOMAIN as DEVICE_TRACKER_DOMAIN
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
     history as recorder_history,
@@ -85,9 +87,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.device_registry import (
-    EVENT_DEVICE_REGISTRY_UPDATED,
-)
+from homeassistant.helpers.device_registry import EVENT_DEVICE_REGISTRY_UPDATED
+from homeassistant.helpers.entity_registry import RegistryEntry as EntityRegistryEntry
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.helpers import (
@@ -1675,6 +1676,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             return candidate if refreshed is None else refreshed
 
+        existing_name: str | None = None
+        existing_user_name: str | None = None
+        if device is not None:
+            existing_name = getattr(device, "name", None)
+            existing_user_name = getattr(device, "name_by_user", None)
+
+        entry_title = getattr(entry, "title", None)
+        sanitized_entry_title = (
+            entry_title.strip() if isinstance(entry_title, str) and entry_title.strip() else None
+        )
+        service_device_name = existing_name or sanitized_entry_title
+
+        _LOGGER.debug(
+            "Service device registry pre-ensure (entry=%s): name=%s, name_by_user=%s",
+            entry.entry_id,
+            self._redact_text(existing_name),
+            self._redact_text(existing_user_name),
+        )
+
         if device is None:
             create_kwargs: dict[str, Any] = {
                 "config_entry_id": entry.entry_id,
@@ -1685,6 +1705,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 "entry_type": dr.DeviceEntryType.SERVICE,
                 "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
             }
+            if service_device_name:
+                create_kwargs["name"] = service_device_name
             if supports_translations is not False:
                 create_kwargs["translation_key"] = SERVICE_DEVICE_TRANSLATION_KEY
                 create_kwargs["translation_placeholders"] = {}
@@ -1703,8 +1725,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
         else:
             # Keep metadata fresh if it drifted (rare)
-            has_user_name = bool(getattr(device, "name_by_user", None))
-            should_clear_name = device.name is not None and not has_user_name
             device_identifiers = set(getattr(device, "identifiers", set()) or set())
             needs_identifier_backfill = not identifiers.issubset(device_identifiers)
             dev_translation_key = getattr(device, "translation_key", None)
@@ -1712,6 +1732,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 device, "translation_placeholders", None
             )
             dev_config_subentry_id = getattr(device, "config_subentry_id", None)
+
+            needs_name_refresh = (
+                service_device_name is not None
+                and service_device_name != existing_name
+            )
 
             needs_update = (
                 device.manufacturer != SERVICE_DEVICE_MANUFACTURER
@@ -1730,7 +1755,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     supports_translations is not False
                     and (dev_translation_placeholders or {}) != {}
                 )
-                or should_clear_name
+                or needs_name_refresh
                 or needs_identifier_backfill
             )
             if needs_update:
@@ -1751,8 +1776,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     new_identifiers = set(device_identifiers)
                     new_identifiers.update(identifiers)
                     update_kwargs["new_identifiers"] = new_identifiers
-                if should_clear_name:
-                    update_kwargs["name"] = None
+                if needs_name_refresh and service_device_name:
+                    update_kwargs["name"] = service_device_name
                 self._call_service_device_registry_api(
                     dev_reg.async_update_device, base_kwargs=update_kwargs
                 )
@@ -1766,8 +1791,71 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._service_device_ready = True
         self._service_device_id = getattr(device, "id", None)
 
+        if device is not None:
+            _LOGGER.debug(
+                "Service device registry post-ensure (entry=%s): name=%s, name_by_user=%s",
+                entry.entry_id,
+                self._redact_text(getattr(device, "name", None)),
+                self._redact_text(getattr(device, "name_by_user", None)),
+            )
+
         # Backfill any end devices that were created before the service device was known
         self._apply_pending_via_updates()
+
+    def _find_tracker_entity_entry(
+        self, device_id: str
+    ) -> EntityRegistryEntry | None:
+        """Return the entity-registry entry for a tracker if one exists."""
+
+        ent_reg = er.async_get(self.hass)
+        entry_id = self._entry_id()
+        candidate_unique_ids: list[str] = []
+        if entry_id:
+            candidate_unique_ids.append(f"{entry_id}:{device_id}")
+            candidate_unique_ids.append(f"{DOMAIN}_{entry_id}_{device_id}")
+        candidate_unique_ids.append(f"{DOMAIN}_{device_id}")
+
+        device_label = self.get_device_display_name(device_id) or device_id
+
+        for unique_id in candidate_unique_ids:
+            entity_id = ent_reg.async_get_entity_id(
+                DEVICE_TRACKER_DOMAIN, DOMAIN, unique_id
+            )
+            if not entity_id:
+                continue
+            entry = ent_reg.async_get(entity_id)
+            if entry is not None:
+                return entry
+
+        for entry in list(ent_reg.entities.values()):
+            if entry.domain != DEVICE_TRACKER_DOMAIN or entry.platform != DOMAIN:
+                continue
+            if device_id not in entry.unique_id:
+                continue
+            if (
+                entry.config_entry_id
+                and entry.config_entry_id != entry_id
+            ):
+                continue
+            _LOGGER.debug(
+                "Tracker registry fallback matched entity_id=%s (unique_id=%s) for device '%s'",
+                entry.entity_id,
+                entry.unique_id,
+                device_label,
+            )
+            return entry
+
+        _LOGGER.debug(
+            "No entity registry entry for device '%s'; checked unique_id formats %s",
+            device_label,
+            candidate_unique_ids,
+        )
+        return None
+
+    def find_tracker_entity_entry(self, device_id: str) -> EntityRegistryEntry | None:
+        """Public wrapper to expose tracker entity lookup to platforms."""
+
+        return self._find_tracker_entity_entry(device_id)
 
     # Optional back-compat alias (some callers may use the public-style name)
     ensure_service_device_exists = _ensure_service_device_exists
@@ -3517,7 +3605,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
         snapshot: list[dict[str, Any]] = []
         wall_now = time.time()
-        ent_reg = er.async_get(self.hass)
 
         for dev in devices:
             entry = self._build_base_snapshot_entry(dev)
@@ -3530,25 +3617,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             # No cache -> Registry + State (cheap, non-blocking)
             dev_id = entry["device_id"]
-            # Support entry-scoped unique_ids (preferred) and legacy forms as fallback
-            entry_id = self._entry_id()
-            uid_candidates: list[str] = []
-            if entry_id:
-                uid_candidates.append(f"{entry_id}:{dev_id}")
-                uid_candidates.append(f"{DOMAIN}_{entry_id}_{dev_id}")
-            uid_candidates.append(f"{DOMAIN}_{dev_id}")  # legacy
+            registry_entry = self._find_tracker_entity_entry(dev_id)
+            if registry_entry is None:
+                _LOGGER.debug(
+                    "Skipping state/history fallback for '%s' because tracker cache entry is unavailable.",
+                    entry["name"],
+                )
+                snapshot.append(entry)
+                continue
 
-            entity_id = None
-            for uid in uid_candidates:
-                entity_id = ent_reg.async_get_entity_id("device_tracker", DOMAIN, uid)
-                if entity_id:
-                    break
+            entity_id = registry_entry.entity_id
             if not entity_id:
                 _LOGGER.debug(
-                    "No entity registry entry for device '%s'; checked unique_id formats %s. "
-                    "Skipping state/history fallback because tracker cache is unavailable.",
+                    "Entity registry entry missing entity_id for tracker '%s' (unique_id=%s)",
                     entry["name"],
-                    uid_candidates,
+                    registry_entry.unique_id,
                 )
                 snapshot.append(entry)
                 continue

@@ -360,8 +360,8 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
                 },
             )
         if result is None:
-            _LOGGER.error(
-                "Discovery flow create_flow returned None (domain=%s, context=%s)",
+            _LOGGER.debug(
+                "Discovery flow already in progress or skipped (domain=%s, context=%s)",
                 domain,
                 context,
             )

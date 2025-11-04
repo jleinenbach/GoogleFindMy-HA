@@ -126,6 +126,17 @@ async def async_setup_entry(
                 continue
             if dev_id in known_ids:
                 continue
+            existing_entry = coordinator.find_tracker_entity_entry(dev_id)
+            if existing_entry is not None:
+                known_ids.add(dev_id)
+                _LOGGER.debug(
+                    "Skipping tracker entity creation for %s (device_id=%s); registry already has %s (unique_id=%s)",
+                    name,
+                    dev_id,
+                    existing_entry.entity_id,
+                    existing_entry.unique_id,
+                )
+                continue
             known_ids.add(dev_id)
             to_add.append(
                 GoogleFindMyDeviceTracker(
