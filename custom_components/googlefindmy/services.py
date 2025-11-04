@@ -547,16 +547,6 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         affected_entry_ids: set[str] = set()
         candidate_devices: set[str] = set()
 
-        for ent in list(ent_reg.entities.values()):
-            if getattr(ent, "platform", None) != DOMAIN:
-                continue
-            device_id = getattr(ent, "device_id", None)
-            if isinstance(device_id, str) and device_id:
-                candidate_devices.add(device_id)
-            entry_id = getattr(ent, "config_entry_id", None)
-            if isinstance(entry_id, str) and entry_id:
-                affected_entry_ids.add(entry_id)
-
         coalesce_accounts = ctx.get("coalesce_account_entries")
         extract_email = ctx.get("extract_normalized_email")
         if callable(coalesce_accounts):
@@ -978,7 +968,27 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 if dev and _dev_is_ours(dev):
                     candidate_devices.add(dev.id)
                     affected_entry_ids.update(dev.config_entries)
+
+            for ent in list(ent_reg.entities.values()):
+                if getattr(ent, "platform", None) != DOMAIN:
+                    continue
+                device_id = getattr(ent, "device_id", None)
+                if isinstance(device_id, str) and device_id in target_device_ids:
+                    candidate_devices.add(device_id)
+                    entry_id = getattr(ent, "config_entry_id", None)
+                    if isinstance(entry_id, str) and entry_id:
+                        affected_entry_ids.add(entry_id)
         else:
+            for ent in list(ent_reg.entities.values()):
+                if getattr(ent, "platform", None) != DOMAIN:
+                    continue
+                device_id = getattr(ent, "device_id", None)
+                if isinstance(device_id, str) and device_id:
+                    candidate_devices.add(device_id)
+                entry_id = getattr(ent, "config_entry_id", None)
+                if isinstance(entry_id, str) and entry_id:
+                    affected_entry_ids.add(entry_id)
+
             for dev in dev_reg.devices.values():
                 if _dev_is_ours(dev):
                     candidate_devices.add(dev.id)
