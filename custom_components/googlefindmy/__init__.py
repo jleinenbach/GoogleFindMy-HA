@@ -3402,7 +3402,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         bucket["fcm_lock_contention_count"] = contention + 1
     async with fcm_lock:
         refcount = _get_fcm_refcount(bucket)
-        providers_registered = cast(bool, bucket.get("providers_registered", False))
+        providers_registered = bucket.get("providers_registered", False)
         raw_receiver = cast(object | None, bucket.get("fcm_receiver"))
         fcm = raw_receiver if isinstance(raw_receiver, FcmReceiverHA) else None
 
