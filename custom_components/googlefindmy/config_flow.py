@@ -38,6 +38,7 @@ import inspect
 import json
 import logging
 import re
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import import_module
@@ -183,6 +184,10 @@ async def _resolve_flow_result(result: _AwaitableFlowResult) -> _MaybeFlowResult
     return result
 
 
+class _DiscoveryFallbackUnavailable(RuntimeError):
+    """Raised when the discovery flow helper cannot provide a fallback."""
+
+
 _discovery_flow_helper = cast(
     _DiscoveryFlowHelper | None,
     getattr(
@@ -205,6 +210,58 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
         discovery_key: Any | None = None,
     ) -> FlowResult:
         """Fallback helper mirroring modern discovery flow creation."""
+
+        create_flow_helper: (
+            Callable[..., Awaitable[FlowResult] | FlowResult] | None
+        ) = None
+
+        module = sys.modules.get(__name__)
+        if module is not None:
+            candidate = getattr(module, "async_create_discovery_flow", None)
+            if callable(candidate):
+                create_flow_helper = candidate
+
+        if create_flow_helper is not None:
+            try:
+                result = await create_flow_helper(
+                    hass,
+                    domain,
+                    context=context,
+                    data=data,
+                    discovery_key=discovery_key,
+                    _skip_fallback=True,
+                )
+            except _DiscoveryFallbackUnavailable:
+                create_flow_helper = None
+            except Exception:  # noqa: BLE001
+                _LOGGER.error(
+                    "Discovery flow helper invocation failed (domain=%s, context=%s)",
+                    domain,
+                    context,
+                    exc_info=True,
+                )
+                return cast(
+                    FlowResult,
+                    {
+                        "type": data_entry_flow.FlowResultType.ABORT,
+                        "reason": "unknown",
+                    },
+                )
+            else:
+                if result is None:
+                    _LOGGER.error(
+                        "Discovery flow helper returned None (domain=%s, context=%s)",
+                        domain,
+                        context,
+                    )
+                    return cast(
+                        FlowResult,
+                        {
+                            "type": data_entry_flow.FlowResultType.ABORT,
+                            "reason": "unknown",
+                        },
+                    )
+                return cast(FlowResult, result)
 
         try:
             from homeassistant.helpers.discovery_flow import (
@@ -279,15 +336,15 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
             )
 
         try:
-            result = await _resolve_flow_result(
-                create_flow(
-                    hass,
-                    domain,
-                    context,
-                    data,
-                    discovery_key=discovery_key,
-                )
+            result = create_flow(
+                hass,
+                domain,
+                context,
+                data,
+                discovery_key=discovery_key,
             )
+            if inspect.isawaitable(result):
+                result = await cast(Awaitable[FlowResult | None], result)
         except Exception:
             _LOGGER.error(
                 "Discovery flow creation failed (domain=%s, context=%s)",
@@ -332,6 +389,7 @@ async def async_create_discovery_flow(
     data: Mapping[str, Any],
     *,
     discovery_key: Any | None = None,
+    _skip_fallback: bool = False,
 ) -> FlowResult:
     """Proxy helper that tolerates runtime helper resolution failures."""
 
@@ -371,18 +429,26 @@ async def async_create_discovery_flow(
             )
             raise
         else:
-            resolved = await _resolve_flow_result(result)
-            if resolved is not None:
-                return cast(FlowResult, resolved)
-            _LOGGER.error(
-                "Discovery flow helper returned None (domain=%s, context=%s)",
-                domain,
-                context,
+            if inspect.isawaitable(result):
+                result = await cast(Awaitable[FlowResult | None], result)
+            if result is not None:
+                return cast(FlowResult, result)
+            _LOGGER.error("Discovery flow helper returned None")
+
+    fallback_helper = _fallback_discovery_flow_helper
+    if fallback_helper is None:
+        module = sys.modules.get(__name__)
+        if module is not None:
+            fallback_helper = cast(
+                _DiscoveryFlowHelper | None,
+                getattr(module, "_async_create_discovery_flow", None),
             )
 
-    if _fallback_discovery_flow_helper is not None:
+    if fallback_helper is not None:
+        if _skip_fallback:
+            raise _DiscoveryFallbackUnavailable
         fallback_result = await _resolve_flow_result(
-            _fallback_discovery_flow_helper(
+            fallback_helper(
                 hass,
                 domain,
                 context,
@@ -2378,9 +2444,12 @@ class ConfigFlow(
         config_entries = getattr(self.hass, "config_entries", None)
         async_entries = getattr(config_entries, "async_entries", None)
 
-        if callable(async_entries) and async_entries(DOMAIN):
+        existing_entries = async_entries(DOMAIN) if callable(async_entries) else []
+
+        if existing_entries:
             _LOGGER.debug(
-                "async_step_user: Aborting new flow, an entry already exists"
+                "async_step_user: Aborting new flow, an entry already exists (found %d entries)",
+                len(existing_entries),
             )
             return self.async_abort(reason="already_configured")
 
