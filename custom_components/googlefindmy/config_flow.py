@@ -43,7 +43,18 @@ from functools import lru_cache
 from importlib import import_module
 from collections.abc import Mapping as CollMapping
 from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Protocol,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
 
 import voluptuous as vol
 
@@ -145,10 +156,31 @@ except AttributeError:
     else:  # pragma: no cover - simple aliasing
         DiscoveryKey = cast(type[Any], _DiscoveryKey)
 
-_DiscoveryFlowHelper = Callable[
-    [HomeAssistant, str, Mapping[str, Any] | None, Mapping[str, Any]],
-    Awaitable[FlowResult],
-]
+class _DiscoveryFlowHelper(Protocol):
+    """Callable contract for discovery flow helpers."""
+
+    def __call__(
+        self,
+        hass: HomeAssistant,
+        domain: str,
+        context: Mapping[str, Any] | None,
+        data: Mapping[str, Any],
+        *,
+        discovery_key: Any | None = ...,
+    ) -> Awaitable[FlowResult | None] | FlowResult | None:
+        """Invoke the discovery flow helper."""
+
+
+_MaybeFlowResult: TypeAlias = FlowResult | None
+_AwaitableFlowResult: TypeAlias = Awaitable[_MaybeFlowResult] | _MaybeFlowResult
+
+
+async def _resolve_flow_result(result: _AwaitableFlowResult) -> _MaybeFlowResult:
+    """Await helper results when necessary."""
+
+    if inspect.isawaitable(result):
+        return await cast(Awaitable[_MaybeFlowResult], result)
+    return result
 
 
 _discovery_flow_helper = cast(
@@ -285,8 +317,9 @@ async def async_create_discovery_flow(
 ) -> FlowResult:
     """Proxy helper that tolerates runtime helper resolution failures."""
 
-    helper = getattr(config_entries, "async_create_discovery_flow", None)
-    if callable(helper):
+    helper_candidate = getattr(config_entries, "async_create_discovery_flow", None)
+    if callable(helper_candidate):
+        helper = cast(_DiscoveryFlowHelper, helper_candidate)
         try:
             result = helper(
                 hass,
@@ -320,11 +353,9 @@ async def async_create_discovery_flow(
             )
             raise
         else:
-            if inspect.isawaitable(result):
-                awaited = await cast(Awaitable[FlowResult], result)
-                return awaited
-            if result is not None:
-                return cast(FlowResult, result)
+            resolved = await _resolve_flow_result(result)
+            if resolved is not None:
+                return cast(FlowResult, resolved)
             _LOGGER.error(
                 "Discovery flow helper returned None (domain=%s, context=%s)",
                 domain,
@@ -332,12 +363,28 @@ async def async_create_discovery_flow(
             )
 
     if _fallback_discovery_flow_helper is not None:
-        return await _fallback_discovery_flow_helper(
-            hass,
+        fallback_result = await _resolve_flow_result(
+            _fallback_discovery_flow_helper(
+                hass,
+                domain,
+                context,
+                data,
+                discovery_key=discovery_key,
+            )
+        )
+        if fallback_result is not None:
+            return cast(FlowResult, fallback_result)
+        _LOGGER.error(
+            "Fallback discovery flow helper returned None (domain=%s, context=%s)",
             domain,
             context,
-            data,
-            discovery_key=discovery_key,
+        )
+        return cast(
+            FlowResult,
+            {
+                "type": data_entry_flow.FlowResultType.ABORT,
+                "reason": "unknown",
+            },
         )
 
     _LOGGER.error(
