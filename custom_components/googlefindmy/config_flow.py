@@ -1,4 +1,5 @@
 # custom_components/googlefindmy/config_flow.py
+
 """Config flow for the Google Find My Device custom integration.
 
 This module implements the complete configuration and options flows for the
@@ -42,12 +43,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from importlib import import_module
 from collections.abc import Mapping as CollMapping
-from types import MappingProxyType, ModuleType, SimpleNamespace
+from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, TypeVar, cast
 
 import voluptuous as vol
 
-from homeassistant import config_entries
+from homeassistant import config_entries, data_entry_flow
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
@@ -97,6 +98,15 @@ from .const import (
     DEFAULT_ENABLE_STATS_ENTITIES,
 )
 from .email import normalize_email, normalize_email_or_default, unique_account_id
+
+_ResolveEntryEmailCallable = Callable[[ConfigEntry], tuple[str | None, str | None]]
+_CoalesceCallable = Callable[
+    [HomeAssistant, ConfigEntry],
+    Awaitable[ConfigEntry | None],
+]
+
+_RESOLVE_ENTRY_EMAIL: _ResolveEntryEmailCallable | None = None
+_COALESCE_ENTRIES: _CoalesceCallable | None = None
 
 if TYPE_CHECKING:
     from .api import GoogleFindMyAPI
@@ -1060,13 +1070,101 @@ def _interpret_reauth_choice(
         return None, None, "invalid_token"
 
     return "manual", token_raw, None
+def _resolve_entry_email_for_lookup(entry: ConfigEntry) -> tuple[str | None, str | None]:
+    """Return the raw and normalized email associated with ``entry``."""
+
+    global _RESOLVE_ENTRY_EMAIL
+    if _RESOLVE_ENTRY_EMAIL is None:
+        try:
+            from . import __init__ as integration  # noqa: PLC0415
+
+            candidate = getattr(integration, "_resolve_entry_email")
+        except Exception:  # pragma: no cover - fallback for stubs
+            candidate = None
+
+        if not callable(candidate):
+
+            def _fallback(entry: ConfigEntry) -> tuple[str | None, str | None]:
+                raw_email: str | None = None
+                for container in (getattr(entry, "data", {}), getattr(entry, "options", {})):
+                    if not isinstance(container, CollMapping):
+                        continue
+                    candidate_email = container.get(CONF_GOOGLE_EMAIL)
+                    if isinstance(candidate_email, str) and candidate_email.strip():
+                        raw_email = candidate_email.strip()
+                        break
+                normalized_email = normalize_email(raw_email)
+                return raw_email, normalized_email
+
+            _RESOLVE_ENTRY_EMAIL = _fallback
+        else:
+            _RESOLVE_ENTRY_EMAIL = cast(_ResolveEntryEmailCallable, candidate)
+
+    resolver = _RESOLVE_ENTRY_EMAIL
+    raw_email: str | None
+    normalized_email: str | None
+    try:
+        raw_email, normalized_email = resolver(entry)
+    except Exception as err:  # pragma: no cover - defensive guard
+        _LOGGER.debug(
+            "Failed to resolve email for entry %s during lookup: %s",
+            getattr(entry, "entry_id", "<unknown>"),
+            err,
+        )
+        return None, None
+    return raw_email, normalized_email
+
+
 def _find_entry_by_email(hass: HomeAssistant, email: str) -> ConfigEntry | None:
     """Return an existing entry that matches the normalized email, if any."""
-    target = normalize_email_or_default(email)
-    for e in hass.config_entries.async_entries(DOMAIN):
-        if normalize_email_or_default(e.data.get(CONF_GOOGLE_EMAIL)) == target:
-            return e
+
+    target = normalize_email(email)
+    if not target:
+        return None
+
+    for candidate in hass.config_entries.async_entries(DOMAIN):
+        _, normalized = _resolve_entry_email_for_lookup(candidate)
+        if normalized and normalized == target:
+            return candidate
     return None
+
+
+async def _async_coalesce_account_entries(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> ConfigEntry | None:
+    """Invoke the integration's coalesce helper to merge duplicate entries."""
+
+    global _COALESCE_ENTRIES
+    if _COALESCE_ENTRIES is None:
+        from . import __init__ as integration  # noqa: PLC0415
+
+        candidate = getattr(integration, "async_coalesce_account_entries", None)
+
+        async def _noop(_: HomeAssistant, __: ConfigEntry) -> ConfigEntry | None:
+            return None
+
+        if callable(candidate):
+            async def _wrapped(hass_obj: HomeAssistant, entry_obj: ConfigEntry) -> ConfigEntry | None:
+                return await cast(
+                    Callable[..., Awaitable[ConfigEntry | None]],
+                    candidate,
+                )(hass_obj, canonical_entry=entry_obj)
+
+            _COALESCE_ENTRIES = _wrapped
+        else:
+            _COALESCE_ENTRIES = _noop
+
+    coalesce = _COALESCE_ENTRIES
+    try:
+        return await coalesce(hass, entry)
+    except Exception as err:  # pragma: no cover - defensive best-effort
+        _LOGGER.debug(
+            "Coalesce helper failed for entry %s: %s",
+            getattr(entry, "entry_id", "<unknown>"),
+            err,
+        )
+        return None
 
 
 # ---------------------------
@@ -1191,7 +1289,9 @@ def _normalize_and_validate_discovery_payload(
     if not normalized_email:
         raise DiscoveryFlowError("invalid_discovery_info")
     title = payload_dict.get("title") or payload_dict.get("name")
-    unique_id = normalized_email
+    unique_id = unique_account_id(normalized_email)
+    if unique_id is None:
+        raise DiscoveryFlowError("invalid_discovery_info")
 
     return CloudDiscoveryData(
         email=email_candidate,
@@ -1292,6 +1392,71 @@ class ConfigFlow(
         self._pending_discovery_updates: dict[str, Any] | None = None
         self._pending_discovery_existing_entry: ConfigEntry | None = None
         self._discovery_confirm_pending = False
+
+    async def _async_prepare_account_context(
+        self,
+        *,
+        email: str,
+        preferred_unique_id: str | None = None,
+        updates: Mapping[str, Any] | None = None,
+        coalesce: bool = True,
+        abort_on_duplicate: bool = True,
+    ) -> ConfigEntry | None:
+        """Set the flow unique_id and abort if ``email`` already has an entry."""
+
+        hass_obj = getattr(self, "hass", None)
+        if hass_obj is None or not hasattr(hass_obj, "config_entries"):
+            return None
+        hass = cast(HomeAssistant, hass_obj)
+
+        normalized = normalize_email(email)
+        unique_id = preferred_unique_id or unique_account_id(normalized)
+        if unique_id:
+            await self.async_set_unique_id(unique_id, raise_on_progress=False)
+
+        existing_entry: ConfigEntry | None = None
+        if normalized:
+            existing_entry = _find_entry_by_email(hass, normalized)
+
+        if existing_entry is None:
+            return None
+
+        context_entry_id: str | None = None
+        context_obj = getattr(self, "context", None)
+        if isinstance(context_obj, Mapping):
+            raw_context_entry = context_obj.get("entry_id")
+            if isinstance(raw_context_entry, str) and raw_context_entry:
+                context_entry_id = raw_context_entry
+
+        bound_entry_id: str | None = None
+        bound_entry = getattr(self, "config_entry", None)
+        if isinstance(bound_entry, ConfigEntry):
+            bound_entry_id = bound_entry.entry_id
+
+        if (
+            (context_entry_id and existing_entry.entry_id == context_entry_id)
+            or (bound_entry_id and existing_entry.entry_id == bound_entry_id)
+        ):
+            if coalesce:
+                await _async_coalesce_account_entries(hass, existing_entry)
+            return existing_entry
+
+        if not abort_on_duplicate:
+            if coalesce:
+                await _async_coalesce_account_entries(hass, existing_entry)
+            return existing_entry
+
+        try:
+            self._abort_if_unique_id_configured(updates=updates)
+        except data_entry_flow.AbortFlow:
+            if coalesce:
+                await _async_coalesce_account_entries(hass, existing_entry)
+            raise
+
+        if coalesce:
+            await _async_coalesce_account_entries(hass, existing_entry)
+
+        raise data_entry_flow.AbortFlow("already_configured")
 
     async def async_step_migrate(self, entry: ConfigEntry) -> FlowResult:
         """Migrate legacy config entries to the subentry-aware structure."""
@@ -1734,9 +1899,16 @@ class ConfigFlow(
                 existing_entry = self._pending_discovery_existing_entry
                 self._clear_discovery_confirmation_state()
 
-                if existing_entry and updates is not None:
-                    self._abort_if_unique_id_configured(updates=updates)
-                    return await self.async_abort(reason="already_configured")
+                if existing_entry and updates is not None and pending_payload is not None:
+                    try:
+                        await self._async_prepare_account_context(
+                            email=pending_payload.email,
+                            preferred_unique_id=pending_payload.unique_id,
+                            updates=updates,
+                        )
+                    except data_entry_flow.AbortFlow:
+                        return self.async_abort(reason="already_configured")
+                    return self.async_abort(reason="already_configured")
 
                 return await self.async_step_device_selection()
 
@@ -1744,17 +1916,19 @@ class ConfigFlow(
             normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
         except DiscoveryFlowError as err:
             _LOGGER.debug("Discovery ignored due to invalid payload: %s", err.reason)
-            return await self.async_abort(reason=err.reason)
+            return self.async_abort(reason=err.reason)
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception(
                 "Discovery ignored due to unexpected payload: %s",
                 err,
             )
-            return await self.async_abort(reason="invalid_discovery_info")
+            return self.async_abort(reason="invalid_discovery_info")
 
-        await self.async_set_unique_id(normalized.unique_id, raise_on_progress=False)
-
-        existing_entry = _find_entry_by_email(self.hass, normalized.email)
+        existing_entry = await self._async_prepare_account_context(
+            email=normalized.email,
+            preferred_unique_id=normalized.unique_id,
+            abort_on_duplicate=False,
+        )
         try:
             auth_data, updates = await _ingest_discovery_credentials(
                 self, normalized, existing_entry=existing_entry
@@ -1770,7 +1944,7 @@ class ConfigFlow(
                 reason = (
                     "cannot_connect" if reason != "invalid_discovery_info" else reason
                 )
-            return await self.async_abort(reason=reason)
+            return self.async_abort(reason=reason)
 
         self._auth_data = auth_data
 
@@ -1811,17 +1985,19 @@ class ConfigFlow(
             normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
         except DiscoveryFlowError as err:
             _LOGGER.debug("Discovery update ignored: %s", err.reason)
-            return await self.async_abort(reason=err.reason)
+            return self.async_abort(reason=err.reason)
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception(
                 "Discovery update invalid: %s",
                 err,
             )
-            return await self.async_abort(reason="invalid_discovery_info")
+            return self.async_abort(reason="invalid_discovery_info")
 
-        await self.async_set_unique_id(normalized.unique_id, raise_on_progress=False)
-
-        existing_entry = _find_entry_by_email(self.hass, normalized.email)
+        existing_entry = await self._async_prepare_account_context(
+            email=normalized.email,
+            preferred_unique_id=normalized.unique_id,
+            abort_on_duplicate=False,
+        )
         _LOGGER.debug(
             "discovery_update_info: normalized.email=%s, unique_id=%s, has_entry=%s",
             _mask_email_for_logs(normalized.email),
@@ -1877,7 +2053,7 @@ class ConfigFlow(
                 reason = (
                     "cannot_connect" if reason != "invalid_discovery_info" else reason
                 )
-            return await self.async_abort(reason=reason)
+            return self.async_abort(reason=reason)
 
         self._auth_data = auth_data
 
@@ -1889,8 +2065,16 @@ class ConfigFlow(
             _mask_email_for_logs(normalized.email),
         )
 
-        self._abort_if_unique_id_configured(updates=updates)
-        return await self.async_abort(reason="already_configured")
+        try:
+            await self._async_prepare_account_context(
+                email=normalized.email,
+                preferred_unique_id=normalized.unique_id,
+                updates=updates,
+            )
+        except data_entry_flow.AbortFlow:
+            return self.async_abort(reason="already_configured")
+
+        return self.async_abort(reason="already_configured")
 
     async def async_step_discovery_update(
         self, discovery_info: Mapping[str, Any] | None
@@ -1904,36 +2088,49 @@ class ConfigFlow(
     ) -> FlowResult:
         """Handle Add Hub flows by delegating to the standard user step."""
 
-        entry_hint: str | None = None
         context_obj = getattr(self, "context", None)
+        entry_id: str | None = None
         if isinstance(context_obj, Mapping):
             raw_entry = context_obj.get("entry_id")
             if isinstance(raw_entry, str) and raw_entry:
-                entry_hint = raw_entry
+                entry_id = raw_entry
+
+        hass_obj = getattr(self, "hass", None)
+        if hass_obj is None or not hasattr(hass_obj, "config_entries"):
+            _LOGGER.error("Add Hub flow invoked without Home Assistant context; aborting")
+            return self.async_abort(reason="unknown")
+        hass = cast(HomeAssistant, hass_obj)
 
         config_entry_obj = getattr(self, "config_entry", None)
-        if config_entry_obj is None:
-            lookup_entry = cast(ConfigEntry, SimpleNamespace())
-        else:
-            lookup_entry = cast(ConfigEntry, config_entry_obj)
+        if (config_entry_obj is None or not hasattr(config_entry_obj, "entry_id")) and entry_id:
+            config_entry_obj = hass.config_entries.async_get_entry(entry_id)
 
-        supported_types = type(self).async_get_supported_subentry_types(lookup_entry)
-        if SUBENTRY_TYPE_HUB not in supported_types:
-            _LOGGER.error(
-                "Failed to load Add Hub config flow: hub subentries are unavailable on this "
-                "Home Assistant core (ConfigSubentry=%r, ConfigSubentryFlow=%r, entry_id=%s); "
-                "falling back to standard onboarding.",
-                ConfigSubentry,
-                ConfigSubentryFlow,
-                entry_hint or "<new>",
+        if config_entry_obj is None or not hasattr(config_entry_obj, "entry_id"):
+            _LOGGER.warning(
+                "Add Hub flow missing config entry context (entry_id=%s); aborting",
+                entry_id or "<unknown>",
             )
-            return await self.async_step_user(user_input)
+            return self.async_abort(reason="unknown")
 
+        config_entry = cast(ConfigEntry, config_entry_obj)
+
+        supported_types = type(self).async_get_supported_subentry_types(config_entry)
+        factory = supported_types.get(SUBENTRY_TYPE_HUB)
+        if factory is None:
+            _LOGGER.error(
+                "Add Hub flow unavailable: hub subentry type not supported (entry_id=%s)",
+                config_entry.entry_id,
+            )
+            return self.async_abort(reason="not_supported")
+
+        handler = factory()
         _LOGGER.info(
-            "Add Hub flow requested; delegating to standard onboarding (entry_id=%s)",
-            entry_hint or "<new>",
+            "Add Hub flow requested; provisioning hub subentry (entry_id=%s)",
+            config_entry.entry_id,
         )
-        return await self.async_step_user(user_input)
+        setattr(handler, "hass", hass)
+        result = handler.async_step_user(user_input)
+        return await self._async_resolve_flow_result(result)
 
     # ------------------ Step: choose authentication path ------------------
     async def async_step_user(
@@ -2006,10 +2203,7 @@ class ConfigFlow(
                     errors["base"] = err
             else:
                 assert method == "secrets" and email and cands
-                uid = unique_account_id(normalize_email(email))
-                if uid:
-                    await self.async_set_unique_id(uid)
-                    self._abort_if_unique_id_configured()
+                await self._async_prepare_account_context(email=email)
 
                 try:
                     chosen = await async_pick_working_token(
@@ -2019,7 +2213,7 @@ class ConfigFlow(
                     )
                 except (DependencyNotReady, ImportError) as exc:
                     _register_dependency_error(errors, exc)
-                    return await self.async_abort(reason="dependency_not_ready")
+                    return self.async_abort(reason="dependency_not_ready")
                 else:
                     if not chosen:
                         _LOGGER.warning(
@@ -2078,16 +2272,13 @@ class ConfigFlow(
                 errors["base"] = err
             else:
                 assert method == "manual" and email and cands
-                uid = unique_account_id(normalize_email(email))
-                if uid:
-                    await self.async_set_unique_id(uid)
-                    self._abort_if_unique_id_configured()
+                await self._async_prepare_account_context(email=email)
 
                 try:
                     chosen = await async_pick_working_token(email, cands)
                 except (DependencyNotReady, ImportError) as exc:
                     _register_dependency_error(errors, exc)
-                    return await self.async_abort(reason="dependency_not_ready")
+                    return self.async_abort(reason="dependency_not_ready")
                 else:
                     if not chosen:
                         _LOGGER.warning(
@@ -2139,12 +2330,9 @@ class ConfigFlow(
         errors: dict[str, str] = {}
 
         # Ensure unique_id is set (should already be done)
-        email_for_uid = unique_account_id(
-            normalize_email(self._auth_data.get(CONF_GOOGLE_EMAIL))
-        )
-        if email_for_uid and not self.unique_id:
-            await self.async_set_unique_id(email_for_uid)
-            self._abort_if_unique_id_configured()
+        email_for_account = self._auth_data.get(CONF_GOOGLE_EMAIL)
+        if isinstance(email_for_account, str) and email_for_account:
+            await self._async_prepare_account_context(email=email_for_account)
 
         # Try a single probe (optional; setup will re-validate anyway)
         if not self._available_devices:
@@ -2319,7 +2507,7 @@ class ConfigFlow(
                     self.context.pop("is_reconfigure", None)
                     self.context.pop("reauth_success_reason_override", None)
                     self.context.pop("reconfigure_options", None)
-                    return await self.async_abort(reason="reconfigure_successful")
+                    return self.async_abort(reason="reconfigure_successful")
             else:
                 subentry_context.setdefault(self._subentry_key_core_tracking, None)
                 subentry_context.setdefault(self._subentry_key_service, None)
@@ -2359,11 +2547,11 @@ class ConfigFlow(
 
         entry_id = self.context.get("entry_id")
         if not isinstance(entry_id, str):
-            return await self.async_abort(reason="unknown")
+            return self.async_abort(reason="unknown")
 
         entry = self.hass.config_entries.async_get_entry(entry_id)
         if entry is None:
-            return await self.async_abort(reason="unknown")
+            return self.async_abort(reason="unknown")
 
         placeholders = dict(self.context.get("title_placeholders", {}) or {})
         email = normalize_email_or_default(entry.data.get(CONF_GOOGLE_EMAIL))

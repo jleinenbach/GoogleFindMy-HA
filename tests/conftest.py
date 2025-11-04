@@ -298,7 +298,7 @@ def _stub_homeassistant() -> None:
         ):  # pragma: no cover - defensive
             return {"type": "menu"}
 
-        async def async_abort(self, **kwargs):
+        def async_abort(self, **kwargs):
             return {"type": "abort", **kwargs}
 
         def async_create_entry(

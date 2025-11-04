@@ -48,6 +48,8 @@ from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, 
 from types import MappingProxyType, SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .ProtoDecoders import Common_pb2, DeviceUpdate_pb2, LocationReportsUpload_pb2
+
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
 try:  # pragma: no cover - ConfigEntryDisabler introduced in HA 2023.12
@@ -135,6 +137,21 @@ from .email import normalize_email, unique_account_id
 
 # Eagerly import diagnostics to prevent blocking calls on-demand
 from . import diagnostics  # noqa: F401
+
+__all__ = [
+    "Common_pb2",
+    "DeviceUpdate_pb2",
+    "LocationReportsUpload_pb2",
+]
+
+
+def __getattr__(name: str) -> Any:
+    """Expose ProtoDecoder modules at the package root for compatibility."""
+
+    if name in __all__:
+        return globals()[name]
+    raise AttributeError(name)
+
 
 CloudDiscoveryRuntimeCallable = Callable[[HomeAssistant], Mapping[str, Any]]
 TriggerCloudDiscoveryCallable = Callable[..., Awaitable[Any]]
@@ -830,6 +847,13 @@ class ConfigEntrySubEntryManager:
                 f"adopt it for key '{key}' in entry {self._entry.entry_id}"
             )
 
+        for old_key, mapped in list(self._managed.items()):
+            if old_key == key:
+                continue
+            if mapped.subentry_id == owner.subentry_id:
+                self._managed.pop(old_key, None)
+                self._cleanup.pop(old_key, None)
+
         update_result = self._hass.config_entries.async_update_subentry(
             self._entry,
             owner,
@@ -1166,7 +1190,23 @@ class ConfigEntrySubEntryManager:
 
             self._cleanup[key] = cleanup
 
-        stale_keys = [key for key in list(self._managed) if key not in desired]
+        desired_ids: set[str] = {
+            subentry.subentry_id
+            for managed_key, subentry in list(self._managed.items())
+            if managed_key in desired and isinstance(subentry.subentry_id, str)
+        }
+
+        stale_keys: list[str] = []
+        for managed_key, subentry in list(self._managed.items()):
+            if managed_key in desired:
+                continue
+            subentry_id = getattr(subentry, "subentry_id", None)
+            if isinstance(subentry_id, str) and subentry_id in desired_ids:
+                self._managed.pop(managed_key, None)
+                self._cleanup.pop(managed_key, None)
+                continue
+            stale_keys.append(managed_key)
+
         for key in stale_keys:
             await self.async_remove(key)
 

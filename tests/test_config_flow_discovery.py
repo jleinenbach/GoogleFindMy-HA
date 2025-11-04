@@ -19,6 +19,7 @@ from custom_components.googlefindmy.const import (
     DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
 )
+from custom_components.googlefindmy.email import unique_account_id
 
 
 def test_normalize_and_validate_discovery_payload() -> None:
@@ -35,7 +36,7 @@ def test_normalize_and_validate_discovery_payload() -> None:
     result = config_flow._normalize_and_validate_discovery_payload(payload)
 
     assert result.email == "DiscoveryUser@example.com"
-    assert result.unique_id == "discoveryuser@example.com"
+    assert result.unique_id == unique_account_id("discoveryuser@example.com")
     tokens = {token for _label, token in result.candidates}
     assert "aas_et/DISCOVERY" in tokens
     assert "manually/PERSIST" in tokens
@@ -250,7 +251,7 @@ def test_async_step_discovery_update_info_existing_entry(
                 CONF_GOOGLE_EMAIL: "existing@example.com",
                 CONF_OAUTH_TOKEN: "old-token",
             }
-            self.unique_id = "existing@example.com"
+            self.unique_id = unique_account_id("existing@example.com")
 
     entry = _Entry()
 
@@ -304,7 +305,7 @@ def test_async_step_discovery_update_info_existing_entry(
 
     normalized = config_flow.CloudDiscoveryData(
         email="existing@example.com",
-        unique_id="existing@example.com",
+        unique_id=unique_account_id("existing@example.com"),
         candidates=(("candidate", "aas_et/UPDATED"),),
         secrets_bundle=None,
     )
@@ -414,7 +415,7 @@ async def test_async_step_discovery_update_info_reroutes_and_restores_context(
 
     normalized = config_flow.CloudDiscoveryData(
         email="user@example.org",
-        unique_id="user@example.org",
+        unique_id=unique_account_id("user@example.org"),
         candidates=(),
         secrets_bundle=None,
     )
@@ -485,7 +486,7 @@ def test_async_step_discovery_update_info_ingest_invalid_auth(
                 CONF_GOOGLE_EMAIL: "existing@example.com",
                 CONF_OAUTH_TOKEN: "old-token",
             }
-            self.unique_id = "existing@example.com"
+            self.unique_id = unique_account_id("existing@example.com")
 
     entry = _Entry()
 
@@ -515,7 +516,7 @@ def test_async_step_discovery_update_info_ingest_invalid_auth(
 
     normalized = config_flow.CloudDiscoveryData(
         email="existing@example.com",
-        unique_id="existing@example.com",
+        unique_id=unique_account_id("existing@example.com"),
         candidates=(("candidate", "aas_et/INVALID"),),
         secrets_bundle=None,
     )

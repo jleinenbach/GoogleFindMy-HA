@@ -60,8 +60,8 @@ python_version = "3.12"
 warn_unused_ignores = true
 ignore_missing_imports = true
 show_error_codes = true
-namespace_packages = true
 mypy_path = ["."]
+explicit_package_bases = true
 exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
 
 [[tool.mypy.overrides]]

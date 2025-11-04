@@ -754,6 +754,49 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             )
             return False, refreshed_entry
 
+        def _purge_orphan_devices_for_entry(entry_: Any) -> int:
+            """Remove orphaned devices for ``entry_`` that no longer have linked entities."""
+
+            entry_id = getattr(entry_, "entry_id", None)
+            if not isinstance(entry_id, str) or not entry_id:
+                return 0
+
+            try:
+                devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
+                entities_for_entry = er.async_entries_for_config_entry(ent_reg, entry_id)
+            except Exception as err:  # pragma: no cover - defensive guard
+                _LOGGER.debug(
+                    "Device/entity registry scan failed for entry %s during orphan purge: %s",
+                    entry_id,
+                    err,
+                )
+                return 0
+
+            linked_device_ids: set[str] = {
+                ent.device_id
+                for ent in entities_for_entry
+                if getattr(ent, "device_id", None)
+            }
+
+            removed = 0
+            for device in list(devices_for_entry):
+                if device.id in linked_device_ids:
+                    continue
+                if _is_service_device(device) or not _dev_is_ours(device):
+                    continue
+                try:
+                    dev_reg.async_remove_device(device.id)
+                except Exception as err:  # pragma: no cover - defensive guard
+                    _LOGGER.error(
+                        "Failed to remove orphan device %s for entry %s: %s",
+                        getattr(device, "id", "<unknown>"),
+                        entry_id,
+                        err,
+                    )
+                    continue
+                removed += 1
+            return removed
+
         if mode == MODE_MIGRATE:
             # C-2: real soft-migrate path using __init__.py helpers via ctx
 
@@ -959,6 +1002,17 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     removed_devices += 1
                 except Exception as err:
                     _LOGGER.error("Failed to remove device %s: %s", dev_id, err)
+
+        orphan_device_removals = 0
+        for entry_ in entries:
+            purged = _purge_orphan_devices_for_entry(entry_)
+            if purged:
+                orphan_device_removals += purged
+                entry_id = getattr(entry_, "entry_id", None)
+                if isinstance(entry_id, str) and entry_id:
+                    affected_entry_ids.add(entry_id)
+
+        removed_devices += orphan_device_removals
 
         # 5) Reload entries. If only orphan entities were removed and we didn't touch any known devices,
         #    reload all entries of our domain to be safe.

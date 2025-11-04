@@ -36,12 +36,14 @@ from homeassistant.helpers.network import get_url
 from .ha_typing import CoordinatorEntity
 
 from .const import (
+    CONF_GOOGLE_EMAIL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
     INTEGRATION_VERSION,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     SERVICE_DEVICE_MANUFACTURER,
     SERVICE_DEVICE_MODEL,
+    SERVICE_DEVICE_NAME,
     SERVICE_DEVICE_TRANSLATION_KEY,
     map_token_hex_digest,
     map_token_secret_seed,
@@ -152,6 +154,21 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
         if include_subentry_identifier and self._subentry_identifier:
             identifiers.add((DOMAIN, f"{entry_id}:{self._subentry_identifier}:service"))
 
+        entry = getattr(self.coordinator, "config_entry", None)
+        entry_title: str | None = None
+        if entry is not None:
+            raw_title = getattr(entry, "title", None)
+            if isinstance(raw_title, str) and raw_title.strip():
+                entry_title = raw_title.strip()
+            else:
+                raw_data = getattr(entry, "data", {})
+                if isinstance(raw_data, Mapping):
+                    email = raw_data.get(CONF_GOOGLE_EMAIL)
+                    if isinstance(email, str) and email.strip():
+                        entry_title = email.strip()
+
+        service_name = f"{entry_title or SERVICE_DEVICE_NAME} – Service"
+
         return DeviceInfo(
             identifiers=identifiers,
             manufacturer=SERVICE_DEVICE_MANUFACTURER,
@@ -159,6 +176,7 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
             sw_version=INTEGRATION_VERSION,
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
             entry_type=dr.DeviceEntryType.SERVICE,
+            name=service_name,
             translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
             translation_placeholders={},
         )

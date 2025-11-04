@@ -205,7 +205,7 @@ def _build_flow(entry: _EntryStub) -> config_flow.ConfigFlow:
         flow._unique_id = value  # type: ignore[attr-defined]
 
     flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
-    flow._abort_if_unique_id_configured = lambda: None  # type: ignore[attr-defined]
+    flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
     return flow
 
 
@@ -487,6 +487,41 @@ async def test_subentry_manager_adoption_missing_owner_raises(
 
     with pytest.raises(HomeAssistantError):
         await manager.async_sync([definition])
+
+
+@pytest.mark.asyncio
+async def test_subentry_manager_preserves_adopted_owner_during_cleanup() -> None:
+    """Adopted subentries must not be removed via stale alias cleanup."""
+
+    entry = _EntryStub()
+    shared_unique_id = f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
+    owner = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Primary service",
+        unique_id=shared_unique_id,
+        subentry_id=_stable_subentry_id(entry.entry_id, "service-owner"),
+    )
+    entry.subentries[owner.subentry_id] = owner
+
+    hass = _HassStub(entry)
+    manager = ConfigEntrySubEntryManager(hass, entry)
+    manager._managed["service-legacy"] = owner  # type: ignore[attr-defined]
+    manager._cleanup["service-legacy"] = None  # type: ignore[attr-defined]
+
+    definition = ConfigEntrySubentryDefinition(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Google Find My service",
+        data={"features": sorted(SERVICE_FEATURE_PLATFORMS)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        unique_id=shared_unique_id,
+    )
+
+    await manager.async_sync([definition])
+
+    assert manager.get(SERVICE_SUBENTRY_KEY) is owner
+    assert "service-legacy" not in manager._managed  # type: ignore[attr-defined]
+    assert hass.config_entries.removed == []
 
 
 def test_supported_subentry_types_include_hub_handler() -> None:
