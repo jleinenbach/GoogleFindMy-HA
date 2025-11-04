@@ -360,8 +360,8 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
                 },
             )
         if result is None:
-            _LOGGER.error(
-                "Discovery flow create_flow returned None (domain=%s, context=%s)",
+            _LOGGER.debug(
+                "Discovery flow already in progress or skipped (domain=%s, context=%s)",
                 domain,
                 context,
             )
@@ -404,22 +404,16 @@ async def async_create_discovery_flow(
                 data,
                 discovery_key=discovery_key,
             )
-        except AttributeError:  # fall back to legacy path on missing helpers
+        except (AttributeError, NotImplementedError):
+            exc_type, _, _ = sys.exc_info()
+            exc_label = exc_type.__name__ if exc_type else "RuntimeError"
             _LOGGER.debug(
-                "Discovery flow helper raised AttributeError (domain=%s, context=%s)",
+                "Discovery flow helper raised %s (domain=%s, context=%s); falling back",
+                exc_label,
                 domain,
                 context,
                 exc_info=True,
             )
-            raise
-        except NotImplementedError:  # fall back when helper is not implemented
-            _LOGGER.debug(
-                "Discovery flow helper raised NotImplementedError (domain=%s, context=%s)",
-                domain,
-                context,
-                exc_info=True,
-            )
-            raise
         except Exception:  # noqa: BLE001 - surface unexpected failures to callers
             _LOGGER.error(
                 "Discovery flow helper raised unexpectedly (domain=%s, context=%s)",
@@ -429,11 +423,41 @@ async def async_create_discovery_flow(
             )
             raise
         else:
-            if inspect.isawaitable(result):
-                result = await cast(Awaitable[FlowResult | None], result)
-            if result is not None:
-                return cast(FlowResult, result)
-            _LOGGER.error("Discovery flow helper returned None")
+            try:
+                resolved = await _resolve_flow_result(result)
+            except (AttributeError, NotImplementedError):
+                exc_type, _, _ = sys.exc_info()
+                exc_label = exc_type.__name__ if exc_type else "RuntimeError"
+                _LOGGER.debug(
+                    "Discovery flow helper raised %s while awaiting result (domain=%s, context=%s); falling back",
+                    exc_label,
+                    domain,
+                    context,
+                    exc_info=True,
+                )
+            except Exception:  # noqa: BLE001 - surface unexpected failures to callers
+                _LOGGER.error(
+                    "Discovery flow helper raised unexpectedly during await (domain=%s, context=%s)",
+                    domain,
+                    context,
+                    exc_info=True,
+                )
+                raise
+            else:
+                if resolved is not None:
+                    return cast(FlowResult, resolved)
+                _LOGGER.debug(
+                    "Discovery flow helper returned None (domain=%s, context=%s) — treating as already in progress",
+                    domain,
+                    context,
+                )
+                return cast(
+                    FlowResult,
+                    {
+                        "type": data_entry_flow.FlowResultType.ABORT,
+                        "reason": "already_in_progress",
+                    },
+                )
 
     fallback_helper = _fallback_discovery_flow_helper
     if fallback_helper is None:
@@ -458,8 +482,8 @@ async def async_create_discovery_flow(
         )
         if fallback_result is not None:
             return cast(FlowResult, fallback_result)
-        _LOGGER.error(
-            "Fallback discovery flow helper returned None (domain=%s, context=%s)",
+        _LOGGER.debug(
+            "Fallback discovery flow helper returned None (domain=%s, context=%s) — treating as already in progress",
             domain,
             context,
         )
@@ -467,11 +491,11 @@ async def async_create_discovery_flow(
             FlowResult,
             {
                 "type": data_entry_flow.FlowResultType.ABORT,
-                "reason": "unknown",
+                "reason": "already_in_progress",
             },
         )
 
-    _LOGGER.error(
+    _LOGGER.debug(
         "Discovery flow helper unavailable; aborting flow creation (domain=%s, context=%s)",
         domain,
         context,

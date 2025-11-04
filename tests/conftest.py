@@ -539,6 +539,14 @@ def _stub_homeassistant() -> None:
 
     data_entry_flow = ModuleType("homeassistant.data_entry_flow")
 
+    class _FlowResultType:
+        """Enum-like container mirroring Home Assistant's flow result types."""
+
+        ABORT = "abort"
+        CREATE_ENTRY = "create_entry"
+        FORM = "form"
+        MENU = "menu"
+
     class _AbortFlow(Exception):
         """Stub AbortFlow matching Home Assistant's interface."""
 
@@ -547,6 +555,7 @@ def _stub_homeassistant() -> None:
             self.reason = reason
 
     data_entry_flow.AbortFlow = _AbortFlow  # type: ignore[attr-defined]
+    data_entry_flow.FlowResultType = _FlowResultType  # type: ignore[attr-defined]
     data_entry_flow.FlowResult = dict  # type: ignore[assignment]
     sys.modules["homeassistant.data_entry_flow"] = data_entry_flow
 
@@ -1095,6 +1104,7 @@ def _stub_homeassistant() -> None:
             return registry
         return _StubEntityRegistry()
 
+    entity_registry_module.RegistryEntry = _StubEntityRegistryEntry
     entity_registry_module.async_get = _entity_registry_for
 
     util_pkg = sys.modules.setdefault(
@@ -1124,6 +1134,7 @@ def _stub_homeassistant() -> None:
         def __init__(self, *_args, **_kwargs) -> None:
             pass
 
+    device_tracker_module.DOMAIN = "device_tracker"
     device_tracker_module.SourceType = SourceType
     device_tracker_module.TrackerEntity = TrackerEntity
     sys.modules["homeassistant.components.device_tracker"] = device_tracker_module
@@ -1340,6 +1351,10 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 self._snapshot_callback = snapshot_callback
                 self._init_kwargs = dict(kwargs)
                 self.subentry_manager: Any | None = None
+                self._device_names: dict[str, str] = {}
+                self._device_location_data: dict[str, Any] = {}
+                self._device_caps: dict[str, Any] = {}
+                self._present_last_seen: dict[str, float] = {}
                 if extra_attributes:
                     for key, value in extra_attributes.items():
                         setattr(self, key, _coerce_attribute(value))
@@ -1349,6 +1364,10 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
             def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
                 self._listeners.append(listener)
                 return lambda: None
+
+            def find_tracker_entity_entry(self, device_id: str) -> Any | None:
+                del device_id
+                return None
 
             def force_poll_due(self) -> None:  # pragma: no cover - default no-op
                 return None
