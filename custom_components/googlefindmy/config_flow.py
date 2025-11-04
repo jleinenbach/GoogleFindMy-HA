@@ -2121,6 +2121,27 @@ class ConfigFlow(
         """Return the options flow for an existing config entry."""
         return OptionsFlowHandler()
 
+    @staticmethod
+    def _should_expose_hidden_subentry_types() -> bool:
+        """Return True when all subentry types should be exposed to the caller."""
+
+        frame = inspect.currentframe()
+        if frame is None:
+            return False
+        try:
+            caller = frame.f_back
+            while caller is not None:
+                module_name = caller.f_globals.get("__name__")
+                if module_name == "homeassistant.config_entries" and caller.f_code.co_name in {
+                    "async_create_flow",
+                    "async_finish_flow",
+                }:
+                    return True
+                caller = caller.f_back
+        finally:
+            del frame
+        return False
+
     @classmethod
     @_typed_callback
     def async_get_supported_subentry_types(
@@ -2148,6 +2169,8 @@ class ConfigFlow(
 
             return _new
 
+        expose_hidden_types = cls._should_expose_hidden_subentry_types()
+
         handlers: dict[str, Callable[[], ConfigSubentryFlow]] = {
             SUBENTRY_TYPE_SERVICE: _factory(ServiceSubentryFlowHandler),
             SUBENTRY_TYPE_TRACKER: _factory(TrackerSubentryFlowHandler),
@@ -2159,7 +2182,14 @@ class ConfigFlow(
         ):
             handlers[SUBENTRY_TYPE_HUB] = _factory(HubSubentryFlowHandler)
 
-        return handlers
+        if expose_hidden_types:
+            return handlers
+
+        return {
+            key: factory
+            for key, factory in handlers.items()
+            if key == SUBENTRY_TYPE_HUB
+        }
 
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
@@ -3696,8 +3726,35 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        payload, title, _ = self._build_payload()
-        return self.async_create_entry(title=title, data=payload)
+        """Provision or update the logical subentry without duplicating entries."""
+
+        payload, title, unique_id = self._build_payload()
+
+        existing = self._resolve_existing()
+        if existing is not None:
+            update_callable = self.async_update_and_abort
+            update_kwargs = {
+                "data": payload,
+                "title": title,
+                "unique_id": unique_id,
+            }
+            update_signature = inspect.signature(update_callable).parameters
+            if "entry" in update_signature and "subentry" in update_signature:
+                return update_callable(self.config_entry, existing, **update_kwargs)
+            return update_callable(**update_kwargs)
+
+        create_callable = self.async_create_entry
+        create_kwargs: dict[str, Any] = {
+            "title": title,
+            "data": payload,
+        }
+        create_signature = inspect.signature(create_callable).parameters
+        if "unique_id" in create_signature:
+            create_kwargs["unique_id"] = unique_id
+        if "subentry_type" in create_signature:
+            create_kwargs["subentry_type"] = self._subentry_type
+
+        return create_callable(**create_kwargs)
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None

@@ -42,6 +42,7 @@ def test_supported_subentry_types_gate_hub_registration(
     subentry_support: _SubentrySupportToggle,
     simulate_legacy_core: bool,
     expects_hub: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Config flow should only expose hub subentries when supported."""
 
@@ -54,9 +55,9 @@ def test_supported_subentry_types_gate_hub_registration(
         SimpleNamespace()
     )
 
-    assert SUBENTRY_TYPE_SERVICE in mapping
-    assert SUBENTRY_TYPE_TRACKER in mapping
     assert (SUBENTRY_TYPE_HUB in mapping) is expects_hub
+    assert SUBENTRY_TYPE_SERVICE not in mapping
+    assert SUBENTRY_TYPE_TRACKER not in mapping
 
     if expects_hub:
         handler_factory = mapping[SUBENTRY_TYPE_HUB]
@@ -66,6 +67,19 @@ def test_supported_subentry_types_gate_hub_registration(
         assert handler._group_key == SERVICE_SUBENTRY_KEY  # type: ignore[attr-defined]
         assert handler._subentry_type == SUBENTRY_TYPE_HUB  # type: ignore[attr-defined]
         assert handler._features == SERVICE_FEATURE_PLATFORMS  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(
+            config_flow.ConfigFlow,
+            "_should_expose_hidden_subentry_types",
+            staticmethod(lambda: True),
+        )
+
+        manager_mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(  # type: ignore[arg-type]
+            SimpleNamespace()
+        )
+
+        assert SUBENTRY_TYPE_SERVICE in manager_mapping
+        assert SUBENTRY_TYPE_TRACKER in manager_mapping
 
 
 @pytest.mark.asyncio

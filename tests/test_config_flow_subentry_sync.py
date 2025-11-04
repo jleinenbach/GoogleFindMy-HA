@@ -31,6 +31,7 @@ from custom_components.googlefindmy.const import (
     OPT_OPTIONS_SCHEMA_VERSION,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
@@ -524,23 +525,33 @@ async def test_subentry_manager_preserves_adopted_owner_during_cleanup() -> None
     assert hass.config_entries.removed == []
 
 
-def test_supported_subentry_types_include_hub_handler() -> None:
-    """Config flow must expose the hub handler alongside service and tracker types."""
+def test_supported_subentry_types_hide_service_and_tracker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UI mapping hides service/tracker while manager access still resolves them."""
 
     entry = _EntryStub()
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)
 
-    service_factory = mapping[SUBENTRY_TYPE_SERVICE]
-    tracker_factory = mapping[SUBENTRY_TYPE_TRACKER]
-    hub_factory = mapping["hub"]
-
-    assert callable(service_factory)
-    assert callable(tracker_factory)
+    assert set(mapping) == {SUBENTRY_TYPE_HUB}
+    hub_factory = mapping[SUBENTRY_TYPE_HUB]
     assert callable(hub_factory)
-
-    assert isinstance(service_factory(), config_flow.ServiceSubentryFlowHandler)
-    assert isinstance(tracker_factory(), config_flow.TrackerSubentryFlowHandler)
     assert isinstance(hub_factory(), config_flow.HubSubentryFlowHandler)
+
+    monkeypatch.setattr(
+        config_flow.ConfigFlow,
+        "_should_expose_hidden_subentry_types",
+        staticmethod(lambda: True),
+    )
+
+    manager_mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)
+
+    assert set(manager_mapping) == {
+        SUBENTRY_TYPE_SERVICE,
+        SUBENTRY_TYPE_TRACKER,
+        SUBENTRY_TYPE_HUB,
+    }
+
+    assert isinstance(manager_mapping[SUBENTRY_TYPE_SERVICE](), config_flow.ServiceSubentryFlowHandler)
+    assert isinstance(manager_mapping[SUBENTRY_TYPE_TRACKER](), config_flow.TrackerSubentryFlowHandler)
 
 
 @pytest.mark.asyncio
