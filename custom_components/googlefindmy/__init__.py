@@ -59,6 +59,8 @@ from homeassistant.const import (
     EVENT_HOMEASSISTANT_STARTED,
     EVENT_HOMEASSISTANT_STOP,
     Platform,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
 )
 from homeassistant.core import CoreState, Event, HomeAssistant
 from homeassistant.exceptions import (
@@ -71,6 +73,7 @@ from homeassistant.helpers import (
     entity_registry as er,
     issue_registry as ir,
 )
+from homeassistant.helpers.entity_component import split_entity_id
 from homeassistant.helpers.storage import Store
 
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
@@ -157,19 +160,9 @@ TriggerCloudDiscoveryCallable = Callable[..., Awaitable[Any]]
 RedactAccountForLogCallable = Callable[..., str]
 
 if TYPE_CHECKING:
-    try:  # pragma: no cover - type-checking fallback for stripped test envs
-        from homeassistant.helpers.entity_registry import (
-            RegistryEntryDisabler as RegistryEntryDisablerType,
-        )
-    except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
-        from enum import StrEnum
-
-        class _RegistryEntryDisablerType(StrEnum):
-            """Minimal fallback matching the Home Assistant enum interface."""
-
-            INTEGRATION = "integration"
-
-        RegistryEntryDisablerType = _RegistryEntryDisablerType
+    from homeassistant.helpers.entity_registry import (
+        RegistryEntryDisabler as RegistryEntryDisablerType,
+    )
 
     from .NovaApi.ExecuteAction.LocateTracker.location_request import (
         FcmReceiverProtocol as NovaFcmReceiverProtocol,
@@ -353,14 +346,10 @@ try:  # pragma: no cover - compatibility shim for stripped test envs
     from homeassistant.helpers.entity_registry import (
         RegistryEntryDisabler as _RegistryEntryDisabler,
     )
-except ImportError:  # pragma: no cover - Home Assistant test doubles may omit enum
-    from types import SimpleNamespace
-
+except Exception:  # pragma: no cover - Home Assistant test doubles may omit enum
     _RegistryEntryDisabler = SimpleNamespace(INTEGRATION="integration")
 
-RegistryEntryDisabler = cast(
-    "RegistryEntryDisablerType", _RegistryEntryDisabler
-)
+RegistryEntryDisabler = cast("RegistryEntryDisablerType", _RegistryEntryDisabler)
 
 # Optional feature: GoogleHomeFilter (guard import to avoid hard dependency)
 if TYPE_CHECKING:
@@ -396,6 +385,106 @@ except AttributeError:
         CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _async_self_heal_duplicate_entities(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Detect and remove duplicate entities tied to ``entry``."""
+
+    entity_registry = er.async_get(hass)
+
+    groups: dict[tuple[str, str | None, str | None, str], list[er.RegistryEntry]] = {}
+
+    for entity_entry in _iter_config_entry_entities(entity_registry, entry.entry_id):
+        if entity_entry.platform != DOMAIN:
+            continue
+
+        try:
+            entity_domain, _ = split_entity_id(entity_entry.entity_id)
+        except ValueError:
+            entity_domain = None
+
+        logical_name = (
+            (entity_entry.translation_key or "").strip()
+            or (entity_entry.original_name or "").strip()
+            or entity_entry.entity_id
+        )
+
+        key = (
+            entity_entry.config_entry_id,
+            entity_entry.device_id,
+            entity_domain,
+            logical_name,
+        )
+        groups.setdefault(key, []).append(entity_entry)
+
+    duplicates: list[str] = []
+
+    for entries in groups.values():
+        if len(entries) <= 1:
+            continue
+
+        canonical = _pick_canonical_entity_entry(hass, entries)
+        for candidate in entries:
+            if candidate.entity_id == canonical.entity_id:
+                continue
+            duplicates.append(candidate.entity_id)
+
+    if not duplicates:
+        return
+
+    _LOGGER.info(
+        "Removing %s duplicate Google Find My entities for config entry %s: %s",
+        len(duplicates),
+        entry.entry_id,
+        ", ".join(sorted(duplicates)),
+    )
+
+    for entity_id in duplicates:
+        if entity_id in entity_registry.entities:
+            entity_registry.async_remove(entity_id)
+
+
+def _compute_entity_score(
+    hass: HomeAssistant,
+    entity_entry: er.RegistryEntry,
+) -> int:
+    """Return a priority score describing how suitable an entity is to keep."""
+
+    score = 0
+
+    if entity_entry.translation_key:
+        score += 4
+
+    if entity_entry.disabled_by is None:
+        score += 3
+
+    state = hass.states.get(entity_entry.entity_id)
+    if state is not None and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        score += 3
+
+    return score
+
+
+def _pick_canonical_entity_entry(
+    hass: HomeAssistant,
+    entries: list[er.RegistryEntry],
+) -> er.RegistryEntry:
+    """Pick the entity registry entry that should remain active."""
+
+    canonical = entries[0]
+    best_score = _compute_entity_score(hass, canonical)
+
+    for candidate in entries[1:]:
+        score = _compute_entity_score(hass, candidate)
+        if score > best_score:
+            canonical = candidate
+            best_score = score
+
+    return canonical
+
 
 _CONFIG_FLOW_HELPERS: dict[str, Any] | None = None
 # Keep the per-entry health probe timeout small so rebuilds remain responsive.
@@ -1341,6 +1430,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     nova_refcount: int
     services_lock: asyncio.Lock
     services_registered: bool
+    providers_registered: bool
     views_registered: bool
 
 
@@ -1788,6 +1878,11 @@ async def _async_relink_button_devices(hass: HomeAssistant, entry: ConfigEntry) 
         )
         return
 
+    if not getattr(entity_registry, "entities", None):
+        return
+    if not getattr(device_registry, "devices", None):
+        return
+
     subentry_map = _resolve_subentry_identifier_map(entry)
     fallback_subentry_id = _default_button_subentry_identifier(subentry_map)
     registry_entries = _iter_config_entry_entities(entity_registry, entry.entry_id)
@@ -1892,6 +1987,11 @@ async def _async_relink_subentry_entities(
             entry_id,
             err,
         )
+        return
+
+    if not getattr(entity_registry, "entities", None):
+        return
+    if not getattr(device_registry, "devices", None):
         return
 
     subentry_map = _resolve_subentry_identifier_map(entry)
@@ -2494,7 +2594,7 @@ def _resolve_canonical_from_any(hass: HomeAssistant, arg: str) -> tuple[str, str
         raise HomeAssistantError(f"Device '{arg}' has no valid {DOMAIN} identifier")
 
     # 2) entity_id
-    if "." in arg:
+    if "." in arg and "/" not in arg and ":" not in arg:
         ent = ent_reg.async_get(arg)
         if ent and ent.platform == DOMAIN and ent.device_id:
             dev = dev_reg.async_get(ent.device_id)
@@ -2552,14 +2652,27 @@ async def async_handle_manual_locate(
 
 
 def _redact_url_token(url: str) -> str:
-    """Return URL with any 'token' query parameter value redacted for safe logging."""
+    """Return URL with any sensitive query parameter values redacted for logging."""
+
     try:
         parts = urlsplit(url)
         q = parse_qsl(parts.query, keep_blank_values=True)
+        sensitive = {
+            "token",
+            "access_token",
+            "id_token",
+            "auth",
+            "key",
+            "apikey",
+            "api_key",
+            "signature",
+        }
         redacted: list[tuple[str, str]] = []
         for k, v in q:
-            if k.lower() == "token" and v:
-                red_v = (v[:2] + "…" + v[-2:]) if len(v) > 4 else "****"
+            if k.lower() in sensitive and v:
+                red_v = "****"
+                if len(v) > 4:
+                    red_v = f"{v[:2]}…{v[-2:]}"
                 redacted.append((k, red_v))
             else:
                 redacted.append((k, v))
@@ -2586,11 +2699,15 @@ def _is_active_entry(entry: ConfigEntry) -> bool:
     """
     if entry.disabled_by:
         return False
-    return entry.state in {
+    active_states = {
         ConfigEntryState.LOADED,
         ConfigEntryState.SETUP_IN_PROGRESS,
         ConfigEntryState.SETUP_RETRY,
     }
+    setup_error = getattr(ConfigEntryState, "SETUP_ERROR", None)
+    if setup_error is not None:
+        active_states.add(setup_error)
+    return entry.state in active_states
 
 
 def _primary_active_entry(entries: list[ConfigEntry]) -> ConfigEntry | None:
@@ -2650,7 +2767,7 @@ async def _async_soft_migrate_data_to_options(
         _LOGGER.info(
             "Soft-migrating %d option(s) from data to options for '%s'",
             len(new_options) - len(entry.options),
-            entry.title,
+            _label_entry_for_log(entry),
         )
         hass.config_entries.async_update_entry(entry, options=new_options)
 
@@ -2754,7 +2871,7 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
             collisions.extend(legacy_result.collisions)
             _LOGGER.warning(
                 "Unique-ID migration incomplete for '%s': migrated=%d / total_needed=%d, collisions=%d",
-                entry.title,
+                _label_entry_for_log(entry),
                 legacy_result.migrated,
                 legacy_result.total_candidates,
                 len(legacy_result.collisions),
@@ -2763,9 +2880,9 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
             current_options["unique_id_migrated"] = True
             options_changed = True
             if legacy_result.total_candidates or legacy_result.migrated:
-                _LOGGER.info(
+                _LOGGER.debug(
                     "Unique-ID migration complete for '%s': migrated=%d, already_scoped=%d, nonprefix=%d",
-                    entry.title,
+                    _label_entry_for_log(entry),
                     legacy_result.migrated,
                     legacy_result.skipped_already_scoped,
                     legacy_result.skipped_nonprefix,
@@ -2778,7 +2895,7 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
             collisions.extend(subentry_result.collisions)
             _LOGGER.warning(
                 "Subentry unique-ID migration incomplete for '%s': updated=%d, already_current=%d, skipped=%d, collisions=%d",
-                entry.title,
+                _label_entry_for_log(entry),
                 subentry_result.updated,
                 subentry_result.already_current,
                 subentry_result.skipped,
@@ -2788,9 +2905,9 @@ async def _async_migrate_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> 
             current_options["unique_id_subentry_migrated"] = True
             options_changed = True
             if subentry_result.updated or subentry_result.already_current:
-                _LOGGER.info(
+                _LOGGER.debug(
                     "Subentry unique-ID migration complete for '%s': updated=%d, already_current=%d, skipped=%d",
-                    entry.title,
+                    _label_entry_for_log(entry),
                     subentry_result.updated,
                     subentry_result.already_current,
                     subentry_result.skipped,
@@ -3276,6 +3393,8 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
     _ensure_runtime_imports()
     bucket = _domain_data(hass)
     fcm_lock: asyncio.Lock = _ensure_fcm_lock(bucket)
+    if not isinstance(bucket.get("providers_registered"), bool):
+        bucket["providers_registered"] = False
     if fcm_lock.locked():
         contention = bucket.get("fcm_lock_contention_count")
         if not isinstance(contention, int):
@@ -3283,6 +3402,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
         bucket["fcm_lock_contention_count"] = contention + 1
     async with fcm_lock:
         refcount = _get_fcm_refcount(bucket)
+        providers_registered = bucket.get("providers_registered", False)
         raw_receiver = cast(object | None, bucket.get("fcm_receiver"))
         fcm = raw_receiver if isinstance(raw_receiver, FcmReceiverHA) else None
 
@@ -3355,12 +3475,14 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
                 return _domain_fcm_provider(hass)
 
             provider_fn: Callable[[], FcmReceiverHA] = provider
-            loc_register_fcm_provider(
-                cast(Callable[[], NovaFcmReceiverProtocol], provider_fn)
-            )
-            api_register_fcm_provider(
-                cast(Callable[[], ApiFcmReceiverProtocol], provider_fn)
-            )
+            if not providers_registered:
+                loc_register_fcm_provider(
+                    cast(Callable[[], NovaFcmReceiverProtocol], provider_fn)
+                )
+                api_register_fcm_provider(
+                    cast(Callable[[], ApiFcmReceiverProtocol], provider_fn)
+                )
+                bucket["providers_registered"] = True
 
         new_refcount = refcount + 1
         _set_fcm_refcount(bucket, new_refcount)
@@ -3393,6 +3515,8 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
             api_unregister_fcm_provider()
         except Exception:
             pass
+
+        bucket["providers_registered"] = False
 
         if fcm is not None:
             try:
@@ -3502,6 +3626,21 @@ def _mask_email_for_logs(email: str | None) -> str:
 
     masked_local = (local[0] + "***") if len(local) > 1 else "*"
     return f"{masked_local}@{domain}"
+
+
+def _label_entry_for_log(entry: ConfigEntry) -> str:
+    """Return a privacy-safe label for log messages referencing ``entry``."""
+
+    email = _extract_email_from_entry(entry)
+    if email:
+        return _mask_email_for_logs(email)
+    title = getattr(entry, "title", None)
+    if isinstance(title, str) and title:
+        return title
+    entry_id = getattr(entry, "entry_id", None)
+    if isinstance(entry_id, str) and entry_id:
+        return entry_id
+    return "<unknown>"
 
 
 def _issue_exists(hass: HomeAssistant, issue_id: str) -> bool:
@@ -3930,6 +4069,8 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     _ensure_cloud_scan_results(bucket, runtime["results"])
     _ensure_entries_bucket(bucket)  # entry_id -> RuntimeData
     _ensure_device_owner_index(bucket)  # canonical_id -> entry_id (E2.5 scaffold)
+    if not isinstance(bucket.get("providers_registered"), bool):
+        bucket["providers_registered"] = False
 
     # Use a lock + idempotent flag to avoid double registration on racey startups.
     services_lock: asyncio.Lock = _ensure_services_lock(bucket)
@@ -4016,7 +4157,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         """Flush deferred saves on Home Assistant stop."""
         try:
             await cache.flush()
-        except Exception as err:
+        except (HomeAssistantError, ValueError, asyncio.TimeoutError) as err:
             _LOGGER.debug("Cache flush on stop raised: %s", err)
 
     entry.async_on_unload(
@@ -4451,6 +4592,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Forward platforms so RestoreEntity can populate immediately
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    hass.async_create_task(
+        _async_self_heal_duplicate_entities(hass, entry),
+        name=f"{DOMAIN}.self_heal_duplicates.{entry.entry_id}",
+    )
 
     # Defer the first refresh until HA is fully started
     listener_active = False

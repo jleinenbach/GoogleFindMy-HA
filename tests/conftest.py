@@ -572,6 +572,8 @@ def _stub_homeassistant() -> None:
     const_module.ATTR_LATITUDE = "latitude"
     const_module.ATTR_LONGITUDE = "longitude"
     const_module.ATTR_GPS_ACCURACY = "gps_accuracy"
+    const_module.STATE_UNAVAILABLE = "unavailable"
+    const_module.STATE_UNKNOWN = "unknown"
     const_module.Platform = Platform
     sys.modules["homeassistant.const"] = const_module
 
@@ -656,6 +658,14 @@ def _stub_homeassistant() -> None:
 
     entity_module.DeviceInfo = DeviceInfo
 
+    def split_entity_id(entity_id: str) -> tuple[str, str]:
+        if "." not in entity_id:
+            raise ValueError(entity_id)
+        domain, object_id = entity_id.split(".", 1)
+        return domain, object_id
+
+    entity_module.split_entity_id = split_entity_id
+
     class EntityCategory:
         CONFIG = "config"
         DIAGNOSTIC = "diagnostic"
@@ -663,6 +673,13 @@ def _stub_homeassistant() -> None:
     entity_module.EntityCategory = EntityCategory
     sys.modules["homeassistant.helpers.entity"] = entity_module
     setattr(helpers_pkg, "entity", entity_module)
+
+    entity_component_module = ModuleType(
+        "homeassistant.helpers.entity_component"
+    )
+    entity_component_module.split_entity_id = split_entity_id
+    sys.modules["homeassistant.helpers.entity_component"] = entity_component_module
+    setattr(helpers_pkg, "entity_component", entity_component_module)
 
     from collections.abc import Callable, Iterable
 
