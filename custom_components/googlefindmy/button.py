@@ -1,8 +1,4 @@
 # custom_components/googlefindmy/button.py
-#
-#  GoogleFindMyTools - A set of tools to interact with the Google Find My API
-#  Copyright © 2024 Leon Böttger. All rights reserved.
-
 """Button platform for Google Find My Device.
 
 This module exposes per-device buttons that trigger actions on Google Find My
