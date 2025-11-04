@@ -674,6 +674,13 @@ def _stub_homeassistant() -> None:
     sys.modules["homeassistant.helpers.entity"] = entity_module
     setattr(helpers_pkg, "entity", entity_module)
 
+    entity_component_module = ModuleType(
+        "homeassistant.helpers.entity_component"
+    )
+    entity_component_module.split_entity_id = split_entity_id
+    sys.modules["homeassistant.helpers.entity_component"] = entity_component_module
+    setattr(helpers_pkg, "entity_component", entity_component_module)
+
     from collections.abc import Callable, Iterable
 
     entity_platform_module = ModuleType("homeassistant.helpers.entity_platform")
