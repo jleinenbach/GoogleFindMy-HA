@@ -1,7 +1,4 @@
 # custom_components/googlefindmy/__init__.py
-#
-#  GoogleFindMyTools - A set of tools to interact with the Google Find My API
-#  Copyright © 2024 Leon Böttger. All rights reserved.
 
 """Google Find My Device integration for Home Assistant.
 
