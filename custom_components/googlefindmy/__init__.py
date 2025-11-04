@@ -1091,6 +1091,19 @@ class ConfigEntrySubEntryManager:
 
             while True:
                 if existing is None:
+                    _LOGGER.info(
+                        "[%s] async_sync: Creating new subentry for key '%s' (unique_id=%s)",
+                        self._entry.entry_id,
+                        key,
+                        unique_id,
+                    )
+                    _LOGGER.debug(
+                        "[%s] async_sync: ADD PAYLOAD: type=%s, title=%s, group_key=%s",
+                        self._entry.entry_id,
+                        subentry_type,
+                        definition.title,
+                        definition.data.get("group_key"),
+                    )
                     new_subentry: ConfigSubentry | None = None
                     add_result: Awaitable[ConfigSubentry] | ConfigSubentry
                     try:
@@ -1166,6 +1179,12 @@ class ConfigEntrySubEntryManager:
                     self._managed[key] = stored
                     break
 
+                _LOGGER.debug(
+                    "[%s] async_sync: Updating existing subentry for key '%s' (unique_id=%s)",
+                    self._entry.entry_id,
+                    key,
+                    unique_id,
+                )
                 try:
                     changed = self._hass.config_entries.async_update_subentry(
                         self._entry,

@@ -157,11 +157,20 @@ async def async_setup_entry(
     def _add_new_devices() -> None:
         new_entities: list[ButtonEntity] = []
         for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
-            dev_id = device.get("id")
-            if not dev_id or dev_id in known_ids:
+            dev_id = device.get("id") if isinstance(device, dict) else None
+            if not dev_id:
+                continue
+
+            if dev_id in known_ids:
+                _LOGGER.debug("Button setup: Skipping known dev_id '%s'", dev_id)
                 continue
 
             label = _derive_device_label(device)
+            _LOGGER.debug(
+                "Button setup: Adding new buttons for dev_id '%s' (label=%s)",
+                dev_id,
+                label,
+            )
             new_entities.append(
                 GoogleFindMyPlaySoundButton(
                     coordinator,
