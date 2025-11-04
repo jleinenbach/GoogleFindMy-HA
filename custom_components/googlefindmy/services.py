@@ -544,6 +544,19 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         ent_reg = er.async_get(hass)
         entries = hass.config_entries.async_entries(DOMAIN)
 
+        affected_entry_ids: set[str] = set()
+        candidate_devices: set[str] = set()
+
+        for ent in list(ent_reg.entities.values()):
+            if getattr(ent, "platform", None) != DOMAIN:
+                continue
+            device_id = getattr(ent, "device_id", None)
+            if isinstance(device_id, str) and device_id:
+                candidate_devices.add(device_id)
+            entry_id = getattr(ent, "config_entry_id", None)
+            if isinstance(entry_id, str) and entry_id:
+                affected_entry_ids.add(entry_id)
+
         coalesce_accounts = ctx.get("coalesce_account_entries")
         extract_email = ctx.get("extract_normalized_email")
         if callable(coalesce_accounts):
@@ -923,14 +936,28 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         def _dev_is_ours(dev: dr.DeviceEntry | None) -> bool:
             if dev is None:
                 return False
-            has_our_ident = any(domain == DOMAIN for domain, _ in dev.identifiers)
-            if not has_our_ident:
+            entry_ids = getattr(dev, "config_entries", None)
+            if not entry_ids:
                 return False
-            for eid in dev.config_entries:
-                e = hass.config_entries.async_get_entry(eid)
-                if not e or e.domain != DOMAIN:
+            owns_any = False
+            for eid in entry_ids:
+                entry_obj = hass.config_entries.async_get_entry(eid)
+                if entry_obj is None or entry_obj.domain != DOMAIN:
                     return False
-            return True
+                owns_any = True
+            if owns_any:
+                return True
+            identifiers = getattr(dev, "identifiers", ())
+            if not isinstance(identifiers, Iterable):
+                return False
+            for candidate in identifiers:
+                try:
+                    domain, _ = candidate
+                except (TypeError, ValueError):
+                    continue
+                if domain == DOMAIN:
+                    return True
+            return False
 
         def _is_service_device(dev: dr.DeviceEntry) -> bool:
             # service device can be 'integration' or entry-scoped name
@@ -945,9 +972,6 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             )
 
         # 1) Determine candidate devices (strictly ours), optionally filtered by passed HA device_ids.
-        affected_entry_ids: set[str] = set()
-        candidate_devices: set[str] = set()
-
         if target_device_ids:
             for d in target_device_ids:
                 dev = dev_reg.async_get(d)

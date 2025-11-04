@@ -2138,6 +2138,11 @@ class ConfigFlow(
     ) -> FlowResult:
         """Ask the user to choose how to provide credentials."""
 
+        try:
+            self._abort_if_unique_id_configured()
+        except data_entry_flow.AbortFlow:
+            return self.async_abort(reason="already_configured")
+
         context_obj = getattr(self, "context", None)
         context_snapshot: dict[str, Any]
         if isinstance(context_obj, Mapping):
@@ -2145,6 +2150,15 @@ class ConfigFlow(
         else:
             context_snapshot = {}
         _LOGGER.info("Flow start: async_step_user (context=%s)", context_snapshot)
+
+        if user_input is None and isinstance(
+            self._auth_data.get(CONF_GOOGLE_EMAIL), str
+        ):
+            email = cast(str, self._auth_data[CONF_GOOGLE_EMAIL])
+            try:
+                await self._async_prepare_account_context(email=email)
+            except data_entry_flow.AbortFlow:
+                return self.async_abort(reason="already_configured")
 
         if user_input is not None:
             method = user_input.get("auth_method")
@@ -2161,6 +2175,11 @@ class ConfigFlow(
                 _LOGGER.debug(
                     "User step: confirm-only submission detected; proceeding to device selection.",
                 )
+                email = cast(str, self._auth_data.get(CONF_GOOGLE_EMAIL))
+                try:
+                    await self._async_prepare_account_context(email=email)
+                except data_entry_flow.AbortFlow:
+                    return self.async_abort(reason="already_configured")
                 return await self.async_step_device_selection()
         _LOGGER.debug("User step: presenting auth method selection form.")
         return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
