@@ -1,8 +1,4 @@
 # custom_components/googlefindmy/services.py
-#
-#  GoogleFindMyTools - A set of tools to interact with the Google Find My API
-#  Copyright © 2024 Leon Böttger. All rights reserved.
-
 """Service handlers & registration for Google Find My Device (Home Assistant).
 
 Design goals
