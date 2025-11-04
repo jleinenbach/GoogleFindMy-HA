@@ -34,6 +34,8 @@ from binascii import Error as BinasciiError, unhexlify
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from homeassistant.exceptions import ConfigEntryAuthFailed
+
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.Auth.username_provider import (
     async_get_username,
@@ -285,12 +287,18 @@ async def async_get_owner_key(
     if user is None:
         raise RuntimeError("Username is not configured; cannot retrieve owner key.")
 
-    raw_value = await _get_or_generate_user_owner_key_hex(
-        user,
-        cache=cache,
-        eid_info_getter=eid_info_getter,
-        shared_key_getter=shared_key_getter,
-    )
+    try:
+        raw_value = await _get_or_generate_user_owner_key_hex(
+            user,
+            cache=cache,
+            eid_info_getter=eid_info_getter,
+            shared_key_getter=shared_key_getter,
+        )
+    except SpotApiEmptyResponseError as exc:
+        raise ConfigEntryAuthFailed(
+            "Owner key retrieval failed: SPOT returned empty/trailers-only body"
+            " (auth/session issue). Please re-authenticate."
+        ) from exc
 
     # 1) Fast path: try hex (canonical format)
     key_bytes: bytes
