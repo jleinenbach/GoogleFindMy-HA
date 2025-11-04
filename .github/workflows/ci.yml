@@ -14,8 +14,59 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Detect hassfest auto-fix check
+        id: hassfest_autofix
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.request
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          target_sha = os.environ["TARGET_SHA"]
+          token = os.environ.get("GITHUB_TOKEN")
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{repository}/commits/{target_sha}/check-runs"
+          )
+          request.add_header("Accept", "application/vnd.github+json")
+          if token:
+              request.add_header("Authorization", f"Bearer {token}")
+
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  payload = json.load(response)
+          except urllib.error.HTTPError as exc:  # pragma: no cover - network error surface
+              print(f"Warning: unable to query check runs (status={exc.code}). Assuming none present.")
+              payload = {"check_runs": []}
+          except urllib.error.URLError as exc:  # pragma: no cover - network error surface
+              print(f"Warning: unable to reach GitHub API ({exc}). Assuming no matching checks.")
+              payload = {"check_runs": []}
+
+          pattern = re.compile(r"(?i)^hassfest( \(auto-fix\)( / hassfest.*)?)?$")
+          has_match = any(
+              pattern.search(run.get("name", ""))
+              for run in payload.get("check_runs", [])
+          )
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as handle:
+              handle.write(f"found={'true' if has_match else 'false'}\n")
+
+          print(
+              "Detected hassfest (auto-fix) check: {}".format(
+                  "yes" if has_match else "no"
+              )
+          )
+          PY
+
       - name: Wait for hassfest auto-fix workflow to finish
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: steps.hassfest_autofix.outputs.found == 'true'
         uses: lewagon/wait-on-check-action@v1.3.3
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
