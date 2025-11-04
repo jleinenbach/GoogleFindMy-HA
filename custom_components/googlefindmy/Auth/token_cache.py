@@ -26,6 +26,8 @@ import asyncio
 import json
 import logging
 import os
+import threading
+from concurrent.futures import CancelledError
 from typing import Any, Mapping, TypedDict, TypeVar, cast
 from collections.abc import Awaitable, Callable
 
@@ -75,6 +77,25 @@ class TokenCache:
             raise ValueError("TokenCache requires a non-empty entry_id.")
 
         self._hass = hass
+
+        loop: asyncio.AbstractEventLoop | None = getattr(hass, "loop", None)
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError as err:  # pragma: no cover - defensive
+                raise RuntimeError(
+                    "TokenCache requires an active event loop when Home Assistant does not expose hass.loop"
+                ) from err
+            if not hasattr(hass, "loop"):
+                try:
+                    setattr(hass, "loop", loop)
+                except Exception:  # noqa: BLE001 - defensive best-effort for stubs
+                    _LOGGER.debug("Unable to attach detected loop to hass stub", exc_info=True)
+
+        if loop is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("TokenCache could not determine the Home Assistant event loop")
+
+        self._loop = loop
         self.entry_id = normalized_entry_id
         # Each entry gets its own storage file: f"{STORAGE_KEY}_{entry_id}"
         self._store: Store[CacheData] = Store(
@@ -83,6 +104,8 @@ class TokenCache:
         self._data: CacheState = {}
         self._write_lock = asyncio.Lock()
         self._per_key_locks: dict[str, asyncio.Lock] = {}
+        self._per_key_lock_loops: dict[str, asyncio.AbstractEventLoop] = {}
+        self._lock_factory_guard = threading.Lock()
         self._closed = False
 
     # ------------------------------- Factory ---------------------------------
@@ -219,7 +242,7 @@ class TokenCache:
         if (existing := self._data.get(name)) is not None:
             return cast(_ValueT, existing)
 
-        lock = self._per_key_locks.setdefault(name, asyncio.Lock())
+        lock = self._ensure_per_key_lock(name)
         async with lock:
             if (existing := self._data.get(name)) is not None:
                 return cast(_ValueT, existing)
@@ -272,6 +295,7 @@ class TokenCache:
         await self._store.async_remove()
         self._data.clear()
         self._per_key_locks.clear()
+        self._per_key_lock_loops.clear()
         self._closed = True
 
     # ------------------------------ Utilities --------------------------------
@@ -340,6 +364,41 @@ class TokenCache:
             )
 
         return coerced
+
+    def _ensure_per_key_lock(self, name: str) -> asyncio.Lock:
+        """Return a per-key lock bound to the Home Assistant event loop."""
+
+        target_loop = self._loop
+
+        running_loop: asyncio.AbstractEventLoop | None
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        with self._lock_factory_guard:
+            existing = self._per_key_locks.get(name)
+            existing_loop = self._per_key_lock_loops.get(name)
+            if existing is not None and existing_loop is target_loop:
+                return existing
+
+            if running_loop is target_loop and running_loop is not None:
+                lock = asyncio.Lock()
+            else:
+                async def _factory() -> asyncio.Lock:
+                    return asyncio.Lock()
+
+                future = asyncio.run_coroutine_threadsafe(_factory(), target_loop)
+                try:
+                    lock = future.result()
+                except CancelledError as err:  # pragma: no cover - defensive
+                    raise RuntimeError("Lock creation cancelled") from err
+                except Exception as err:  # pragma: no cover - defensive
+                    raise RuntimeError("Failed to create lock on hass loop") from err
+
+            self._per_key_locks[name] = lock
+            self._per_key_lock_loops[name] = target_loop
+            return lock
 
 
 # -------------------------- Global registry & facade --------------------------
