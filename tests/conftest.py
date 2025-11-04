@@ -1351,6 +1351,10 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 self._snapshot_callback = snapshot_callback
                 self._init_kwargs = dict(kwargs)
                 self.subentry_manager: Any | None = None
+                self._device_names: dict[str, str] = {}
+                self._device_location_data: dict[str, Any] = {}
+                self._device_caps: dict[str, Any] = {}
+                self._present_last_seen: dict[str, float] = {}
                 if extra_attributes:
                     for key, value in extra_attributes.items():
                         setattr(self, key, _coerce_attribute(value))
@@ -1360,6 +1364,10 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
             def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
                 self._listeners.append(listener)
                 return lambda: None
+
+            def find_tracker_entity_entry(self, device_id: str) -> Any | None:
+                del device_id
+                return None
 
             def force_poll_due(self) -> None:  # pragma: no cover - default no-op
                 return None

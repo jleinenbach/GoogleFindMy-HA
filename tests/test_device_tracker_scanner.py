@@ -76,6 +76,10 @@ def test_scanner_triggers_cloud_discovery(
             self.hass = hass
             self.config_entry = None
             self._bootstrap_consumed = False
+            self._device_names: dict[str, str] = {}
+            self._device_location_data: dict[str, Any] = {}
+            self._device_caps: dict[str, Any] = {}
+            self._present_last_seen: dict[str, float] = {}
 
         def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
             self._listeners.append(listener)

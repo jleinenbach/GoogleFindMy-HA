@@ -66,7 +66,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from collections.abc import Callable, Mapping, Sequence
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 if TYPE_CHECKING:
     from homeassistant.core import Event
@@ -1737,7 +1737,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             dev_config_subentry_id = getattr(device, "config_subentry_id", None)
 
             needs_name_refresh = (
-                service_device_name is not None
+                supports_translations is not False
+                and service_device_name is not None
                 and service_device_name != existing_name
                 and not has_user_name
             )
@@ -1850,8 +1851,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     if getattr(candidate, "entity_id", None) == entity_id:
                         entry = candidate
                         break
-            if entry is not None:
-                return entry
+            if entry is None:
+                entry = SimpleNamespace(
+                    entity_id=entity_id,
+                    unique_id=unique_id,
+                    domain=DEVICE_TRACKER_DOMAIN,
+                    platform=DOMAIN,
+                    config_entry_id=entry_id,
+                )
+            return cast("EntityRegistryEntry", entry)
 
         for entry in ent_registry_values:
             if entry.domain != DEVICE_TRACKER_DOMAIN or entry.platform != DOMAIN:
@@ -1885,6 +1893,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     # Optional back-compat alias (some callers may use the public-style name)
     ensure_service_device_exists = _ensure_service_device_exists
+
+    def _ensure_device_name_cache(self) -> dict[str, str]:
+        """Return the lazily initialized device-name cache."""
+
+        cache = getattr(self, "_device_names", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_device_names", cache)
+        return cache
 
     def _ensure_pending_via_container(self) -> set[str]:
         """Return the shared set used to track devices awaiting via updates."""
@@ -3120,13 +3137,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # If the list is empty, leave _present_last_seen untouched; TTL will decide availability.
 
             # 2) Update internal name/capability caches for ALL devices
+            name_cache = self._ensure_device_name_cache()
             for dev in filtered_devices:
                 dev_id = dev["id"]
                 raw_name = dev.get("name")
                 if isinstance(raw_name, str) and raw_name.strip():
-                    self._device_names[dev_id] = raw_name
-                elif dev_id not in self._device_names:
-                    self._device_names[dev_id] = dev_id
+                    name_cache[dev_id] = raw_name
+                elif dev_id not in name_cache:
+                    name_cache[dev_id] = dev_id
 
                 # Normalize and cache the "can ring" capability
                 if "can_ring" in dev:
@@ -3220,7 +3238,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             ]
             for dev in visible_devices:
                 dev_id = dev["id"]
-                cached_name = self._device_names.get(dev_id)
+                cached_name = name_cache.get(dev_id)
                 name = dev.get("name")
                 if cached_name and (not isinstance(name, str) or not name.strip()):
                     dev["name"] = cached_name
@@ -3901,10 +3919,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # Preserve recency/coordinate fidelity before committing to cache.
         slot = self._merge_with_existing_cache_row(device_id, slot)
 
+        name_cache = self._ensure_device_name_cache()
+
         # Keep human-friendly name mapping up-to-date if provided alongside
         name = slot.get("name")
         if isinstance(name, str) and name:
-            self._device_names[device_id] = name
+            name_cache[device_id] = name
 
         self._device_location_data[device_id] = slot
         # Increment background updates to account for push/manual commits.
@@ -4110,7 +4130,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         Returns:
             The display name as a string, or None.
         """
-        return self._device_names.get(device_id)
+        return self._ensure_device_name_cache().get(device_id)
 
     def get_device_name_map(self) -> dict[str, str]:
         """Return a shallow copy of the internal device-id -> name mapping.
@@ -4118,7 +4138,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         Returns:
             A dictionary mapping device IDs to their names.
         """
-        return dict(self._device_names)
+        return dict(self._ensure_device_name_cache())
 
     # ---------------------------- Presence & Purge API ----------------------------
     def is_device_present(self, device_id: str) -> bool:
@@ -4144,7 +4164,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             ts = self._present_last_seen.get(dev_id, 0.0)
             return (not ts) or ((now_mono - float(ts)) > float(self._presence_ttl_s))
 
-        known = set(self._device_names) | set(self._device_location_data)
+        name_cache = self._ensure_device_name_cache()
+        known = set(name_cache) | set(self._device_location_data)
         return sorted([d for d in known if expired(d)])
 
     def purge_device(self, device_id: str) -> None:
@@ -4158,7 +4179,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         self._device_location_data.pop(device_id, None)
-        self._device_names.pop(device_id, None)
+        self._ensure_device_name_cache().pop(device_id, None)
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
@@ -4217,11 +4238,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._last_poll_mono = time.monotonic()  # optional: reset poll timer
 
         # Choose device ids for the snapshot
+        name_cache = self._ensure_device_name_cache()
+
         if device_ids:
             ids = device_ids
         else:
             # union of all known names and cached locations
-            ids = list({*self._device_names.keys(), *self._device_location_data.keys()})
+            ids = list({*name_cache.keys(), *self._device_location_data.keys()})
 
         # Apply ignore filter first to avoid touching presence for ignored devices.
         ignored = self._get_ignored_set()
@@ -4235,7 +4258,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # Build "devices" stubs from id->name mapping
         devices_stub: list[dict[str, Any]] = []
         for dev_id in ids:
-            cached_name = self._device_names.get(dev_id)
+            cached_name = name_cache.get(dev_id)
             if isinstance(cached_name, str) and cached_name.strip():
                 name = cached_name if cached_name != dev_id else "Google Find My Device"
             else:
@@ -4360,9 +4383,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
 
         # 3) Optimistic final decision based on whether we know the device.
-        is_known = (
-            device_id in self._device_names or device_id in self._device_location_data
-        )
+        name_cache = self._ensure_device_name_cache()
+        is_known = (device_id in name_cache or device_id in self._device_location_data)
         if is_known:
             _LOGGER.debug(
                 "can_play_sound(%s) -> True (optimistic; known device, push_ready=%s)",

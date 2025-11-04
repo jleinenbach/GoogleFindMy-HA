@@ -30,6 +30,10 @@ def test_duplicate_devices_seed_only_once() -> None:
             self.hass = SimpleNamespace()
             self.config_entry = SimpleNamespace(entry_id="entry-id")
             self.stats: dict[str, int] = {}
+            self._device_names: dict[str, str] = {}
+            self._device_location_data: dict[str, Any] = {}
+            self._device_caps: dict[str, Any] = {}
+            self._present_last_seen: dict[str, float] = {}
 
         def async_add_listener(
             self, listener: Callable[[], None]
