@@ -539,6 +539,14 @@ def _stub_homeassistant() -> None:
 
     data_entry_flow = ModuleType("homeassistant.data_entry_flow")
 
+    class _FlowResultType:
+        """Enum-like container mirroring Home Assistant's flow result types."""
+
+        ABORT = "abort"
+        CREATE_ENTRY = "create_entry"
+        FORM = "form"
+        MENU = "menu"
+
     class _AbortFlow(Exception):
         """Stub AbortFlow matching Home Assistant's interface."""
 
@@ -547,6 +555,7 @@ def _stub_homeassistant() -> None:
             self.reason = reason
 
     data_entry_flow.AbortFlow = _AbortFlow  # type: ignore[attr-defined]
+    data_entry_flow.FlowResultType = _FlowResultType  # type: ignore[attr-defined]
     data_entry_flow.FlowResult = dict  # type: ignore[assignment]
     sys.modules["homeassistant.data_entry_flow"] = data_entry_flow
 

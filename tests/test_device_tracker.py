@@ -154,3 +154,61 @@ def test_scanner_skips_entities_already_in_registry() -> None:
     for task in scheduled:
         assert task.done()
 
+
+def test_initial_snapshot_skips_registry_duplicates() -> None:
+    """Startup population should respect existing registry entries."""
+
+    device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
+
+    class _StubCoordinator(device_tracker.GoogleFindMyCoordinator):
+        def __init__(self) -> None:
+            self.hass = SimpleNamespace(async_create_task=lambda coro: coro)
+            self.config_entry = None
+            self._listeners: list[Any] = []
+            self.lookup_calls: list[str] = []
+
+        def async_add_listener(self, listener):
+            self._listeners.append(listener)
+            return lambda: None
+
+        def stable_subentry_identifier(self, *, key: str | None = None, feature: str | None = None) -> str:
+            return "tracker-subentry"
+
+        def get_subentry_metadata(self, *, key: str | None = None, feature: str | None = None) -> Any:
+            return SimpleNamespace(key=TRACKER_SUBENTRY_KEY)
+
+        def get_subentry_snapshot(self, key: str | None = None, *, feature: str | None = None) -> list[dict[str, Any]]:
+            return [{"id": "tracker-1", "name": "Keys"}]
+
+        def find_tracker_entity_entry(self, device_id: str):
+            self.lookup_calls.append(device_id)
+            return SimpleNamespace(
+                entity_id="device_tracker.googlefindmy_keys",
+                unique_id="tracker-subentry:tracker-1",
+            )
+
+    class _StubConfigEntry:
+        def __init__(self, coordinator: _StubCoordinator) -> None:
+            self.runtime_data = coordinator
+            self.entry_id = "entry-1"
+            self.data: dict[str, Any] = {}
+            self.options: dict[str, Any] = {}
+
+        def async_on_unload(self, callback: Any) -> None:
+            pass
+
+    coordinator = _StubCoordinator()
+    entry = _StubConfigEntry(coordinator)
+    coordinator.config_entry = entry
+
+    added: list[list[Any]] = []
+
+    def _capture_entities(entities: list[Any], update_before_add: bool = False) -> None:
+        added.append(list(entities))
+        assert update_before_add is True
+
+    asyncio.run(device_tracker.async_setup_entry(coordinator.hass, entry, _capture_entities))
+
+    assert not added
+    assert coordinator.lookup_calls == ["tracker-1"]
+

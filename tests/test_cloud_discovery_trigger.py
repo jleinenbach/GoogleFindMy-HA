@@ -26,7 +26,14 @@ if TYPE_CHECKING:
 def _make_hass() -> SimpleNamespace:
     """Return a minimal hass stub suitable for discovery tests."""
 
-    flow = SimpleNamespace(async_init=AsyncMock())
+    flow = SimpleNamespace(
+        async_init=AsyncMock(
+            return_value={
+                "type": config_flow.data_entry_flow.FlowResultType.ABORT,
+                "reason": "unknown",
+            }
+        )
+    )
     config_entries = SimpleNamespace(flow=flow)
     return SimpleNamespace(data={}, config_entries=config_entries)
 
@@ -155,10 +162,10 @@ def test_trigger_cloud_discovery_falls_back(
 
 
 @pytest.mark.asyncio
-async def test_async_create_discovery_flow_propagates_helper_errors(
+async def test_async_create_discovery_flow_handles_missing_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Helper errors should bubble up so callers can trigger fallbacks."""
+    """Attribute errors should fall back to a graceful abort."""
 
     hass = _make_hass()
 
@@ -173,13 +180,48 @@ async def test_async_create_discovery_flow_propagates_helper_errors(
     )
     monkeypatch.setattr(config_flow, "_fallback_discovery_flow_helper", None)
 
-    with pytest.raises(AttributeError):
-        await config_flow.async_create_discovery_flow(
-            hass,
-            DOMAIN,
-            context=None,
-            data={},
-        )
+    result = await config_flow.async_create_discovery_flow(
+        hass,
+        DOMAIN,
+        context=None,
+        data={},
+    )
+
+    assert result == {
+        "type": config_flow.data_entry_flow.FlowResultType.ABORT,
+        "reason": "unknown",
+    }
+
+
+@pytest.mark.asyncio
+async def test_async_create_discovery_flow_treats_none_as_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Returning None should be treated as an already-in-progress abort."""
+
+    hass = _make_hass()
+
+    async def _helper(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        config_flow.config_entries,
+        "async_create_discovery_flow",
+        _helper,
+        raising=False,
+    )
+
+    result = await config_flow.async_create_discovery_flow(
+        hass,
+        DOMAIN,
+        context={"source": "discovery"},
+        data={},
+    )
+
+    assert result == {
+        "type": config_flow.data_entry_flow.FlowResultType.ABORT,
+        "reason": "already_in_progress",
+    }
 
 
 def test_trigger_cloud_discovery_deduplicates(

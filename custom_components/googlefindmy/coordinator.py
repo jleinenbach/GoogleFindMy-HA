@@ -1678,9 +1678,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         existing_name: str | None = None
         existing_user_name: str | None = None
+        has_user_name = False
         if device is not None:
             existing_name = getattr(device, "name", None)
             existing_user_name = getattr(device, "name_by_user", None)
+            if isinstance(existing_user_name, str) and existing_user_name.strip():
+                has_user_name = True
 
         entry_title = getattr(entry, "title", None)
         sanitized_entry_title = (
@@ -1736,6 +1739,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             needs_name_refresh = (
                 service_device_name is not None
                 and service_device_name != existing_name
+                and not has_user_name
             )
 
             needs_update = (
@@ -1817,17 +1821,39 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         device_label = self.get_device_display_name(device_id) or device_id
 
+        entities_container = getattr(ent_reg, "entities", None)
+        ent_registry_values: Sequence[Any] = ()
+        if entities_container is not None:
+            try:
+                ent_registry_values = list(entities_container.values())
+            except Exception:  # noqa: BLE001 - best-effort compatibility
+                ent_registry_values = ()
+
         for unique_id in candidate_unique_ids:
-            entity_id = ent_reg.async_get_entity_id(
-                DEVICE_TRACKER_DOMAIN, DOMAIN, unique_id
-            )
+            try:
+                entity_id = ent_reg.async_get_entity_id(
+                    DEVICE_TRACKER_DOMAIN, DOMAIN, unique_id
+                )
+            except TypeError:
+                entity_id = None
             if not entity_id:
                 continue
-            entry = ent_reg.async_get(entity_id)
+            entry: EntityRegistryEntry | None = None
+            getter = getattr(ent_reg, "async_get", None)
+            if callable(getter):
+                try:
+                    entry = getter(entity_id)
+                except TypeError:
+                    entry = None
+            if entry is None:
+                for candidate in ent_registry_values:
+                    if getattr(candidate, "entity_id", None) == entity_id:
+                        entry = candidate
+                        break
             if entry is not None:
                 return entry
 
-        for entry in list(ent_reg.entities.values()):
+        for entry in ent_registry_values:
             if entry.domain != DEVICE_TRACKER_DOMAIN or entry.platform != DOMAIN:
                 continue
             if device_id not in entry.unique_id:
