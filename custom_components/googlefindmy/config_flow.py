@@ -2942,15 +2942,6 @@ class ConfigFlow(
         if placeholders:
             self.context["title_placeholders"] = placeholders
 
-        description_placeholders = placeholders or None
-
-        if user_input is None:
-            return self.async_show_form(
-                step_id="reconfigure",
-                data_schema=vol.Schema({}),
-                description_placeholders=description_placeholders,
-            )
-
         self._auth_data = {}
         for key in (
             DATA_AUTH_METHOD,
@@ -3003,6 +2994,13 @@ class ConfigFlow(
                 group_key = data.get("group_key")
                 if isinstance(group_key, str) and group_key in subentry_context:
                     subentry_context[group_key] = getattr(subentry, "subentry_id", None)
+
+        if user_input is None:
+            return await self.async_show_form(
+                step_id="reconfigure",
+                data_schema=vol.Schema({}),
+                description_placeholders=placeholders or None,
+            )
 
         oauth_token = self._auth_data.get(CONF_OAUTH_TOKEN)
         flow_result: FlowResult | Awaitable[FlowResult]

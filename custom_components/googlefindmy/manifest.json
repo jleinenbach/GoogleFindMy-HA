@@ -4,7 +4,6 @@
   "after_dependencies": ["recorder"],
   "codeowners": ["@BSkando"],
   "config_flow": true,
-  "reconfigure": true,
   "dependencies": ["http"],
   "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
   "integration_type": "hub",
