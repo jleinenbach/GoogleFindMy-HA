@@ -149,10 +149,18 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
     ) -> DeviceInfo:
         """Return the ``DeviceInfo`` for the per-entry service device."""
 
-        entry_id = self.entry_id or "default"
-        identifiers: set[tuple[str, str]] = {service_device_identifier(entry_id)}
+        entry_id = self.entry_id
+        effective_entry_id = entry_id or "default"
+        identifiers: set[tuple[str, str]] = {
+            service_device_identifier(effective_entry_id)
+        }
         if include_subentry_identifier and self._subentry_identifier:
-            identifiers.add((DOMAIN, f"{entry_id}:{self._subentry_identifier}:service"))
+            identifiers.add(
+                (
+                    DOMAIN,
+                    f"{effective_entry_id}:{self._subentry_identifier}:service",
+                )
+            )
 
         entry = getattr(self.coordinator, "config_entry", None)
         entry_title: str | None = None
@@ -169,17 +177,20 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
 
         service_name = f"{entry_title or SERVICE_DEVICE_NAME} – Service"
 
-        return DeviceInfo(
-            identifiers=identifiers,
-            manufacturer=SERVICE_DEVICE_MANUFACTURER,
-            model=SERVICE_DEVICE_MODEL,
-            sw_version=INTEGRATION_VERSION,
-            configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
-            entry_type=dr.DeviceEntryType.SERVICE,
-            name=service_name,
-            translation_key=SERVICE_DEVICE_TRANSLATION_KEY,
-            translation_placeholders={},
-        )
+        info_kwargs: dict[str, Any] = {
+            "identifiers": identifiers,
+            "manufacturer": SERVICE_DEVICE_MANUFACTURER,
+            "model": SERVICE_DEVICE_MODEL,
+            "sw_version": INTEGRATION_VERSION,
+            "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
+            "entry_type": dr.DeviceEntryType.SERVICE,
+            "name": service_name,
+            "translation_key": SERVICE_DEVICE_TRANSLATION_KEY,
+            "translation_placeholders": {},
+        }
+        if entry_id:
+            info_kwargs["config_entry_id"] = entry_id
+        return DeviceInfo(**info_kwargs)
 
     def maybe_update_device_registry_name(self, new_name: str | None) -> None:
         """Best-effort registry name sync while respecting user overrides."""
@@ -381,6 +392,9 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
             "serial_number": self.device_id,
             "configuration_url": self.device_configuration_url(),
         }
+        entry_id = self.entry_id
+        if entry_id:
+            kwargs["config_entry_id"] = entry_id
         via = self._service_via_device()
         if via:
             kwargs["via_device"] = via
