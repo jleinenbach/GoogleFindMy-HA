@@ -1558,6 +1558,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         return call(**dict(base_kwargs))
 
+    def _device_registry_allows_translation_update(self, dev_reg: Any) -> bool:
+        """Return True if the registry accepts translation metadata during updates."""
+
+        cached = getattr(self, "_device_registry_supports_translation_update", None)
+        if isinstance(cached, bool):
+            return cached
+
+        update_helper = getattr(dev_reg, "async_update_device", None)
+        supports_translation = False
+        if callable(update_helper):
+            try:
+                signature = inspect.signature(update_helper)
+            except (TypeError, ValueError):
+                supports_translation = False
+            else:
+                params = signature.parameters
+                supports_translation = "translation_key" in params and "translation_placeholders" in params
+
+        setattr(self, "_device_registry_supports_translation_update", supports_translation)
+        return supports_translation
+
     def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
 
@@ -1705,6 +1726,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             dev_config_subentry_id = getattr(device, "config_subentry_id", None)
 
+            translation_refresh_required = (
+                dev_translation_key != SERVICE_DEVICE_TRANSLATION_KEY
+                or (dev_translation_placeholders or {}) != {}
+            )
+            translation_update_supported = (
+                translation_refresh_required
+                and self._device_registry_allows_translation_update(dev_reg)
+            )
+
             needs_name_refresh = (
                 service_device_name is not None
                 and service_device_name != existing_name
@@ -1717,8 +1747,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 or device.sw_version != INTEGRATION_VERSION
                 or device.entry_type != dr.DeviceEntryType.SERVICE
                 or dev_config_subentry_id != service_config_subentry_id
-                or dev_translation_key != SERVICE_DEVICE_TRANSLATION_KEY
-                or (dev_translation_placeholders or {}) != {}
+                or translation_refresh_required
                 or needs_name_refresh
                 or needs_identifier_backfill
             )
@@ -1730,19 +1759,62 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "sw_version": INTEGRATION_VERSION,
                     "entry_type": dr.DeviceEntryType.SERVICE,
                     "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
+                    "config_subentry_id": service_config_subentry_id,
                 }
-                update_kwargs["translation_placeholders"] = {}
-                update_kwargs["config_subentry_id"] = service_config_subentry_id
                 if needs_identifier_backfill:
                     new_identifiers = set(device_identifiers)
                     new_identifiers.update(identifiers)
                     update_kwargs["new_identifiers"] = new_identifiers
                 if needs_name_refresh and service_device_name:
                     update_kwargs["name"] = service_device_name
-                self._call_device_registry_api(
-                    dev_reg.async_update_device, base_kwargs=update_kwargs
-                )
+
+                call_kwargs = dict(update_kwargs)
+                if translation_update_supported:
+                    call_kwargs["translation_key"] = SERVICE_DEVICE_TRANSLATION_KEY
+                    call_kwargs["translation_placeholders"] = {}
+
+                try:
+                    self._call_device_registry_api(
+                        dev_reg.async_update_device, base_kwargs=call_kwargs
+                    )
+                except TypeError as err:
+                    if translation_update_supported:
+                        setattr(
+                            self,
+                            "_device_registry_supports_translation_update",
+                            False,
+                        )
+                        translation_update_supported = False
+                        self._call_device_registry_api(
+                            dev_reg.async_update_device, base_kwargs=update_kwargs
+                        )
+                    else:  # pragma: no cover - propagate unexpected contract errors
+                        raise err
                 device = _refresh_service_device_entry(device)
+                if translation_refresh_required and not translation_update_supported:
+                    translation_kwargs: dict[str, Any] = {
+                        "config_entry_id": entry.entry_id,
+                        "identifiers": identifiers,
+                        "manufacturer": SERVICE_DEVICE_MANUFACTURER,
+                        "model": SERVICE_DEVICE_MODEL,
+                        "sw_version": INTEGRATION_VERSION,
+                        "entry_type": dr.DeviceEntryType.SERVICE,
+                        "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
+                        "translation_key": SERVICE_DEVICE_TRANSLATION_KEY,
+                        "translation_placeholders": {},
+                        "config_subentry_id": service_config_subentry_id,
+                    }
+                    if needs_name_refresh and service_device_name:
+                        translation_kwargs["name"] = service_device_name
+                    device = self._call_device_registry_api(
+                        dev_reg.async_get_or_create,
+                        base_kwargs=translation_kwargs,
+                    )
+                    device = _refresh_service_device_entry(device)
+                    _LOGGER.debug(
+                        "Backfilled service device translation metadata using get_or_create for entry %s",
+                        entry.entry_id,
+                    )
                 _LOGGER.debug(
                     "Updated Google Find My service device metadata for entry %s",
                     entry.entry_id,

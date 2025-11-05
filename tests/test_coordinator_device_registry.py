@@ -115,6 +115,27 @@ class _FakeDeviceRegistry:
         via_device: tuple[str, str] | None = None,
         **kwargs: Any,
     ) -> _FakeDeviceEntry:
+        existing = self.async_get_device(identifiers=identifiers)
+        if existing is not None:
+            if name is not None:
+                existing.name = name
+            existing.manufacturer = manufacturer
+            existing.model = model
+            existing.sw_version = kwargs.get("sw_version")
+            existing.entry_type = kwargs.get("entry_type")
+            existing.configuration_url = kwargs.get("configuration_url")
+            translation_key = kwargs.get("translation_key")
+            if translation_key is not None:
+                existing.translation_key = translation_key
+            translation_placeholders = kwargs.get("translation_placeholders")
+            if translation_placeholders is not None:
+                existing.translation_placeholders = translation_placeholders
+            config_subentry_id = kwargs.get("config_subentry_id")
+            if config_subentry_id is not None:
+                existing.config_subentry_id = config_subentry_id
+            existing.identifiers = set(existing.identifiers) | set(identifiers)
+            return existing
+
         entry = _FakeDeviceEntry(
             identifiers=identifiers,
             config_entry_id=config_entry_id,
