@@ -84,9 +84,6 @@
       "migration_failed": "Migracja nie powiodła się. Usuń integrację i dodaj ją ponownie.",
       "reconfigure_successful": "Integracja jest już skonfigurowana. Nie można dodać kolejnych kont."
     },
-    "menu": {
-      "import_device": "Importuj urządzenie (tracker)"
-    },
     "progress": {
       "discovery_secrets_new": "Wykryto Auth/secrets.json dla {email}",
       "discovery_secrets_update": "Wykryto nowe dane logowania dla {email}"

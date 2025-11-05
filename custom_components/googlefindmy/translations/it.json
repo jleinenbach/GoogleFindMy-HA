@@ -84,9 +84,6 @@
       "migration_failed": "Migrazione non riuscita. Rimuovi l'integrazione e aggiungila di nuovo.",
       "reconfigure_successful": "L'integrazione è già configurata. Non è possibile aggiungere altri account."
     },
-    "menu": {
-      "import_device": "Importa dispositivo (tracker)"
-    },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json rilevato per {email}",
       "discovery_secrets_update": "Nuove credenziali rilevate per {email}"

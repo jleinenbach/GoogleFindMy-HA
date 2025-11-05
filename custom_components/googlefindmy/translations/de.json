@@ -84,9 +84,6 @@
       "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu.",
       "reconfigure_successful": "Integration ist bereits konfiguriert. Es können keine weiteren Konten hinzugefügt werden."
     },
-    "menu": {
-      "import_device": "Gerät importieren (Tracker)"
-    },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json für {email} erkannt",
       "discovery_secrets_update": "Neue Anmeldedaten für {email} erkannt"

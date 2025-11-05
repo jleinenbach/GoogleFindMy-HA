@@ -84,9 +84,6 @@
       "migration_failed": "Migración fallida. Elimina la integración y vuelve a agregarla.",
       "reconfigure_successful": "La integración ya está configurada. No se pueden añadir más cuentas."
     },
-    "menu": {
-      "import_device": "Importar dispositivo (rastreador)"
-    },
     "progress": {
       "discovery_secrets_new": "Se detectó Auth/secrets.json para {email}",
       "discovery_secrets_update": "Se detectaron nuevas credenciales para {email}"

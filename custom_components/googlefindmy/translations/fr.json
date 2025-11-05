@@ -84,9 +84,6 @@
       "migration_failed": "Échec de la migration. Supprimez puis réajoutez l’intégration.",
       "reconfigure_successful": "L’intégration est déjà configurée. Aucun autre compte ne peut être ajouté."
     },
-    "menu": {
-      "import_device": "Importer un appareil (traceur)"
-    },
     "progress": {
       "discovery_secrets_new": "Fichier Auth/secrets.json détecté pour {email}",
       "discovery_secrets_update": "Nouvelles informations d'identification détectées pour {email}"
