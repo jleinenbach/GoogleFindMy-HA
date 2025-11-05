@@ -411,9 +411,13 @@ Add to the PR description:
 * `pytest -q`
 * `mypy --strict --install-types --non-interactive custom_components/googlefindmy tests`
 
-  > Running mypy with `--install-types --non-interactive` pre-approves the stub
-  > installations strict mode requires, eliminating interactive prompts during
-  > local or CI runs.
+  > **Non-interactive flag REQUIRED.** Running mypy with
+  > `--install-types --non-interactive` pre-approves the stub installations strict
+  > mode requires, eliminating interactive prompts during local or CI runs. When
+  > invoking mypy against a subset of files, append
+  > `--install-types --non-interactive` as well (for example,
+  > `mypy path/to/file.py --install-types --non-interactive`). CI logs are audited
+  > for this flag to prevent hung jobs waiting for stub-install confirmation.
 
 > **Hassfest runs in CI.** The `.github/workflows/hassfest-auto-fix.yml` workflow
 > validates manifests on every push/PR and auto-commits any key ordering fixes.
