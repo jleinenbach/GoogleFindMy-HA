@@ -1759,7 +1759,7 @@ class ConfigFlow(
             raw_email, _ = _resolve_entry_email_for_lookup(entry)
             if raw_email:
                 return raw_email
-            return entry.entry_id
+            return cast(str, entry.entry_id)
 
         hub_choices = {entry.entry_id: _entry_label(entry) for entry in entries}
 
