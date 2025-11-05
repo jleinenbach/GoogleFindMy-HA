@@ -43,6 +43,13 @@
           "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy"
         }
       },
+      "select_hub_for_visibility": {
+        "title": "Wybierz hub",
+        "description": "Wybierz hub Google Find My, którym chcesz zarządzać, zanim otworzysz okno widoczności urządzeń.",
+        "data": {
+          "hub": "Hub"
+        }
+      },
       "reconfigure": {
         "title": "Ponownie skonfiguruj Google Find My Device",
         "description": "Sprawdź bieżącą konfigurację dla **{email}**. Kontynuuj, aby zaktualizować dane logowania lub dostosować opcje odpytywania."
@@ -82,7 +89,8 @@
       "reauth_successful": "Ponowne uwierzytelnienie zakończone pomyślnie.",
       "migration_successful": "Migracja zakończona.",
       "migration_failed": "Migracja nie powiodła się. Usuń integrację i dodaj ją ponownie.",
-      "reconfigure_successful": "Integracja jest już skonfigurowana. Nie można dodać kolejnych kont."
+      "reconfigure_successful": "Integracja jest już skonfigurowana. Nie można dodać kolejnych kont.",
+      "no_hubs_configured": "Nie skonfigurowano jeszcze żadnych hubów Google Find My."
     },
     "progress": {
       "discovery_secrets_new": "Wykryto Auth/secrets.json dla {email}",

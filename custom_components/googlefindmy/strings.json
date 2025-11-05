@@ -43,6 +43,13 @@
           "map_view_token_expiration": "Enable map view token expiration"
         }
       },
+      "select_hub_for_visibility": {
+        "title": "Select hub",
+        "description": "Choose which Google Find My hub to manage before opening the device visibility dialog.",
+        "data": {
+          "hub": "Hub"
+        }
+      },
       "reconfigure": {
         "title": "Reconfigure Google Find My Device",
         "description": "Review the current configuration for **{email}**. Continue to update credentials or adjust polling options."
@@ -82,7 +89,8 @@
       "reauth_successful": "Reauthentication successful.",
       "migration_successful": "Migration complete.",
       "migration_failed": "Migration failed. Please remove and re-add the integration.",
-      "reconfigure_successful": "Integration already configured. Additional accounts cannot be added."
+      "reconfigure_successful": "Integration already configured. Additional accounts cannot be added.",
+      "no_hubs_configured": "No Google Find My hubs are configured yet."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json detected for {email}",

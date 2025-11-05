@@ -883,6 +883,7 @@ _FIELD_SUBENTRY = "subentry"
 _FIELD_REPAIR_TARGET = "target_subentry"
 _FIELD_REPAIR_DELETE = "delete_subentry"
 _FIELD_REPAIR_FALLBACK = "fallback_subentry"
+_FIELD_VISIBILITY_HUB = "hub"
 # Field identifiers used in options/visibility flows
 _FIELD_REPAIR_DEVICES = "device_ids"
 
@@ -1720,15 +1721,72 @@ class ConfigFlow(
     ) -> FlowResult:
         """Handle the flow initiated by the '+' icon on the integration card.
 
-        Home Assistant already forwards the `+` trigger to the reconfigure
-        flow when no dedicated subentry handler exists. We mirror that default
-        behaviour explicitly so the trigger remains available while we override
-        the step. Any metadata supplied by Home Assistant (for example,
-        `entry_id`) is forwarded unchanged so the existing reconfigure flow can
-        continue presenting the device visibility dialog.
+        Home Assistant does not populate the config entry context when the
+        integration implements a custom subentry step. Determine the target hub
+        before launching the existing reconfigure flow so the device visibility
+        dialog has the required `entry_id`.
         """
 
-        return await self.async_step_reconfigure(user_input=user_input)
+        if self.context.get("entry_id"):
+            return await self.async_step_reconfigure(user_input=user_input)
+
+        return await self.async_step_select_hub_for_visibility(user_input)
+
+    async def async_step_select_hub_for_visibility(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Prompt the user to choose the hub whose device visibility to edit."""
+
+        hass_obj = getattr(self, "hass", None)
+        if not isinstance(hass_obj, HomeAssistant):
+            return self.async_abort(reason="unknown")
+        hass = cast(HomeAssistant, hass_obj)
+
+        entries = [
+            entry
+            for entry in hass.config_entries.async_entries(DOMAIN)
+            if entry.source != config_entries.SOURCE_IGNORE
+        ]
+
+        if not entries:
+            return self.async_abort(reason="no_hubs_configured")
+
+        def _entry_label(entry: ConfigEntry) -> str:
+            if isinstance(entry.title, str):
+                label = entry.title.strip()
+                if label:
+                    return label
+            raw_email, _ = _resolve_entry_email_for_lookup(entry)
+            if raw_email:
+                return raw_email
+            return entry.entry_id
+
+        hub_choices = {entry.entry_id: _entry_label(entry) for entry in entries}
+
+        if len(hub_choices) == 1:
+            self.context["entry_id"] = next(iter(hub_choices))
+            return await self.async_step_reconfigure(None)
+
+        if user_input is not None:
+            selected = user_input.get(_FIELD_VISIBILITY_HUB)
+            if isinstance(selected, str) and selected in hub_choices:
+                self.context["entry_id"] = selected
+                return await self.async_step_reconfigure(None)
+
+        default_choice = next(iter(hub_choices))
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    _FIELD_VISIBILITY_HUB,
+                    default=default_choice,
+                ): vol.In(hub_choices)
+            }
+        )
+
+        return self.async_show_form(
+            step_id="select_hub_for_visibility",
+            data_schema=schema,
+        )
 
     async def _async_prepare_account_context(
         self,
