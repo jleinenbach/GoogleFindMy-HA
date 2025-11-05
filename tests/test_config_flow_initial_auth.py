@@ -808,3 +808,147 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
     assert updated_kwargs["data"][CONF_GOOGLE_EMAIL] == "existing@example.com"
     assert updated_kwargs["options"][OPT_OPTIONS_SCHEMA_VERSION] == 2
     assert hass.config_entries.reloaded == [entry.entry_id]
+
+
+def test_async_step_reconfigure_legacy_update_preserves_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy async_update_entry fallback must still persist options."""
+
+    class _Entry:
+        def __init__(self) -> None:
+            self.entry_id = "entry-1"
+            self.unique_id = "existing@example.com"
+            self.title = "Existing"
+            self.data: dict[str, Any] = {
+                CONF_GOOGLE_EMAIL: "existing@example.com",
+                CONF_OAUTH_TOKEN: "old-token",
+                DATA_AUTH_METHOD: config_flow._AUTH_METHOD_INDIVIDUAL,
+            }
+            self.options: dict[str, Any] = {
+                OPT_LOCATION_POLL_INTERVAL: 300,
+                OPT_DEVICE_POLL_DELAY: 10,
+                OPT_MIN_ACCURACY_THRESHOLD: 150,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
+                OPT_OPTIONS_SCHEMA_VERSION: 1,
+            }
+            self.subentries: dict[str, Any] = {}
+
+    entry = _Entry()
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.updated: list[tuple[Any, dict[str, Any]]] = []
+            self.reloaded: list[str] = []
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return [entry]
+
+        def async_get_entry(self, entry_id: str) -> _Entry | None:
+            if entry_id != entry.entry_id:
+                return None
+            return entry
+
+        def async_update_entry(self, target: Any, **updates: Any) -> None:
+            assert target is entry
+            update_kwargs = dict(updates)
+            self.updated.append((target, update_kwargs))
+            if "options" in update_kwargs:
+                raise TypeError("async_update_entry() got an unexpected keyword 'options'")
+            if "data" in update_kwargs:
+                entry.data = dict(update_kwargs["data"])
+
+        async def async_reload(self, entry_id: str) -> None:
+            self.reloaded.append(entry_id)
+
+    class _Hass:
+        def __init__(self) -> None:
+            self.config_entries = _ConfigEntries()
+            self.tasks: list[asyncio.Task[Any]] = []
+
+        def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
+            task = asyncio.create_task(coro)
+            self.tasks.append(task)
+            return task
+
+    hass = _Hass()
+
+    sync_calls: list[tuple[Any, dict[str, Any]]] = []
+
+    async def _fake_sync(
+        self: config_flow.ConfigFlow,
+        entry_obj: Any,
+        *,
+        options_payload: dict[str, Any],
+        defaults: dict[str, Any],
+        context_map: dict[str, Any],
+    ) -> None:
+        sync_calls.append((entry_obj, dict(options_payload)))
+
+    monkeypatch.setattr(
+        config_flow.ConfigFlow,
+        "_async_sync_feature_subentries",
+        _fake_sync,
+    )
+
+    async def _fake_build_api(self: config_flow.ConfigFlow) -> tuple[Any, str, str]:
+        return object(), "existing@example.com", "old-token"
+
+    async def _fake_probe(_api: Any, *, email: str, token: str) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(
+        config_flow.ConfigFlow,
+        "_async_build_api_and_username",
+        _fake_build_api,
+    )
+    monkeypatch.setattr(
+        config_flow,
+        "_try_probe_devices",
+        _fake_probe,
+    )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {
+        "source": getattr(ha_config_entries, "SOURCE_RECONFIGURE", "reconfigure"),
+        "entry_id": entry.entry_id,
+    }
+    flow.unique_id = None  # type: ignore[attr-defined]
+
+    async def _exercise() -> tuple[dict[str, Any], dict[str, Any]]:
+        initial = await flow.async_step_reconfigure()
+        flow._auth_data[CONF_OAUTH_TOKEN] = "new-token"
+        flow._auth_data[DATA_AUTH_METHOD] = config_flow._AUTH_METHOD_INDIVIDUAL
+        result = await flow.async_step_device_selection(
+            {
+                OPT_LOCATION_POLL_INTERVAL: 120,
+                OPT_DEVICE_POLL_DELAY: 5,
+                OPT_MIN_ACCURACY_THRESHOLD: 90,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+            }
+        )
+        return initial, result
+
+    initial_result, final_result = asyncio.run(_exercise())
+
+    assert initial_result["type"] == "form"
+    assert final_result["type"] == "abort"
+    assert final_result["reason"] == "reconfigure_successful"
+
+    assert sync_calls and sync_calls[0][0] is entry
+
+    assert len(hass.config_entries.updated) == 2
+    first_kwargs = hass.config_entries.updated[0][1]
+    fallback_kwargs = hass.config_entries.updated[1][1]
+    assert "options" in first_kwargs
+    assert "options" not in fallback_kwargs
+    assert fallback_kwargs["data"][CONF_OAUTH_TOKEN] == "new-token"
+    assert fallback_kwargs["data"][CONF_GOOGLE_EMAIL] == "existing@example.com"
+    assert fallback_kwargs["data"][OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
+
+    assert entry.options[OPT_OPTIONS_SCHEMA_VERSION] == 2
+    assert entry.options[OPT_LOCATION_POLL_INTERVAL] == 120
+    assert entry.options[OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
+    assert hass.config_entries.reloaded == [entry.entry_id]

@@ -2947,14 +2947,13 @@ class ConfigFlow(
                             options=existing_options,
                         )
                     except TypeError:
+                        fallback_payload = dict(merged_data)
+                        fallback_payload.update(existing_options)
                         self.hass.config_entries.async_update_entry(
                             entry_for_update,
-                            data=merged_data,
+                            data=fallback_payload,
                         )
                         setattr(entry_for_update, "options", existing_options)
-                    else:
-                        setattr(entry_for_update, "options", existing_options)
-                    setattr(entry_for_update, "data", merged_data)
 
                     self.hass.async_create_task(
                         self.hass.config_entries.async_reload(entry_for_update.entry_id)
@@ -3442,7 +3441,7 @@ class ConfigFlow(
         ensure_device = getattr(coordinator, "_ensure_service_device_exists", None)
         if callable(ensure_device):
             try:
-                ensure_device()
+                ensure_device(entry)
             except Exception as err:  # pragma: no cover - defensive guard
                 _LOGGER.debug(
                     "Service device ensure after core subentry repair failed: %s", err
