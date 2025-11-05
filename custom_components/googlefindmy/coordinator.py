@@ -1577,10 +1577,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         and returns the supported keyword, caching the result for reuse.
         """
 
-        cache = getattr(self, "_device_registry_config_subentry_kwarg_cache", None)
-        if not isinstance(cache, dict):
-            cache = {}
-            setattr(self, "_device_registry_config_subentry_kwarg_cache", cache)
+        cache_attr = "_device_registry_config_subentry_kwarg_cache"
+        cache_obj = getattr(self, cache_attr, None)
+        cache: dict[Callable[..., Any], str | None]
+        if isinstance(cache_obj, dict):
+            cache = cast(dict[Callable[..., Any], str | None], cache_obj)
+        else:
+            cache = cast(dict[Callable[..., Any], str | None], {})
+            setattr(self, cache_attr, cache)
 
         func = getattr(call, "__func__", call)
         if func in cache:
