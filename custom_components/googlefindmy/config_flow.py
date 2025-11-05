@@ -2953,6 +2953,7 @@ class ConfigFlow(
                             entry_for_update,
                             data=fallback_payload,
                         )
+                        setattr(entry_for_update, "options", existing_options)
 
                     self.hass.async_create_task(
                         self.hass.config_entries.async_reload(entry_for_update.entry_id)
