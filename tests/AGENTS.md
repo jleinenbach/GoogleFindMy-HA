@@ -4,6 +4,19 @@
 >
 > Applies to the entire `tests/` tree.
 
+## Flow helper return modes
+
+The bundled Home Assistant stubs intentionally mix synchronous and
+asynchronous helper signatures to mirror real-core behavior. The
+`ConfigFlow.async_show_form` implementation in
+[`tests/conftest.py`](tests/conftest.py) is defined as an `async def`, so
+calling it yields an awaitable that resolves to the response dict. Tests
+may temporarily replace that attribute with synchronous callables when
+exercising legacy code paths, while the `OptionsFlow.async_show_form`
+helper remains synchronous by default. When adding new tests or stubs,
+keep this split explicit so flows under test can safely handle both
+awaitable and immediate responses.
+
 ## Package layout
 
 The test suite is a Python package (`tests/__init__.py`). Use
