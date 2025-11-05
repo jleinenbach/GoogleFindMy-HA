@@ -1715,6 +1715,21 @@ class ConfigFlow(
         self._pending_discovery_existing_entry: ConfigEntry | None = None
         self._discovery_confirm_pending = False
 
+    async def async_step_subentry(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle the flow initiated by the '+' icon on the integration card.
+
+        Home Assistant already forwards the `+` trigger to the reconfigure
+        flow when no dedicated subentry handler exists. We mirror that default
+        behaviour explicitly so the trigger remains available while we override
+        the step. Any metadata supplied by Home Assistant (for example,
+        `entry_id`) is forwarded unchanged so the existing reconfigure flow can
+        continue presenting the device visibility dialog.
+        """
+
+        return await self.async_step_reconfigure(user_input=user_input)
+
     async def _async_prepare_account_context(
         self,
         *,
