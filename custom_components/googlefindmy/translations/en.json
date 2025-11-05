@@ -81,7 +81,8 @@
       "invalid_discovery_info": "The discovery payload was invalid. Check the credentials and try again.",
       "reauth_successful": "Reauthentication successful.",
       "migration_successful": "Migration complete.",
-      "migration_failed": "Migration failed. Please remove and re-add the integration."
+      "migration_failed": "Migration failed. Please remove and re-add the integration.",
+      "reconfigure_successful": "Integration already configured. Additional accounts cannot be added."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json detected for {email}",
@@ -145,13 +146,11 @@
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
           "enable_stats_entities": "Create statistics entities",
           "map_view_token_expiration": "Enable map view token expiration",
-          "delete_caches_on_remove": "Delete local caches on remove",
           "contributor_mode": "Location contributor mode",
           "subentry": "Feature group"
         },
         "data_description": {
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire.",
-          "delete_caches_on_remove": "When the entry is removed, delete its local Store (tokens/cache).",
           "contributor_mode": "Choose \"high_traffic\" for aggregated network-only updates (Google's default) or \"in_all_areas\" to opt into crowdsourced reports for faster coverage.",
           "subentry": "Store these options on the selected feature group. See [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) for examples."
         }
@@ -443,19 +442,15 @@
       }
     }
   },
-    "issues": {
-        "auth_expired": {
-            "title": "Reauthentication required",
-            "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality."
-        },
-        "cache_purged": {
-            "title": "Local caches removed",
-            "description": "Local credentials and cached data for **{entry_title}** were deleted when the integration entry was removed. Reconfigure the integration if you plan to add the account again."
-        },
-        "multiple_config_entries": {
-            "title": "Multiple configuration entries detected",
-            "description": "Google Find My Device now supports multiple configuration entries, one per Google account. If each entry targets a different account, no action is required. When the same account is added twice, Home Assistant creates a **Duplicate account entries** repair issue for the new entry so you can remove or re-enable the correct one."
-        },
+  "issues": {
+    "auth_expired": {
+      "title": "Reauthentication required",
+      "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality."
+    },
+    "multiple_config_entries": {
+      "title": "Multiple configuration entries detected",
+      "description": "Google Find My Device now supports multiple configuration entries, one per Google account. If each entry targets a different account, no action is required. When the same account is added twice, Home Assistant creates a **Duplicate account entries** repair issue for the new entry so you can remove or re-enable the correct one."
+    },
     "unique_id_collision": {
       "title": "Entity unique ID collision detected",
       "description": "Some entities for **{entry}** already use the new unique ID format and conflict with the migration.\n\n**Count:** {count}\n**Examples:** {entities}\n\nTo resolve:\n1) Open **Settings → Devices & Services → Entities** and search for the listed entities.\n2) Remove or rename conflicting entities, or delete abandoned entries from other integrations.\n3) Reload the integration (or restart Home Assistant). The migration will retry automatically."
