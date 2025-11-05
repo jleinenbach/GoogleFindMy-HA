@@ -507,21 +507,33 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         )
 
         entry_ids_from_service = call.data.get(ATTR_ENTRY_ID)
+        if isinstance(entry_ids_from_service, str):
+            provided_entry_ids: list[str] = [entry_ids_from_service]
+        elif isinstance(entry_ids_from_service, Iterable):
+            provided_entry_ids = list(entry_ids_from_service)
+        elif entry_ids_from_service is None:
+            provided_entry_ids = []
+        else:
+            _LOGGER.warning(
+                "Invalid %s payload type: %s", ATTR_ENTRY_ID, type(entry_ids_from_service)
+            )
+            return
+
         config_entry_ids: list[str] = []
 
         entries = hass.config_entries.async_entries(DOMAIN)
         entry: Any | None = entries[0] if entries else None
 
-        if entry_ids_from_service:
+        if provided_entry_ids:
             config_entry_ids.extend(
                 entry_id
-                for entry_id in entry_ids_from_service
+                for entry_id in provided_entry_ids
                 if any(e.entry_id == entry_id for e in entries)
             )
             if not config_entry_ids:
                 _LOGGER.warning(
                     "No valid config entries found for IDs: %s",
-                    entry_ids_from_service,
+                    provided_entry_ids,
                 )
                 return
 
