@@ -1005,6 +1005,46 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     candidate_devices.add(dev.id)
                     affected_entry_ids.update(dev.config_entries)
 
+        entries_by_id: dict[str, Any] = {
+            getattr(entry_, "entry_id", ""): entry_
+            for entry_ in entries
+            if isinstance(getattr(entry_, "entry_id", None), str)
+        }
+
+        if affected_entry_ids:
+            prep_entries = [
+                entries_by_id[entry_id]
+                for entry_id in affected_entry_ids
+                if entry_id in entries_by_id
+            ]
+        else:
+            prep_entries = list(entries_by_id.values())
+
+        prepared_for_setup: set[str] = set()
+
+        for entry_ in prep_entries:
+            entry_id = getattr(entry_, "entry_id", None)
+            if not isinstance(entry_id, str) or not entry_id:
+                continue
+            state = getattr(entry_, "state", None)
+            if state == ConfigEntryState.MIGRATION_ERROR:
+                continue
+            try:
+                unloaded = await hass.config_entries.async_unload(entry_id)
+            except Exception as err:
+                _LOGGER.error(
+                    "Failed to unload entry %s prior to registry rebuild: %s",
+                    entry_id,
+                    err,
+                )
+                continue
+            if unloaded or state in (
+                ConfigEntryState.NOT_LOADED,
+                ConfigEntryState.SETUP_ERROR,
+                ConfigEntryState.SETUP_RETRY,
+            ):
+                prepared_for_setup.add(entry_id)
+
         removed_entities = 0
         removed_devices = 0
 
@@ -1093,17 +1133,33 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     state,
                 )
 
+        setups_started = 0
+        reloads_started = 0
+
         for entry_ in reloadable_entries:
+            entry_id = getattr(entry_, "entry_id", None)
+            if not isinstance(entry_id, str) or not entry_id:
+                continue
             try:
-                await hass.config_entries.async_reload(entry_.entry_id)
+                if entry_id in prepared_for_setup:
+                    await hass.config_entries.async_setup(entry_id)
+                    setups_started += 1
+                else:
+                    await hass.config_entries.async_reload(entry_id)
+                    reloads_started += 1
             except Exception as err:
-                _LOGGER.error("Reload failed for entry %s: %s", entry_.entry_id, err)
+                _LOGGER.error("Reload failed for entry %s: %s", entry_id, err)
 
         _LOGGER.info(
-            "googlefindmy.rebuild_registry: finished (safe mode): removed %d entit(y/ies), %d device(s), entries reloaded=%d",
+            (
+                "googlefindmy.rebuild_registry: finished (safe mode): removed %d "
+                "entit(y/ies), %d device(s), entries restarted=%d (setup=%d, reload=%d)"
+            ),
             removed_entities,
             removed_devices,
             len(reloadable_entries),
+            setups_started,
+            reloads_started,
         )
 
     # ---- Actual service registrations (global; visible even without entries) ----
