@@ -43,6 +43,10 @@
           "map_view_token_expiration": "Ablauf von Kartenansicht-Tokens aktivieren"
         }
       },
+      "reconfigure": {
+        "title": "Google Find My Device neu konfigurieren",
+        "description": "Überprüfe die aktuelle Konfiguration für **{email}**. Fahre fort, um Anmeldedaten zu aktualisieren oder Abfrageoptionen anzupassen."
+      },
       "reauth_confirm": {
         "title": "Erneute Authentifizierung",
         "description": "Die Anmeldedaten für **{email}** sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben.",

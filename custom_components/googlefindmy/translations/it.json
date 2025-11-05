@@ -43,6 +43,10 @@
           "map_view_token_expiration": "Abilita scadenza dei token della vista mappa"
         }
       },
+      "reconfigure": {
+        "title": "Riconfigurare Google Find My Device",
+        "description": "Controlla la configurazione attuale per **{email}**. Continua per aggiornare le credenziali o modificare le opzioni di polling."
+      },
       "reauth_confirm": {
         "title": "Riautenticazione",
         "description": "Le credenziali di **{email}** sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email.",

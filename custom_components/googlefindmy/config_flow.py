@@ -2942,6 +2942,15 @@ class ConfigFlow(
         if placeholders:
             self.context["title_placeholders"] = placeholders
 
+        description_placeholders = placeholders or None
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=vol.Schema({}),
+                description_placeholders=description_placeholders,
+            )
+
         self._auth_data = {}
         for key in (
             DATA_AUTH_METHOD,

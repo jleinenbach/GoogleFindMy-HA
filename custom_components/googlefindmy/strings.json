@@ -43,6 +43,10 @@
           "map_view_token_expiration": "Enable map view token expiration"
         }
       },
+      "reconfigure": {
+        "title": "Reconfigure Google Find My Device",
+        "description": "Review the current configuration for **{email}**. Continue to update credentials or adjust polling options."
+      },
       "reauth_confirm": {
         "title": "Reauthenticate",
         "description": "Your credentials for **{email}** appear to be invalid or expired. Provide new credentials below.\n\nYou can either paste the full contents of a fresh **secrets.json** **or** enter a new **OAuth token**.\n\nNote: The account email is fixed for this reauthentication and cannot be changed here.",
