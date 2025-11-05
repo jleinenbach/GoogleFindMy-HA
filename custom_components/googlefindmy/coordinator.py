@@ -1556,7 +1556,56 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     ) -> Any:
         """Call a device-registry helper without compatibility fallbacks."""
 
-        return call(**dict(base_kwargs))
+        kwargs = dict(base_kwargs)
+        if "config_subentry_id" in kwargs:
+            replacement = self._device_registry_config_subentry_kwarg_name(call)
+            if replacement is None:
+                kwargs.pop("config_subentry_id")
+            elif replacement != "config_subentry_id":
+                kwargs[replacement] = kwargs.pop("config_subentry_id")
+
+        return call(**kwargs)
+
+    def _device_registry_config_subentry_kwarg_name(
+        self, call: Callable[..., Any]
+    ) -> str | None:
+        """Return the config-subentry kwarg name accepted by ``call``.
+
+        Home Assistant 2025.11 renamed the ``async_update_device`` keyword from
+        ``config_subentry_id`` to ``add_config_subentry_id``. Earlier versions still
+        expect ``config_subentry_id``. This helper inspects the callable signature
+        and returns the supported keyword, caching the result for reuse.
+        """
+
+        cache = getattr(self, "_device_registry_config_subentry_kwarg_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_device_registry_config_subentry_kwarg_cache", cache)
+
+        func = getattr(call, "__func__", call)
+        if func in cache:
+            return cache[func]
+
+        try:
+            signature = inspect.signature(call)
+        except (TypeError, ValueError):  # pragma: no cover - defensive fallback
+            kwarg_name: str | None = None
+        else:
+            parameters = signature.parameters
+            if "config_subentry_id" in parameters:
+                kwarg_name = "config_subentry_id"
+            elif "add_config_subentry_id" in parameters:
+                kwarg_name = "add_config_subentry_id"
+            elif any(
+                param.kind is inspect.Parameter.VAR_KEYWORD
+                for param in parameters.values()
+            ):
+                kwarg_name = "config_subentry_id"
+            else:
+                kwarg_name = None
+
+        cache[func] = kwarg_name
+        return kwarg_name
 
     def _device_registry_allows_translation_update(self, dev_reg: Any) -> bool:
         """Return True if the registry accepts translation metadata during updates."""

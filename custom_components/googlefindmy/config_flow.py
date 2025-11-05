@@ -3069,7 +3069,7 @@ class ConfigFlow(
                     subentry_context[group_key] = getattr(subentry, "subentry_id", None)
 
         if user_input is None:
-            return await self.async_show_form(
+            return self.async_show_form(
                 step_id="reconfigure",
                 data_schema=vol.Schema({}),
                 description_placeholders=placeholders or None,
