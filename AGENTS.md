@@ -280,6 +280,8 @@ When a change is a bug fix (**commit type** `fix:` or **branch** `fix/...`) and 
 * Prefer the closest relevant file/naming: `tests/test_<area>_...py`. For config-flow fixes, put it in `test_config_flow.py`; for token/cache issues, `test_token_cache.py`.
 * If multiple permutations exist, cover the **single most representative** one; add more only if they catch distinct behaviors.
 
+> **Reviewer reminder:** When service payload handling changes (for example, normalizing `entry_id` inputs from strings vs. lists), explicitly confirm or request regression coverage for each supported payload shape before approving the PR.
+
 ### 3.3 Opportunistic **Test Optimization** (SHOULD SUGGEST)
 
 * Suggest improvements **only as a by-product** of other work (no dedicated optimization sweep): e.g., use `pytest.mark.parametrize`, simplify redundant mocks/fixtures, remove unreachable branches, replace sleeps with time freezing.

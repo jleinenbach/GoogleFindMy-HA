@@ -21,10 +21,14 @@ from typing import Any
 from collections.abc import Iterable
 
 from homeassistant import exceptions as ha_exceptions
-from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.network import get_url
+
+try:  # Home Assistant 2025.5+: attribute constant exposed
+    from homeassistant.const import ATTR_ENTRY_ID
+except ImportError:  # pragma: no cover - forward compatibility for HA < 2025.5
+    ATTR_ENTRY_ID = "entry_id"
 
 from .const import (
     DOMAIN,
@@ -34,11 +38,6 @@ from .const import (
     SERVICE_STOP_SOUND,
     SERVICE_REFRESH_DEVICE_URLS,
     SERVICE_REBUILD_REGISTRY,
-    ATTR_DEVICE_IDS,
-    ATTR_MODE,
-    MODE_MIGRATE,
-    MODE_REBUILD,
-    REBUILD_REGISTRY_MODES,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,  # ctx provides the key but we keep a local fallback constant
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     LEGACY_SERVICE_IDENTIFIER,
@@ -502,665 +501,58 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
     async def async_rebuild_registry_service(call: ServiceCall) -> None:
-        """Migrate soft settings or rebuild the registry (optionally scoped to device_ids).
+        """Handle the service call to reload the integration."""
+        _LOGGER.info(
+            "Service 'rebuild_device_registry' (reloading config entry) called."
+        )
 
-        Safety invariants:
-          - Delete only what is unambiguously ours:
-            * Entities: ent.platform == DOMAIN
-            * Devices: device.identifiers contains our DOMAIN AND ALL linked config_entries belong to our DOMAIN
-            * Never touch the "service"/integration device (identifier == 'integration' or f'integration_<entry_id>')
-          - Do not remove any device that still has entities (from any platform).
-        Steps:
-          1) Determine target devices (ours) from Device Registry.
-          2) Remove all entities (ours) linked to those devices.
-          3) Remove orphan entities (ours) with no device or missing device.
-          4) Remove devices (ours) that now have no entities left and are not the service device.
-          5) Reload entries (or all if only global orphan-entity cleanup happened).
-        """
-        mode: str = str(call.data.get(ATTR_MODE, MODE_REBUILD)).lower()
-        raw_ids = call.data.get(ATTR_DEVICE_IDS)
+        entry_ids_from_service = call.data.get(ATTR_ENTRY_ID)
+        if isinstance(entry_ids_from_service, str):
+            provided_entry_ids: list[str] = [entry_ids_from_service]
+        elif isinstance(entry_ids_from_service, Iterable):
+            provided_entry_ids = list(entry_ids_from_service)
+        elif entry_ids_from_service is None:
+            provided_entry_ids = []
+        else:
+            _LOGGER.warning(
+                "Invalid %s payload type: %s", ATTR_ENTRY_ID, type(entry_ids_from_service)
+            )
+            return
 
-        # C-4: Micro-hardening for device_ids input (developer tools misuse)
-        if isinstance(raw_ids, str):
-            target_device_ids = {raw_ids}
-        elif isinstance(raw_ids, (list, tuple, set)):
-            try:
-                target_device_ids = {str(x) for x in raw_ids}
-            except Exception:
-                _LOGGER.error(
-                    "Invalid 'device_ids' payload; expected list/tuple/set of device IDs (strings)."
+        config_entry_ids: list[str] = []
+
+        entries = hass.config_entries.async_entries(DOMAIN)
+        entry: Any | None = entries[0] if entries else None
+
+        if provided_entry_ids:
+            config_entry_ids.extend(
+                entry_id
+                for entry_id in provided_entry_ids
+                if any(e.entry_id == entry_id for e in entries)
+            )
+            if not config_entry_ids:
+                _LOGGER.warning(
+                    "No valid config entries found for IDs: %s",
+                    provided_entry_ids,
                 )
                 return
-        elif raw_ids is None:
-            target_device_ids = set()
-        else:
-            _LOGGER.error(
-                "Invalid 'device_ids' type: %s; expected string, list/tuple/set, or omitted.",
-                type(raw_ids).__name__,
-            )
+
+        if not config_entry_ids:
+            if entry is None:
+                _LOGGER.warning("No config entries available to reload.")
+                return
+            _LOGGER.info("Reloading config entry: %s", entry.entry_id)
+            await hass.config_entries.async_reload(entry.entry_id)
             return
 
-        dev_reg = dr.async_get(hass)
-        ent_reg = er.async_get(hass)
-        entries = hass.config_entries.async_entries(DOMAIN)
-
-        affected_entry_ids: set[str]
-        candidate_devices: set[str]
-
-        coalesce_accounts = ctx.get("coalesce_account_entries")
-        extract_email = ctx.get("extract_normalized_email")
-        if callable(coalesce_accounts):
-            processed_accounts: set[str] = set()
-            for candidate in list(entries):
-                entry_id = getattr(candidate, "entry_id", "<unknown>")
-                normalized_email: str | None = None
-                if callable(extract_email):
-                    try:
-                        normalized_email = extract_email(candidate)
-                    except Exception as err:  # pragma: no cover - defensive logging
-                        _LOGGER.debug(
-                            "Failed to resolve normalized email for %s during rebuild: %s",
-                            entry_id,
-                            err,
-                        )
-                account_key = normalized_email or f"id:{entry_id}"
-                if account_key in processed_accounts:
-                    continue
-                processed_accounts.add(account_key)
-                try:
-                    await coalesce_accounts(hass, canonical_entry=candidate)
-                except Exception as err:
-                    _LOGGER.error(
-                        "googlefindmy.rebuild_registry: account deduplication failed for entry %s: %s",
-                        entry_id,
-                        err,
-                    )
-                    raise
-            entries = hass.config_entries.async_entries(DOMAIN)
-
-        _LOGGER.info(
-            "googlefindmy.rebuild_registry requested: mode=%s, device_ids=%s",
-            mode,
-            "none"
-            if not raw_ids
-            else (
-                raw_ids if isinstance(raw_ids, str) else f"{len(target_device_ids)} ids"
-            ),
-        )
-
-        soft_migrate = ctx.get("soft_migrate_entry")
-        unique_id_migrate = ctx.get("migrate_unique_ids")
-        relink_button_devices = ctx.get("relink_button_devices")
-        relink_subentry_entities = ctx.get("relink_subentry_entities")
-        manager = getattr(hass, "config_entries", None)
-
-        allowed_reload_states: set[ConfigEntryState] = {
-            ConfigEntryState.LOADED,
-            ConfigEntryState.NOT_LOADED,
-            ConfigEntryState.SETUP_ERROR,
-            ConfigEntryState.SETUP_RETRY,
-            ConfigEntryState.SETUP_IN_PROGRESS,
-        }
-
-        failed_unload_state = getattr(ConfigEntryState, "FAILED_UNLOAD", None)
-        if failed_unload_state is not None:
-            allowed_reload_states.add(failed_unload_state)
-
-        async def _recover_migration_error_entry(entry_: Any) -> tuple[bool, Any | None]:
-            """Attempt to recover an entry from MIGRATION_ERROR and signal reload readiness."""
-
-            migrate_entry_callable = None
-            migrate_callable = None
-            if manager is not None:
-                migrate_entry_callable = getattr(manager, "async_migrate_entry", None)
-                if not callable(migrate_entry_callable):
-                    migrate_entry_callable = None
-                if migrate_entry_callable is None:
-                    migrate_callable = getattr(manager, "async_migrate", None)
-                    if not callable(migrate_callable):
-                        migrate_callable = None
-            migration_supported = bool(migrate_entry_callable or migrate_callable)
-
-            entry_id = getattr(entry_, "entry_id", "<unknown>")
-            _LOGGER.warning(
-                "Config entry %s is in migration error state; attempting soft migration instead of reload.",
-                entry_id,
-            )
-
-            soft_completed = False
-            if callable(soft_migrate):
-                try:
-                    await soft_migrate(hass, entry_)
-                except Exception as err:
-                    _LOGGER.error(
-                        "Soft migration helper failed for entry %s: %s",
-                        entry_id,
-                        err,
-                    )
-                else:
-                    soft_completed = True
-            else:
-                _LOGGER.warning(
-                    "Soft migration helper unavailable; entry %s remains in migration error state until migration is resolved manually.",
-                    entry_id,
-                )
-
-            if callable(unique_id_migrate):
-                try:
-                    await unique_id_migrate(hass, entry_)
-                except Exception as err:
-                    _LOGGER.error(
-                        "Unique ID migration helper failed for entry %s: %s",
-                        entry_id,
-                        err,
-                    )
-            elif unique_id_migrate is None:
-                _LOGGER.info(
-                    "Unique ID migration helper not provided; entry %s skipped.",
-                    entry_id,
-                )
-            else:
-                _LOGGER.warning(
-                    "Unique ID migration helper for entry %s is not callable; skipped.",
-                    entry_id,
-                )
-
-            reasons: list[str] = []
-            if soft_completed:
-                reasons.append("soft migration helpers completed")
-
-            if not migration_supported:
-                reasons.append("Home Assistant migration API unavailable")
-                refreshed_entry = _entry_for_id(hass, entry_.entry_id) or entry_
-                joined_reasons = ", ".join(reasons) or "no helper progress"
-                _LOGGER.warning(
-                    (
-                        "Config entry %s remains in migration error state; Home Assistant "
-                        "cannot retry migration automatically (%s); manual migration required."
-                    ),
-                    entry_id,
-                    joined_reasons,
-                )
-                return False, refreshed_entry
-
-            migration_succeeded = False
-            if callable(migrate_entry_callable):
-                try:
-                    migrate_result = await migrate_entry_callable(entry_)
-                except ConfigEntryError as err:
-                    _LOGGER.error(
-                        "Retrying Home Assistant migration for entry %s failed: %s",
-                        entry_id,
-                        err,
-                    )
-                except Exception as err:  # pragma: no cover - defensive guard
-                    _LOGGER.error(
-                        "Unexpected error while migrating entry %s: %s",
-                        entry_id,
-                        err,
-                    )
-                else:
-                    migration_succeeded = bool(migrate_result)
-                    reasons.append("Home Assistant migration retried")
-            elif callable(migrate_callable):
-                try:
-                    migrate_result = await migrate_callable(entry_.entry_id)
-                except ConfigEntryError as err:
-                    _LOGGER.error(
-                        "Retrying Home Assistant migration for entry %s failed: %s",
-                        entry_id,
-                        err,
-                    )
-                except Exception as err:  # pragma: no cover - defensive guard
-                    _LOGGER.error(
-                        "Unexpected error while migrating entry %s: %s",
-                        entry_id,
-                        err,
-                    )
-                else:
-                    migration_succeeded = bool(migrate_result)
-                    reasons.append("Home Assistant migration retried")
-
-            refreshed_entry = _entry_for_id(hass, entry_.entry_id) or entry_
-            refreshed_state = getattr(refreshed_entry, "state", None)
-
-            state_ready = False
-            if refreshed_state == ConfigEntryState.MIGRATION_ERROR:
-                pass
-            elif refreshed_state is None:
-                reasons.append("entry state unavailable after recovery attempt")
-            elif refreshed_state in allowed_reload_states:
-                state_ready = True
-                state_name = getattr(refreshed_state, "name", str(refreshed_state))
-                if not migration_succeeded:
-                    reasons.append(f"entry state recovered ({state_name})")
-            else:
-                state_name = getattr(refreshed_state, "name", str(refreshed_state))
-                reasons.append(f"entry state transitioned to {state_name}")
-
-            should_reload = migration_succeeded or state_ready
-
-            if should_reload:
-                joined_reasons = ", ".join(reasons) or "no additional context"
-                _LOGGER.info(
-                    "Config entry %s recovered from migration error; queued for reload (%s).",
-                    entry_id,
-                    joined_reasons,
-                )
-                return True, refreshed_entry
-
-            joined_reasons = ", ".join(reasons) or "no helper progress"
-            _LOGGER.warning(
-                "Config entry %s remains in migration error state after rebuild helpers; manual migration required (%s).",
-                entry_id,
-                joined_reasons,
-            )
-            return False, refreshed_entry
-
-        def _purge_orphan_devices_for_entry(entry_: Any) -> int:
-            """Remove orphaned devices for ``entry_`` that no longer have linked entities."""
-
-            entry_id = getattr(entry_, "entry_id", None)
-            if not isinstance(entry_id, str) or not entry_id:
-                return 0
-
+        _LOGGER.info("Reloading config entries: %s", config_entry_ids)
+        for entry_id in config_entry_ids:
             try:
-                devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
-                entities_for_entry = er.async_entries_for_config_entry(ent_reg, entry_id)
-            except Exception as err:  # pragma: no cover - defensive guard
-                _LOGGER.debug(
-                    "Device/entity registry scan failed for entry %s during orphan purge: %s",
-                    entry_id,
-                    err,
-                )
-                return 0
-
-            linked_device_ids: set[str] = {
-                ent.device_id
-                for ent in entities_for_entry
-                if getattr(ent, "device_id", None)
-            }
-
-            removed = 0
-            for device in list(devices_for_entry):
-                if device.id in linked_device_ids:
-                    continue
-                if _is_service_device(device) or not _dev_is_ours(device):
-                    continue
-                try:
-                    dev_reg.async_remove_device(device.id)
-                except Exception as err:  # pragma: no cover - defensive guard
-                    _LOGGER.error(
-                        "Failed to remove orphan device %s for entry %s: %s",
-                        getattr(device, "id", "<unknown>"),
-                        entry_id,
-                        err,
-                    )
-                    continue
-                removed += 1
-            return removed
-
-        if mode == MODE_MIGRATE:
-            # C-2: real soft-migrate path using __init__.py helpers via ctx
-
-            if not callable(soft_migrate):
-                _LOGGER.warning(
-                    "soft_migrate_entry not provided in context; data→options migration will be skipped."
-                )
-            if not callable(unique_id_migrate):
-                _LOGGER.warning(
-                    "migrate_unique_ids not provided in context; unique-id migration will be skipped."
-                )
-            if not callable(relink_button_devices):
-                _LOGGER.warning(
-                    "relink_button_devices not provided in context; button relinking will be skipped."
-                )
-            if not callable(relink_subentry_entities):
-                _LOGGER.warning(
-                    "relink_subentry_entities not provided in context; tracker/service relinking will be skipped."
-                )
-
-            soft_completed = 0
-            unique_completed = 0
-            relink_completed = 0
-            subentry_relink_completed = 0
-
-            for entry_ in entries:
-                if callable(soft_migrate):
-                    try:
-                        await soft_migrate(hass, entry_)
-                    except Exception as err:
-                        _LOGGER.error(
-                            "Soft-migrate failed for entry %s: %s", entry_.entry_id, err
-                        )
-                    else:
-                        soft_completed += 1
-
-                if callable(unique_id_migrate):
-                    try:
-                        await unique_id_migrate(hass, entry_)
-                    except Exception as err:
-                        _LOGGER.error(
-                            "Unique-ID migration failed for entry %s: %s",
-                            entry_.entry_id,
-                            err,
-                        )
-                    else:
-                        unique_completed += 1
-
-                if callable(relink_button_devices):
-                    try:
-                        await relink_button_devices(hass, entry_)
-                    except Exception as err:
-                        _LOGGER.error(
-                            "Button relink failed for entry %s: %s",
-                            entry_.entry_id,
-                            err,
-                        )
-                    else:
-                        relink_completed += 1
-
-                if callable(relink_subentry_entities):
-                    try:
-                        await relink_subentry_entities(hass, entry_)
-                    except Exception as err:
-                        _LOGGER.error(
-                            "Tracker/service relink failed for entry %s: %s",
-                            entry_.entry_id,
-                            err,
-                        )
-                    else:
-                        subentry_relink_completed += 1
-
-            # Reload all entries to apply migrations
-            entries_to_reload: list[Any] = []
-            migrate_skipped_states: list[tuple[Any, str | ConfigEntryState | None]] = []
-            for entry_ in entries:
-                state = getattr(entry_, "state", None)
-                if state == ConfigEntryState.MIGRATION_ERROR:
-                    should_reload, refreshed_entry = await _recover_migration_error_entry(
-                        entry_
-                    )
-                    if should_reload and refreshed_entry is not None:
-                        entries_to_reload.append(refreshed_entry)
-                    continue
-                if state is None or state in allowed_reload_states:
-                    entries_to_reload.append(entry_)
-                    continue
-                migrate_skipped_states.append((entry_, state))
-
-            if migrate_skipped_states:
-                for entry_, state in migrate_skipped_states:
-                    _LOGGER.info(
-                        "Skipping reload for entry %s in unsupported state %s.",
-                        getattr(entry_, "entry_id", "<unknown>"),
-                        state,
-                    )
-
-            for entry_ in entries_to_reload:
-                try:
-                    await hass.config_entries.async_reload(entry_.entry_id)
-                except Exception as err:
-                    _LOGGER.error(
-                        "Reload failed for entry %s: %s", entry_.entry_id, err
-                    )
-
-            _LOGGER.info(
-                "googlefindmy.rebuild_registry: migrate completed for %d config entrie(s) (data/options=%d, unique_ids=%d, button_relinks=%d, subentry_relinks=%d)",
-                len(entries),
-                soft_completed,
-                unique_completed,
-                relink_completed,
-                subentry_relink_completed,
-            )
-            return
-
-        if mode != MODE_REBUILD:
-            _LOGGER.error(
-                "Unsupported mode '%s' for rebuild_registry; use one of: %s",
-                mode,
-                ", ".join(REBUILD_REGISTRY_MODES),
-            )
-            return
-
-        def _dev_is_ours(dev: dr.DeviceEntry | None) -> bool:
-            if dev is None:
-                return False
-            entry_ids = getattr(dev, "config_entries", None)
-            if not entry_ids:
-                return False
-            owns_any = False
-            for eid in entry_ids:
-                entry_obj = hass.config_entries.async_get_entry(eid)
-                if entry_obj is None or entry_obj.domain != DOMAIN:
-                    return False
-                owns_any = True
-            if owns_any:
-                return True
-            identifiers = getattr(dev, "identifiers", ())
-            if not isinstance(identifiers, Iterable):
-                return False
-            for candidate in identifiers:
-                try:
-                    domain, _ = candidate
-                except (TypeError, ValueError):
-                    continue
-                if domain == DOMAIN:
-                    return True
-            return False
-
-        def _is_service_device(dev: dr.DeviceEntry) -> bool:
-            # service device can be 'integration' or entry-scoped name
-            if any(
-                domain == DOMAIN and ident == "integration"
-                for domain, ident in dev.identifiers
-            ):
-                return True
-            return any(
-                domain == DOMAIN and str(ident).startswith("integration_")
-                for domain, ident in dev.identifiers
-            )
-
-        # 1) Determine candidate devices (strictly ours), optionally filtered by passed HA device_ids.
-        if target_device_ids:
-            _LOGGER.debug(
-                "Scoped registry rebuild requested for %d device(s)",
-                len(target_device_ids),
-            )
-            affected_entry_ids = set()
-            candidate_devices = set()
-            for d in target_device_ids:
-                dev = dev_reg.async_get(d)
-                if dev and _dev_is_ours(dev):
-                    candidate_devices.add(dev.id)
-                    affected_entry_ids.update(dev.config_entries)
-
-            for ent in list(ent_reg.entities.values()):
-                if getattr(ent, "platform", None) != DOMAIN:
-                    continue
-                device_id = getattr(ent, "device_id", None)
-                if isinstance(device_id, str) and device_id in target_device_ids:
-                    candidate_devices.add(device_id)
-                    entry_id = getattr(ent, "config_entry_id", None)
-                    if isinstance(entry_id, str) and entry_id:
-                        affected_entry_ids.add(entry_id)
-        else:
-            _LOGGER.debug(
-                "Global registry rebuild requested; scanning all Google Find My entities/devices",
-            )
-            affected_entry_ids = set()
-            candidate_devices = set()
-            for ent in list(ent_reg.entities.values()):
-                if getattr(ent, "platform", None) != DOMAIN:
-                    continue
-                device_id = getattr(ent, "device_id", None)
-                if isinstance(device_id, str) and device_id:
-                    candidate_devices.add(device_id)
-                entry_id = getattr(ent, "config_entry_id", None)
-                if isinstance(entry_id, str) and entry_id:
-                    affected_entry_ids.add(entry_id)
-
-            for dev in dev_reg.devices.values():
-                if _dev_is_ours(dev):
-                    candidate_devices.add(dev.id)
-                    affected_entry_ids.update(dev.config_entries)
-
-        entries_by_id: dict[str, Any] = {
-            getattr(entry_, "entry_id", ""): entry_
-            for entry_ in entries
-            if isinstance(getattr(entry_, "entry_id", None), str)
-        }
-
-        if affected_entry_ids:
-            prep_entries = [
-                entries_by_id[entry_id]
-                for entry_id in affected_entry_ids
-                if entry_id in entries_by_id
-            ]
-        else:
-            prep_entries = list(entries_by_id.values())
-
-        prepared_for_setup: set[str] = set()
-
-        for entry_ in prep_entries:
-            entry_id = getattr(entry_, "entry_id", None)
-            if not isinstance(entry_id, str) or not entry_id:
-                continue
-            state = getattr(entry_, "state", None)
-            if state == ConfigEntryState.MIGRATION_ERROR:
-                continue
-            try:
-                unloaded = await hass.config_entries.async_unload(entry_id)
+                await hass.config_entries.async_reload(entry_id)
             except Exception as err:
                 _LOGGER.error(
-                    "Failed to unload entry %s prior to registry rebuild: %s",
-                    entry_id,
-                    err,
+                    "Error reloading config entry %s: %s", entry_id, err
                 )
-                continue
-            if unloaded or state in (
-                ConfigEntryState.NOT_LOADED,
-                ConfigEntryState.SETUP_ERROR,
-                ConfigEntryState.SETUP_RETRY,
-            ):
-                prepared_for_setup.add(entry_id)
-
-        removed_entities = 0
-        removed_devices = 0
-
-        # 2) Remove our entities linked to candidate devices (includes disabled/hidden).
-        for ent in list(ent_reg.entities.values()):
-            if ent.platform == DOMAIN and ent.device_id in candidate_devices:
-                try:
-                    ent_reg.async_remove(ent.entity_id)
-                    removed_entities += 1
-                except Exception as err:
-                    _LOGGER.error("Failed to remove entity %s: %s", ent.entity_id, err)
-
-        # 3) Orphan cleanup (ours only): platform==DOMAIN and (no device_id OR device missing).
-        orphan_only_cleanup = False
-        for ent in list(ent_reg.entities.values()):
-            if ent.platform != DOMAIN:
-                continue
-            if ent.device_id:
-                dev_obj = dev_reg.async_get(ent.device_id)
-                if dev_obj is not None:
-                    continue  # has a device; not an orphan
-            try:
-                ent_reg.async_remove(ent.entity_id)
-                removed_entities += 1
-                orphan_only_cleanup = True
-            except Exception as err:
-                _LOGGER.error(
-                    "Failed to remove orphan entity %s: %s", ent.entity_id, err
-                )
-
-        # 4) Remove devices (ours only) that now have no entities left and are not service devices.
-        for dev_id in list(candidate_devices):
-            dev = dev_reg.async_get(dev_id)
-            if dev is None or not _dev_is_ours(dev) or _is_service_device(dev):
-                continue
-            has_entities = any(e.device_id == dev_id for e in ent_reg.entities.values())
-            if not has_entities:
-                try:
-                    dev_reg.async_remove_device(dev_id)
-                    removed_devices += 1
-                except Exception as err:
-                    _LOGGER.error("Failed to remove device %s: %s", dev_id, err)
-
-        orphan_device_removals = 0
-        for entry_ in entries:
-            purged = _purge_orphan_devices_for_entry(entry_)
-            if purged:
-                orphan_device_removals += purged
-                entry_id = getattr(entry_, "entry_id", None)
-                if isinstance(entry_id, str) and entry_id:
-                    affected_entry_ids.add(entry_id)
-
-        removed_devices += orphan_device_removals
-
-        # 5) Reload entries. If only orphan entities were removed and we didn't touch any known devices,
-        #    reload all entries of our domain to be safe.
-        if orphan_only_cleanup and not affected_entry_ids:
-            to_reload = list(entries)
-        else:
-            to_reload = [
-                e for e in entries if e.entry_id in affected_entry_ids
-            ] or list(entries)
-
-        reloadable_entries: list[Any] = []
-        skipped_states: list[tuple[Any, str | ConfigEntryState | None]] = []
-
-        for entry_ in to_reload:
-            state = getattr(entry_, "state", None)
-            if state == ConfigEntryState.MIGRATION_ERROR:
-                should_reload, refreshed_entry = await _recover_migration_error_entry(
-                    entry_
-                )
-                if should_reload and refreshed_entry is not None:
-                    reloadable_entries.append(refreshed_entry)
-                continue
-            if state is None or state in allowed_reload_states:
-                reloadable_entries.append(entry_)
-                continue
-            skipped_states.append((entry_, state))
-
-        if skipped_states:
-            for entry_, state in skipped_states:
-                _LOGGER.info(
-                    "Skipping reload for entry %s in unsupported state %s.",
-                    getattr(entry_, "entry_id", "<unknown>"),
-                    state,
-                )
-
-        setups_started = 0
-        reloads_started = 0
-
-        for entry_ in reloadable_entries:
-            entry_id = getattr(entry_, "entry_id", None)
-            if not isinstance(entry_id, str) or not entry_id:
-                continue
-            try:
-                if entry_id in prepared_for_setup:
-                    await hass.config_entries.async_setup(entry_id)
-                    setups_started += 1
-                else:
-                    await hass.config_entries.async_reload(entry_id)
-                    reloads_started += 1
-            except Exception as err:
-                _LOGGER.error("Reload failed for entry %s: %s", entry_id, err)
-
-        _LOGGER.info(
-            (
-                "googlefindmy.rebuild_registry: finished (safe mode): removed %d "
-                "entit(y/ies), %d device(s), entries restarted=%d (setup=%d, reload=%d)"
-            ),
-            removed_entities,
-            removed_devices,
-            len(reloadable_entries),
-            setups_started,
-            reloads_started,
-        )
 
     # ---- Actual service registrations (global; visible even without entries) ----
     # NOTE: We intentionally do NOT pass voluptuous schemas here; services.yaml is our SSoT.
