@@ -2995,6 +2995,13 @@ class ConfigFlow(
                 if isinstance(group_key, str) and group_key in subentry_context:
                     subentry_context[group_key] = getattr(subentry, "subentry_id", None)
 
+        if user_input is None:
+            return await self.async_show_form(
+                step_id="reconfigure",
+                data_schema=vol.Schema({}),
+                description_placeholders=placeholders or None,
+            )
+
         oauth_token = self._auth_data.get(CONF_OAUTH_TOKEN)
         flow_result: FlowResult | Awaitable[FlowResult]
         if oauth_token:

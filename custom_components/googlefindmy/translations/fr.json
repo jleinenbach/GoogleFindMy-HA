@@ -43,6 +43,10 @@
           "map_view_token_expiration": "Activer l’expiration du jeton de la vue carte"
         }
       },
+      "reconfigure": {
+        "title": "Reconfigurer Google Find My Device",
+        "description": "Vérifiez la configuration actuelle pour **{email}**. Continuez pour mettre à jour les identifiants ou ajuster les options d’interrogation."
+      },
       "reauth_confirm": {
         "title": "Se réauthentifier",
         "description": "Les identifiants de **{email}** semblent invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nAstuce : vous pouvez soit coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail.",

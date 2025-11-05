@@ -43,6 +43,10 @@
           "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy"
         }
       },
+      "reconfigure": {
+        "title": "Ponownie skonfiguruj Google Find My Device",
+        "description": "Sprawdź bieżącą konfigurację dla **{email}**. Kontynuuj, aby zaktualizować dane logowania lub dostosować opcje odpytywania."
+      },
       "reauth_confirm": {
         "title": "Ponowne uwierzytelnienie",
         "description": "Poświadczenia dla **{email}** są nieprawidłowe lub wygasły. Podaj poniżej nowe.\n\nWskazówka: możesz wkleić pełną zawartość nowego pliku secrets.json **albo** podać nowy token OAuth i adres e-mail.",

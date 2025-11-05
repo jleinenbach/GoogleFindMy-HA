@@ -43,6 +43,10 @@
           "map_view_token_expiration": "Activar caducidad del token de la vista de mapa"
         }
       },
+      "reconfigure": {
+        "title": "Reconfigurar Google Find My Device",
+        "description": "Revisa la configuración actual para **{email}**. Continúa para actualizar las credenciales o ajustar las opciones de sondeo."
+      },
       "reauth_confirm": {
         "title": "Volver a autenticar",
         "description": "Las credenciales de **{email}** parecen no ser válidas o han caducado. Proporciona nuevas credenciales a continuación.\n\nConsejo: puedes pegar el contenido completo de un secrets.json reciente **o** facilitar un nuevo token OAuth y correo electrónico.",
