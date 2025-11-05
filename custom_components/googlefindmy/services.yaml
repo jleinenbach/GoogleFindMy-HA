@@ -106,3 +106,15 @@ rebuild_registry:
         device:
           multiple: true
           integration: googlefindmy
+    entry_id:
+      name: Config Entry IDs (optional)
+      description: >-
+        Target specific config entries when reloading. Accepts either a single entry_id string
+        (`entry_id: "abc123def456"`) or a list of IDs (`entry_id: ["abc123def456", "ghi789jkl012"]`).
+      required: false
+      example:
+        - "abc123def456"
+        - "ghi789jkl012"
+      selector:
+        text:
+          multiline: false
