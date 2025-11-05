@@ -65,16 +65,19 @@ from homeassistant.const import (
 from homeassistant.core import CoreState, Event, HomeAssistant
 
 try:
-    from homeassistant.core import split_entity_id
-except ImportError:  # pragma: no cover - fallback for test environments
+    from homeassistant.helpers.entity import split_entity_id
+except ImportError:  # pragma: no cover - fallback for legacy or test environments
+    try:
+        from homeassistant.core import split_entity_id
+    except ImportError:  # pragma: no cover - minimal shim for isolated tests
 
-    def split_entity_id(entity_id: str) -> tuple[str, str]:
-        """Split an entity_id into its domain and object ID parts."""
+        def split_entity_id(entity_id: str) -> tuple[str, str]:
+            """Split an entity_id into its domain and object ID parts."""
 
-        if "." not in entity_id:
-            raise ValueError(entity_id)
-        domain, object_id = entity_id.split(".", 1)
-        return domain, object_id
+            if "." not in entity_id:
+                raise ValueError(entity_id)
+            domain, object_id = entity_id.split(".", 1)
+            return domain, object_id
 from homeassistant.exceptions import (
     ConfigEntryNotReady,
     HomeAssistantError,
@@ -401,7 +404,13 @@ async def _async_self_heal_duplicate_entities(
     hass: HomeAssistant,
     entry: ConfigEntry,
 ) -> None:
-    """Detect and remove duplicate entities tied to ``entry``."""
+    """Detect and remove duplicate entities for this config entry.
+
+    A duplicate is defined as sharing the same config entry, device identifier,
+    entity domain, and logical name (``translation_key`` preferred, then
+    ``original_name``) while exposing a different ``entity_id`` or
+    ``unique_id``. Only one canonical entity in every group is preserved.
+    """
 
     entity_registry = er.async_get(hass)
 
@@ -4603,6 +4612,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # Forward platforms so RestoreEntity can populate immediately
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # Run duplicate self-healing asynchronously so it also executes on reloads.
     hass.async_create_task(
         _async_self_heal_duplicate_entities(hass, entry),
         name=f"{DOMAIN}.self_heal_duplicates.{entry.entry_id}",
