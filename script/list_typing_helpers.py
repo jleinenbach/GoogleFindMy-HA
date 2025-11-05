@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 DEFAULT_PATTERN = "_typing.py"
 
@@ -74,7 +74,7 @@ def _print_helpers(grouped: dict[str, list[Path]], root: Path) -> None:
             print(f"  - {relative}")
 
 
-def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the script."""
 
     parser = argparse.ArgumentParser(
@@ -97,7 +97,7 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Iterable[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for enumerating typing helper modules."""
 
     args = _parse_args(argv)

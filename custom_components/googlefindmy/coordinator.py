@@ -617,10 +617,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             contributor_mode_switch_epoch=self._contributor_mode_switch_epoch,
         )
 
-        # Device-registry optional feature detection (learned lazily).
-        self._reg_supports_translations: bool | None = None
-        self._reg_supports_config_subentry_id: bool | None = None
-
         # Configuration (user options; updated via update_settings())
         self.location_poll_interval = int(location_poll_interval)
         self.device_poll_delay = int(device_poll_delay)
@@ -764,6 +760,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Attach the config entry subentry manager to the coordinator."""
 
         self._subentry_manager = manager
+        if manager is None:
+            return
+
+        try:
+            self._refresh_subentry_index(skip_manager_update=True)
+        except Exception as err:  # noqa: BLE001 - defensive guard
+            _LOGGER.debug(
+                "Initial subentry refresh failed during setup: %s",
+                err,
+            )
+            return
+
+        service_meta = self._subentry_metadata.get(SERVICE_SUBENTRY_KEY)
+        if service_meta is not None and service_meta.config_subentry_id:
+            try:
+                self._ensure_service_device_exists()
+            except Exception as err:  # noqa: BLE001 - defensive guard
+                _LOGGER.debug(
+                    "Service device ensure skipped during setup: %s",
+                    err,
+                )
 
     def _default_subentry_key(self) -> str:
         """Return the default subentry key used when no explicit mapping exists."""
@@ -895,7 +912,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._pending_subentry_repair = task
 
     def _refresh_subentry_index(
-        self, visible_devices: Sequence[Mapping[str, Any]] | None = None
+        self,
+        visible_devices: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        skip_manager_update: bool = False,
     ) -> None:
         """Refresh internal subentry metadata caches."""
 
@@ -963,6 +983,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     registry_lookup = candidate_lookup
 
         canonical_to_registry_id: dict[str, str] = {}
+        registry_to_canonical: dict[str, str] = {}
         if device_registry is not None:
             candidate_entries: list[Any] = []
             raw_devices = getattr(device_registry, "devices", None)
@@ -992,6 +1013,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 device_id_attr = getattr(device_entry, "id", None)
                 if isinstance(device_id_attr, str) and device_id_attr:
                     canonical_to_registry_id.setdefault(canonical, device_id_attr)
+                    registry_to_canonical.setdefault(device_id_attr, canonical)
 
         def _register_device(candidate: Mapping[str, Any]) -> None:
             dev_id = candidate.get("id")
@@ -1122,6 +1144,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 visibility_candidates.extend(normalized_allowed)
 
             visible_ids = tuple(sorted(dict.fromkeys(visibility_candidates)))
+            if group_key != SERVICE_SUBENTRY_KEY and registry_to_canonical:
+                canonicalized_ids: list[str] = []
+                for dev_id in visible_ids:
+                    canonicalized_ids.append(dev_id)
+                    canonical_id = registry_to_canonical.get(dev_id)
+                    if canonical_id and canonical_id != dev_id:
+                        canonicalized_ids.append(canonical_id)
+                visible_ids = tuple(
+                    sorted(dict.fromkeys(canonicalized_ids))
+                )
 
             if group_key == SERVICE_SUBENTRY_KEY:
                 visible_ids = cast(tuple[str, ...], ())
@@ -1226,7 +1258,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._default_subentry_key_value = default_key
 
         manager = self._subentry_manager
-        if manager and manager_visible:
+        if manager and manager_visible and not skip_manager_update:
             for group_key, visible_ids in manager_visible.items():
                 if group_key == SERVICE_SUBENTRY_KEY:
                     continue
@@ -1516,76 +1548,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return ident
         return None
 
-    def _call_service_device_registry_api(
+    def _call_device_registry_api(
         self,
         call: Callable[..., Any],
         *,
         base_kwargs: Mapping[str, Any],
     ) -> Any:
-        """Call a device-registry helper with fallbacks for optional kwargs."""
+        """Call a device-registry helper without compatibility fallbacks."""
 
-        supports_translations = getattr(self, "_reg_supports_translations", None)
-        supports_config_subentry = getattr(
-            self, "_reg_supports_config_subentry_id", None
-        )
-
-        attempt_kwargs = dict(base_kwargs)
-        if supports_translations is False:
-            attempt_kwargs.pop("translation_key", None)
-            attempt_kwargs.pop("translation_placeholders", None)
-        if supports_config_subentry is False:
-            attempt_kwargs.pop("config_subentry_id", None)
-
-        while True:
-            try:
-                result = call(**attempt_kwargs)
-            except TypeError as err:
-                message = str(err)
-                if (
-                    "config_subentry_id" in message
-                    and "config_subentry_id" in attempt_kwargs
-                ):
-                    attempt_kwargs.pop("config_subentry_id", None)
-                    if getattr(self, "_reg_supports_config_subentry_id", None) is not False:
-                        setattr(self, "_reg_supports_config_subentry_id", False)
-                        _LOGGER.info(
-                            "Device registry does not accept config_subentry_id for the service device; disabling subentry linkage."
-                        )
-                    continue
-                translation_error = "translation_key" in message or "translation_placeholders" in message
-                if translation_error and (
-                    "translation_key" in attempt_kwargs
-                    or "translation_placeholders" in attempt_kwargs
-                ):
-                    attempt_kwargs.pop("translation_key", None)
-                    attempt_kwargs.pop("translation_placeholders", None)
-                    if getattr(self, "_reg_supports_translations", None) is not False:
-                        setattr(self, "_reg_supports_translations", False)
-                        _LOGGER.info(
-                            "Device registry does not accept translation fields for the service device; disabling translation metadata."
-                        )
-                    continue
-                raise
-            else:
-                if (
-                    "config_subentry_id" in base_kwargs
-                    and "config_subentry_id" in attempt_kwargs
-                    and getattr(self, "_reg_supports_config_subentry_id", None) is None
-                ):
-                    setattr(self, "_reg_supports_config_subentry_id", True)
-                if (
-                    (
-                        "translation_key" in base_kwargs
-                        or "translation_placeholders" in base_kwargs
-                    )
-                    and (
-                        "translation_key" in attempt_kwargs
-                        or "translation_placeholders" in attempt_kwargs
-                    )
-                    and getattr(self, "_reg_supports_translations", None) is None
-                ):
-                    setattr(self, "_reg_supports_translations", True)
-                return result
+        return call(**dict(base_kwargs))
 
     def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
@@ -1608,7 +1579,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         # Refresh subentry metadata to obtain the current service subentry context.
         try:
-            self._refresh_subentry_index()
+            self._refresh_subentry_index(skip_manager_update=True)
         except Exception:  # pragma: no cover - defensive guard
             pass
 
@@ -1658,11 +1629,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 device = get_device(identifiers=identifiers)
             except TypeError:
                 device = None
-        supports_translations = getattr(self, "_reg_supports_translations", None)
-        supports_config_subentry = getattr(
-            self, "_reg_supports_config_subentry_id", None
-        )
-
         def _refresh_service_device_entry(candidate: Any) -> Any:
             """Return a fresh copy of the service device entry when possible."""
 
@@ -1715,13 +1681,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             }
             if service_device_name:
                 create_kwargs["name"] = service_device_name
-            if supports_translations is not False:
-                create_kwargs["translation_key"] = SERVICE_DEVICE_TRANSLATION_KEY
-                create_kwargs["translation_placeholders"] = {}
-            if supports_config_subentry is not False:
-                create_kwargs["config_subentry_id"] = service_config_subentry_id
+            create_kwargs["translation_key"] = SERVICE_DEVICE_TRANSLATION_KEY
+            create_kwargs["translation_placeholders"] = {}
+            create_kwargs["config_subentry_id"] = service_config_subentry_id
 
-            device = self._call_service_device_registry_api(
+            device = self._call_device_registry_api(
                 dev_reg.async_get_or_create,
                 base_kwargs=create_kwargs,
             )
@@ -1742,8 +1706,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             dev_config_subentry_id = getattr(device, "config_subentry_id", None)
 
             needs_name_refresh = (
-                supports_translations is not False
-                and service_device_name is not None
+                service_device_name is not None
                 and service_device_name != existing_name
                 and not has_user_name
             )
@@ -1753,18 +1716,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 or device.model != SERVICE_DEVICE_MODEL
                 or device.sw_version != INTEGRATION_VERSION
                 or device.entry_type != dr.DeviceEntryType.SERVICE
-                or (
-                    supports_config_subentry is not False
-                    and dev_config_subentry_id != service_config_subentry_id
-                )
-                or (
-                    supports_translations is not False
-                    and dev_translation_key != SERVICE_DEVICE_TRANSLATION_KEY
-                )
-                or (
-                    supports_translations is not False
-                    and (dev_translation_placeholders or {}) != {}
-                )
+                or dev_config_subentry_id != service_config_subentry_id
+                or dev_translation_key != SERVICE_DEVICE_TRANSLATION_KEY
+                or (dev_translation_placeholders or {}) != {}
                 or needs_name_refresh
                 or needs_identifier_backfill
             )
@@ -1777,18 +1731,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "entry_type": dr.DeviceEntryType.SERVICE,
                     "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
                 }
-                if supports_translations is not False:
-                    update_kwargs["translation_key"] = SERVICE_DEVICE_TRANSLATION_KEY
-                    update_kwargs["translation_placeholders"] = {}
-                if supports_config_subentry is not False:
-                    update_kwargs["config_subentry_id"] = service_config_subentry_id
+                update_kwargs["translation_key"] = SERVICE_DEVICE_TRANSLATION_KEY
+                update_kwargs["translation_placeholders"] = {}
+                update_kwargs["config_subentry_id"] = service_config_subentry_id
                 if needs_identifier_backfill:
                     new_identifiers = set(device_identifiers)
                     new_identifiers.update(identifiers)
                     update_kwargs["new_identifiers"] = new_identifiers
                 if needs_name_refresh and service_device_name:
                     update_kwargs["name"] = service_device_name
-                self._call_service_device_registry_api(
+                self._call_device_registry_api(
                     dev_reg.async_update_device, base_kwargs=update_kwargs
                 )
                 device = _refresh_service_device_entry(device)
@@ -1950,8 +1902,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 continue
             if getattr(device, "via_device_id", None) == service_device_id:
                 continue
-            dev_reg.async_update_device(
-                device_id=device_id, via_device_id=service_device_id
+            self._call_device_registry_api(
+                dev_reg.async_update_device,
+                base_kwargs={
+                    "device_id": device_id,
+                    "via_device_id": service_device_id,
+                },
             )
             updated += 1
 
@@ -2146,14 +2102,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         def _update_device_with_kwargs(kwargs: dict[str, Any]) -> None:
             if not callable(update_device):
                 return
-            try:
-                update_device(**kwargs)
-            except TypeError as err:
-                if "config_subentry_id" in str(err):
-                    kwargs.pop("config_subentry_id", None)
-                    update_device(**kwargs)
-                    return
-                raise
+            self._call_device_registry_api(
+                update_device,
+                base_kwargs=dict(kwargs),
+            )
 
         def _refresh_device_entry(device_id: str, fallback: Any) -> Any:
             if not callable(get_device_by_id) or not device_id:
@@ -2272,14 +2224,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
                 while True:
                     try:
-                        dev = async_get_or_create(**create_kwargs)
+                        dev = self._call_device_registry_api(
+                            async_get_or_create,
+                            base_kwargs=create_kwargs,
+                        )
                     except TypeError as err:
-                        if (
-                            "config_subentry_id" in str(err)
-                            and "config_subentry_id" in create_kwargs
-                        ):
-                            create_kwargs.pop("config_subentry_id", None)
-                            continue
                         via_value = create_kwargs.pop("via_device", None)
                         if via_value is not None:
                             # Older HA core without via_device kwarg support.

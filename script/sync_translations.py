@@ -86,10 +86,10 @@ def _find_extra_keys(
             isinstance(base, Sequence) and not isinstance(base, (str, bytes, bytearray))
         ):
             return ["/".join(path) if path else "<root>"]
-        extras: list[str] = []
+        sequence_extras: list[str] = []
         limit = min(len(candidate), len(base))
         for index in range(limit):
-            extras.extend(
+            sequence_extras.extend(
                 _find_extra_keys(
                     base[index],
                     candidate[index],
@@ -97,11 +97,11 @@ def _find_extra_keys(
                 )
             )
         if len(candidate) > len(base):
-            extras.extend(
+            sequence_extras.extend(
                 "/".join(path + (str(index),))
                 for index in range(len(base), len(candidate))
             )
-        return extras
+        return sequence_extras
 
     return []
 
