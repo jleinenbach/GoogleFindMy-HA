@@ -73,6 +73,32 @@ async def test_rebuild_registry_reloads_specific_ids(caplog: pytest.LogCaptureFi
 
 
 @pytest.mark.asyncio
+async def test_rebuild_registry_accepts_single_entry_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Treat a lone entry ID string as a single-item reload request."""
+
+    manager = FakeConfigEntriesManager(
+        [
+            FakeConfigEntry(entry_id="primary"),
+            FakeConfigEntry(entry_id="secondary"),
+        ]
+    )
+    hass = FakeHass(manager)
+
+    handler = await _register_rebuild_service(hass, {})
+
+    caplog.set_level(logging.INFO)
+    await handler(ServiceCall({services.ATTR_ENTRY_ID: "primary"}))
+
+    assert manager.reload_calls == ["primary"]
+    assert any(
+        "Reloading config entries: ['primary']" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_rebuild_registry_logs_warning_for_invalid_ids(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
