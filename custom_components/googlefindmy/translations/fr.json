@@ -43,6 +43,13 @@
           "map_view_token_expiration": "Activer l’expiration du jeton de la vue carte"
         }
       },
+      "select_hub_for_visibility": {
+        "title": "Sélectionner un hub",
+        "description": "Choisissez le hub Google Find My à gérer avant d’ouvrir le dialogue de visibilité des appareils.",
+        "data": {
+          "hub": "Hub"
+        }
+      },
       "reconfigure": {
         "title": "Reconfigurer Google Find My Device",
         "description": "Vérifiez la configuration actuelle pour **{email}**. Continuez pour mettre à jour les identifiants ou ajuster les options d’interrogation."
@@ -82,7 +89,8 @@
       "reauth_successful": "Réauthentification réussie.",
       "migration_successful": "Migration terminée.",
       "migration_failed": "Échec de la migration. Supprimez puis réajoutez l’intégration.",
-      "reconfigure_successful": "L’intégration est déjà configurée. Aucun autre compte ne peut être ajouté."
+      "reconfigure_successful": "L’intégration est déjà configurée. Aucun autre compte ne peut être ajouté.",
+      "no_hubs_configured": "Aucun hub Google Find My n’est encore configuré."
     },
     "progress": {
       "discovery_secrets_new": "Fichier Auth/secrets.json détecté pour {email}",

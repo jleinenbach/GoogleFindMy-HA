@@ -43,6 +43,13 @@
           "map_view_token_expiration": "Ablauf von Kartenansicht-Tokens aktivieren"
         }
       },
+      "select_hub_for_visibility": {
+        "title": "Hub auswählen",
+        "description": "Wähle den Google Find My Hub aus, dessen Gerätesichtbarkeit du bearbeiten möchtest, bevor der Dialog geöffnet wird.",
+        "data": {
+          "hub": "Hub"
+        }
+      },
       "reconfigure": {
         "title": "Google Find My Device neu konfigurieren",
         "description": "Überprüfe die aktuelle Konfiguration für **{email}**. Fahre fort, um Anmeldedaten zu aktualisieren oder Abfrageoptionen anzupassen."
@@ -82,7 +89,8 @@
       "reauth_successful": "Erneute Authentifizierung erfolgreich.",
       "migration_successful": "Migration abgeschlossen.",
       "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu.",
-      "reconfigure_successful": "Integration ist bereits konfiguriert. Es können keine weiteren Konten hinzugefügt werden."
+      "reconfigure_successful": "Integration ist bereits konfiguriert. Es können keine weiteren Konten hinzugefügt werden.",
+      "no_hubs_configured": "Es sind noch keine Google Find My Hubs konfiguriert."
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json für {email} erkannt",
