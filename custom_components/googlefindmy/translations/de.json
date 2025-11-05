@@ -78,11 +78,14 @@
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
       "dependency_not_ready": "Google Find My Device-Abhängigkeiten sind nicht installiert. Installiere die Anforderungen und versuche es erneut.",
-      "import_failed": "Authentifizierungs-Hilfsbibliothek konnte nicht importiert werden. Installiere die Google Find My Device-Anforderungen (Selenium und Chrome-Treiber) und versuche es erneut.",
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",
       "reauth_successful": "Erneute Authentifizierung erfolgreich.",
       "migration_successful": "Migration abgeschlossen.",
-      "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu."
+      "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu.",
+      "reconfigure_successful": "Integration ist bereits konfiguriert. Es können keine weiteren Konten hinzugefügt werden."
+    },
+    "menu": {
+      "import_device": "Gerät importieren (Tracker)"
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json für {email} erkannt",
@@ -146,13 +149,11 @@
           "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
           "enable_stats_entities": "Statistik-Entitäten erstellen",
           "map_view_token_expiration": "Ablauf von Kartenansicht-Tokens aktivieren",
-          "delete_caches_on_remove": "Lokale Caches beim Entfernen löschen",
           "contributor_mode": "Modus für Standortmeldungen",
           "subentry": "Feature group"
         },
         "data_description": {
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab.",
-          "delete_caches_on_remove": "Beim Entfernen des Eintrags die lokalen Stores (Token/Cache) löschen.",
           "contributor_mode": "\"high_traffic\" entspricht dem standardmäßigen Aggregationsmodus von Google. \"in_all_areas\" aktiviert schnellere Crowdsource-Ortungen.",
           "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
         }
@@ -448,10 +449,6 @@
     "auth_expired": {
       "title": "Erneute Anmeldung erforderlich",
       "description": "Die Anmeldung für Google Find My Device ist ungültig oder abgelaufen.\n\n**Eintrag:** {entry_title}\n**Konto:** {email}\n\nWähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden. Wenn du kürzlich dein Google-Passwort geändert oder Tokens widerrufen hast, musst du dich hier neu authentifizieren, um die Funktionalität wiederherzustellen."
-    },
-    "cache_purged": {
-      "title": "Lokale Caches entfernt",
-      "description": "Lokale Anmeldedaten und zwischengespeicherte Informationen für **{entry_title}** wurden beim Entfernen des Integrations-Eintrags gelöscht. Konfiguriere die Integration erneut, wenn du das Konto wieder hinzufügen möchtest."
     },
     "multiple_config_entries": {
       "title": "Mehrere Konfigurationseinträge erkannt",

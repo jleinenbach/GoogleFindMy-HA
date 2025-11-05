@@ -81,7 +81,11 @@
       "invalid_discovery_info": "La charge de découverte est invalide. Vérifiez les identifiants et réessayez.",
       "reauth_successful": "Réauthentification réussie.",
       "migration_successful": "Migration terminée.",
-      "migration_failed": "Échec de la migration. Supprimez puis réajoutez l’intégration."
+      "migration_failed": "Échec de la migration. Supprimez puis réajoutez l’intégration.",
+      "reconfigure_successful": "L’intégration est déjà configurée. Aucun autre compte ne peut être ajouté."
+    },
+    "menu": {
+      "import_device": "Importer un appareil (traceur)"
     },
     "progress": {
       "discovery_secrets_new": "Fichier Auth/secrets.json détecté pour {email}",
@@ -145,13 +149,11 @@
           "google_home_filter_keywords": "Mots-clés du filtre (séparés par des virgules)",
           "enable_stats_entities": "Créer des entités de statistiques",
           "map_view_token_expiration": "Activer l’expiration du jeton de la vue carte",
-          "delete_caches_on_remove": "Supprimer les caches locaux lors de la suppression",
           "contributor_mode": "Mode de contribution de localisation",
           "subentry": "Feature group"
         },
         "data_description": {
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas.",
-          "delete_caches_on_remove": "Lors de la suppression de l’entrée, supprime le Store local (jetons/cache).",
           "contributor_mode": "\"high_traffic\" conserve le mode agrégé par défaut de Google. \"in_all_areas\" active des signalements participatifs plus rapides.",
           "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
         }
@@ -447,10 +449,6 @@
     "auth_expired": {
       "title": "Une réauthentification est requise",
       "description": "L’authentification de Google Find My Device n’est plus valide ou a expiré.\n\n**Entrée :** {entry_title}\n**Compte :** {email}\n\nDans la carte de l’intégration, choisissez **Reconfigurer** pour vous réauthentifier. Si vous avez récemment changé votre mot de passe Google ou révoqué des jetons, vous devrez vous reconnecter ici pour rétablir le fonctionnement."
-    },
-    "cache_purged": {
-      "title": "Caches locaux supprimés",
-      "description": "Les identifiants et données en cache locaux de **{entry_title}** ont été supprimés lors de la suppression de l’entrée d’intégration. Reconfigurez l’intégration si vous envisagez d’ajouter à nouveau le compte."
     },
     "multiple_config_entries": {
       "title": "Plusieurs entrées de configuration détectées",

@@ -81,7 +81,11 @@
       "invalid_discovery_info": "The discovery payload was invalid. Check the credentials and try again.",
       "reauth_successful": "Reauthentication successful.",
       "migration_successful": "Migration complete.",
-      "migration_failed": "Migration failed. Please remove and re-add the integration."
+      "migration_failed": "Migration failed. Please remove and re-add the integration.",
+      "reconfigure_successful": "Integration already configured. Additional accounts cannot be added."
+    },
+    "menu": {
+      "import_device": "Import device (tracker)"
     },
     "progress": {
       "discovery_secrets_new": "Auth/secrets.json detected for {email}",

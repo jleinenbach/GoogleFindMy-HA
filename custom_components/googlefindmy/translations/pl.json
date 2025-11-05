@@ -81,7 +81,11 @@
       "invalid_discovery_info": "Ładunek wykrywania jest nieprawidłowy. Sprawdź dane logowania i spróbuj ponownie.",
       "reauth_successful": "Ponowne uwierzytelnienie zakończone pomyślnie.",
       "migration_successful": "Migracja zakończona.",
-      "migration_failed": "Migracja nie powiodła się. Usuń integrację i dodaj ją ponownie."
+      "migration_failed": "Migracja nie powiodła się. Usuń integrację i dodaj ją ponownie.",
+      "reconfigure_successful": "Integracja jest już skonfigurowana. Nie można dodać kolejnych kont."
+    },
+    "menu": {
+      "import_device": "Importuj urządzenie (tracker)"
     },
     "progress": {
       "discovery_secrets_new": "Wykryto Auth/secrets.json dla {email}",
@@ -145,13 +149,11 @@
           "google_home_filter_keywords": "Słowa kluczowe filtra (oddzielone przecinkami)",
           "enable_stats_entities": "Twórz encje statystyczne",
           "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy",
-          "delete_caches_on_remove": "Usuń lokalne pamięci podręczne przy usuwaniu",
           "contributor_mode": "Tryb raportowania lokalizacji",
           "subentry": "Feature group"
         },
         "data_description": {
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
-          "delete_caches_on_remove": "Podczas usuwania wpisu usuń jego lokalny Store (tokeny/cache).",
           "contributor_mode": "\"high_traffic\" utrzymuje domyślny tryb agregacji Google. \"in_all_areas\" włącza szybsze zgłoszenia crowdsourcingowe.",
           "subentry": "Zapisz te opcje w wybranej grupie funkcji. Zobacz [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups), aby poznać przykłady."
         }
@@ -447,10 +449,6 @@
     "auth_expired": {
       "title": "Wymagane ponowne uwierzytelnienie",
       "description": "Uwierzytelnienie Google Find My Device jest nieprawidłowe lub wygasło.\n\n**Wpis:** {entry_title}\n**Konto:** {email}\n\nNa karcie integracji wybierz **Skonfiguruj ponownie**, aby przejść proces ponownego logowania. Jeśli niedawno zmieniono hasło do Google lub cofnięto tokeny, musisz zalogować się tutaj ponownie, aby przywrócić działanie."
-    },
-    "cache_purged": {
-      "title": "Usunięto lokalne pamięci podręczne",
-      "description": "Lokalne dane logowania i pamięć podręczna dla **{entry_title}** zostały usunięte podczas kasowania wpisu integracji. Skonfiguruj integrację ponownie, jeśli planujesz ponownie dodać to konto."
     },
     "multiple_config_entries": {
       "title": "Wykryto wiele wpisów konfiguracji",

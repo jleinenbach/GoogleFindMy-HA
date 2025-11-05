@@ -1731,7 +1731,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "entry_type": dr.DeviceEntryType.SERVICE,
                     "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
                 }
-                update_kwargs["translation_key"] = SERVICE_DEVICE_TRANSLATION_KEY
                 update_kwargs["translation_placeholders"] = {}
                 update_kwargs["config_subentry_id"] = service_config_subentry_id
                 if needs_identifier_backfill:

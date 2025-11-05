@@ -81,7 +81,11 @@
       "invalid_discovery_info": "La carga de descubrimiento no es válida. Verifica las credenciales y vuelve a intentarlo.",
       "reauth_successful": "Reautenticación correcta.",
       "migration_successful": "Migración completada.",
-      "migration_failed": "Migración fallida. Elimina la integración y vuelve a agregarla."
+      "migration_failed": "Migración fallida. Elimina la integración y vuelve a agregarla.",
+      "reconfigure_successful": "La integración ya está configurada. No se pueden añadir más cuentas."
+    },
+    "menu": {
+      "import_device": "Importar dispositivo (rastreador)"
     },
     "progress": {
       "discovery_secrets_new": "Se detectó Auth/secrets.json para {email}",
@@ -145,13 +149,11 @@
           "google_home_filter_keywords": "Palabras clave del filtro (separadas por comas)",
           "enable_stats_entities": "Crear entidades de estadísticas",
           "map_view_token_expiration": "Activar caducidad del token de la vista de mapa",
-          "delete_caches_on_remove": "Eliminar las cachés locales al eliminar",
           "contributor_mode": "Modo de contribución de ubicaciones",
           "subentry": "Feature group"
         },
         "data_description": {
           "map_view_token_expiration": "Si está activado, los tokens de la vista de mapa caducan tras 1 semana. Si está desactivado (por defecto), no caducan.",
-          "delete_caches_on_remove": "Al quitar la entrada, elimina su Store local (tokens/caché).",
           "contributor_mode": "\"high_traffic\" mantiene el modo agregado predeterminado de Google. \"in_all_areas\" habilita informes colaborativos más rápidos.",
           "subentry": "Guarda estas opciones en el grupo de funciones seleccionado. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver ejemplos."
         }
@@ -447,10 +449,6 @@
     "auth_expired": {
       "title": "Se requiere volver a iniciar sesión",
       "description": "La autenticación de Google Find My Device no es válida o ha caducado.\n\n**Entrada:** {entry_title}\n**Cuenta:** {email}\n\nEn la tarjeta de la integración, elige **Reconfigurar** para volver a autenticarte. Si recientemente cambiaste tu contraseña de Google o revocaste tokens, tendrás que iniciar sesión aquí para restablecer la funcionalidad."
-    },
-    "cache_purged": {
-      "title": "Cachés locales eliminadas",
-      "description": "Las credenciales locales y los datos almacenados en caché de **{entry_title}** se eliminaron al quitar la entrada de la integración. Configura la integración de nuevo si piensas añadir la cuenta otra vez."
     },
     "multiple_config_entries": {
       "title": "Se detectaron varias entradas de configuración",
