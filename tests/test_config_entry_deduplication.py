@@ -243,9 +243,9 @@ async def test_async_migrate_entry_uses_coalesced_entry(
 
 
 @pytest.mark.asyncio
-async def test_rebuild_service_deduplicates_before_migration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_rebuild_service_reloads_primary_entry_without_dedup() -> None:
+    """The rebuild service now simply reloads config entries without deduplication."""
+
     services_module = import_module("custom_components.googlefindmy.services")
 
     @dataclass(slots=True)
@@ -260,41 +260,18 @@ async def test_rebuild_service_deduplicates_before_migration(
     primary = _ServiceEntry("primary", {CONF_GOOGLE_EMAIL: "service@example.com"})
     duplicate = _ServiceEntry("duplicate", {CONF_GOOGLE_EMAIL: "service@example.com"})
 
-    from tests.helpers import (
-        FakeConfigEntriesManager,
-        FakeDeviceRegistry,
-        FakeEntityRegistry,
-        FakeHass,
-    )
+    from tests.helpers import FakeConfigEntriesManager, FakeHass
 
     manager = FakeConfigEntriesManager([primary, duplicate])
     hass = FakeHass(manager)
 
-    device_registry = FakeDeviceRegistry()
-    entity_registry = FakeEntityRegistry()
-    monkeypatch.setattr(services_module.dr, "async_get", lambda hass_obj: device_registry)
-    monkeypatch.setattr(services_module.er, "async_get", lambda hass_obj: entity_registry)
-
-    coalesce_calls: list[str] = []
-
-    async def _fake_coalesce(
-        hass_obj: Any, *, canonical_entry: _ServiceEntry
-    ) -> _ServiceEntry:
-        coalesce_calls.append(canonical_entry.entry_id)
-        manager._entries = [entry for entry in manager._entries if entry.entry_id == primary.entry_id]
-        return primary
-
-    ctx = {
-        "coalesce_account_entries": _fake_coalesce,
-        "extract_normalized_email": lambda entry: entry.data.get(CONF_GOOGLE_EMAIL),
-    }
-
-    await services_module.async_register_services(hass, ctx)
+    await services_module.async_register_services(hass, {})
     handler = hass.services.handlers[(DOMAIN, services_module.SERVICE_REBUILD_REGISTRY)]
 
     await handler(ServiceCall({}))
 
-    assert coalesce_calls == [primary.entry_id]
     assert manager.reload_calls == [primary.entry_id]
-    remaining_ids = [entry.entry_id for entry in manager.async_entries(DOMAIN)]
-    assert remaining_ids == [primary.entry_id]
+    assert [entry.entry_id for entry in manager.async_entries(DOMAIN)] == [
+        primary.entry_id,
+        duplicate.entry_id,
+    ]
