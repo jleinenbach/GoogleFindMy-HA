@@ -149,6 +149,13 @@ ensure the helper continues to accept both the legacy `via_device_id` keyword
 and the newer tuple form, recording the tuple in created-device metadata so the
 tests can assert the parent linkage accurately.
 
+### DeviceInfo assertion style
+
+When asserting `DeviceInfo` contents, prefer attribute access (for example,
+`info.config_entry_id`) over subscript-style lookups. Home Assistant models
+`DeviceInfo` as a dataclass, so attribute reads reflect the production API and
+avoid accidental reliance on the helper's mapping-like fallbacks.
+
 ### Update checklist for registry stub changes
 
 When adjusting the registry stubs or adding new assertions, confirm the

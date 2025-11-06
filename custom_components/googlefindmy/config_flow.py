@@ -3519,7 +3519,7 @@ class ConfigFlow(
             "config_subentry_id": service_config_subentry_id,
         }
         if service_config_subentry_id is not None:
-            update_kwargs["config_entry_id"] = entry.entry_id
+            update_kwargs["add_config_entry_id"] = entry.entry_id
 
         call_api = getattr(coordinator, "_call_device_registry_api", None)
         if callable(call_api):
@@ -3535,7 +3535,7 @@ class ConfigFlow(
             dev_reg.async_update_device(**update_kwargs)
         except TypeError:
             fallback_kwargs = dict(update_kwargs)
-            fallback_kwargs.pop("config_entry_id", None)
+            fallback_kwargs.pop("add_config_entry_id", None)
             fallback_kwargs["add_config_subentry_id"] = fallback_kwargs.pop(
                 "config_subentry_id"
             )

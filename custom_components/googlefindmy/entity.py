@@ -188,8 +188,6 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
             "translation_key": SERVICE_DEVICE_TRANSLATION_KEY,
             "translation_placeholders": {},
         }
-        if entry_id:
-            info_kwargs["config_entry_id"] = entry_id
         return DeviceInfo(**info_kwargs)
 
     def maybe_update_device_registry_name(self, new_name: str | None) -> None:
@@ -392,9 +390,6 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
             "serial_number": self.device_id,
             "configuration_url": self.device_configuration_url(),
         }
-        entry_id = self.entry_id
-        if entry_id:
-            kwargs["config_entry_id"] = entry_id
         via = self._service_via_device()
         if via:
             kwargs["via_device"] = via
