@@ -113,6 +113,7 @@ from .const import (
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
     TRACKER_FEATURE_PLATFORMS,
@@ -2170,8 +2171,31 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         Returns:
             Count of devices that were created or updated.
         """
-        entry_id = self._entry_id()
+        entry = self.config_entry or getattr(self, "entry", None)
+        entry_id = getattr(entry, "entry_id", None) if entry is not None else None
         if not entry_id:
+            return 0
+
+        entry_type: str | None = None
+        if entry is not None:
+            for container in (getattr(entry, "data", None), getattr(entry, "options", None)):
+                if isinstance(container, Mapping):
+                    marker = container.get("subentry_type")
+                    if isinstance(marker, str):
+                        entry_type = marker
+                        break
+            if entry_type is None and isinstance(getattr(entry, "data", None), Mapping):
+                fallback_marker = cast(Mapping[str, Any], entry.data).get("type")
+                if not isinstance(fallback_marker, str):
+                    fallback_marker = cast(Mapping[str, Any], entry.data).get("entry_type")
+                if isinstance(fallback_marker, str):
+                    entry_type = fallback_marker
+
+        if entry_type in {SUBENTRY_TYPE_HUB, "hub"}:
+            _LOGGER.debug(
+                "Skipping Device Registry ensure for hub entry %s; subentries manage device links.",
+                entry_id,
+            )
             return 0
 
         try:
@@ -2261,10 +2285,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             and not getattr(legacy_dev, "name_by_user", None)
                             and getattr(legacy_dev, "name", None) != use_name
                         )
+                        needs_parent_clear = (
+                            getattr(legacy_dev, "via_device_id", None) is not None
+                        )
                         if (
                             needs_identifiers
                             or needs_config_subentry
                             or needs_name
+                            or needs_parent_clear
                         ):
                             update_kwargs: dict[str, Any] = {
                                 "device_id": legacy_dev.id,
@@ -2276,6 +2304,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 update_kwargs["new_identifiers"] = new_idents
                             if needs_name:
                                 update_kwargs["name"] = use_name
+                            if needs_parent_clear:
+                                update_kwargs["via_device_id"] = None
                             legacy_id = getattr(legacy_dev, "id", None)
                             _update_device_with_kwargs(update_kwargs)
                             legacy_dev = _refresh_device_entry(
@@ -2336,16 +2366,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     != tracker_config_subentry_id
                 )
 
+                needs_parent_clear = (
+                    getattr(dev, "via_device_id", None) is not None
+                )
+
+                if needs_parent_clear:
+                    update_existing_kwargs["via_device_id"] = None
+
                 needs_update = (
                     name_needs_update
                     or needs_config_subentry_update
+                    or needs_parent_clear
                 )
 
                 if needs_update and callable(update_device) and device_id:
-                    update_existing_kwargs["config_subentry_id"] = (
-                        tracker_config_subentry_id
-                    )
-                    if tracker_config_subentry_id is not None:
+                    if needs_config_subentry_update:
+                        update_existing_kwargs["config_subentry_id"] = (
+                            tracker_config_subentry_id
+                        )
+                        if tracker_config_subentry_id is not None:
+                            update_existing_kwargs["add_config_entry_id"] = entry_id
+                    elif (
+                        tracker_config_subentry_id is not None
+                        and (name_needs_update or needs_parent_clear)
+                    ):
                         update_existing_kwargs["add_config_entry_id"] = entry_id
                     _update_device_with_kwargs(update_existing_kwargs)
                     dev = _refresh_device_entry(device_id or "", dev)
