@@ -50,6 +50,34 @@ class _AddConfigSubentryRecorder:
         return "ok"
 
 
+class _AddConfigEntryFallbackRecorder:
+    """Recorder that forces a retry when ``add_config_entry_id`` is provided."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> str:
+        self.calls.append(dict(kwargs))
+        if "add_config_entry_id" in kwargs:
+            raise TypeError("unexpected keyword argument 'add_config_entry_id'")
+        assert "config_entry_id" in kwargs
+        return "ok"
+
+
+class _AddConfigSubentryFallbackRecorder:
+    """Recorder that forces a retry when ``add_config_subentry_id`` is provided."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> str:
+        self.calls.append(dict(kwargs))
+        if "add_config_subentry_id" in kwargs:
+            raise TypeError("unexpected keyword argument 'add_config_subentry_id'")
+        assert "config_subentry_id" in kwargs
+        return "ok"
+
+
 def test_device_registry_wrapper_passes_kwargs() -> None:
     """The wrapper should pass kwargs to the underlying callable unchanged."""
 
@@ -118,4 +146,73 @@ def test_device_registry_wrapper_maps_config_subentry_kwarg() -> None:
             "add_config_subentry_id": "service-subentry",
             "translation_key": "service",
         }
+    ]
+
+
+def test_device_registry_wrapper_retries_with_legacy_config_entry_kwarg() -> None:
+    """The wrapper retries with ``config_entry_id`` when modern kwarg fails."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    recorder = _AddConfigEntryFallbackRecorder()
+
+    payload: dict[str, Any] = {
+        "device_id": "device-id",
+        "config_subentry_id": "service-subentry",
+        "add_config_entry_id": "entry-id",
+    }
+
+    result = coordinator._call_device_registry_api(  # type: ignore[attr-defined]
+        recorder,
+        base_kwargs=payload,
+    )
+
+    assert result == "ok"
+    assert recorder.calls == [
+        {
+            "device_id": "device-id",
+            "config_subentry_id": "service-subentry",
+            "add_config_entry_id": "entry-id",
+        },
+        {
+            "device_id": "device-id",
+            "config_subentry_id": "service-subentry",
+            "config_entry_id": "entry-id",
+        },
+    ]
+
+
+def test_device_registry_wrapper_retries_with_legacy_config_subentry_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wrapper retries with ``config_subentry_id`` when modern kwarg fails."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    recorder = _AddConfigSubentryFallbackRecorder()
+
+    payload: dict[str, Any] = {
+        "device_id": "device-id",
+        "config_subentry_id": "service-subentry",
+    }
+
+    monkeypatch.setattr(
+        coordinator,
+        "_device_registry_config_subentry_kwarg_name",
+        lambda call: "add_config_subentry_id",
+    )
+
+    result = coordinator._call_device_registry_api(  # type: ignore[attr-defined]
+        recorder,
+        base_kwargs=payload,
+    )
+
+    assert result == "ok"
+    assert recorder.calls == [
+        {
+            "device_id": "device-id",
+            "add_config_subentry_id": "service-subentry",
+        },
+        {
+            "device_id": "device-id",
+            "config_subentry_id": "service-subentry",
+        },
     ]

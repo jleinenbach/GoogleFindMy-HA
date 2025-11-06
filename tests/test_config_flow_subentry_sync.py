@@ -433,7 +433,116 @@ def test_service_device_binding_clears_stale_subentry(
         "device_id": "service-device",
         "config_subentry_id": None,
     }
-    assert "config_entry_id" not in payload
+    assert "add_config_entry_id" not in payload
+
+
+def test_service_device_binding_sets_add_config_entry_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Service device binding must use add_config_entry_id when subentries exist."""
+
+    entry = _EntryStub()
+    entry.service_subentry_id = "service-subentry"
+    hass = SimpleNamespace()
+
+    expected_identifiers = {
+        service_device_identifier(entry.entry_id),
+        (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service"),
+    }
+
+    class _RegistryStub:
+        def __init__(self) -> None:
+            self.updated: list[dict[str, Any]] = []
+
+        def async_get_device(
+            self, *args: Any, **kwargs: Any
+        ) -> SimpleNamespace | None:
+            if args:
+                identifiers = args[0]
+            else:
+                identifiers = kwargs.get("identifiers")
+            assert identifiers == expected_identifiers
+            return SimpleNamespace(id="service-device", config_subentry_id=None)
+
+        def async_update_device(self, **kwargs: Any) -> None:
+            self.updated.append(dict(kwargs))
+
+    registry = _RegistryStub()
+
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        hass,
+        entry,
+        coordinator=None,
+        service_config_subentry_id=entry.service_subentry_id,
+    )
+
+    assert registry.updated, "service device update should be issued"
+    payload = registry.updated[-1]
+    assert payload == {
+        "device_id": "service-device",
+        "config_subentry_id": entry.service_subentry_id,
+        "add_config_entry_id": entry.entry_id,
+    }
+
+
+def test_service_device_binding_retries_with_legacy_keywords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct binding calls should retry with legacy kwargs on TypeError."""
+
+    entry = _EntryStub()
+    entry.service_subentry_id = "service-subentry"
+    hass = SimpleNamespace()
+
+    expected_identifiers = {
+        service_device_identifier(entry.entry_id),
+        (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service"),
+    }
+
+    class _RegistryStub:
+        def __init__(self) -> None:
+            self.updated: list[dict[str, Any]] = []
+
+        def async_get_device(
+            self, *args: Any, **kwargs: Any
+        ) -> SimpleNamespace | None:
+            if args:
+                identifiers = args[0]
+            else:
+                identifiers = kwargs.get("identifiers")
+            assert identifiers == expected_identifiers
+            return SimpleNamespace(id="service-device", config_subentry_id=None)
+
+        def async_update_device(self, **kwargs: Any) -> None:
+            self.updated.append(dict(kwargs))
+            if "add_config_entry_id" in kwargs:
+                raise TypeError("unexpected keyword argument 'add_config_entry_id'")
+
+    registry = _RegistryStub()
+
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        hass,
+        entry,
+        coordinator=None,
+        service_config_subentry_id=entry.service_subentry_id,
+    )
+
+    assert registry.updated == [
+        {
+            "device_id": "service-device",
+            "config_subentry_id": entry.service_subentry_id,
+            "add_config_entry_id": entry.entry_id,
+        },
+        {
+            "device_id": "service-device",
+            "config_subentry_id": entry.service_subentry_id,
+            "config_entry_id": entry.entry_id,
+        },
+    ]
 
 
 @pytest.mark.asyncio

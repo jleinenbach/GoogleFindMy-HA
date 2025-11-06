@@ -886,6 +886,7 @@ def _stub_homeassistant() -> None:
             config_subentry_id: object = _MISSING,
             add_config_subentry_id: object = _MISSING,
             config_entry_id: object = _MISSING,
+            add_config_entry_id: object = _MISSING,
             name: str | None = None,
             manufacturer: str | None = None,
             model: str | None = None,
@@ -905,6 +906,18 @@ def _stub_homeassistant() -> None:
                 else:
                     device.config_entries = {cast(str, config_entry_id)}
                 updates["config_entry_id"] = cast(str | None, config_entry_id)
+            if add_config_entry_id is not _MISSING:
+                if add_config_entry_id is None:
+                    device.config_entries = set()
+                else:
+                    entries = set(
+                        getattr(device, "config_entries", set()) or set()
+                    )
+                    entries.add(cast(str, add_config_entry_id))
+                    device.config_entries = entries
+                updates["add_config_entry_id"] = cast(
+                    str | None, add_config_entry_id
+                )
             effective_subentry = _MISSING
             if config_subentry_id is not _MISSING:
                 effective_subentry = config_subentry_id
@@ -958,6 +971,9 @@ def _stub_homeassistant() -> None:
                     "add_config_subentry_id": None
                     if add_config_subentry_id is _MISSING
                     else cast(str | None, add_config_subentry_id),
+                    "add_config_entry_id": None
+                    if add_config_entry_id is _MISSING
+                    else cast(str | None, add_config_entry_id),
                 }
             )
 

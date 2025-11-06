@@ -1552,11 +1552,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self,
         call: Callable[..., Any],
         *,
-        base_kwargs: Mapping[str, Any],
+        base_kwargs: Mapping[str, Any] | None = None,
     ) -> Any:
-        """Call a device-registry helper without compatibility fallbacks."""
+        """Call a device registry API, handling keyword compatibility."""
 
-        kwargs = dict(base_kwargs)
+        kwargs = dict(base_kwargs or {})
         if "config_subentry_id" in kwargs:
             replacement = self._device_registry_config_subentry_kwarg_name(call)
             if replacement is None:
@@ -1564,7 +1564,47 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             elif replacement != "config_subentry_id":
                 kwargs[replacement] = kwargs.pop("config_subentry_id")
 
-        return call(**kwargs)
+        try:
+            return call(**kwargs)
+        except TypeError as err:
+            if not self._device_registry_kwargs_need_legacy_retry(err, kwargs):
+                raise
+
+            legacy_kwargs = self._device_registry_build_legacy_kwargs(kwargs)
+            _LOGGER.debug(
+                "Retrying device registry call %s with legacy keyword arguments after %s",
+                getattr(call, "__qualname__", repr(call)),
+                err,
+            )
+            return call(**legacy_kwargs)
+
+    @staticmethod
+    def _device_registry_kwargs_need_legacy_retry(
+        err: TypeError, kwargs: Mapping[str, Any]
+    ) -> bool:
+        """Return True when ``kwargs`` must be rewritten for legacy cores."""
+
+        err_str = str(err)
+        if "add_config_entry_id" in kwargs and "add_config_entry_id" in err_str:
+            return True
+        if "add_config_subentry_id" in kwargs and "add_config_subentry_id" in err_str:
+            return True
+        return False
+
+    @staticmethod
+    def _device_registry_build_legacy_kwargs(
+        kwargs: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Translate modern device-registry kwargs to their legacy names."""
+
+        legacy_kwargs = dict(kwargs)
+        if "add_config_entry_id" in legacy_kwargs:
+            legacy_kwargs["config_entry_id"] = legacy_kwargs.pop("add_config_entry_id")
+        if "add_config_subentry_id" in legacy_kwargs:
+            legacy_kwargs["config_subentry_id"] = legacy_kwargs.pop(
+                "add_config_subentry_id"
+            )
+        return legacy_kwargs
 
     def _device_registry_config_subentry_kwarg_name(
         self, call: Callable[..., Any]
@@ -1815,7 +1855,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "config_subentry_id": service_config_subentry_id,
                 }
                 if service_config_subentry_id is not None:
-                    update_kwargs["config_entry_id"] = entry.entry_id
+                    update_kwargs["add_config_entry_id"] = entry.entry_id
                 if needs_identifier_backfill:
                     new_identifiers = set(device_identifiers)
                     new_identifiers.update(identifiers)
