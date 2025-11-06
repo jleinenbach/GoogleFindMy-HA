@@ -425,15 +425,18 @@ async def _async_self_heal_duplicate_entities(
         except ValueError:
             entity_domain = None
 
+        translation_key = getattr(entity_entry, "translation_key", None)
+        original_name = getattr(entity_entry, "original_name", None)
         logical_name = (
-            (entity_entry.translation_key or "").strip()
-            or (entity_entry.original_name or "").strip()
+            (translation_key or "").strip()
+            or (original_name or "").strip()
             or entity_entry.entity_id
         )
 
+        device_id = getattr(entity_entry, "device_id", None)
         key = (
             entity_entry.config_entry_id,
-            entity_entry.device_id,
+            device_id,
             entity_domain,
             logical_name,
         )
@@ -4132,8 +4135,24 @@ def _self_heal_device_registry(hass: HomeAssistant, entry: MyConfigEntry) -> Non
     entry_id = entry.entry_id
     correct_service_identifier = service_device_identifier(entry_id)
 
+    registry_devices: Iterable[Any]
+    entries_helper: Callable[[Any, str], Iterable[Any]] | None = getattr(
+        dr, "async_entries_for_config_entry", None
+    )
+    if entries_helper is None:
+        fallback = getattr(dev_reg, "async_entries_for_config_entry", None)
+        if callable(fallback):
+            registry_devices = cast(Iterable[Any], fallback(entry_id))
+        else:
+            _LOGGER.debug(
+                "Self-healing: device registry helper missing, skipping cleanup.",
+            )
+            registry_devices = ()
+    else:
+        registry_devices = entries_helper(dev_reg, entry_id)
+
     healed_devices = 0
-    for device in dr.async_entries_for_config_entry(dev_reg, entry_id):
+    for device in registry_devices:
         config_entries: Collection[str] = getattr(device, "config_entries", ())
         if entry_id not in config_entries:
             continue
