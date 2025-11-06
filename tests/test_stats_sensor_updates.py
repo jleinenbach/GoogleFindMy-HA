@@ -438,7 +438,15 @@ def test_stats_sensor_device_info_uses_service_identifiers() -> None:
         }
 
         assert sensor.subentry_key == SERVICE_SUBENTRY_KEY
-        assert sensor.device_info.identifiers == expected
+
+        info = sensor.device_info
+        assert info.identifiers == expected
+        assert getattr(info, "config_entry_id", None) is None
+
+        service_info = sensor.service_device_info(
+            include_subentry_identifier=True
+        )
+        assert getattr(service_info, "config_entry_id", None) is None
     finally:
         pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
         for task in pending:

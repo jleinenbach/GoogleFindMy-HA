@@ -3519,7 +3519,7 @@ class ConfigFlow(
             "config_subentry_id": service_config_subentry_id,
         }
         if service_config_subentry_id is not None:
-            update_kwargs["config_entry_id"] = entry.entry_id
+            update_kwargs["add_config_entry_id"] = entry.entry_id
 
         call_api = getattr(coordinator, "_call_device_registry_api", None)
         if callable(call_api):
@@ -3533,11 +3533,36 @@ class ConfigFlow(
 
         try:
             dev_reg.async_update_device(**update_kwargs)
-        except TypeError:
+        except TypeError as err:
+            err_str = str(err)
+            needs_fallback = False
+            if (
+                "add_config_entry_id" in update_kwargs
+                and "add_config_entry_id" in err_str
+            ):
+                needs_fallback = True
+            if (
+                "add_config_subentry_id" in update_kwargs
+                and "add_config_subentry_id" in err_str
+            ):
+                needs_fallback = True
+
+            if not needs_fallback:
+                raise
+
             fallback_kwargs = dict(update_kwargs)
-            fallback_kwargs.pop("config_entry_id", None)
-            fallback_kwargs["add_config_subentry_id"] = fallback_kwargs.pop(
-                "config_subentry_id"
+            if "add_config_entry_id" in fallback_kwargs:
+                fallback_kwargs["config_entry_id"] = fallback_kwargs.pop(
+                    "add_config_entry_id"
+                )
+            if "add_config_subentry_id" in fallback_kwargs:
+                fallback_kwargs["config_subentry_id"] = fallback_kwargs.pop(
+                    "add_config_subentry_id"
+                )
+
+            _LOGGER.debug(
+                "Retrying direct device registry update with legacy kwargs after %s",
+                err,
             )
             dev_reg.async_update_device(**fallback_kwargs)
 

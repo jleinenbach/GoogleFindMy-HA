@@ -921,6 +921,45 @@ def test_service_device_updates_add_translation(
     assert metadata["new_identifiers"] == {service_ident, service_subentry_ident}
 
 
+def test_service_device_update_uses_add_config_entry_id() -> None:
+    """Service device refreshes must link config entries via add_config_entry_id."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-88")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hass = coordinator.hass
+    registry = dr.async_get(hass)
+
+    service_ident = service_device_identifier(entry.entry_id)
+    existing = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_ident},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Existing Hub",
+        sw_version="1.0.0",
+        entry_type=dr.DeviceEntryType.SERVICE,
+        configuration_url="https://example.invalid",
+        translation_key=None,
+        translation_placeholders={},
+        config_subentry_id=None,
+    )
+
+    coordinator._service_device_ready = True
+    coordinator._service_device_id = existing.id
+
+    registry.updated.clear()  # type: ignore[attr-defined]
+
+    coordinator._ensure_service_device_exists()
+
+    assert registry.updated, "Service device update should have been recorded"
+    payload = registry.updated[-1]  # type: ignore[index]
+    assert payload["add_config_entry_id"] == entry.entry_id
+    assert payload["config_entry_id"] is None
+    assert payload["config_subentry_id"] == entry.service_subentry_id
+
+
 def test_service_device_preserves_user_defined_name(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:

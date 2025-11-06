@@ -17,8 +17,8 @@ Highlights for contributors:
   and best-effort name synchronization) is provided here—avoid duplicating the
   logic in individual platforms.
 * Per-device entities should inherit :class:`GoogleFindMyDeviceEntity` to gain
-  the map-token helpers, ``via_device`` linking, and label refresh utilities
-  used by the button, sensor, and device_tracker platforms.
+  the map-token helpers and label refresh utilities used by the button, sensor,
+  and device_tracker platforms.
 """
 
 from __future__ import annotations
@@ -188,8 +188,6 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
             "translation_key": SERVICE_DEVICE_TRANSLATION_KEY,
             "translation_placeholders": {},
         }
-        if entry_id:
-            info_kwargs["config_entry_id"] = entry_id
         return DeviceInfo(**info_kwargs)
 
     def maybe_update_device_registry_name(self, new_name: str | None) -> None:
@@ -229,8 +227,7 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
     """Base class for entities representing a concrete Google device.
 
     Callers must provide ``subentry_key=TRACKER_SUBENTRY_KEY`` so the entity can
-    expose tracker-specific ``DeviceInfo`` identifiers while keeping
-    ``via_device`` linked to the per-entry service device.  Service diagnostics
+    expose tracker-specific ``DeviceInfo`` identifiers.  Service diagnostics
     should continue using :class:`GoogleFindMyEntity` directly.
     """
 
@@ -372,14 +369,6 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
             identifiers.add((DOMAIN, self.device_id))
         return identifiers
 
-    def _service_via_device(self) -> tuple[str, str] | None:
-        """Return the per-entry service device identifier, if available."""
-
-        entry_id = self.entry_id
-        if not entry_id:
-            return None
-        return service_device_identifier(entry_id)
-
     @property
     def device_info(self) -> DeviceInfo:
         """Return ``DeviceInfo`` describing the Google device."""
@@ -392,12 +381,6 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
             "serial_number": self.device_id,
             "configuration_url": self.device_configuration_url(),
         }
-        entry_id = self.entry_id
-        if entry_id:
-            kwargs["config_entry_id"] = entry_id
-        via = self._service_via_device()
-        if via:
-            kwargs["via_device"] = via
         if label and label != self._DEFAULT_DEVICE_LABEL:
             kwargs["name"] = label
         return DeviceInfo(**kwargs)
