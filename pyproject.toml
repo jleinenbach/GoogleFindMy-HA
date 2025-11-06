@@ -62,6 +62,9 @@ ignore_missing_imports = true
 show_error_codes = true
 mypy_path = ["."]
 explicit_package_bases = true
+files = [
+    "custom_components/googlefindmy",
+]
 exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
 
 [[tool.mypy.overrides]]
