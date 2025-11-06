@@ -8,7 +8,8 @@ Notes on design and consistency with the coordinator:
 - Extra attributes come from `_as_ha_attributes(...)` and intentionally use stable keys
   like `accuracy_m` for recorder friendliness, while the entity's built-in accuracy
   property exposes an integer `gps_accuracy` to HA Core.
-- End devices link to the per-entry SERVICE device via `via_device=(DOMAIN, f"integration_{entry_id}")`.
+- End devices rely on tracker subentry identifiers to associate with their
+  registry entry; avoid manual `via_device` linkage.
 
 Entry-scope guarantees (C2):
 - Unique IDs are entry-scoped using the subentry-aware schema:

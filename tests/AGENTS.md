@@ -142,12 +142,13 @@ can be bound using :class:`types.MethodType`.
 
 ## Device registry expectations
 
-The coordinator device-registry tests exercise Home Assistant's 2025.10
-`via_device` tuple support. When extending the `_FakeDeviceRegistry`
+The coordinator device-registry tests retain Home Assistant's 2025.10
+`via_device` tuple support for completeness even though tracker devices no
+longer link to the service device. When extending the `_FakeDeviceRegistry`
 implementation or adding new tests in `tests/test_coordinator_device_registry.py`,
 ensure the helper continues to accept both the legacy `via_device_id` keyword
-and the newer tuple form, recording the tuple in created-device metadata so the
-tests can assert the parent linkage accurately.
+and the newer tuple form so regression tests can assert that the integration
+leaves both fields unset for tracker entries.
 
 ### DeviceInfo assertion style
 

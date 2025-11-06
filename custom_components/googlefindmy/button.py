@@ -15,8 +15,8 @@ Quality & design notes (HA Platinum guidelines)
 * Availability mirrors device presence and capability gates from the coordinator.
 * Device registry naming respects user overrides; we never write placeholders.
 * Entities default to **enabled** (see `_attr_entity_registry_enabled_default = True`).
-* End devices are linked to the single per-entry *service device* via `via_device`
-  using the identifier `(DOMAIN, f"integration_{entry_id}")` for clean grouping.
+* Tracker entities rely on per-device identifiers managed by the coordinator;
+  do not link them to the service device via manual `via_device` tuples.
 """
 
 from __future__ import annotations

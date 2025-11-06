@@ -160,7 +160,6 @@ async def test_coordinator_recreates_missing_core_subentries() -> None:
     )
     coordinator._service_device_ready = False
     coordinator._service_device_id = None
-    coordinator._pending_via_updates = set()
     runtime_data.coordinator = coordinator
     coordinator.attach_subentry_manager(manager)
 

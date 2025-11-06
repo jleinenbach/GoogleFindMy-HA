@@ -120,7 +120,7 @@ The service hub subentry, identified by `SERVICE_SUBENTRY_KEY`, represents the a
 The tracker subentry, keyed by `TRACKER_SUBENTRY_KEY`, represents the phones, tablets, and tags imported from Google Find My Device.
 
 - Each tracker entry backs per-device entities such as `device_tracker`, “last seen” timestamp sensors, and control buttons for actions like ring / play sound / locate.
-- Trackers register as individual device entries in the Home Assistant device registry with their own unique IDs and `DeviceInfo`. They link back to the service hub via `via_device` / `via_device_id`, which keeps each tracker as a first-class device while nesting it beneath the hub in the UI.[1]
+- Trackers register as individual device entries in the Home Assistant device registry with their own unique IDs and `DeviceInfo`. They remain standalone devices—Home Assistant automatically associates them with the correct config-entry subentry without manual `via_device` or `via_device_id` pointers.[1]
 - Trackers never appear in the service hub’s `visible_device_ids` list and are never assigned to the service hub subentry; they stay within the tracker subentry so repairs and options target the correct devices.
 
 ### Subentry flow abort reasons
