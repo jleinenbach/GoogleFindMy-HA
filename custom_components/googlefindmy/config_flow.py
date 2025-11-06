@@ -64,7 +64,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
@@ -107,6 +107,7 @@ from .const import (
     coerce_ignored_mapping,
     DEFAULT_OPTIONS,
     DEFAULT_ENABLE_STATS_ENTITIES,
+    service_device_identifier,
 )
 from .email import normalize_email, normalize_email_or_default, unique_account_id
 
@@ -3447,6 +3448,20 @@ class ConfigFlow(
                     "Service device ensure after core subentry repair failed: %s", err
                 )
 
+        get_service_subentry = getattr(subentry_manager, "get", None)
+        service_config_subentry_id: str | None = None
+        if callable(get_service_subentry):
+            service_obj = get_service_subentry(SERVICE_SUBENTRY_KEY)
+            if service_obj is not None:
+                service_config_subentry_id = getattr(service_obj, "subentry_id", None)
+
+        ConfigFlow._ensure_service_device_binding(
+            hass,
+            entry,
+            coordinator,
+            service_config_subentry_id,
+        )
+
     def _ensure_subentry_context(self) -> dict[str, str | None]:
         """Return (and initialize) the flow-scoped subentry identifier mapping."""
 
@@ -3458,6 +3473,73 @@ class ConfigFlow(
         mapping.setdefault(self._subentry_key_service, None)
         self.context["subentry_ids"] = mapping
         return mapping
+
+    @staticmethod
+    def _ensure_service_device_binding(
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        coordinator: Any | None,
+        service_config_subentry_id: str | None,
+    ) -> None:
+        """Ensure the service device metadata reflects the latest subentry mapping."""
+
+        if hass is None or entry is None:
+            return
+
+        dev_reg = dr.async_get(hass)
+        if not hasattr(dev_reg, "async_update_device"):
+            return
+
+        identifiers: set[tuple[str, str]] = {service_device_identifier(entry.entry_id)}
+        if service_config_subentry_id is not None:
+            identifiers.add(
+                (DOMAIN, f"{entry.entry_id}:{service_config_subentry_id}:service")
+            )
+
+        get_device = getattr(dev_reg, "async_get_device", None)
+        device: Any | None = None
+        if callable(get_device):
+            try:
+                device = get_device(identifiers=identifiers)
+            except TypeError:
+                try:
+                    device = get_device(identifiers)
+                except TypeError:  # pragma: no cover - defensive guard
+                    device = None
+
+        if device is None:
+            return
+
+        device_id = getattr(device, "id", None) or getattr(device, "device_id", None)
+        if device_id is None:
+            return
+
+        update_kwargs: dict[str, Any] = {
+            "device_id": device_id,
+            "config_subentry_id": service_config_subentry_id,
+        }
+        if service_config_subentry_id is not None:
+            update_kwargs["config_entry_id"] = entry.entry_id
+
+        call_api = getattr(coordinator, "_call_device_registry_api", None)
+        if callable(call_api):
+            try:
+                call_api(dev_reg.async_update_device, base_kwargs=update_kwargs)
+                return
+            except Exception as err:  # noqa: BLE001 - defensive guard
+                _LOGGER.debug(
+                    "Service device binding via coordinator helper failed: %s", err
+                )
+
+        try:
+            dev_reg.async_update_device(**update_kwargs)
+        except TypeError:
+            fallback_kwargs = dict(update_kwargs)
+            fallback_kwargs.pop("config_entry_id", None)
+            fallback_kwargs["add_config_subentry_id"] = fallback_kwargs.pop(
+                "config_subentry_id"
+            )
+            dev_reg.async_update_device(**fallback_kwargs)
 
     async def _async_sync_feature_subentries(
         self,
@@ -4819,7 +4901,6 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         return self.async_show_form(
             step_id="credentials", data_schema=schema, errors=errors
         )
-
 
 # ---------- Custom exceptions ----------
 class CannotConnect(HomeAssistantErrorBase):

@@ -62,45 +62,10 @@ ignore_missing_imports = true
 show_error_codes = true
 mypy_path = ["."]
 explicit_package_bases = true
-exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
-
-[[tool.mypy.overrides]]
-module = [
-    "custom_components.googlefindmy.Auth",
-    "custom_components.googlefindmy.Auth.*",
-    "custom_components.googlefindmy.Auth.fcm_receiver_ha",
-    "custom_components.googlefindmy.FMDNCrypto",
-    "custom_components.googlefindmy.FMDNCrypto.*",
-    "custom_components.googlefindmy.KeyBackup",
-    "custom_components.googlefindmy.KeyBackup.*",
-    "custom_components.googlefindmy.ProtoDecoders",
-    "custom_components.googlefindmy.ProtoDecoders.*",
-    "custom_components.googlefindmy.SpotApi",
-    "custom_components.googlefindmy.SpotApi.*",
-    "custom_components.googlefindmy.__init__",
-    "custom_components.googlefindmy.api",
-    "custom_components.googlefindmy.binary_sensor",
-    "custom_components.googlefindmy.button",
-    "custom_components.googlefindmy.chrome_driver",
-    "custom_components.googlefindmy.const",
-    "custom_components.googlefindmy.coordinator",
-    "custom_components.googlefindmy.device_tracker",
-    "custom_components.googlefindmy.diagnostics",
-    "custom_components.googlefindmy.discovery",
-    "custom_components.googlefindmy.entity",
-    "custom_components.googlefindmy.example_data_provider",
-    "custom_components.googlefindmy.exceptions",
-    "custom_components.googlefindmy.get_oauth_token",
-    "custom_components.googlefindmy.google_home_filter",
-    "custom_components.googlefindmy.ha_typing",
-    "custom_components.googlefindmy.location_recorder",
-    "custom_components.googlefindmy.map_view",
-    "custom_components.googlefindmy.sensor",
-    "custom_components.googlefindmy.services",
-    "custom_components.googlefindmy.system_health",
-    "custom_components.googlefindmy.util_services",
+files = [
+    "custom_components/googlefindmy",
 ]
-ignore_errors = false
+exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]

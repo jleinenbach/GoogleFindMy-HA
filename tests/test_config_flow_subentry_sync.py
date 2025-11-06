@@ -36,6 +36,7 @@ from custom_components.googlefindmy.const import (
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
+    service_device_identifier,
 )
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigSubentry
@@ -386,6 +387,53 @@ async def test_device_selection_updates_existing_feature_group() -> None:
     assert flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
     assert flags[OPT_GOOGLE_HOME_FILTER_ENABLED] is True
     assert flags[OPT_ENABLE_STATS_ENTITIES] is False
+
+
+def test_service_device_binding_clears_stale_subentry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Service device updates must clear stale config_subentry_id bindings."""
+
+    entry = _EntryStub()
+    hass = SimpleNamespace()
+
+    expected_identifiers = {service_device_identifier(entry.entry_id)}
+
+    class _RegistryStub:
+        """Capture device-registry updates issued by the binding helper."""
+
+        def __init__(self) -> None:
+            self.updated: list[dict[str, Any]] = []
+
+        def async_get_device(self, *args: Any, **kwargs: Any) -> SimpleNamespace | None:
+            if args:
+                identifiers = args[0]
+            else:
+                identifiers = kwargs.get("identifiers")
+            assert identifiers == expected_identifiers
+            return SimpleNamespace(id="service-device", config_subentry_id="stale-id")
+
+        def async_update_device(self, **kwargs: Any) -> None:
+            self.updated.append(dict(kwargs))
+
+    registry = _RegistryStub()
+
+    monkeypatch.setattr(config_flow.dr, "async_get", lambda hass_arg: registry)
+
+    config_flow.ConfigFlow._ensure_service_device_binding(
+        hass,
+        entry,
+        coordinator=None,
+        service_config_subentry_id=None,
+    )
+
+    assert registry.updated, "service device update should be issued"
+    payload = registry.updated[-1]
+    assert payload == {
+        "device_id": "service-device",
+        "config_subentry_id": None,
+    }
+    assert "config_entry_id" not in payload
 
 
 @pytest.mark.asyncio

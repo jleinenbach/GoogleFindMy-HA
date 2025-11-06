@@ -798,6 +798,8 @@ def _stub_homeassistant() -> None:
             for key, value in changes.items():
                 setattr(self, key, value)
 
+    _MISSING = object()
+
     class _StubDeviceRegistry:
         """Minimal registry implementation retaining created/updated metadata."""
 
@@ -881,7 +883,9 @@ def _stub_homeassistant() -> None:
             via_device_id: str | None = None,
             translation_key: str | None = None,
             translation_placeholders: Mapping[str, str] | None = None,
-            config_subentry_id: str | None = None,
+            config_subentry_id: object = _MISSING,
+            add_config_subentry_id: object = _MISSING,
+            config_entry_id: object = _MISSING,
             name: str | None = None,
             manufacturer: str | None = None,
             model: str | None = None,
@@ -894,7 +898,21 @@ def _stub_homeassistant() -> None:
                 raise AssertionError(f"Unknown device_id {device_id}")
             if new_identifiers is not None:
                 device.identifiers = set(new_identifiers)
-            updates: dict[str, object] = {}
+            updates: dict[str, object | None] = {}
+            if config_entry_id is not _MISSING:
+                if config_entry_id is None:
+                    device.config_entries = set()
+                else:
+                    device.config_entries = {cast(str, config_entry_id)}
+                updates["config_entry_id"] = cast(str | None, config_entry_id)
+            effective_subentry = _MISSING
+            if config_subentry_id is not _MISSING:
+                effective_subentry = config_subentry_id
+            elif add_config_subentry_id is not _MISSING:
+                effective_subentry = add_config_subentry_id
+            if effective_subentry is not _MISSING:
+                device.config_subentry_id = cast(str | None, effective_subentry)
+                updates["config_subentry_id"] = cast(str | None, effective_subentry)
             for attr, value in (
                 ("via_device_id", via_device_id),
                 ("translation_key", translation_key),
@@ -906,6 +924,8 @@ def _stub_homeassistant() -> None:
                 ("entry_type", entry_type),
                 ("configuration_url", configuration_url),
             ):
+                if attr == "config_subentry_id":
+                    continue
                 if value is not None:
                     updates[attr] = value
             if translation_placeholders is not None:
@@ -923,13 +943,21 @@ def _stub_homeassistant() -> None:
                     "translation_placeholders": None
                     if translation_placeholders is None
                     else dict(translation_placeholders),
-                    "config_subentry_id": config_subentry_id,
+                    "config_entry_id": None
+                    if config_entry_id is _MISSING
+                    else cast(str | None, config_entry_id),
+                    "config_subentry_id": None
+                    if effective_subentry is _MISSING
+                    else cast(str | None, effective_subentry),
                     "name": name,
                     "manufacturer": manufacturer,
                     "model": model,
                     "sw_version": sw_version,
                     "entry_type": entry_type,
                     "configuration_url": configuration_url,
+                    "add_config_subentry_id": None
+                    if add_config_subentry_id is _MISSING
+                    else cast(str | None, add_config_subentry_id),
                 }
             )
 
