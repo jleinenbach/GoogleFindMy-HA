@@ -15,7 +15,9 @@ __all__ = [
     "FakeConfigEntry",
     "FakeConfigEntriesManager",
     "FakeServiceRegistry",
+    "FakeDeviceEntry",
     "FakeDeviceRegistry",
+    "device_registry_async_entries_for_config_entry",
     "FakeEntityRegistry",
     "FakeHass",
 ]
@@ -115,17 +117,63 @@ class FakeServiceRegistry:
         self.handlers[(domain, service)] = handler
 
 
+@dataclass(slots=True)
+class FakeDeviceEntry:
+    """Lightweight device entry model mirroring Home Assistant's registry."""
+
+    id: str
+    identifiers: set[tuple[str, str]] = field(default_factory=set)
+    config_entries: set[str] = field(default_factory=set)
+    via_device_id: str | None = None
+    name: str | None = None
+
+
 class FakeDeviceRegistry:
     """Expose the subset of device registry behaviour required by tests."""
 
-    def __init__(self) -> None:
-        self.devices: dict[str, Any] = {}
+    def __init__(self, devices: Iterable[FakeDeviceEntry] | None = None) -> None:
+        self.devices: dict[str, FakeDeviceEntry] = {
+            device.id: device for device in devices or ()
+        }
+        self.updated: list[tuple[str, dict[str, Any]]] = []
 
-    def async_get(self, device_id: str) -> Any | None:
+    def add_device(self, device: FakeDeviceEntry) -> None:
+        """Register another device entry for subsequent lookups."""
+
+        self.devices[device.id] = device
+
+    def async_get(self, device_id: str) -> FakeDeviceEntry | None:
         return self.devices.get(device_id)
+
+    def async_update_device(self, device_id: str, **changes: Any) -> None:
+        """Record updates to a device entry and apply them immediately."""
+
+        entry = self.devices[device_id]
+        for attribute, value in changes.items():
+            setattr(entry, attribute, value)
+        self.updated.append((device_id, dict(changes)))
+
+    def async_entries_for_config_entry(
+        self, entry_id: str
+    ) -> tuple[FakeDeviceEntry, ...]:
+        """Return all device entries associated with ``entry_id``."""
+
+        return tuple(
+            device
+            for device in self.devices.values()
+            if entry_id in device.config_entries
+        )
 
     def async_remove_device(self, device_id: str) -> None:  # pragma: no cover - defensive
         raise AssertionError(f"Unexpected device removal for {device_id}")
+
+
+def device_registry_async_entries_for_config_entry(
+    registry: FakeDeviceRegistry, entry_id: str
+) -> tuple[FakeDeviceEntry, ...]:
+    """Return devices for ``entry_id`` mirroring Home Assistant's helper."""
+
+    return registry.async_entries_for_config_entry(entry_id)
 
 
 class FakeEntityRegistry:

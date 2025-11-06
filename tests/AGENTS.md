@@ -110,6 +110,16 @@ Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
 
+#### Device registry listing helper
+
+The shared :func:`device_registry_async_entries_for_config_entry` helper in
+``tests.helpers.homeassistant`` returns a deterministic list of
+``FakeDeviceEntry`` instances for the provided config entry ID. Prefer importing
+and patching this helper in registry-focused tests instead of reimplementing
+ad-hoc stubs—doing so keeps device-registry expectations synchronized across
+the suite and ensures new assertions automatically benefit from future
+enhancements to the shared fake registry.
+
 ## Config flow subentry support fixture
 
 The :func:`subentry_support` fixture in ``tests/conftest.py`` centralizes the
