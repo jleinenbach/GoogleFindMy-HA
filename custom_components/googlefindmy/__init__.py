@@ -4121,6 +4121,50 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     return True
 
 
+def _self_heal_device_registry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
+    """Remove stale parent links from tracker devices for the given entry."""
+
+    _LOGGER.debug(
+        "[Entry=%s] Starting self-healing cleanup of device registry...",
+        entry.entry_id,
+    )
+    dev_reg = dr.async_get(hass)
+    entry_id = entry.entry_id
+    correct_service_identifier = service_device_identifier(entry_id)
+
+    healed_devices = 0
+    for device in dr.async_entries_for_config_entry(dev_reg, entry_id):
+        config_entries: Collection[str] = getattr(device, "config_entries", ())
+        if entry_id not in config_entries:
+            continue
+
+        identifiers: Collection[tuple[str, str]] = getattr(device, "identifiers", ())
+        is_service_device = correct_service_identifier in identifiers
+        via_device_id = getattr(device, "via_device_id", None)
+
+        if is_service_device or via_device_id is None:
+            continue
+
+        device_name = getattr(device, "name", device.id)
+        _LOGGER.debug(
+            "Healing device '%s' (ID: %s): Removing incorrect parent link (via_device_id)",
+            device_name,
+            device.id,
+        )
+        dev_reg.async_update_device(device.id, via_device_id=None)
+        healed_devices += 1
+
+    if healed_devices > 0:
+        _LOGGER.info(
+            "Self-healing complete: Removed incorrect parent links from %d orphaned devices.",
+            healed_devices,
+        )
+    else:
+        _LOGGER.debug(
+            "Self-healing: No orphaned devices with incorrect links found.",
+        )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """Set up a config entry.
 
@@ -4346,6 +4390,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "No credentials found in config entry (neither secrets_data nor oauth_token+google_email)"
         )
         raise ConfigEntryNotReady("Credentials missing")
+
+    # Remove legacy parent links from tracker devices before building runtime state.
+    _self_heal_device_registry(hass, entry)
 
     # Build effective runtime settings (options-first)
     coordinator = GoogleFindMyCoordinator(
