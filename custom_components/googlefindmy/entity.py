@@ -374,16 +374,18 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         """Return ``DeviceInfo`` describing the Google device."""
 
         label = self.device_label()
-        kwargs: dict[str, Any] = {
-            "identifiers": self._device_identifiers(),
-            "manufacturer": "Google",
-            "model": "Find My Device",
-            "serial_number": self.device_id,
-            "configuration_url": self.device_configuration_url(),
-        }
-        if label and label != self._DEFAULT_DEVICE_LABEL:
-            kwargs["name"] = label
-        return DeviceInfo(**kwargs)
+        name = label if label and label != self._DEFAULT_DEVICE_LABEL else None
+        # Tracker devices intentionally omit ``via_device`` so Home Assistant
+        # can attach them to the correct parent device automatically.
+
+        return DeviceInfo(
+            identifiers=self._device_identifiers(),
+            manufacturer="Google",
+            model="Find My Device",
+            serial_number=self.device_id,
+            configuration_url=self.device_configuration_url(),
+            name=name,
+        )
 
     def refresh_device_label_from_coordinator(
         self, *, log_prefix: str | None = None

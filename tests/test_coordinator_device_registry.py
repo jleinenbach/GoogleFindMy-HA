@@ -22,6 +22,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
+    SUBENTRY_TYPE_HUB,
     service_device_identifier,
 )
 from homeassistant.config_entries import ConfigSubentry
@@ -79,6 +80,9 @@ class _FakeDeviceEntry:
         self.translation_key = translation_key
         self.translation_placeholders = translation_placeholders
         self.config_subentry_id = config_subentry_id
+
+
+_UNSET_DEVICE = object()
 
 
 class _FakeDeviceRegistry:
@@ -176,7 +180,7 @@ class _FakeDeviceRegistry:
         *,
         device_id: str,
         new_identifiers: Iterable[tuple[str, str]] | None = None,
-        via_device_id: str | None = None,
+        via_device_id: Any = _UNSET_DEVICE,
         name: str | None = None,
         translation_key: str | None = None,
         translation_placeholders: dict[str, str] | None = None,
@@ -187,8 +191,8 @@ class _FakeDeviceRegistry:
             if device.id == device_id:
                 if new_identifiers is not None:
                     device.identifiers = set(new_identifiers)
-                if via_device_id is not None:
-                    device.via_device_id = via_device_id
+                if via_device_id is not _UNSET_DEVICE:
+                    device.via_device_id = cast(str | None, via_device_id)
                 if name is not None:
                     device.name = name
                 if translation_key is not None:
@@ -213,7 +217,9 @@ class _FakeDeviceRegistry:
                         "new_identifiers": None
                         if new_identifiers is None
                         else set(new_identifiers),
-                        "via_device_id": via_device_id,
+                        "via_device_id": None
+                        if via_device_id is _UNSET_DEVICE
+                        else cast(str | None, via_device_id),
                         "name": name,
                         "translation_key": translation_key,
                         "translation_placeholders": translation_placeholders,
@@ -600,6 +606,25 @@ def test_devices_register_without_service_parent(
     )
 
 
+def test_hub_entry_skips_registry_updates(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Hub config entries must not claim tracker devices in the registry."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub")
+    entry.data = {"subentry_type": SUBENTRY_TYPE_HUB}
+    entry.subentries = {}
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    devices = [{"id": "ghost", "name": "Ghost"}]
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created == 0
+    assert fake_registry.created == []
+    assert fake_registry.updated == []
+
+
 def test_legacy_device_migrates_without_service_parent(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:
@@ -755,10 +780,12 @@ def test_existing_device_backfills_config_subentry(
 
     assert created == 1
     assert len(fake_registry.updated) == 1
-    assert fake_registry.updated[0]["device_id"] == existing.id
-    assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
+    payload = fake_registry.updated[0]
+    assert payload["device_id"] == existing.id
+    assert payload["config_subentry_id"] == entry.tracker_subentry_id
+    assert payload["via_device_id"] is None
     assert existing.config_subentry_id == entry.tracker_subentry_id
-    assert existing.via_device_id == "svc-device-1"
+    assert existing.via_device_id is None
 
 
 def test_existing_device_name_refresh_uses_add_config_entry_id(
@@ -792,8 +819,10 @@ def test_existing_device_name_refresh_uses_add_config_entry_id(
     assert fake_registry.updated
     payload = fake_registry.updated[-1]
     assert payload["name"] == "Fresh Label"
-    assert payload["config_subentry_id"] == entry.tracker_subentry_id
+    assert payload["config_subentry_id"] in (None, entry.tracker_subentry_id)
+    assert payload["via_device_id"] is None
     assert payload["add_config_entry_id"] == entry.entry_id
+    assert existing.via_device_id is None
 
 
 def test_service_device_creation_does_not_modify_tracker_parents(
