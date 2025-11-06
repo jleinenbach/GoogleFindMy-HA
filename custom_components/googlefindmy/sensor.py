@@ -8,7 +8,8 @@ Exposes:
 Best practices:
 - Device names are synced from the coordinator once known; user-assigned names are never overwritten.
 - No placeholder names are written to the device registry on cold boot.
-- End devices link to the per-entry *service device* via `via_device=(DOMAIN, f"integration_{entry_id}")`.
+- End devices rely on the coordinator's tracker subentry metadata; do not set
+  manual `via_device` links.
 - Sensors default to **enabled** so a fresh installation is immediately functional.
 """
 

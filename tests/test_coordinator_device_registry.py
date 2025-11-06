@@ -223,6 +223,8 @@ class _FakeDeviceRegistry:
                         "sw_version": kwargs.get("sw_version"),
                         "entry_type": kwargs.get("entry_type"),
                         "configuration_url": kwargs.get("configuration_url"),
+                        "add_config_entry_id": kwargs.get("add_config_entry_id"),
+                        "config_entry_id": kwargs.get("config_entry_id"),
                     }
                 )
                 return
@@ -569,11 +571,12 @@ def _prepare_coordinator_for_registry(
         add_warning=lambda **kwargs: None,
         remove_warning=lambda *args, **kwargs: None,
     )
-    coordinator._pending_via_updates = set()
 
 
-def test_devices_link_to_service_device(fake_registry: _FakeDeviceRegistry) -> None:
-    """Newly created devices must reference the service device via `via_device_id`."""
+def test_devices_register_without_service_parent(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Newly created tracker devices must remain standalone without service parents."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     entry = _build_entry_with_subentries("entry-42")
@@ -588,23 +591,19 @@ def test_devices_link_to_service_device(fake_registry: _FakeDeviceRegistry) -> N
     )
 
     assert created == 1
-    service_ident = service_device_identifier("entry-42")
     assert fake_registry.created[0]["identifiers"] == {(DOMAIN, "entry-42:abc123")}
-    assert fake_registry.created[0]["via_device"] == service_ident
+    assert fake_registry.created[0]["via_device"] is None
     assert fake_registry.created[0]["via_device_id"] is None
-    assert fake_registry.updated[0]["via_device_id"] == "svc-device-1"
+    assert fake_registry.updated == []
     assert (
         fake_registry.created[0]["config_subentry_id"] == entry.tracker_subentry_id
     )
-    assert (
-        fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
-    )
 
 
-def test_legacy_device_migrates_to_service_parent(
+def test_legacy_device_migrates_without_service_parent(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:
-    """Legacy devices gain the service device parent during migration."""
+    """Legacy tracker devices keep their standalone status during migration."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     entry = _build_entry_with_subentries("entry-42")
@@ -626,10 +625,10 @@ def test_legacy_device_migrates_to_service_parent(
         ignored=set(),
     )
 
-    assert created == 2
-    assert legacy.via_device_id == "svc-device-1"
+    assert created == 1
+    assert legacy.via_device_id is None
     assert legacy.identifiers == {(DOMAIN, "abc123"), (DOMAIN, "entry-42:abc123")}
-    assert fake_registry.updated[0]["via_device_id"] == "svc-device-1"
+    assert fake_registry.updated[0]["via_device_id"] is None
     assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
     assert legacy.name == "Pixel"
     assert legacy.config_subentry_id == entry.tracker_subentry_id
@@ -658,7 +657,7 @@ def test_frozen_registry_updates_do_not_raise(
         ignored=set(),
     )
 
-    assert created == 2
+    assert created == 1
     assert frozen_registry.updated
     assert frozen_registry.async_get(legacy.id) is not None
 
@@ -691,12 +690,14 @@ def test_frozen_legacy_device_merges_identifiers(
     assert refreshed.identifiers == frozenset(
         {(DOMAIN, "abc123"), (DOMAIN, "entry-42:abc123")}
     )
-    assert refreshed.via_device_id == coordinator._service_device_id
+    assert refreshed.via_device_id is None
     assert refreshed.config_subentry_id == entry.tracker_subentry_id
 
 
-def test_existing_device_backfills_via_link(fake_registry: _FakeDeviceRegistry) -> None:
-    """Existing namespaced devices gain the service device parent if missing."""
+def test_existing_device_remains_standalone(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Existing namespaced devices keep operating without a service-device parent."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     entry = _build_entry_with_subentries("entry-42")
@@ -719,8 +720,8 @@ def test_existing_device_backfills_via_link(fake_registry: _FakeDeviceRegistry) 
     )
 
     assert created == 1
-    assert fake_registry.updated[0]["via_device_id"] == "svc-device-1"
-    assert existing.via_device_id == "svc-device-1"
+    assert fake_registry.updated[0]["via_device_id"] is None
+    assert existing.via_device_id is None
     assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
     assert existing.config_subentry_id == entry.tracker_subentry_id
 
@@ -760,10 +761,45 @@ def test_existing_device_backfills_config_subentry(
     assert existing.via_device_id == "svc-device-1"
 
 
-def test_service_device_backfills_via_links(
+def test_existing_device_name_refresh_uses_add_config_entry_id(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:
-    """Devices created before the service device exists are relinked once available."""
+    """Name refreshes keep config-entry linkage for tracker devices."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    coordinator._service_device_id = "svc-device-1"
+
+    existing = _FakeDeviceEntry(
+        identifiers={(DOMAIN, "entry-42:abc123")},
+        config_entry_id="entry-42",
+        name="Old Label",
+        via_device_id="svc-device-1",
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+    fake_registry.devices.append(existing)
+
+    devices = [{"id": "abc123", "name": "Fresh Label"}]
+    coordinator.data = devices
+
+    created = coordinator._ensure_registry_for_devices(
+        devices=devices,
+        ignored=set(),
+    )
+
+    assert created == 1
+    assert fake_registry.updated
+    payload = fake_registry.updated[-1]
+    assert payload["name"] == "Fresh Label"
+    assert payload["config_subentry_id"] == entry.tracker_subentry_id
+    assert payload["add_config_entry_id"] == entry.entry_id
+
+
+def test_service_device_creation_does_not_modify_tracker_parents(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Tracker devices created before the service device stay standalone after creation."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     entry = _build_entry_with_subentries("entry-42")
@@ -780,41 +816,27 @@ def test_service_device_backfills_via_links(
     created = coordinator._ensure_registry_for_devices(devices, set())
 
     assert created == 2
-    service_ident = service_device_identifier("entry-42")
-    service_config_identifier = _service_subentry_identifier(entry)
-    assert fake_registry.created[0]["via_device"] == service_ident
-    assert fake_registry.created[1]["via_device"] == service_ident
-    for device_entry in fake_registry.devices:
-        assert device_entry.via_device_id is None
+    assert all(entry["via_device"] is None for entry in fake_registry.created)
+    assert all(entry["via_device_id"] is None for entry in fake_registry.created)
 
-    pending = getattr(coordinator, "_pending_via_updates")
-    assert len(pending) == 2
-
+    # Service-device creation should not mutate tracker device parentage.
     coordinator._ensure_service_device_exists()
 
-    service_id = coordinator._service_device_id
-    assert service_id is not None
     service_ident = service_device_identifier("entry-42")
-    service_subentry_ident = service_config_identifier
+    service_config_identifier = _service_subentry_identifier(entry)
     service_entry = next(
         entry for entry in fake_registry.devices if service_ident in entry.identifiers
     )
     assert service_entry.translation_key == SERVICE_DEVICE_TRANSLATION_KEY
     assert service_entry.translation_placeholders == {}
     assert service_entry.config_subentry_id == entry.service_subentry_id
-    assert service_entry.identifiers == {service_ident, service_subentry_ident}
-    metadata = fake_registry.created[-1]
-    assert metadata["identifiers"] == {service_ident, service_subentry_ident}
-    assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
-    assert metadata["translation_placeholders"] == {}
-    assert metadata["config_subentry_id"] == entry.service_subentry_id
-    for device_entry in fake_registry.devices:
-        if {service_ident, service_subentry_ident} & device_entry.identifiers:
-            continue
-        assert device_entry.via_device_id == service_id
-        assert device_entry.config_subentry_id == entry.tracker_subentry_id
+    assert service_entry.identifiers == {service_ident, service_config_identifier}
 
-    assert getattr(coordinator, "_pending_via_updates") == set()
+    for device_entry in fake_registry.devices:
+        if {service_ident, service_config_identifier} & device_entry.identifiers:
+            continue
+        assert device_entry.via_device_id is None
+        assert device_entry.config_subentry_id == entry.tracker_subentry_id
 
 
 def test_service_device_translation_rejection_is_fatal(
@@ -1001,10 +1023,10 @@ def test_service_device_preserves_user_defined_name(
     assert metadata["new_identifiers"] == {service_ident, service_subentry_ident}
 
 
-def test_rebuild_flow_creates_devices_with_via_parent(
+def test_rebuild_flow_creates_devices_without_service_parent(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:
-    """Safe-mode rebuild path should recreate devices using via_device linkage."""
+    """Safe-mode rebuild path recreates tracker devices without service parents."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     entry = _build_entry_with_subentries("entry-77")
@@ -1013,7 +1035,6 @@ def test_rebuild_flow_creates_devices_with_via_parent(
     # Simulate a safe-mode rebuild: service device removed, pending queue cleared.
     coordinator._service_device_ready = False
     coordinator._service_device_id = None
-    coordinator._dr_supports_via_device_kw = True
 
     devices = [{"id": "ghi789", "name": "Phone"}]
     coordinator.data = devices
@@ -1024,12 +1045,9 @@ def test_rebuild_flow_creates_devices_with_via_parent(
 
     assert created == 1
     metadata = fake_registry.created[0]
-    parent_identifier = service_device_identifier("entry-77")
-    assert metadata["via_device"] == parent_identifier
+    assert metadata["via_device"] is None
     assert metadata["via_device_id"] is None
     assert metadata["config_subentry_id"] == entry.tracker_subentry_id
-    pending = getattr(coordinator, "_pending_via_updates")
-    assert pending == {fake_registry.devices[0].id}
 
 
 @pytest.mark.asyncio

@@ -688,9 +688,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._enabled_poll_device_ids: set[str] = set()
         self._devices_with_entry: set[str] = set()
         self._dr_unsub: Callable[[], None] | None = None
-        # Deferred service-device linking for end devices awaiting the anchor
-        self._pending_via_updates: set[str] = set()
-
         # Subentry awareness (feature groups / platform scoping)
         self._subentry_metadata: dict[str, SubentryMetadata] = {}
         self._subentry_snapshots: dict[str, tuple[dict[str, Any], ...]] = {}
@@ -2026,65 +2023,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             setattr(self, "_device_names", cache)
         return cache
 
-    def _ensure_pending_via_container(self) -> set[str]:
-        """Return the shared set used to track devices awaiting via updates."""
-
-        pending = getattr(self, "_pending_via_updates", None)
-        if pending is None:
-            pending = set()
-            setattr(self, "_pending_via_updates", pending)
-        return pending
-
-    def _note_pending_via_update(self, device_id: str | None) -> None:
-        """Track a device that should be linked once the service device is known."""
-
-        if not isinstance(device_id, str) or not device_id:
-            return
-        pending = self._ensure_pending_via_container()
-        pending.add(device_id)
-
     def _apply_pending_via_updates(self) -> None:
-        """Link any pending devices to the service device once it is available."""
+        """Deprecated no-op retained for backward compatibility."""
 
-        hass = getattr(self, "hass", None)
-        service_device_id = getattr(self, "_service_device_id", None)
-        pending = getattr(self, "_pending_via_updates", None)
-
-        if hass is None or service_device_id is None or not pending:
-            return
-
-        dev_reg = dr.async_get(hass)
-        if not hasattr(dev_reg, "async_get") or not hasattr(
-            dev_reg, "async_update_device"
-        ):
-            return
-        updated = 0
-        still_pending: set[str] = set()
-
-        for device_id in list(pending):
-            device = dev_reg.async_get(device_id)
-            if device is None:
-                still_pending.add(device_id)
-                continue
-            if getattr(device, "via_device_id", None) == service_device_id:
-                continue
-            self._call_device_registry_api(
-                dev_reg.async_update_device,
-                base_kwargs={
-                    "device_id": device_id,
-                    "via_device_id": service_device_id,
-                },
-            )
-            updated += 1
-
-        pending.clear()
-        if still_pending:
-            pending.update(still_pending)
-
-        if updated:
-            _LOGGER.debug(
-                "Linked %d device(s) to Google Find My service device", updated
-            )
+        # Tracker devices no longer link to the service device via ``via_device``.
+        # Keep the method defined to avoid AttributeError in case third-party
+        # callers relied on the old behavior, but return immediately.
+        return
 
     def _sync_owner_index(self, devices: list[dict[str, Any]] | None) -> None:
         """Sync hass.data owner index for this entry (FCM fallback support)."""
@@ -2254,17 +2199,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         get_device_by_id = getattr(dev_reg, "async_get", None)
         created_or_updated = 0
 
-        supports_via_kw = getattr(self, "_dr_supports_via_device_kw", None)
-        if supports_via_kw is None:
-            supports_via_kw = False
-            try:
-                params = inspect.signature(async_get_or_create).parameters
-            except (TypeError, ValueError):
-                supports_via_kw = False
-            else:
-                supports_via_kw = "via_device" in params
-            setattr(self, "_dr_supports_via_device_kw", supports_via_kw)
-
         def _update_device_with_kwargs(kwargs: dict[str, Any]) -> None:
             if not callable(update_device):
                 return
@@ -2286,8 +2220,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             dev_id = d.get("id")
             if not isinstance(dev_id, str) or dev_id in ignored:
                 continue
-
-            service_device_id = getattr(self, "_service_device_id", None)
 
             # Build identifiers
             ns_ident = (DOMAIN, f"{entry_id}:{dev_id}")
@@ -2314,11 +2246,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         new_idents = set(legacy_dev.identifiers)
                         new_idents.add(ns_ident)
                         needs_identifiers = new_idents != legacy_dev.identifiers
-                        needs_via = (
-                            service_device_id is not None
-                            and getattr(legacy_dev, "via_device_id", None)
-                            != service_device_id
-                        )
                         needs_config_subentry = (
                             getattr(legacy_dev, "config_subentry_id", None)
                             != tracker_config_subentry_id
@@ -2336,7 +2263,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         )
                         if (
                             needs_identifiers
-                            or needs_via
                             or needs_config_subentry
                             or needs_name
                         ):
@@ -2344,10 +2270,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 "device_id": legacy_dev.id,
                                 "config_subentry_id": tracker_config_subentry_id,
                             }
+                            if tracker_config_subentry_id is not None:
+                                update_kwargs["add_config_entry_id"] = entry_id
                             if needs_identifiers:
                                 update_kwargs["new_identifiers"] = new_idents
-                            if needs_via:
-                                update_kwargs["via_device_id"] = service_device_id
                             if needs_name:
                                 update_kwargs["name"] = use_name
                             legacy_id = getattr(legacy_dev, "id", None)
@@ -2357,8 +2283,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 legacy_dev,
                             )
                         created_or_updated += 1
-                    if service_device_id is None:
-                        self._note_pending_via_update(legacy_dev.id)
                         dev = legacy_dev
                     else:
                         # Belongs to another entry → create a new device with namespaced ident (no merge).
@@ -2383,49 +2307,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "config_subentry_id": tracker_config_subentry_id,
                 }
 
-                if parent_identifier and supports_via_kw:
-                    create_kwargs["via_device"] = parent_identifier
-                elif service_device_id is not None:
-                    create_kwargs["via_device_id"] = service_device_id
-
-                while True:
-                    try:
-                        dev = self._call_device_registry_api(
-                            async_get_or_create,
-                            base_kwargs=create_kwargs,
-                        )
-                    except TypeError as err:
-                        via_value = create_kwargs.pop("via_device", None)
-                        if via_value is not None:
-                            # Older HA core without via_device kwarg support.
-                            if service_device_id is not None:
-                                create_kwargs["via_device_id"] = service_device_id
-                            supports_via_kw = False
-                            setattr(self, "_dr_supports_via_device_kw", False)
-                            _LOGGER.debug(
-                                "Device Registry create fell back to via_device_id linkage: %s",
-                                err,
-                            )
-                            continue
-                        raise
-                    else:
-                        break
+                dev = self._call_device_registry_api(
+                    async_get_or_create,
+                    base_kwargs=create_kwargs,
+                )
                 created_or_updated += 1
-                if service_device_id is None:
-                    self._note_pending_via_update(getattr(dev, "id", None))
-                elif (
-                    callable(update_device)
-                    and getattr(dev, "id", None)
-                    and getattr(dev, "via_device_id", None) != service_device_id
-                ):
-                    update_kwargs = {
-                        "device_id": dev.id,
-                        "via_device_id": service_device_id,
-                        "config_subentry_id": tracker_config_subentry_id,
-                    }
-                    device_id = getattr(dev, "id", None)
-                    _update_device_with_kwargs(update_kwargs)
-                    dev = _refresh_device_entry(device_id or "", dev)
             else:
                 # Keep name fresh if not user-overridden and a new upstream label is available
                 raw_name = (d.get("name") or "").strip()
@@ -2445,13 +2331,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if name_needs_update:
                     update_existing_kwargs["name"] = use_name
 
-                needs_via_update = (
-                    service_device_id is not None
-                    and getattr(dev, "via_device_id", None) != service_device_id
-                )
-                if needs_via_update:
-                    update_existing_kwargs["via_device_id"] = service_device_id
-
                 needs_config_subentry_update = (
                     getattr(dev, "config_subentry_id", None)
                     != tracker_config_subentry_id
@@ -2459,7 +2338,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
                 needs_update = (
                     name_needs_update
-                    or needs_via_update
                     or needs_config_subentry_update
                 )
 
@@ -2467,12 +2345,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     update_existing_kwargs["config_subentry_id"] = (
                         tracker_config_subentry_id
                     )
+                    if tracker_config_subentry_id is not None:
+                        update_existing_kwargs["add_config_entry_id"] = entry_id
                     _update_device_with_kwargs(update_existing_kwargs)
                     dev = _refresh_device_entry(device_id or "", dev)
                     created_or_updated += 1
-
-                if service_device_id is None and dev is not None:
-                    self._note_pending_via_update(getattr(dev, "id", None))
 
         self._apply_pending_via_updates()
         return created_or_updated
