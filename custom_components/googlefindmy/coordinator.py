@@ -1814,6 +1814,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
                     "config_subentry_id": service_config_subentry_id,
                 }
+                if service_config_subentry_id is not None:
+                    update_kwargs["config_entry_id"] = entry.entry_id
                 if needs_identifier_backfill:
                     new_identifiers = set(device_identifiers)
                     new_identifiers.update(identifiers)
