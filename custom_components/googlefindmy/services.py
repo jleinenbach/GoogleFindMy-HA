@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from homeassistant import exceptions as ha_exceptions
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -44,6 +44,7 @@ from .const import (
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
     map_token_hex_digest,
     map_token_secret_seed,
+    service_device_identifier,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +52,228 @@ _LOGGER = logging.getLogger(__name__)
 ServiceValidationError = ha_exceptions.ServiceValidationError
 HomeAssistantError = ha_exceptions.HomeAssistantError
 ConfigEntryError = getattr(ha_exceptions, "ConfigEntryError", HomeAssistantError)
+
+
+SERVICE_REBUILD_DEVICE_REGISTRY: str = "rebuild_device_registry"
+
+
+async def async_rebuild_device_registry(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Synchronize and clean Device Registry entries for Google Find My hubs."""
+
+    _LOGGER.info("Service '%s' called: rebuilding device registry.", SERVICE_REBUILD_DEVICE_REGISTRY)
+
+    domain_bucket = hass.data.get(DOMAIN, {})
+    if not isinstance(domain_bucket, Mapping):
+        domain_bucket = {}
+
+    def _extract_hub_details(
+        candidate: Any,
+    ) -> tuple[str, Mapping[Any, Any]] | None:
+        """Return the hub entry_id and coordinators mapping if available."""
+
+        entry_id: str | None
+        coordinators: Any
+
+        if isinstance(candidate, Mapping):
+            raw_entry_id = candidate.get("entry_id")
+            if isinstance(raw_entry_id, str) and raw_entry_id:
+                entry_id = raw_entry_id
+            elif raw_entry_id is not None:
+                entry_id = str(raw_entry_id)
+            else:
+                entry_id = None
+            coordinators = candidate.get("coordinators")
+        else:
+            raw_entry_id = getattr(candidate, "entry_id", None)
+            if isinstance(raw_entry_id, str) and raw_entry_id:
+                entry_id = raw_entry_id
+            elif raw_entry_id is not None:
+                entry_id = str(raw_entry_id)
+            else:
+                entry_id = None
+            coordinators = getattr(candidate, "coordinators", None)
+
+        if not entry_id:
+            return None
+
+        if isinstance(coordinators, Mapping):
+            return entry_id, coordinators
+
+        return None
+
+    def _iter_hubs() -> list[tuple[str, Mapping[Any, Any]]]:
+        """Yield hub entry_id and coordinator mapping tuples."""
+
+        hubs: list[tuple[str, Mapping[Any, Any]]] = []
+        seen: set[int] = set()
+
+        hub_bucket = domain_bucket.get("hubs") if isinstance(domain_bucket, Mapping) else None
+        if isinstance(hub_bucket, Mapping):
+            for item in hub_bucket.values():
+                if item is None or id(item) in seen:
+                    continue
+                seen.add(id(item))
+                details = _extract_hub_details(item)
+                if details is not None:
+                    hubs.append(details)
+
+        for value in domain_bucket.values():
+            if value is None or id(value) in seen:
+                continue
+            details = _extract_hub_details(value)
+            if details is not None:
+                hubs.append(details)
+
+        return hubs
+
+    processed_coordinators = 0
+    seen_coordinators: set[int] = set()
+
+    for _hub_entry_id, coordinators in _iter_hubs():
+        for coordinator in coordinators.values():
+            if coordinator is None or id(coordinator) in seen_coordinators:
+                continue
+            update_registry = getattr(coordinator, "async_update_device_registry", None)
+            if not callable(update_registry):
+                continue
+            try:
+                await update_registry()
+            except Exception as err:  # noqa: BLE001 - defensive logging
+                _LOGGER.warning(
+                    "Coordinator %s failed during registry rebuild: %s",
+                    getattr(coordinator, "name", "<unknown>"),
+                    err,
+                )
+                continue
+            processed_coordinators += 1
+            seen_coordinators.add(id(coordinator))
+
+    entries_bucket = domain_bucket.get("entries") if isinstance(domain_bucket, Mapping) else None
+    if isinstance(entries_bucket, Mapping):
+        for runtime in entries_bucket.values():
+            coordinator = getattr(runtime, "coordinator", None)
+            if coordinator is None or id(coordinator) in seen_coordinators:
+                continue
+            update_registry = getattr(coordinator, "async_update_device_registry", None)
+            if not callable(update_registry):
+                continue
+            try:
+                await update_registry()
+            except Exception as err:  # noqa: BLE001 - defensive logging
+                _LOGGER.warning(
+                    "Runtime coordinator %s failed during registry rebuild: %s",
+                    getattr(coordinator, "name", "<unknown>"),
+                    err,
+                )
+                continue
+            processed_coordinators += 1
+            seen_coordinators.add(id(coordinator))
+
+    _LOGGER.info(
+        "Completed device registry ensure phase; processed %d coordinators.",
+        processed_coordinators,
+    )
+
+    # --- Phase 2: Cleanup Orphaned Devices ---
+    _LOGGER.info("Starting device registry cleanup phase...")
+    dev_reg = dr.async_get(hass)
+
+    processed_hubs = 0
+    cleaned_devices = 0
+
+    for hub_entry_id, coordinators in _iter_hubs():
+        if not hub_entry_id:
+            continue
+
+        processed_hubs += 1
+
+        service_device_ident = service_device_identifier(hub_entry_id)
+        try:
+            service_device = dev_reg.async_get_device(identifiers={service_device_ident})
+        except TypeError:  # pragma: no cover - defensive best effort
+            service_device = None
+        service_device_id = getattr(service_device, "id", None) if service_device else None
+
+        active_sub_entry_ids: set[str] = set()
+        for coordinator in coordinators.values():
+            config_entry = getattr(coordinator, "config_entry", None)
+            entry_id = getattr(config_entry, "entry_id", None)
+            if isinstance(entry_id, str):
+                active_sub_entry_ids.add(entry_id)
+
+        _LOGGER.debug(
+            "[%s] Hub Cleanup: Found %d active sub-entries. (Service Device ID: %s)",
+            hub_entry_id,
+            len(active_sub_entry_ids),
+            service_device_id,
+        )
+
+        try:
+            get_devices_for_entry = getattr(dr, "async_get_devices_for_config_entry", None)
+            if callable(get_devices_for_entry):
+                all_hub_linked_devices = get_devices_for_entry(dev_reg, hub_entry_id)
+            else:
+                all_hub_linked_devices = dr.async_entries_for_config_entry(
+                    dev_reg, hub_entry_id
+                )
+        except Exception as err:  # noqa: BLE001 - defensive logging
+            _LOGGER.warning(
+                "[%s] Hub Cleanup: Failed to get devices for config entry: %s",
+                hub_entry_id,
+                err,
+            )
+            continue
+
+        for device in all_hub_linked_devices:
+            if device is None:
+                continue
+
+            device_id = getattr(device, "id", None)
+            if service_device_id and device_id == service_device_id:
+                continue
+
+            if not isinstance(device_id, str) or not device_id:
+                continue
+
+            raw_links = getattr(device, "config_entries", set()) or set()
+            device_links = {
+                str(entry_id)
+                for entry_id in raw_links
+                if isinstance(entry_id, str) and entry_id
+            }
+
+            if device_links & active_sub_entry_ids:
+                continue
+
+            active_overlap = device_links & active_sub_entry_ids
+            _LOGGER.info(
+                "[%s] Hub Cleanup: Removing orphaned device '%s' (ID: %s) from hub entry. (Active links: %s)",
+                hub_entry_id,
+                getattr(device, "name", None),
+                device_id,
+                active_overlap,
+            )
+            try:
+                dev_reg.async_update_device(
+                    device_id,
+                    remove_config_entry_id=hub_entry_id,
+                )
+                cleaned_devices += 1
+            except Exception as err:  # noqa: BLE001 - defensive logging
+                _LOGGER.error(
+                    "[%s] Hub Cleanup: Failed to remove config entry from device %s: %s",
+                    hub_entry_id,
+                    device_id,
+                    err,
+                )
+
+    _LOGGER.info(
+        "Device registry cleanup phase complete. Processed %d hubs and removed %d orphaned device links.",
+        processed_hubs,
+        cleaned_devices,
+    )
 
 
 async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> None:
@@ -500,6 +723,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
         _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
+    async def async_rebuild_device_registry_service(call: ServiceCall) -> None:
+        """Run the two-phase Device Registry rebuild + cleanup workflow."""
+
+        await async_rebuild_device_registry(hass, call)
+
     async def async_rebuild_registry_service(call: ServiceCall) -> None:
         """Handle the service call to reload the integration."""
         _LOGGER.info(
@@ -566,6 +794,11 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
     hass.services.async_register(DOMAIN, SERVICE_STOP_SOUND, async_stop_sound_service)
     hass.services.async_register(
         DOMAIN, SERVICE_REFRESH_DEVICE_URLS, async_refresh_device_urls_service
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REBUILD_DEVICE_REGISTRY,
+        async_rebuild_device_registry_service,
     )
     hass.services.async_register(
         DOMAIN, SERVICE_REBUILD_REGISTRY, async_rebuild_registry_service
