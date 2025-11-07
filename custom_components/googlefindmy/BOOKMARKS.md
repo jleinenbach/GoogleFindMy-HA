@@ -1,12 +1,12 @@
 # BOOKMARKS.md
-> Central references for AGENTS.md / Quality & Security requirements (Python 3.12, Home Assistant 2025.10, Secure Coding, Software Supply Chain).
+> Central references for AGENTS.md / Quality & Security requirements (Python 3.13, Home Assistant 2025.10, Secure Coding, Software Supply Chain).
 > Updated: 2025-10-19
 
-## 1) Python 3.12 — Language, Style, Typing, Safety
+## 1) Python 3.13 — Language, Style, Typing, Safety
 - PEP 8 – Style Guide: https://peps.python.org/pep-0008/
 - PEP 257 – Docstring Conventions: https://peps.python.org/pep-0257/
 - PEP 695 – Type Parameter Syntax (Generics): https://peps.python.org/pep-0695/
-- What’s New in Python 3.12: https://docs.python.org/3/whatsnew/3.12.html
+- What’s New in Python 3.13: https://docs.python.org/3/whatsnew/3.13.html
 - Exceptions & `raise … from …` (tutorial): https://docs.python.org/3/tutorial/errors.html
 - `asyncio.TaskGroup` (structured concurrency): https://docs.python.org/3/library/asyncio-task.html#taskgroups
 - `subprocess` – security considerations / avoid `shell=True`: https://docs.python.org/3/library/subprocess.html#security-considerations

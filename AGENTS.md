@@ -29,7 +29,7 @@
   - [9) Docs & i18n (minimal but strict)](#9-docs--i18n-minimal-but-strict)
   - [10) Local commands (VERIFY)](#10-local-commands-verify)
     - [10.1 Type-checking policy — mypy strict on edited Python files](#101-type-checking-policy--mypy-strict-on-edited-python-files)
-  - [11) Clean & Secure Coding Standard (Python 3.12 + Home Assistant 2025.10)](#11-clean--secure-coding-standard-python-312--home-assistant-202510)
+  - [11) Clean & Secure Coding Standard (Python 3.13 + Home Assistant 2025.10)](#11-clean--secure-coding-standard-python-313--home-assistant-202510)
     - [11.1 Language & style (self-documenting)](#111-language--style-self-documenting)
     - [11.2 Security baseline (OWASP / NIST / BSI)](#112-security-baseline-owasp--nist--bsi)
     - [11.3 Async, concurrency & cancellation](#113-async-concurrency--cancellation)
@@ -40,7 +40,7 @@
     - [11.8 Release & operations](#118-release--operations)
     - [11.9 Machine-checkable acceptance checklist (for the agent)](#119-machine-checkable-acceptance-checklist-for-the-agent)
   - [REFERENCES](#references)
-    - [1) Python 3.12 — Language, Style, Typing, Safety](#1-python-312--language-style-typing-safety)
+    - [1) Python 3.13 — Language, Style, Typing, Safety](#1-python-313--language-style-typing-safety)
     - [2) Home Assistant (Developer Docs, 2024–2025)](#2-home-assistant-developer-docs-20242025)
     - [3) Secure Development — Standards & Guidance](#3-secure-development--standards--guidance)
       - [OWASP Cheat Sheet Series (selected)](#owasp-cheat-sheet-series-selected)
@@ -464,7 +464,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ---
 
-## 11) Clean & Secure Coding Standard (Python 3.12 + Home Assistant 2025.10)
+## 11) Clean & Secure Coding Standard (Python 3.13 + Home Assistant 2025.10)
 
 ### 11.1 Language & style (self-documenting)
 
@@ -568,12 +568,12 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ## REFERENCES
 
-### 1) Python 3.12 — Language, Style, Typing, Safety
+### 1) Python 3.13 — Language, Style, Typing, Safety
 
 * PEP 8 – Style Guide: [https://peps.python.org/pep-0008/](https://peps.python.org/pep-0008/)
 * PEP 257 – Docstring Conventions: [https://peps.python.org/pep-0257/](https://peps.python.org/pep-0257/)
 * PEP 695 – Type Parameter Syntax (Generics): [https://peps.python.org/pep-0695/](https://peps.python.org/pep-0695/)
-* What’s New in Python 3.12: [https://docs.python.org/3/whatsnew/3.12.html](https://docs.python.org/3/whatsnew/3.12.html)
+* What’s New in Python 3.13: [https://docs.python.org/3/whatsnew/3.13.html](https://docs.python.org/3/whatsnew/3.13.html)
 * Exceptions & `raise … from …` (tutorial): [https://docs.python.org/3/tutorial/errors.html](https://docs.python.org/3/tutorial/errors.html)
 * `asyncio.TaskGroup` (structured concurrency): [https://docs.python.org/3/library/asyncio-task.html#taskgroups](https://docs.python.org/3/library/asyncio-task.html#taskgroups)
 * `subprocess` — security considerations / avoid `shell=True`: [https://docs.python.org/3/library/subprocess.html#security-considerations](https://docs.python.org/3/library/subprocess.html#security-considerations)
