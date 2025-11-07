@@ -778,7 +778,7 @@ class _ConfigFlowMixin:
     def add_suggested_values_to_schema(
         self, schema: vol.Schema, suggested_values: Mapping[str, Any]
     ) -> vol.Schema:
-        ...
+        return schema
 
     def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
         ...
@@ -843,7 +843,7 @@ class _OptionsFlowMixin:
     def add_suggested_values_to_schema(
         self, schema: vol.Schema, suggested_values: Mapping[str, Any]
     ) -> vol.Schema:
-        ...
+        return schema
 
     def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
         ...
@@ -3589,8 +3589,8 @@ class ConfigFlow(
         )
         tracker_title = "Google Find My devices"
         service_title = "Google Find Hub Service"
-        tracker_translation_key = TRACKER_SUBENTRY_KEY
-        service_translation_key = SERVICE_SUBENTRY_KEY
+        tracker_translation_key = None
+        service_translation_key = None
 
         has_filter, feature_flags = _derive_feature_settings(
             options_payload=options_payload,

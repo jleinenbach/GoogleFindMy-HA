@@ -4686,11 +4686,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 },
                 subentry_type=SUBENTRY_TYPE_TRACKER,
                 unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
-                translation_key=TRACKER_SUBENTRY_KEY,
             ),
             ConfigEntrySubentryDefinition(
                 key=SERVICE_SUBENTRY_KEY,
-                title=entry_title,
+                title="Google Find Hub Service",
                 data={
                     "features": service_features,
                     "fcm_push_enabled": fcm_push_enabled,
@@ -4699,7 +4698,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 },
                 subentry_type=SUBENTRY_TYPE_SERVICE,
                 unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
-                translation_key=SERVICE_SUBENTRY_KEY,
             ),
         ]
     )

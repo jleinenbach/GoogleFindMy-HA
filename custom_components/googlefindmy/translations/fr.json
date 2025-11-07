@@ -509,13 +509,5 @@
       "fcm": "Récepteur FCM",
       "fcm_lock_contention_count": "Nombre de contentions du verrou FCM"
     }
-  },
-  "subentry": {
-    "service": {
-      "title": "Google Find Hub Service"
-    },
-    "core_tracking": {
-      "title": "Google Find My devices"
-    }
   }
 }

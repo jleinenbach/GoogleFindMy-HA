@@ -287,14 +287,6 @@
       }
     }
   },
-  "subentry": {
-    "service": {
-      "title": "Google Find Hub Service"
-    },
-    "core_tracking": {
-      "title": "Google Find My devices"
-    }
-  },
   "entity": {
     "button": {
       "play_sound": {
