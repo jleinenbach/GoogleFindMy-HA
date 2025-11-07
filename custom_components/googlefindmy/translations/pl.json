@@ -114,10 +114,34 @@
       "error": {}
     },
     "service": {
-      "title": "Google Find Hub Service"
+      "title": "Usługa Google Find Hub",
+      "step": {
+        "user": {
+          "title": "Dodaj grupę funkcji usługi",
+          "description": "Skonfiguruj grupę funkcji usługi, aby Home Assistant mógł udostępniać diagnostykę i usługi pomocnicze dla tego konta."
+        },
+        "reconfigure": {
+          "title": "Zaktualizuj grupę funkcji usługi",
+          "description": "Odśwież grupę funkcji usługi, aby zsynchronizować diagnostykę i usługi pomocnicze z najnowszą konfiguracją."
+        }
+      },
+      "abort": {},
+      "error": {}
     },
     "core_tracking": {
-      "title": "Google Find My devices"
+      "title": "Urządzenia Google Find My",
+      "step": {
+        "user": {
+          "title": "Dodaj grupę funkcji urządzeń",
+          "description": "Utwórz grupę funkcji urządzeń, aby zarządzać wykrytymi dla tego konta lokalizatorami Google Find My."
+        },
+        "reconfigure": {
+          "title": "Zaktualizuj grupę funkcji urządzeń",
+          "description": "Zaktualizuj grupę funkcji urządzeń, aby odnowić widoczność i metadane lokalizatorów."
+        }
+      },
+      "abort": {},
+      "error": {}
     }
   },
   "options": {

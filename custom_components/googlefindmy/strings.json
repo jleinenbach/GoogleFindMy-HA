@@ -112,6 +112,36 @@
       },
       "abort": {},
       "error": {}
+    },
+    "service": {
+      "title": "Google Find Hub Service",
+      "step": {
+        "user": {
+          "title": "Add service feature group",
+          "description": "Provision the service feature group so Home Assistant can expose diagnostics and helper services for this account."
+        },
+        "reconfigure": {
+          "title": "Update service feature group",
+          "description": "Refresh the service feature group to sync diagnostics and helper services with the latest configuration."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "core_tracking": {
+      "title": "Google Find My devices",
+      "step": {
+        "user": {
+          "title": "Add device feature group",
+          "description": "Create the device feature group to manage Google Find My trackers discovered for this account."
+        },
+        "reconfigure": {
+          "title": "Update device feature group",
+          "description": "Update the device feature group to refresh tracker visibility and metadata."
+        }
+      },
+      "abort": {},
+      "error": {}
     }
   },
   "options": {

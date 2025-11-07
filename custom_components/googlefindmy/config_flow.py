@@ -90,11 +90,13 @@ from .const import (
     OPT_ALLOW_HISTORY_FALLBACK,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SERVICE_SUBENTRY_TRANSLATION_KEY,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_TRANSLATION_KEY,
     # Defaults
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_DEVICE_POLL_DELAY,
@@ -3589,8 +3591,8 @@ class ConfigFlow(
         )
         tracker_title = "Google Find My devices"
         service_title = "Google Find Hub Service"
-        tracker_translation_key = None
-        service_translation_key = None
+        tracker_translation_key = TRACKER_SUBENTRY_TRANSLATION_KEY
+        service_translation_key = SERVICE_SUBENTRY_TRANSLATION_KEY
 
         has_filter, feature_flags = _derive_feature_settings(
             options_payload=options_payload,

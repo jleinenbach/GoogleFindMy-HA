@@ -120,6 +120,7 @@ class _ConfigEntriesManagerStub:
                 "unique_id": subentry.unique_id,
                 "subentry_type": subentry.subentry_type,
                 "config_subentry_id": subentry.subentry_id,
+                "translation_key": getattr(subentry, "translation_key", None),
                 "object": subentry,
             }
         )
@@ -256,6 +257,7 @@ async def test_device_selection_creates_feature_groups_with_flags() -> None:
     assert service_record["subentry_type"] == SUBENTRY_TYPE_SERVICE
     assert tracker_record["subentry_type"] == SUBENTRY_TYPE_TRACKER
     assert service_record["unique_id"] == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
+    assert service_record["translation_key"] == SERVICE_SUBENTRY_KEY
 
     assert service_payload["features"] == sorted(SERVICE_FEATURE_PLATFORMS)
     assert "visible_device_ids" not in service_payload
@@ -270,6 +272,7 @@ async def test_device_selection_creates_feature_groups_with_flags() -> None:
     assert flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] is False
     assert flags[OPT_GOOGLE_HOME_FILTER_ENABLED] is False
     assert flags[OPT_ENABLE_STATS_ENTITIES] is True
+    assert tracker_record["translation_key"] == TRACKER_SUBENTRY_KEY
 
 
 @pytest.mark.asyncio
@@ -384,6 +387,7 @@ async def test_device_selection_updates_existing_feature_group() -> None:
     )
     assert created_service["data"]["group_key"] == SERVICE_SUBENTRY_KEY
     assert created_service["unique_id"] == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
+    assert created_service["translation_key"] == SERVICE_SUBENTRY_KEY
 
     assert manager.updated, "tracker subentry should be updated"
     payload = manager.updated[-1]["data"]
@@ -393,6 +397,7 @@ async def test_device_selection_updates_existing_feature_group() -> None:
     assert flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
     assert flags[OPT_GOOGLE_HOME_FILTER_ENABLED] is True
     assert flags[OPT_ENABLE_STATS_ENTITIES] is False
+    assert manager.updated[-1]["translation_key"] == TRACKER_SUBENTRY_KEY
 
 
 def test_service_device_binding_clears_stale_subentry(

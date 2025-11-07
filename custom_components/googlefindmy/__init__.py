@@ -139,11 +139,13 @@ from .const import (
     CACHE_KEY_LAST_MODE_SWITCH,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SERVICE_SUBENTRY_TRANSLATION_KEY,
     LEGACY_SERVICE_IDENTIFIER,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_TRANSLATION_KEY,
     coerce_ignored_mapping,
     service_device_identifier,
     STORAGE_KEY,
@@ -4686,6 +4688,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 },
                 subentry_type=SUBENTRY_TYPE_TRACKER,
                 unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+                translation_key=TRACKER_SUBENTRY_TRANSLATION_KEY,
             ),
             ConfigEntrySubentryDefinition(
                 key=SERVICE_SUBENTRY_KEY,
@@ -4698,6 +4701,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 },
                 subentry_type=SUBENTRY_TYPE_SERVICE,
                 unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+                translation_key=SERVICE_SUBENTRY_TRANSLATION_KEY,
             ),
         ]
     )
