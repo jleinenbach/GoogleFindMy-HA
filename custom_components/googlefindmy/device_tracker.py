@@ -101,15 +101,14 @@ async def async_setup_entry(
             continue
         existing_entry = coordinator.find_tracker_entity_entry(dev_id)
         if existing_entry is not None:
-            known_ids.add(dev_id)
             _LOGGER.debug(
-                "Skipping startup tracker creation for %s (device_id=%s); registry already has %s (unique_id=%s)",
-                name,
-                dev_id,
+                "Startup: registry already contains tracker entity %s (unique_id=%s) for %s (device_id=%s); creating canonical tracker entity for subentry '%s'.",
                 existing_entry.entity_id,
                 existing_entry.unique_id,
+                name,
+                dev_id,
+                tracker_subentry_identifier,
             )
-            continue
         known_ids.add(dev_id)
         entities.append(
             GoogleFindMyDeviceTracker(
@@ -140,15 +139,14 @@ async def async_setup_entry(
                 continue
             existing_entry = coordinator.find_tracker_entity_entry(dev_id)
             if existing_entry is not None:
-                known_ids.add(dev_id)
                 _LOGGER.debug(
-                    "Skipping tracker entity creation for %s (device_id=%s); registry already has %s (unique_id=%s)",
-                    name,
-                    dev_id,
+                    "Dynamic scan: registry already contains tracker entity %s (unique_id=%s) for %s (device_id=%s); creating canonical tracker entity for subentry '%s'.",
                     existing_entry.entity_id,
                     existing_entry.unique_id,
+                    name,
+                    dev_id,
+                    tracker_subentry_identifier,
                 )
-                continue
             known_ids.add(dev_id)
             to_add.append(
                 GoogleFindMyDeviceTracker(

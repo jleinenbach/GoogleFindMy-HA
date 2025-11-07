@@ -1931,16 +1931,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     def _find_tracker_entity_entry(
         self, device_id: str
     ) -> EntityRegistryEntry | None:
-        """Return the entity-registry entry for a tracker if one exists."""
+        """Return the registry entry for a tracker and migrate legacy unique IDs."""
 
         ent_reg = er.async_get(self.hass)
         entry_id = self._entry_id()
-        candidate_unique_ids: list[str] = []
-        if entry_id:
-            candidate_unique_ids.append(f"{entry_id}:{device_id}")
-            candidate_unique_ids.append(f"{DOMAIN}_{entry_id}_{device_id}")
-        candidate_unique_ids.append(f"{DOMAIN}_{device_id}")
-
         device_label = self.get_device_display_name(device_id) or device_id
 
         entities_container = getattr(ent_reg, "entities", None)
@@ -1951,15 +1945,69 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             except Exception:  # noqa: BLE001 - best-effort compatibility
                 ent_registry_values = ()
 
-        for unique_id in candidate_unique_ids:
+        canonical_unique_id: str | None = None
+        if entry_id:
+            tracker_subentry_key = TRACKER_SUBENTRY_KEY
+            tracker_meta: Any | None = None
+            meta_getter = getattr(self, "get_subentry_metadata", None)
+            if callable(meta_getter):
+                try:
+                    tracker_meta = meta_getter(feature="device_tracker")
+                except TypeError:
+                    tracker_meta = None
+                except AttributeError:
+                    tracker_meta = None
+            if tracker_meta is not None:
+                candidate_key = getattr(tracker_meta, "key", None)
+                if isinstance(candidate_key, str) and candidate_key.strip():
+                    tracker_subentry_key = candidate_key.strip()
+
+            tracker_subentry_identifier: str | None = None
+            identifier_getter = getattr(self, "stable_subentry_identifier", None)
+            if callable(identifier_getter):
+                try:
+                    tracker_subentry_identifier = identifier_getter(
+                        key=tracker_subentry_key,
+                        feature="device_tracker",
+                    )
+                except TypeError:
+                    tracker_subentry_identifier = identifier_getter(
+                        key=tracker_subentry_key
+                    )
+                except Exception:  # noqa: BLE001 - defensive for legacy coordinators
+                    tracker_subentry_identifier = None
+            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier.strip():
+                tracker_subentry_identifier = tracker_subentry_key
+
+            parts: list[str] = []
+            for part in (entry_id, tracker_subentry_identifier, device_id):
+                if isinstance(part, str) and part:
+                    stripped = part.strip()
+                    if stripped:
+                        parts.append(stripped)
+            if parts:
+                canonical_unique_id = ":".join(parts)
+
+        def _get_entry_for_unique_id(
+            unique_id: str,
+        ) -> EntityRegistryEntry | None:
+            """Return the registry entry for a given unique_id if it exists."""
+
+            if not unique_id:
+                return None
+
             try:
                 entity_id = ent_reg.async_get_entity_id(
-                    DEVICE_TRACKER_DOMAIN, DOMAIN, unique_id
+                    DEVICE_TRACKER_DOMAIN,
+                    DOMAIN,
+                    unique_id,
                 )
             except TypeError:
                 entity_id = None
+
             if not entity_id:
-                continue
+                return None
+
             entry: EntityRegistryEntry | None = None
             getter = getattr(ent_reg, "async_get", None)
             if callable(getter):
@@ -1967,11 +2015,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     entry = getter(entity_id)
                 except TypeError:
                     entry = None
-            if entry is None:
+
+            if entry is None and ent_registry_values:
                 for candidate in ent_registry_values:
                     if getattr(candidate, "entity_id", None) == entity_id:
                         entry = candidate
                         break
+
             if entry is None:
                 entry = SimpleNamespace(
                     entity_id=entity_id,
@@ -1980,30 +2030,121 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     platform=DOMAIN,
                     config_entry_id=entry_id,
                 )
+
             return cast("EntityRegistryEntry", entry)
+
+        if canonical_unique_id:
+            entry = _get_entry_for_unique_id(canonical_unique_id)
+            if entry is not None:
+                _LOGGER.debug(
+                    "Tracker registry matched canonical unique_id=%s for device '%s' (entity_id=%s)",
+                    canonical_unique_id,
+                    device_label,
+                    entry.entity_id,
+                )
+                return entry
+
+        candidate_unique_ids: list[str] = []
+        if entry_id:
+            candidate_unique_ids.append(f"{entry_id}:{device_id}")
+            candidate_unique_ids.append(f"{DOMAIN}_{entry_id}_{device_id}")
+        candidate_unique_ids.append(f"{DOMAIN}_{device_id}")
+
+        for unique_id in candidate_unique_ids:
+            entry = _get_entry_for_unique_id(unique_id)
+            if entry is None:
+                continue
+
+            if canonical_unique_id and entry.unique_id != canonical_unique_id:
+                _LOGGER.info(
+                    "Migrating tracker entity %s for device '%s' from legacy unique_id=%s to canonical unique_id=%s",
+                    entry.entity_id,
+                    device_label,
+                    entry.unique_id,
+                    canonical_unique_id,
+                )
+                try:
+                    update_entity = getattr(ent_reg, "async_update_entity", None)
+                    if callable(update_entity):
+                        update_entity(
+                            entry.entity_id,
+                            new_unique_id=canonical_unique_id,
+                        )
+                        migrated = _get_entry_for_unique_id(canonical_unique_id)
+                        if migrated is not None:
+                            return migrated
+                    else:
+                        _LOGGER.debug(
+                            "Entity registry for entry %s lacks async_update_entity; skipping canonical migration",
+                            entry_id,
+                        )
+                        return entry
+                except ValueError as err:
+                    _LOGGER.error(
+                        "Failed to migrate tracker entity %s to canonical unique_id=%s: %s",
+                        entry.entity_id,
+                        canonical_unique_id,
+                        err,
+                    )
+                    return entry
+
+            return entry
 
         for entry in ent_registry_values:
             if entry.domain != DEVICE_TRACKER_DOMAIN or entry.platform != DOMAIN:
                 continue
-            if device_id not in entry.unique_id:
+            unique_id = getattr(entry, "unique_id", "")
+            if not isinstance(unique_id, str) or device_id not in unique_id:
                 continue
-            if (
-                entry.config_entry_id
-                and entry.config_entry_id != entry_id
-            ):
+            if entry.config_entry_id and entry.config_entry_id != entry_id:
                 continue
+
+            if canonical_unique_id and unique_id != canonical_unique_id:
+                _LOGGER.info(
+                    "Migrating tracker entity %s for device '%s' from heuristic unique_id=%s to canonical unique_id=%s",
+                    entry.entity_id,
+                    device_label,
+                    unique_id,
+                    canonical_unique_id,
+                )
+                try:
+                    update_entity = getattr(ent_reg, "async_update_entity", None)
+                    if callable(update_entity):
+                        update_entity(
+                            entry.entity_id,
+                            new_unique_id=canonical_unique_id,
+                        )
+                        migrated = _get_entry_for_unique_id(canonical_unique_id)
+                        if migrated is not None:
+                            return migrated
+                    else:
+                        _LOGGER.debug(
+                            "Entity registry for entry %s lacks async_update_entity; skipping canonical migration",
+                            entry_id,
+                        )
+                        return entry
+                except ValueError as err:
+                    _LOGGER.error(
+                        "Failed to migrate heuristic tracker entity %s to canonical unique_id=%s: %s",
+                        entry.entity_id,
+                        canonical_unique_id,
+                        err,
+                    )
+                    return entry
+
             _LOGGER.debug(
                 "Tracker registry fallback matched entity_id=%s (unique_id=%s) for device '%s'",
                 entry.entity_id,
-                entry.unique_id,
+                unique_id,
                 device_label,
             )
             return entry
 
         _LOGGER.debug(
-            "No entity registry entry for device '%s'; checked unique_id formats %s",
+            "No entity registry entry for device '%s'; checked unique_id formats %s (canonical=%s)",
             device_label,
             candidate_unique_ids,
+            canonical_unique_id,
         )
         return None
 
