@@ -310,6 +310,54 @@ Use this list during reviews:
 - Register Home Assistant services in `async_setup` instead of `async_setup_entry` so automations remain valid when entries reload.
 - Use update listeners to reload children whenever parent options change, preventing stale `hass.data` clients.
 
+### D. Device and entity registry troubleshooting playbooks
+
+Subentries succeed or fail based on how well they coordinate device and entity ownership. Use the following diagnostics when new
+children fail to appear in the UI, refuse to unload, or leave orphaned registry entries:
+
+1. **Creation: verify parent linkage before platform setup.**
+   - Ensure `_async_setup_subentry` loads its shared coordinator from `hass.data[entry.parent_entry_id]` before calling
+     `async_forward_entry_setups`. If the parent client is unavailable, raise `ConfigEntryNotReady`; Home Assistant will retry
+     after the parent finishes restoring its runtime state.
+   - Confirm `entry.runtime_data` stores any per-subentry helpers that platforms need to bind the correct device identifiers.
+   - Add regression tests that instantiate the flow, create the child entry, and assert the coordinator exposes
+     `async_update_device_registry` or similar helpers. See `tests/test_coordinator_device_registry.py` for examples that validate
+     `async_update_device` calls include `add_config_entry_id` so the device registry links back to the subentry owner.
+
+2. **Entity linkage: confirm identifiers and config entry IDs.**
+   - Entity factories must source identifiers from the subentry (`entry.unique_id`) and pass them through `DeviceInfo`. Avoid
+     copying parent identifiers; devices tied to the parent will not reload when only the child changes.
+   - Whenever registry helpers run (for example, coordinator refreshes or service-driven cleanups), log the `device_id` and
+     `config_entry_id` parameters. During debugging, temporarily enable debug logging around `DeviceRegistry.async_update_device`
+     to observe which entries receive updates.
+   - In tests, simulate both Home Assistant 2025.7+ (`add_config_entry_id`) and legacy keyword shapes to guarantee backward
+     compatibility. The existing fakes in `tests/helpers/homeassistant.py` illustrate how to guard keyword names without suppressing
+     mypy.
+
+3. **Removal: cascade deletes in the correct order.**
+   - Parent unload handlers must wait for every subentry to unload successfully before tearing down shared clients. Use
+     `async_get_subentries(entry.entry_id)` to enumerate children and `async_unload` each one before dropping the parent from
+     `hass.data`.
+   - Custom cleanup services (for example, registry rebuild tasks) should aggregate both subentry IDs and parent IDs when pruning
+     legacy devices. Inspect `custom_components/googlefindmy/services.py` for the reference implementation that collects
+     `managed_entry_ids` from both buckets before removing stale registry rows.
+   - When a device or entity remains after the parent is removed, query `.storage/core.device_registry` and
+     `.storage/core.entity_registry` for the lingering identifiers. A missing `config_entries` reference usually means one of the
+     update calls omitted the child `entry_id`.
+
+4. **Reconfigure flows: keep registries in sync.**
+   - `async_step_reconfigure` must call `async_update_reload_and_abort` with merged data and rely on setup logic to rebuild runtime
+     data. Afterwards, trigger `async_reload` on the child entry to refresh device registry metadata such as `name` or
+     `configuration_url`.
+   - Write regression tests that edit a subentry and assert that `DeviceRegistry.async_update_device` receives new labels while
+     preserving the `add_config_entry_id` parameter.
+
+5. **Instrumenting debug logs:**
+   - Wrap registry writes in helper functions that emit structured logs (entry ID, device ID, identifiers). This makes it easier to
+     spot when a subentry accidentally targets the parent device or omits identifiers entirely.
+   - During QA, enable the logger `custom_components.googlefindmy` at debug level to capture the full lifecycle of registry updates
+     and confirm each handler runs in the expected order: parent setup → child setup → platform setup → device/entity registration.
+
 ## Section IX: Migration Case Studies
 
 ### A. `openai_conversation`
