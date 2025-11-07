@@ -1,4 +1,5 @@
 # custom_components/googlefindmy/services.py
+
 """Service handlers & registration for Google Find My Device (Home Assistant).
 
 Design goals
@@ -57,12 +58,13 @@ ConfigEntryError = getattr(ha_exceptions, "ConfigEntryError", HomeAssistantError
 SERVICE_REBUILD_DEVICE_REGISTRY: str = "rebuild_device_registry"
 
 
-async def async_rebuild_device_registry(
-    hass: HomeAssistant, call: ServiceCall
-) -> None:
+async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) -> None:
     """Synchronize and clean Device Registry entries for Google Find My hubs."""
 
-    _LOGGER.info("Service '%s' called: rebuilding device registry.", SERVICE_REBUILD_DEVICE_REGISTRY)
+    _LOGGER.info(
+        "Service '%s' called: rebuilding device registry.",
+        SERVICE_REBUILD_DEVICE_REGISTRY,
+    )
 
     domain_bucket = hass.data.get(DOMAIN, {})
     if not isinstance(domain_bucket, Mapping):
@@ -109,7 +111,9 @@ async def async_rebuild_device_registry(
         hubs: list[tuple[str, Mapping[Any, Any]]] = []
         seen: set[int] = set()
 
-        hub_bucket = domain_bucket.get("hubs") if isinstance(domain_bucket, Mapping) else None
+        hub_bucket = (
+            domain_bucket.get("hubs") if isinstance(domain_bucket, Mapping) else None
+        )
         if isinstance(hub_bucket, Mapping):
             for item in hub_bucket.values():
                 if item is None or id(item) in seen:
@@ -150,7 +154,9 @@ async def async_rebuild_device_registry(
             processed_coordinators += 1
             seen_coordinators.add(id(coordinator))
 
-    entries_bucket = domain_bucket.get("entries") if isinstance(domain_bucket, Mapping) else None
+    entries_bucket = (
+        domain_bucket.get("entries") if isinstance(domain_bucket, Mapping) else None
+    )
     if isinstance(entries_bucket, Mapping):
         for runtime in entries_bucket.values():
             coordinator = getattr(runtime, "coordinator", None)
@@ -191,10 +197,14 @@ async def async_rebuild_device_registry(
 
         service_device_ident = service_device_identifier(hub_entry_id)
         try:
-            service_device = dev_reg.async_get_device(identifiers={service_device_ident})
+            service_device = dev_reg.async_get_device(
+                identifiers={service_device_ident}
+            )
         except TypeError:  # pragma: no cover - defensive best effort
             service_device = None
-        service_device_id = getattr(service_device, "id", None) if service_device else None
+        service_device_id = (
+            getattr(service_device, "id", None) if service_device else None
+        )
 
         active_sub_entry_ids: set[str] = set()
         for coordinator in coordinators.values():
@@ -202,6 +212,8 @@ async def async_rebuild_device_registry(
             entry_id = getattr(config_entry, "entry_id", None)
             if isinstance(entry_id, str):
                 active_sub_entry_ids.add(entry_id)
+
+        active_sub_entry_ids.discard(hub_entry_id)
 
         _LOGGER.debug(
             "[%s] Hub Cleanup: Found %d active sub-entries. (Service Device ID: %s)",
@@ -211,7 +223,9 @@ async def async_rebuild_device_registry(
         )
 
         try:
-            get_devices_for_entry = getattr(dr, "async_get_devices_for_config_entry", None)
+            get_devices_for_entry = getattr(
+                dr, "async_get_devices_for_config_entry", None
+            )
             if callable(get_devices_for_entry):
                 all_hub_linked_devices = get_devices_for_entry(dev_reg, hub_entry_id)
             else:
@@ -231,9 +245,6 @@ async def async_rebuild_device_registry(
                 continue
 
             device_id = getattr(device, "id", None)
-            if service_device_id and device_id == service_device_id:
-                continue
-
             if not isinstance(device_id, str) or not device_id:
                 continue
 
@@ -244,12 +255,12 @@ async def async_rebuild_device_registry(
                 if isinstance(entry_id, str) and entry_id
             }
 
-            if device_links & active_sub_entry_ids:
+            active_overlap = device_links & active_sub_entry_ids
+            if not active_overlap:
                 continue
 
-            active_overlap = device_links & active_sub_entry_ids
             _LOGGER.info(
-                "[%s] Hub Cleanup: Removing orphaned device '%s' (ID: %s) from hub entry. (Active links: %s)",
+                "[%s] Hub Cleanup: Detaching hub entry from device '%s' (ID: %s). Active sub-entry links: %s",
                 hub_entry_id,
                 getattr(device, "name", None),
                 device_id,
@@ -743,7 +754,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             provided_entry_ids = []
         else:
             _LOGGER.warning(
-                "Invalid %s payload type: %s", ATTR_ENTRY_ID, type(entry_ids_from_service)
+                "Invalid %s payload type: %s",
+                ATTR_ENTRY_ID,
+                type(entry_ids_from_service),
             )
             return
 
@@ -778,9 +791,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             try:
                 await hass.config_entries.async_reload(entry_id)
             except Exception as err:
-                _LOGGER.error(
-                    "Error reloading config entry %s: %s", entry_id, err
-                )
+                _LOGGER.error("Error reloading config entry %s: %s", entry_id, err)
 
     # ---- Actual service registrations (global; visible even without entries) ----
     # NOTE: We intentionally do NOT pass voluptuous schemas here; services.yaml is our SSoT.
