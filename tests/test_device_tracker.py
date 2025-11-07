@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+# tests/test_device_tracker.py
+
 import asyncio
 import importlib
 from collections.abc import Coroutine
@@ -47,6 +49,17 @@ class _EntityRegistryStub:
     def async_get(self, entity_id: str) -> SimpleNamespace | None:
         return self.entities.get(entity_id)
 
+    def async_update_entity(self, entity_id: str, *, new_unique_id: str) -> None:
+        entry = self.entities.get(entity_id)
+        if entry is None:
+            raise ValueError(f"Entity {entity_id} not found")
+
+        old_key = (entry.domain, entry.platform, entry.unique_id)
+        self._entity_index.pop(old_key, None)
+
+        entry.unique_id = new_unique_id
+        self._entity_index[(entry.domain, entry.platform, new_unique_id)] = entity_id
+
 
 def test_find_tracker_entity_entry_uses_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fallback scanning should locate tracker entries with legacy unique IDs."""
@@ -71,13 +84,25 @@ def test_find_tracker_entity_entry_uses_fallback(monkeypatch: pytest.MonkeyPatch
 
     assert entry is not None
     assert entry.entity_id == "device_tracker.googlefindmy_backpack"
-    assert entry.unique_id == "tracker-subentry:tracker-42"
+    assert entry.unique_id.startswith("entry-42:")
+    assert entry.unique_id.endswith(":tracker-42")
 
 
-def test_scanner_skips_entities_already_in_registry() -> None:
-    """The device tracker platform should not create duplicates for known devices."""
+def test_scanner_instantiates_tracker_for_known_registry_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The device tracker platform should hydrate a tracker even if the registry already has it."""
 
     device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
+
+    async def _fake_trigger_cloud_discovery(*args: Any, **kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        device_tracker,
+        "_trigger_cloud_discovery",
+        _fake_trigger_cloud_discovery,
+    )
 
     scheduled: list[asyncio.Task[Any]] = []
 
@@ -86,7 +111,7 @@ def test_scanner_skips_entities_already_in_registry() -> None:
         scheduled.append(task)
         return task
 
-    hass = SimpleNamespace(async_create_task=_async_create_task)
+    hass = SimpleNamespace(async_create_task=_async_create_task, data={})
 
     class _StubCoordinator(device_tracker.GoogleFindMyCoordinator):
         def __init__(self) -> None:
@@ -142,21 +167,23 @@ def test_scanner_skips_entities_already_in_registry() -> None:
 
     async def _exercise() -> None:
         await device_tracker.async_setup_entry(hass, entry, _capture_entities)
-        assert not added
         for task in scheduled:
             await task
 
     asyncio.run(_exercise())
 
     assert coordinator.lookup_calls == ["tracker-1"]
-    assert not added
+    assert added and len(added[-1]) == 1
+    tracker_entity = added[-1][0]
+    assert tracker_entity.unique_id == "entry-1:tracker-subentry:tracker-1"
+    assert tracker_entity.device_id == "tracker-1"
     assert entry._callbacks, "async_on_unload should register cleanup callbacks"
     for task in scheduled:
         assert task.done()
 
 
-def test_initial_snapshot_skips_registry_duplicates() -> None:
-    """Startup population should respect existing registry entries."""
+def test_initial_snapshot_hydrates_registry_tracker() -> None:
+    """Startup population should still create a tracker entity when the registry already knows it."""
 
     device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
 
@@ -209,6 +236,8 @@ def test_initial_snapshot_skips_registry_duplicates() -> None:
 
     asyncio.run(device_tracker.async_setup_entry(coordinator.hass, entry, _capture_entities))
 
-    assert not added
+    assert added and len(added[0]) == 1
+    tracker_entity = added[0][0]
+    assert tracker_entity.unique_id == "entry-1:tracker-subentry:tracker-1"
     assert coordinator.lookup_calls == ["tracker-1"]
 

@@ -1947,14 +1947,38 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         canonical_unique_id: str | None = None
         if entry_id:
-            tracker_meta = self.get_subentry_metadata(feature="device_tracker")
-            tracker_subentry_key = (
-                tracker_meta.key if tracker_meta is not None else TRACKER_SUBENTRY_KEY
-            )
-            tracker_subentry_identifier = self.stable_subentry_identifier(
-                key=tracker_subentry_key,
-                feature="device_tracker",
-            )
+            tracker_subentry_key = TRACKER_SUBENTRY_KEY
+            tracker_meta: Any | None = None
+            meta_getter = getattr(self, "get_subentry_metadata", None)
+            if callable(meta_getter):
+                try:
+                    tracker_meta = meta_getter(feature="device_tracker")
+                except TypeError:
+                    tracker_meta = None
+                except AttributeError:
+                    tracker_meta = None
+            if tracker_meta is not None:
+                candidate_key = getattr(tracker_meta, "key", None)
+                if isinstance(candidate_key, str) and candidate_key.strip():
+                    tracker_subentry_key = candidate_key.strip()
+
+            tracker_subentry_identifier: str | None = None
+            identifier_getter = getattr(self, "stable_subentry_identifier", None)
+            if callable(identifier_getter):
+                try:
+                    tracker_subentry_identifier = identifier_getter(
+                        key=tracker_subentry_key,
+                        feature="device_tracker",
+                    )
+                except TypeError:
+                    tracker_subentry_identifier = identifier_getter(
+                        key=tracker_subentry_key
+                    )
+                except Exception:  # noqa: BLE001 - defensive for legacy coordinators
+                    tracker_subentry_identifier = None
+            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier.strip():
+                tracker_subentry_identifier = tracker_subentry_key
+
             parts: list[str] = []
             for part in (entry_id, tracker_subentry_identifier, device_id):
                 if isinstance(part, str) and part:
@@ -2040,13 +2064,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     canonical_unique_id,
                 )
                 try:
-                    ent_reg.async_update_entity(
-                        entry.entity_id,
-                        new_unique_id=canonical_unique_id,
-                    )
-                    migrated = _get_entry_for_unique_id(canonical_unique_id)
-                    if migrated is not None:
-                        return migrated
+                    update_entity = getattr(ent_reg, "async_update_entity", None)
+                    if callable(update_entity):
+                        update_entity(
+                            entry.entity_id,
+                            new_unique_id=canonical_unique_id,
+                        )
+                        migrated = _get_entry_for_unique_id(canonical_unique_id)
+                        if migrated is not None:
+                            return migrated
+                    else:
+                        _LOGGER.debug(
+                            "Entity registry for entry %s lacks async_update_entity; skipping canonical migration",
+                            entry_id,
+                        )
+                        return entry
                 except ValueError as err:
                     _LOGGER.error(
                         "Failed to migrate tracker entity %s to canonical unique_id=%s: %s",
@@ -2076,13 +2108,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     canonical_unique_id,
                 )
                 try:
-                    ent_reg.async_update_entity(
-                        entry.entity_id,
-                        new_unique_id=canonical_unique_id,
-                    )
-                    migrated = _get_entry_for_unique_id(canonical_unique_id)
-                    if migrated is not None:
-                        return migrated
+                    update_entity = getattr(ent_reg, "async_update_entity", None)
+                    if callable(update_entity):
+                        update_entity(
+                            entry.entity_id,
+                            new_unique_id=canonical_unique_id,
+                        )
+                        migrated = _get_entry_for_unique_id(canonical_unique_id)
+                        if migrated is not None:
+                            return migrated
+                    else:
+                        _LOGGER.debug(
+                            "Entity registry for entry %s lacks async_update_entity; skipping canonical migration",
+                            entry_id,
+                        )
+                        return entry
                 except ValueError as err:
                     _LOGGER.error(
                         "Failed to migrate heuristic tracker entity %s to canonical unique_id=%s: %s",
@@ -2101,9 +2141,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return entry
 
         _LOGGER.debug(
-            "No entity registry entry for device '%s'; checked legacy unique_id formats %s",
+            "No entity registry entry for device '%s'; checked unique_id formats %s (canonical=%s)",
             device_label,
             candidate_unique_ids,
+            canonical_unique_id,
         )
         return None
 
