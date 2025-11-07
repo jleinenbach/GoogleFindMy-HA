@@ -4866,27 +4866,30 @@ async def async_remove_config_entry_device(
     if not canonical_id:
         return False
 
-    if canonical_id == "integration" or canonical_id == f"integration_{entry.entry_id}":
+    if _device_is_service_device(device_entry, entry.entry_id):
         return False
 
     try:
-        runtime = getattr(entry, "runtime_data", None)
+        bucket = _domain_data(hass)
+        entries_bucket = _ensure_entries_bucket(bucket)
+        runtime: RuntimeData | GoogleFindMyCoordinator | None = entries_bucket.get(
+            entry.entry_id
+        )
+        if runtime is None:
+            runtime = getattr(entry, "runtime_data", None)
+
         coordinator: GoogleFindMyCoordinator | None = None
+        purge_device: Callable[[str], Any] | None = None
+
         if isinstance(runtime, GoogleFindMyCoordinator):
             coordinator = runtime
         elif runtime is not None:
             coordinator = getattr(runtime, "coordinator", None)
-        if not isinstance(coordinator, GoogleFindMyCoordinator):
-            runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
-            runtime_entry = runtime_bucket.get(entry.entry_id)
-            coordinator = getattr(runtime_entry, "coordinator", None)
-        purge_device: Callable[[str], Any] | None = None
+
         if isinstance(coordinator, GoogleFindMyCoordinator):
-            purge_device = coordinator.purge_device
-        elif coordinator is not None:
-            candidate = getattr(coordinator, "purge_device", None)
-            if callable(candidate):
-                purge_device = cast(Callable[[str], Any], candidate)
+            purge_callable = getattr(coordinator, "purge_device", None)
+            if callable(purge_callable):
+                purge_device = cast(Callable[[str], Any], purge_callable)
         if purge_device is not None:
             purge_device(canonical_id)
     except Exception as err:
@@ -5000,73 +5003,119 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
-    """Unload a config entry.
+async def _async_unload_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
+    """Unload a subentry (tracker or service) by unloading its platforms."""
 
-    Notes:
-        - FCM stop is *signaled* via the unload hook registered during setup.
-          The awaited stop and refcount release are handled here to avoid long
-          awaits inside `async_on_unload`.
-        - TokenCache is explicitly closed here to flush and mark the cache closed.
-        - Device owner index cleanup: remove all canonical_id claims for this entry (E2.5).
-    """
-    _ensure_runtime_imports()
-    runtime_data: RuntimeData | GoogleFindMyCoordinator | None = getattr(
-        entry, "runtime_data", None
+    _LOGGER.debug(
+        "[%s] Unloading subentry (parent_id=%s, type=%s, key=%s)",
+        entry.entry_id,
+        getattr(entry, "parent_entry_id", None),
+        getattr(entry, "subentry_type", None),
+        entry.data.get("group_key"),
     )
-    subentry_manager: ConfigEntrySubEntryManager | None = None
-    entries_bucket: dict[str, RuntimeData] | None = None
+    result: Any = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    return bool(result)
 
-    try:
-        bucket = _domain_data(hass)
-        entries_bucket = _ensure_entries_bucket(bucket)
 
-        stored_runtime = entries_bucket.get(entry.entry_id)
-        if not isinstance(runtime_data, RuntimeData) and isinstance(
-            stored_runtime, RuntimeData
-        ):
-            runtime_data = stored_runtime
+async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
+    """Unload a parent entry by unloading children and cleaning up resources."""
 
-        coordinator: GoogleFindMyCoordinator | None = None
-        if isinstance(runtime_data, GoogleFindMyCoordinator):
-            coordinator = runtime_data
-        elif isinstance(runtime_data, RuntimeData):
-            coordinator = runtime_data.coordinator
-            subentry_manager = runtime_data.subentry_manager
+    _ensure_runtime_imports()
+    _LOGGER.debug("[%s] Unloading parent entry", entry.entry_id)
+
+    bucket = _domain_data(hass)
+    entries_bucket = _ensure_entries_bucket(bucket)
+    runtime_data: RuntimeData | None = entries_bucket.pop(entry.entry_id, None)
+    if runtime_data is None:
+        runtime_data_raw = getattr(entry, "runtime_data", None)
+        if isinstance(runtime_data_raw, RuntimeData):
+            runtime_data = runtime_data_raw
+
+    has_managed_subentries = bool(
+        runtime_data is not None and runtime_data.subentry_manager is not None
+    )
+
+    subentries = list(getattr(entry, "subentries", {}).values())
+    target_subentries = [
+        sub
+        for sub in subentries
+        if isinstance(getattr(sub, "subentry_id", None), str)
+    ]
+
+    async def _unload_child_subentry(subentry: Any) -> bool:
+        subentry_id = getattr(subentry, "subentry_id", None)
+        if not isinstance(subentry_id, str):
+            return True
+
+        helper = getattr(hass, "config_entries", None)
+        if helper is None:
+            return True
+
+        unload_callable = getattr(helper, "async_unload", None)
+        if callable(unload_callable):
+            maybe_awaitable: Any = unload_callable(subentry_id)
+            if isinstance(maybe_awaitable, Awaitable):
+                resolved_result = await maybe_awaitable
+            else:
+                resolved_result = maybe_awaitable
+            return bool(resolved_result)
+
+        remove_callable = getattr(helper, "async_remove_subentry", None)
+        if callable(remove_callable) and not has_managed_subentries:
+            try:
+                maybe_awaitable = remove_callable(entry, subentry_id)
+            except TypeError:
+                maybe_awaitable = remove_callable(subentry_id)
+            if isinstance(maybe_awaitable, Awaitable):
+                resolved_result = await maybe_awaitable
+            else:
+                resolved_result = maybe_awaitable
+            return bool(resolved_result)
+
+        return True
+
+    unload_results = await asyncio.gather(
+        *(_unload_child_subentry(sub) for sub in target_subentries),
+        return_exceptions=True,
+    )
+
+    unload_success = all(
+        isinstance(result, bool) and result for result in unload_results
+    )
+    if not unload_success:
+        _LOGGER.error(
+            "[%s] Failed to unload one or more subentries; aborting parent unload",
+            entry.entry_id,
+        )
+        for index, result in enumerate(unload_results):
+            if isinstance(result, Exception):
+                sub_id = getattr(
+                    target_subentries[index], "subentry_id", f"index {index}"
+                )
+                _LOGGER.debug(
+                    "[%s] Subentry %s unload failed: %s",
+                    entry.entry_id,
+                    sub_id,
+                    result,
+                )
+        if runtime_data is not None:
+            entries_bucket[entry.entry_id] = runtime_data
+        return False
+
+    if runtime_data is not None:
+        coordinator = runtime_data.coordinator
         if coordinator is not None:
             await coordinator.async_shutdown()
-    except Exception as err:
-        _LOGGER.debug("Coordinator async_shutdown raised during unload: %s", err)
 
-    unloaded = bool(await hass.config_entries.async_unload_platforms(entry, PLATFORMS))
-    if unloaded:
-        if entries_bucket is None:
-            entries_bucket = _ensure_entries_bucket(_domain_data(hass))
-
-        if subentry_manager is None:
-            stored = entries_bucket.get(entry.entry_id)
-            if isinstance(stored, RuntimeData):
-                subentry_manager = stored.subentry_manager
-
-        if subentry_manager is not None:
+        if runtime_data.subentry_manager is not None:
             try:
-                await subentry_manager.async_remove_all()
+                await runtime_data.subentry_manager.async_remove_all()
             except Exception as err:
                 _LOGGER.debug("Subentry cleanup raised during unload: %s", err)
 
-        removed_runtime = entries_bucket.pop(entry.entry_id, None)
-
-        cache = None
-        if isinstance(runtime_data, RuntimeData):
-            cache = runtime_data.token_cache
-        elif isinstance(removed_runtime, RuntimeData):
-            cache = removed_runtime.token_cache
-
-        fallback_cache = _unregister_instance(entry.entry_id)
-        if cache is None:
-            cache = fallback_cache
-
-        if cache:
+        cache = runtime_data.token_cache
+        if cache is not None:
+            fallback_cache = _unregister_instance(entry.entry_id)
             try:
                 await cache.close()
                 _LOGGER.debug(
@@ -5079,21 +5128,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                     entry.entry_id,
                     err,
                 )
-
-        if fallback_cache and fallback_cache is not cache:
-            try:
-                await fallback_cache.close()
-            except Exception:
-                pass
+            if fallback_cache is not None and fallback_cache is not cache:
+                with suppress(Exception):
+                    await fallback_cache.close()
 
     try:
         await _async_release_shared_fcm(hass)
     except Exception as err:
-        _LOGGER.debug("FCM release during async_unload_entry raised: %s", err)
+        _LOGGER.debug("FCM release during parent unload raised: %s", err)
 
-    # Cleanup owner index (E2.5)
     try:
-        bucket = _domain_data(hass)
         owner_index: dict[str, str] = _ensure_device_owner_index(bucket)
         stale = [cid for cid, eid in list(owner_index.items()) if eid == entry.entry_id]
         for cid in stale:
@@ -5107,13 +5151,26 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("Owner-index cleanup failed: %s", err)
 
-    if unloaded and hasattr(entry, "runtime_data"):
-        try:
+    if hasattr(entry, "runtime_data"):
+        with suppress(Exception):
             setattr(entry, "runtime_data", None)
-        except Exception:
-            pass
 
-    return unloaded
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
+    """Unload a config entry.
+
+    Notes:
+        - This function is now a router.
+        - Parent unload logic is in `_async_unload_parent_entry`.
+        - Subentry unload logic is in `_async_unload_subentry`.
+    """
+
+    parent_entry_id = getattr(entry, "parent_entry_id", None)
+    if parent_entry_id:
+        return await _async_unload_subentry(hass, entry)
+    return await _async_unload_parent_entry(hass, entry)
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
@@ -5170,19 +5227,6 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                     "Google Home filter shutdown during removal raised: %s", err
                 )
 
-    fallback_cache = _unregister_instance(entry.entry_id)
-    if token_cache is None and fallback_cache is not None:
-        token_cache = fallback_cache
-    elif fallback_cache is not None and fallback_cache is not token_cache:
-        close_fallback = getattr(fallback_cache, "close", None)
-        if callable(close_fallback):
-            try:
-                result = close_fallback()
-                if inspect.isawaitable(result):
-                    await result
-            except Exception:
-                pass
-
     try:
         await _async_release_shared_fcm(hass)
     except Exception as err:
@@ -5211,6 +5255,19 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     if isinstance(fallback_runtime, RuntimeData):
         fallback_runtime.google_home_filter = None
         fallback_runtime.fcm_receiver = None
+
+    fallback_cache = _unregister_instance(entry.entry_id)
+    if token_cache is None and fallback_cache is not None:
+        token_cache = fallback_cache
+    elif fallback_cache is not None and fallback_cache is not token_cache:
+        close_fallback = getattr(fallback_cache, "close", None)
+        if callable(close_fallback):
+            try:
+                result = close_fallback()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
 
     if hasattr(entry, "runtime_data"):
         try:
