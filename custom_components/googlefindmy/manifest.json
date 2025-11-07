@@ -1,10 +1,16 @@
 {
   "domain": "googlefindmy",
   "name": "Google Find My Device",
-  "after_dependencies": ["recorder"],
-  "codeowners": ["@BSkando"],
+  "after_dependencies": [
+    "recorder"
+  ],
+  "codeowners": [
+    "@BSkando"
+  ],
   "config_flow": true,
-  "dependencies": ["http"],
+  "dependencies": [
+    "http"
+  ],
   "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
   "integration_type": "hub",
   "iot_class": "cloud_polling",

@@ -1489,9 +1489,7 @@ type MyConfigEntry = ConfigEntry
 class GoogleFindMyDomainData(TypedDict, total=False):
     """Typed container describing objects stored under ``hass.data[DOMAIN]``."""
 
-    cloud_scan_results: Mapping[str, Any]
     device_owner_index: dict[str, str]
-    discovery_manager: DiscoveryManager
     entries: dict[str, RuntimeData]
     fcm_lock: asyncio.Lock
     fcm_receiver: FcmReceiverHA
@@ -1549,27 +1547,6 @@ def _ensure_device_owner_index(bucket: GoogleFindMyDomainData) -> dict[str, str]
         owner_index = {}
         bucket["device_owner_index"] = owner_index
     return owner_index
-
-
-def _get_discovery_manager(
-    bucket: GoogleFindMyDomainData,
-) -> DiscoveryManager | None:
-    """Return the discovery manager if already initialized."""
-    _ensure_runtime_imports()
-
-    manager = bucket.get("discovery_manager")
-    if isinstance(manager, DiscoveryManager):
-        return manager
-    return None
-
-
-def _set_discovery_manager(
-    bucket: GoogleFindMyDomainData, manager: DiscoveryManager
-) -> None:
-    """Store the shared discovery manager."""
-    _ensure_runtime_imports()
-
-    bucket["discovery_manager"] = manager
 
 
 def _get_fcm_receiver(bucket: GoogleFindMyDomainData) -> FcmReceiverHA | None:
@@ -1630,18 +1607,6 @@ def _set_nova_refcount(bucket: GoogleFindMyDomainData, value: int) -> None:
     """Persist the Nova API session provider refcount."""
 
     bucket["nova_refcount"] = value
-
-
-def _ensure_cloud_scan_results(
-    bucket: GoogleFindMyDomainData, results: Mapping[str, Any]
-) -> Mapping[str, Any]:
-    """Ensure the shared cloud discovery results mapping is stored."""
-
-    existing = bucket.get("cloud_scan_results")
-    if isinstance(existing, Mapping):
-        return existing
-    bucket["cloud_scan_results"] = results
-    return results
 
 
 def _domain_fcm_provider(hass: HomeAssistant) -> FcmReceiverHA:
@@ -4132,12 +4097,6 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
     _ensure_runtime_imports()
     bucket = _domain_data(hass)
-    runtime = _cloud_discovery_runtime(hass)
-    discovery_manager = _get_discovery_manager(bucket)
-    if discovery_manager is None:
-        discovery_manager = await async_initialize_discovery_runtime(hass)
-        _set_discovery_manager(bucket, discovery_manager)
-    _ensure_cloud_scan_results(bucket, runtime["results"])
     _ensure_entries_bucket(bucket)  # entry_id -> RuntimeData
     _ensure_device_owner_index(bucket)  # canonical_id -> entry_id (E2.5 scaffold)
     if not isinstance(bucket.get("providers_registered"), bool):
@@ -4233,6 +4192,25 @@ def _self_heal_device_registry(hass: HomeAssistant, entry: MyConfigEntry) -> Non
         )
 
 
+async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
+    """Forward setup for a config subentry to the integration platforms."""
+
+    subentry_type = getattr(entry, "subentry_type", None)
+    group_key = entry.data.get("group_key")
+    parent_entry_id = getattr(entry, "parent_entry_id", None)
+    _LOGGER.debug(
+        "[%s] Setting up subentry (parent_id=%s, type=%s, key=%s)",
+        entry.entry_id,
+        parent_entry_id,
+        subentry_type,
+        group_key,
+    )
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """Set up a config entry.
 
@@ -4241,9 +4219,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
       2) Initialize and register TokenCache (entry-scoped, no default).
       3) Soft-migrate options and unique_ids; acquire and wire the shared FCM provider.
       4) Seed token cache from entry data (secrets bundle or individual tokens).
-      5) Build coordinator, register views, forward platforms.
+      5) Build coordinator, register views, and synchronize subentries.
       6) Schedule initial refresh after HA is fully started.
     """
+    parent_entry_id = getattr(entry, "parent_entry_id", None)
+    if parent_entry_id:
+        return await _async_setup_subentry(hass, entry)
+
     _ensure_runtime_imports()
     # --- Multi-entry policy: allow MA; block duplicate-account (same email) ----
     # Legacy issue cleanup: we no longer block on multiple config entries
@@ -4725,9 +4707,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         hass.http.register_view(GoogleFindMyMapRedirectView(hass))
         bucket["views_registered"] = True
         _LOGGER.debug("Registered map views")
-
-    # Forward platforms so RestoreEntity can populate immediately
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Run duplicate self-healing asynchronously so it also executes on reloads.
     hass.async_create_task(
