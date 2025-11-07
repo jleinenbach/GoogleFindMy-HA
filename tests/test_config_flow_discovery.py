@@ -17,6 +17,7 @@ from custom_components.googlefindmy.const import (
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
+    DATA_SUBENTRY_KEY,
     DATA_SECRET_BUNDLE,
 )
 from custom_components.googlefindmy.email import unique_account_id
@@ -133,6 +134,7 @@ def test_async_step_discovery_new_entry(
     assert created_entry["data"][DATA_SECRET_BUNDLE] == {
         "aas_token": "aas_et/VALID_TOKEN_VALUE"
     }
+    assert created_entry["data"].get(DATA_SUBENTRY_KEY) is None
     assert recorded_forms == ["discovery", "device_selection"]
 
 

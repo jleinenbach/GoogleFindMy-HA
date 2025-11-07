@@ -123,6 +123,7 @@ class _DummyConfigEntries:
         data: dict[str, Any],
         title: str | None = None,
         unique_id: str | None = None,
+        translation_key: str | None = None,
     ) -> None:
         assert entry is self._entry
         subentry.data = MappingProxyType(dict(data))
@@ -130,6 +131,8 @@ class _DummyConfigEntries:
             subentry.title = title
         if unique_id is not None:
             subentry.unique_id = unique_id
+        if translation_key is not None:
+            subentry.translation_key = translation_key
         self.updated_subentries.append((subentry.subentry_id, dict(subentry.data)))
 
     def async_remove_subentry(self, entry: _DummyEntry, subentry_id: str) -> bool:

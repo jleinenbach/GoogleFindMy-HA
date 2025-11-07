@@ -297,6 +297,12 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             if isinstance(raw_entry_id, str) and raw_entry_id:
                 managed_entry_ids.add(raw_entry_id)
 
+    hub_bucket = domain_bucket.get("hubs") if isinstance(domain_bucket, Mapping) else None
+    if isinstance(hub_bucket, Mapping):
+        for raw_hub_id in hub_bucket.keys():
+            if isinstance(raw_hub_id, str) and raw_hub_id:
+                managed_entry_ids.add(raw_hub_id)
+
     for hub_entry_id, _coordinators in _iter_hubs():
         if isinstance(hub_entry_id, str) and hub_entry_id:
             managed_entry_ids.add(hub_entry_id)

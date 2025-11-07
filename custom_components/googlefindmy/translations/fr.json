@@ -99,7 +99,7 @@
   },
   "config_subentries": {
     "hub": {
-      "title": "Hub",
+      "title": "Google Find My Device Hub",
       "step": {
         "user": {
           "title": "Ajouter le groupe de fonctionnalités du hub",
@@ -112,6 +112,12 @@
       },
       "abort": {},
       "error": {}
+    },
+    "service": {
+      "title": "Google Find Hub Service"
+    },
+    "core_tracking": {
+      "title": "Google Find My devices"
     }
   },
   "options": {

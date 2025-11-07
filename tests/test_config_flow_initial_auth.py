@@ -504,6 +504,7 @@ def test_device_selection_creates_and_updates_subentry() -> None:
             title: str,
             unique_id: str | None,
             subentry_type: str,
+            translation_key: str | None = None,
         ) -> ConfigSubentry:
             subentry = ConfigSubentry(
                 data=MappingProxyType(dict(data)),
@@ -511,6 +512,7 @@ def test_device_selection_creates_and_updates_subentry() -> None:
                 title=title,
                 unique_id=unique_id,
                 subentry_id=_stable_subentry_id(entry.entry_id, data["group_key"]),
+                translation_key=translation_key,
             )
             entry.subentries[subentry.subentry_id] = subentry
             self.created.append(subentry)
@@ -524,6 +526,7 @@ def test_device_selection_creates_and_updates_subentry() -> None:
             data: dict[str, Any] | None = None,
             title: str | None = None,
             unique_id: str | None = None,
+            translation_key: str | None = None,
         ) -> bool:
             if data is not None:
                 subentry.data = MappingProxyType(dict(data))
@@ -531,6 +534,8 @@ def test_device_selection_creates_and_updates_subentry() -> None:
                 subentry.title = title
             if unique_id is not None:
                 subentry.unique_id = unique_id
+            if translation_key is not None:
+                subentry.translation_key = translation_key
             entry.subentries[subentry.subentry_id] = subentry
             self.updated.append(subentry)
             return True

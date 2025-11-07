@@ -88,6 +88,7 @@ class _ConfigEntriesManagerStub:
         title: str,
         unique_id: str | None,
         subentry_type: str,
+        translation_key: str | None = None,
     ) -> ConfigSubentry:
         assert entry is self._entry
         subentry = ConfigSubentry(
@@ -96,6 +97,7 @@ class _ConfigEntriesManagerStub:
             title=title,
             unique_id=unique_id,
             subentry_id=_stable_subentry_id(entry.entry_id, data["group_key"]),
+            translation_key=translation_key,
         )
         return self.async_add_subentry(entry, subentry)
 
@@ -131,6 +133,7 @@ class _ConfigEntriesManagerStub:
         data: dict[str, Any],
         title: str | None = None,
         unique_id: str | None = None,
+        translation_key: str | None = None,
     ) -> None:
         assert entry is self._entry
         if unique_id is not None:
@@ -144,6 +147,8 @@ class _ConfigEntriesManagerStub:
             subentry.title = title
         if unique_id is not None:
             subentry.unique_id = unique_id
+        if translation_key is not None:
+            subentry.translation_key = translation_key
         self.updated.append(
             {
                 "data": dict(data),
@@ -151,6 +156,7 @@ class _ConfigEntriesManagerStub:
                 "unique_id": unique_id,
                 "config_subentry_id": subentry.subentry_id,
                 "subentry": subentry,
+                "translation_key": translation_key,
             }
         )
 

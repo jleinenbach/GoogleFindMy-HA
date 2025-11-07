@@ -44,6 +44,10 @@ LEGACY_SERVICE_IDENTIFIER: str = "integration"
 # --------------------------------------------------------------------------------------
 SERVICE_SUBENTRY_KEY: str = "service"
 TRACKER_SUBENTRY_KEY: str = "core_tracking"
+# Config entry data key reserved for subentry identifiers. Hub/root entries
+# should store ``None`` to avoid being misclassified as a subentry during
+# discovery lookups.
+DATA_SUBENTRY_KEY: str = "subentry_key"
 SUBENTRY_TYPE_SERVICE: str = "service"
 SUBENTRY_TYPE_HUB: str = "hub"
 SUBENTRY_TYPE_TRACKER: str = "tracker"
@@ -484,6 +488,7 @@ __all__ = [
     "LEGACY_SERVICE_IDENTIFIER",
     "SERVICE_SUBENTRY_KEY",
     "TRACKER_SUBENTRY_KEY",
+    "DATA_SUBENTRY_KEY",
     "SUBENTRY_TYPE_SERVICE",
     "SUBENTRY_TYPE_HUB",
     "SUBENTRY_TYPE_TRACKER",

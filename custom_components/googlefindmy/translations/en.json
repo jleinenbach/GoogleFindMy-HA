@@ -99,7 +99,7 @@
   },
   "config_subentries": {
     "hub": {
-      "title": "Hub",
+      "title": "Google Find My Device Hub",
       "step": {
         "user": {
           "title": "Add hub feature group",
@@ -285,6 +285,12 @@
           "description": "Limit the operation to specific devices. Leave empty to target all Google Find My devices."
         }
       }
+    },
+    "service": {
+      "title": "Google Find Hub Service"
+    },
+    "core_tracking": {
+      "title": "Google Find My devices"
     }
   },
   "entity": {
