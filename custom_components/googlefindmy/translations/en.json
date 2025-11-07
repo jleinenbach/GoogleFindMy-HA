@@ -285,7 +285,9 @@
           "description": "Limit the operation to specific devices. Leave empty to target all Google Find My devices."
         }
       }
-    },
+    }
+  },
+  "subentry": {
     "service": {
       "title": "Google Find Hub Service"
     },

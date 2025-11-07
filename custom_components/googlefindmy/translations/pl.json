@@ -509,5 +509,13 @@
       "fcm": "Odbiornik FCM",
       "fcm_lock_contention_count": "Liczba konfliktów blokady FCM"
     }
+  },
+  "subentry": {
+    "service": {
+      "title": "Google Find Hub Service"
+    },
+    "core_tracking": {
+      "title": "Google Find My devices"
+    }
   }
 }
