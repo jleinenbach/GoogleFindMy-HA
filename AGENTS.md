@@ -437,6 +437,9 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 2. **Respect local configuration.** When `pyproject.toml`, `mypy.ini`,
    `.mypy.ini`, or `setup.cfg` exists, invoke `mypy` without extra overrides so the
    repository configuration remains authoritative.
+   *Fresh environment reminder:* Run
+   `mypy --install-types --non-interactive --strict` once before the checks below
+   to auto-install required stub packages without interactive prompts.
 3. **Run the strict check.** Execute `mypy -q <changed-files>` when a
    configuration file is present; otherwise run `mypy -q --strict <changed-files>`.
    Install/upgrade mypy locally (`python -m pip install --upgrade mypy`) if it is
