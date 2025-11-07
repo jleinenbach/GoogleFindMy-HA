@@ -19,7 +19,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ### Continuous integration checks
 
-Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, `mypy --strict`, and `pytest -q --cov` on Python 3.12 to protect code quality before merges.
+Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, `mypy --strict`, and `pytest -q --cov` on Python 3.13 to protect code quality before merges.
 
 ---
 ## Features

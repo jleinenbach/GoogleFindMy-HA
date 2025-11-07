@@ -139,11 +139,13 @@ from .const import (
     CACHE_KEY_LAST_MODE_SWITCH,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SERVICE_SUBENTRY_TRANSLATION_KEY,
     LEGACY_SERVICE_IDENTIFIER,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_TRANSLATION_KEY,
     coerce_ignored_mapping,
     service_device_identifier,
     STORAGE_KEY,
@@ -881,6 +883,7 @@ class ConfigEntrySubentryDefinition:
     data: Mapping[str, Any]
     subentry_type: str = SUBENTRY_TYPE_TRACKER
     unique_id: str | None = None
+    translation_key: str | None = None
     unload: CleanupCallback | None = None
 
 
@@ -1200,6 +1203,7 @@ class ConfigEntrySubEntryManager:
             payload[self._key_field] = key
             unique_id = definition.unique_id or f"{self._entry.entry_id}-{key}"
             subentry_type = definition.subentry_type or self._default_subentry_type
+            translation_key = definition.translation_key
             cleanup = definition.unload
 
             existing = self._managed.get(key)
@@ -1237,20 +1241,52 @@ class ConfigEntrySubEntryManager:
                     add_result: Awaitable[ConfigSubentry] | ConfigSubentry
                     try:
                         if callable(create_subentry):
-                            add_result = create_subentry(
-                                self._entry,
-                                data=payload,
-                                title=definition.title,
-                                unique_id=unique_id,
-                                subentry_type=subentry_type,
-                            )
+                            create_kwargs: dict[str, Any] = {
+                                "data": payload,
+                                "title": definition.title,
+                                "unique_id": unique_id,
+                                "subentry_type": subentry_type,
+                            }
+                            if translation_key is not None:
+                                create_kwargs["translation_key"] = translation_key
+                            try:
+                                add_result = create_subentry(
+                                    self._entry,
+                                    **create_kwargs,
+                                )
+                            except TypeError:
+                                if "translation_key" in create_kwargs:
+                                    create_kwargs.pop("translation_key")
+                                    add_result = create_subentry(
+                                        self._entry,
+                                        **create_kwargs,
+                                    )
+                                else:
+                                    raise
                         else:
-                            new_subentry = ConfigSubentry(
-                                data=MappingProxyType(payload),
-                                subentry_type=subentry_type,
-                                title=definition.title,
-                                unique_id=unique_id,
-                            )
+                            constructor_kwargs: dict[str, Any] = {
+                                "data": MappingProxyType(payload),
+                                "title": definition.title,
+                                "unique_id": unique_id,
+                            }
+                            if translation_key is not None:
+                                constructor_kwargs["translation_key"] = translation_key
+                            constructor_kwargs["subentry_type"] = subentry_type
+                            try:
+                                new_subentry = ConfigSubentry(
+                                    **constructor_kwargs,
+                                )
+                            except TypeError:
+                                constructor_kwargs.pop("translation_key", None)
+                                try:
+                                    new_subentry = ConfigSubentry(
+                                        **constructor_kwargs,
+                                    )
+                                except TypeError:
+                                    constructor_kwargs.pop("subentry_type", None)
+                                    new_subentry = ConfigSubentry(
+                                        **constructor_kwargs,
+                                    )
                             add_result = self._hass.config_entries.async_add_subentry(
                                 self._entry, new_subentry
                             )
@@ -1315,13 +1351,26 @@ class ConfigEntrySubEntryManager:
                     unique_id,
                 )
                 try:
-                    changed = self._hass.config_entries.async_update_subentry(
-                        self._entry,
-                        existing,
-                        data=payload,
-                        title=definition.title,
-                        unique_id=unique_id,
-                    )
+                    update_kwargs: dict[str, Any] = {
+                        "data": payload,
+                        "title": definition.title,
+                        "unique_id": unique_id,
+                    }
+                    if translation_key is not None:
+                        update_kwargs["translation_key"] = translation_key
+                    try:
+                        changed = self._hass.config_entries.async_update_subentry(
+                            self._entry,
+                            existing,
+                            **update_kwargs,
+                        )
+                    except TypeError:
+                        update_kwargs.pop("translation_key", None)
+                        changed = self._hass.config_entries.async_update_subentry(
+                            self._entry,
+                            existing,
+                            **update_kwargs,
+                        )
                 except data_entry_flow.AbortFlow as err:
                     if err.reason != "already_configured":
                         raise
@@ -4639,10 +4688,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 },
                 subentry_type=SUBENTRY_TYPE_TRACKER,
                 unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+                translation_key=TRACKER_SUBENTRY_TRANSLATION_KEY,
             ),
             ConfigEntrySubentryDefinition(
                 key=SERVICE_SUBENTRY_KEY,
-                title=entry_title,
+                title="Google Find Hub Service",
                 data={
                     "features": service_features,
                     "fcm_push_enabled": fcm_push_enabled,
@@ -4651,6 +4701,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 },
                 subentry_type=SUBENTRY_TYPE_SERVICE,
                 unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+                translation_key=SERVICE_SUBENTRY_TRANSLATION_KEY,
             ),
         ]
     )
@@ -4850,8 +4901,15 @@ async def async_remove_config_entry_device(
             runtime_bucket = hass.data.get(DOMAIN, {}).get("entries", {})
             runtime_entry = runtime_bucket.get(entry.entry_id)
             coordinator = getattr(runtime_entry, "coordinator", None)
+        purge_device: Callable[[str], Any] | None = None
         if isinstance(coordinator, GoogleFindMyCoordinator):
-            coordinator.purge_device(canonical_id)
+            purge_device = coordinator.purge_device
+        elif coordinator is not None:
+            candidate = getattr(coordinator, "purge_device", None)
+            if callable(candidate):
+                purge_device = cast(Callable[[str], Any], candidate)
+        if purge_device is not None:
+            purge_device(canonical_id)
     except Exception as err:
         _LOGGER.debug("Coordinator purge failed for %s: %s", canonical_id, err)
 

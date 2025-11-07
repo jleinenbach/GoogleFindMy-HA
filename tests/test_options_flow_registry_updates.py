@@ -102,6 +102,7 @@ class _ManagerWithRegistries:
         data: dict[str, Any],
         title: str | None = None,
         unique_id: str | None = None,
+        translation_key: str | None = None,
     ) -> None:
         assert entry is self._entry
         subentry.data = MappingProxyType(dict(data))
@@ -109,6 +110,8 @@ class _ManagerWithRegistries:
             subentry.title = title
         if unique_id is not None:
             subentry.unique_id = unique_id
+        if translation_key is not None:
+            subentry.translation_key = translation_key
         self.updated.append((subentry.subentry_id, dict(data)))
         visible = tuple(data.get("visible_device_ids", ()))
         self.entity_registry.apply(subentry.subentry_id, visible)

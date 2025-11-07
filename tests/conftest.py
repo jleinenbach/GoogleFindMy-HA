@@ -425,12 +425,14 @@ def _stub_homeassistant() -> None:
             title: str,
             unique_id: str | None = None,
             subentry_id: str | None = None,
+            translation_key: str | None = None,
         ) -> None:
             self.data: Mapping[str, object] = MappingProxyType(dict(data))
             self.subentry_type: str = subentry_type
             self.title: str = title
             self.unique_id: str | None = unique_id
             self.subentry_id: str = subentry_id or _next_subentry_id()
+            self.translation_key: str | None = translation_key
 
         def as_dict(self) -> dict[str, object]:  # pragma: no cover - helper parity
             return {
@@ -439,6 +441,7 @@ def _stub_homeassistant() -> None:
                 "subentry_type": self.subentry_type,
                 "title": self.title,
                 "unique_id": self.unique_id,
+                "translation_key": self.translation_key,
             }
 
     class ConfigSubentryFlow:
@@ -462,6 +465,7 @@ def _stub_homeassistant() -> None:
             self.data: Mapping[str, object] = subentry.data
             self.title = subentry.title
             self.unique_id = subentry.unique_id
+            self.translation_key = subentry.translation_key
 
         async def async_step_init(
             self, user_input: Mapping[str, object] | None = None

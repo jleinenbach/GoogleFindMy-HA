@@ -156,6 +156,7 @@ class _StubConfigEntries:
         data: dict[str, Any] | None = None,
         title: str | None = None,
         unique_id: str | None = None,
+        translation_key: str | None = None,
     ) -> bool:
         changed = False
         if data is not None:
@@ -166,6 +167,9 @@ class _StubConfigEntries:
             changed = True
         if unique_id is not None and subentry.unique_id != unique_id:
             subentry.unique_id = unique_id
+            changed = True
+        if translation_key is not None and subentry.translation_key != translation_key:
+            subentry.translation_key = translation_key
             changed = True
         entry.subentries[subentry.subentry_id] = subentry
         self.updated_subentries.append((entry.entry_id, subentry))

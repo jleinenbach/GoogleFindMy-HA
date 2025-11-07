@@ -99,7 +99,7 @@
   },
   "config_subentries": {
     "hub": {
-      "title": "Hub",
+      "title": "Google Find My Device Hub",
       "step": {
         "user": {
           "title": "Ajouter le groupe de fonctionnalités du hub",
@@ -108,6 +108,36 @@
         "reconfigure": {
           "title": "Mettre à jour le groupe de fonctionnalités du hub",
           "description": "Actualisez le groupe de fonctionnalités du hub pour que les fonctions les plus récentes soient disponibles."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "service": {
+      "title": "Service Google Find Hub",
+      "step": {
+        "user": {
+          "title": "Ajouter le groupe de fonctionnalités du service",
+          "description": "Provisionnez le groupe de fonctionnalités du service afin que Home Assistant puisse exposer les diagnostics et services auxiliaires pour ce compte."
+        },
+        "reconfigure": {
+          "title": "Mettre à jour le groupe de fonctionnalités du service",
+          "description": "Actualisez le groupe de fonctionnalités du service pour synchroniser diagnostics et services auxiliaires avec la configuration la plus récente."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "core_tracking": {
+      "title": "Appareils Google Find My",
+      "step": {
+        "user": {
+          "title": "Ajouter le groupe de fonctionnalités des appareils",
+          "description": "Créez le groupe de fonctionnalités des appareils pour gérer les traceurs Google Find My détectés pour ce compte."
+        },
+        "reconfigure": {
+          "title": "Mettre à jour le groupe de fonctionnalités des appareils",
+          "description": "Mettez à jour le groupe de fonctionnalités des appareils afin d’actualiser la visibilité et les métadonnées des traceurs."
         }
       },
       "abort": {},

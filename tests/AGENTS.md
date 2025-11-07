@@ -183,6 +183,12 @@ following to preserve migration coverage:
    must assert both the integration-level identifier and the derived
    service-subentry identifier (see `_service_subentry_identifier(...)`) so
    future expectations stay aligned with the coordinator's registry updates.
+5. **Playbook parity** — Whenever a regression test targets creation, reload,
+   or cleanup logic, mirror the diagnostics from Section VIII.D of
+   `docs/CONFIG_SUBENTRIES_HANDBOOK.md`. Assert that registry helpers capture
+   the `(entry_id, device_id, identifiers)` tuple and that `add_config_entry_id`
+   (or `config_entry_id`) is forwarded, ensuring the documentation and tests
+   stay synchronized.
 
 ## Translation alignment checks
 

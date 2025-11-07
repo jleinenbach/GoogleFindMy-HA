@@ -29,7 +29,7 @@
   - [9) Docs & i18n (minimal but strict)](#9-docs--i18n-minimal-but-strict)
   - [10) Local commands (VERIFY)](#10-local-commands-verify)
     - [10.1 Type-checking policy — mypy strict on edited Python files](#101-type-checking-policy--mypy-strict-on-edited-python-files)
-  - [11) Clean & Secure Coding Standard (Python 3.12 + Home Assistant 2025.10)](#11-clean--secure-coding-standard-python-312--home-assistant-202510)
+  - [11) Clean & Secure Coding Standard (Python 3.13 + Home Assistant 2025.10)](#11-clean--secure-coding-standard-python-313--home-assistant-202510)
     - [11.1 Language & style (self-documenting)](#111-language--style-self-documenting)
     - [11.2 Security baseline (OWASP / NIST / BSI)](#112-security-baseline-owasp--nist--bsi)
     - [11.3 Async, concurrency & cancellation](#113-async-concurrency--cancellation)
@@ -40,7 +40,7 @@
     - [11.8 Release & operations](#118-release--operations)
     - [11.9 Machine-checkable acceptance checklist (for the agent)](#119-machine-checkable-acceptance-checklist-for-the-agent)
   - [REFERENCES](#references)
-    - [1) Python 3.12 — Language, Style, Typing, Safety](#1-python-312--language-style-typing-safety)
+    - [1) Python 3.13 — Language, Style, Typing, Safety](#1-python-313--language-style-typing-safety)
     - [2) Home Assistant (Developer Docs, 2024–2025)](#2-home-assistant-developer-docs-20242025)
     - [3) Secure Development — Standards & Guidance](#3-secure-development--standards--guidance)
       - [OWASP Cheat Sheet Series (selected)](#owasp-cheat-sheet-series-selected)
@@ -86,6 +86,8 @@
 ## Scoped guidance index
 
 * [`tests/AGENTS.md`](tests/AGENTS.md) — Home Assistant config flow test stubs, helpers, discovery/update scaffolding details, **and** the package-layout note that requires package-relative imports now that `tests/` ships with an `__init__.py`. Also documents the coordinator device-registry expectations for `via_device` tuple handling so future stub updates remain aligned with Home Assistant 2025.10. The `_ensure_button_dependencies()` helper in `tests/test_button_setup.py` already prepares sufficient stubs to `import custom_components.googlefindmy.button`, so tests can reference coordinator attributes directly without reloading source snippets.
+* [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Full Home Assistant 2025.7+ handbook covering the architecture, config flow factories, lifecycle routing, discovery patterns, translation rules, and peer-review checklist for configuration subentries. Keep code and tests aligned with this contract.
+  * Section VIII.D contains the new device/entity registry troubleshooting playbooks. Reference them whenever you touch `_async_setup_subentry`, registry rebuild services, or device cleanup helpers, and summarize the relevant diagnostics in your PR description.
 * **Tracker device linkage:** Tracker entities rely on Home Assistant's automatic parent-device assignment for the `TRACKER_SUBENTRY_KEY`. Do not introduce manual `via_device` pointers for tracker `DeviceInfo` payloads; only service-level entities may declare `via_device` tuples when modelling nested hardware chains documented upstream. When updating tracker devices via `async_update_device`, always include `add_config_entry_id` (or `config_entry_id` on legacy cores) whenever a tracker subentry identifier is present so Home Assistant keeps the device associated with its config entry.
 * **Config entry version source of truth:** Use `custom_components/googlefindmy/const.py::CONFIG_ENTRY_VERSION` whenever flows, migrations, or tests need the integration's config-entry version. Do not introduce duplicate version constants in other modules.
 * [`custom_components/googlefindmy/ProtoDecoders/AGENTS.md`](custom_components/googlefindmy/ProtoDecoders/AGENTS.md) — Protobuf overlay structure requirements, including the mandate that generated message classes remain nominal subclasses of `google.protobuf.message.Message` so helper utilities typed against the concrete base keep accepting them.
@@ -94,6 +96,7 @@
 * **Platform subentry quick reference:**
   * Service-level diagnostics (`binary_sensor`, diagnostic `sensor` entities, repairs counters, etc.) **must** pass `SERVICE_SUBENTRY_KEY` when constructing entities **and** expose `device_info = service_device_info(include_subentry_identifier=True)`. This guarantees every diagnostic entity binds to the same service device + config subentry pair so Home Assistant keeps the hub grouped in the device registry.
   * Per-device platforms (`device_tracker`, per-device `sensor` entities such as `last_seen`, `button` actions, future tracker-scoped entities) **must** pass `TRACKER_SUBENTRY_KEY`, publish tracker-specific identifiers in `device_info`, and rely on Home Assistant's automatic device association—do **not** add manual `via_device` tuples for tracker devices.
+  * Registry updates **must** include the child `entry_id` in every `async_update_device` or equivalent call (`add_config_entry_id` for 2025.7+, `config_entry_id` for legacy cores). Log the `(entry_id, device_id, identifiers)` tuple in debug builds to catch mismatches early; mirror the Section VIII.D playbooks when triaging stuck or orphaned devices.
   * When `manifest.json` sets `"integration_type": "hub"`, expose an `async_step_hub` handler and register a `"hub"` mapping in `ConfigFlow.async_get_supported_subentry_types()` that points at the service/hub subentry flow handler. This keeps Home Assistant's "Add hub" button functional without custom UI patches.
   * Home Assistant's subentry helpers (`async_add_subentry`, `async_update_subentry`, `async_remove_subentry`) may return a `ConfigSubentry`, a sentinel boolean/`None`, or an awaitable yielding one of those values. Always normalize results through the shared `_await_subentry_result` helper (or an equivalent `inspect.isawaitable` guard) so asynchronous responses update the manager cache correctly.
 * [`custom_components/googlefindmy/NovaApi`](custom_components/googlefindmy/NovaApi) — Nova helpers, request builders, and protobuf serializers. Keep protobuf imports inside `if TYPE_CHECKING:` guards when the dependency is only needed for type annotations so startup stays fast on constrained devices.
@@ -464,7 +467,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ---
 
-## 11) Clean & Secure Coding Standard (Python 3.12 + Home Assistant 2025.10)
+## 11) Clean & Secure Coding Standard (Python 3.13 + Home Assistant 2025.10)
 
 ### 11.1 Language & style (self-documenting)
 
@@ -568,12 +571,12 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ## REFERENCES
 
-### 1) Python 3.12 — Language, Style, Typing, Safety
+### 1) Python 3.13 — Language, Style, Typing, Safety
 
 * PEP 8 – Style Guide: [https://peps.python.org/pep-0008/](https://peps.python.org/pep-0008/)
 * PEP 257 – Docstring Conventions: [https://peps.python.org/pep-0257/](https://peps.python.org/pep-0257/)
 * PEP 695 – Type Parameter Syntax (Generics): [https://peps.python.org/pep-0695/](https://peps.python.org/pep-0695/)
-* What’s New in Python 3.12: [https://docs.python.org/3/whatsnew/3.12.html](https://docs.python.org/3/whatsnew/3.12.html)
+* What’s New in Python 3.13: [https://docs.python.org/3/whatsnew/3.13.html](https://docs.python.org/3/whatsnew/3.13.html)
 * Exceptions & `raise … from …` (tutorial): [https://docs.python.org/3/tutorial/errors.html](https://docs.python.org/3/tutorial/errors.html)
 * `asyncio.TaskGroup` (structured concurrency): [https://docs.python.org/3/library/asyncio-task.html#taskgroups](https://docs.python.org/3/library/asyncio-task.html#taskgroups)
 * `subprocess` — security considerations / avoid `shell=True`: [https://docs.python.org/3/library/subprocess.html#security-considerations](https://docs.python.org/3/library/subprocess.html#security-considerations)

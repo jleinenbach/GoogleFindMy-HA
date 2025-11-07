@@ -99,7 +99,7 @@
   },
   "config_subentries": {
     "hub": {
-      "title": "Hub",
+      "title": "Google Find My Device Hub",
       "step": {
         "user": {
           "title": "Dodaj grupę funkcji huba",
@@ -108,6 +108,36 @@
         "reconfigure": {
           "title": "Zaktualizuj grupę funkcji huba",
           "description": "Odśwież grupę funkcji huba, aby najnowsze funkcje były dostępne."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "service": {
+      "title": "Usługa Google Find Hub",
+      "step": {
+        "user": {
+          "title": "Dodaj grupę funkcji usługi",
+          "description": "Skonfiguruj grupę funkcji usługi, aby Home Assistant mógł udostępniać diagnostykę i usługi pomocnicze dla tego konta."
+        },
+        "reconfigure": {
+          "title": "Zaktualizuj grupę funkcji usługi",
+          "description": "Odśwież grupę funkcji usługi, aby zsynchronizować diagnostykę i usługi pomocnicze z najnowszą konfiguracją."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "core_tracking": {
+      "title": "Urządzenia Google Find My",
+      "step": {
+        "user": {
+          "title": "Dodaj grupę funkcji urządzeń",
+          "description": "Utwórz grupę funkcji urządzeń, aby zarządzać wykrytymi dla tego konta lokalizatorami Google Find My."
+        },
+        "reconfigure": {
+          "title": "Zaktualizuj grupę funkcji urządzeń",
+          "description": "Zaktualizuj grupę funkcji urządzeń, aby odnowić widoczność i metadane lokalizatorów."
         }
       },
       "abort": {},

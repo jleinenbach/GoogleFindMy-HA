@@ -47,6 +47,7 @@ class _ConfigEntriesStub:
         subentry: ConfigSubentry,
         *,
         data: dict[str, object] | None = None,
+        translation_key: str | None = None,
         **_: object,
     ) -> bool:
         if data is not None:
@@ -56,6 +57,7 @@ class _ConfigEntriesStub:
                 title=subentry.title,
                 unique_id=subentry.unique_id,
                 subentry_id=subentry.subentry_id,
+                translation_key=translation_key,
             )
         self.updated_subentries.append((subentry.subentry_id, data))
         return True

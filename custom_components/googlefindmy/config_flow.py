@@ -76,6 +76,7 @@ from .const import (
     DATA_AUTH_METHOD,
     DATA_AAS_TOKEN,
     DATA_SECRET_BUNDLE,
+    DATA_SUBENTRY_KEY,
     # Options (non-secret runtime settings)
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
@@ -89,11 +90,13 @@ from .const import (
     OPT_ALLOW_HISTORY_FALLBACK,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SERVICE_SUBENTRY_TRANSLATION_KEY,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_TRANSLATION_KEY,
     # Defaults
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_DEVICE_POLL_DELAY,
@@ -777,7 +780,7 @@ class _ConfigFlowMixin:
     def add_suggested_values_to_schema(
         self, schema: vol.Schema, suggested_values: Mapping[str, Any]
     ) -> vol.Schema:
-        ...
+        return schema
 
     def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
         ...
@@ -842,7 +845,7 @@ class _OptionsFlowMixin:
     def add_suggested_values_to_schema(
         self, schema: vol.Schema, suggested_values: Mapping[str, Any]
     ) -> vol.Schema:
-        ...
+        return schema
 
     def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
         ...
@@ -2885,6 +2888,7 @@ class ConfigFlow(
                 # We persist AAS master tokens as well; they are required to mint service tokens.
                 CONF_OAUTH_TOKEN: self._auth_data.get(CONF_OAUTH_TOKEN),
                 CONF_GOOGLE_EMAIL: self._auth_data.get(CONF_GOOGLE_EMAIL),
+                DATA_SUBENTRY_KEY: None,
             }
             if DATA_SECRET_BUNDLE in self._auth_data:
                 data_payload[DATA_SECRET_BUNDLE] = self._auth_data[DATA_SECRET_BUNDLE]
@@ -2928,6 +2932,7 @@ class ConfigFlow(
                         CONF_GOOGLE_EMAIL,
                         DATA_SECRET_BUNDLE,
                         DATA_AAS_TOKEN,
+                        DATA_SUBENTRY_KEY,
                     ):
                         merged_data.pop(removable, None)
                     for key, value in data_payload.items():
@@ -3585,6 +3590,9 @@ class ConfigFlow(
             self._auth_data.get(CONF_GOOGLE_EMAIL) or "Google Find My Device"
         )
         tracker_title = "Google Find My devices"
+        service_title = "Google Find Hub Service"
+        tracker_translation_key = TRACKER_SUBENTRY_TRANSLATION_KEY
+        service_translation_key = SERVICE_SUBENTRY_TRANSLATION_KEY
 
         has_filter, feature_flags = _derive_feature_settings(
             options_payload=options_payload,
@@ -3646,9 +3654,10 @@ class ConfigFlow(
                 self,
                 entry,
                 data=service_payload,
-                title=entry_title,
+                title=service_title,
                 unique_id=service_unique_id,
                 subentry_type=SUBENTRY_TYPE_SERVICE,
+                translation_key=service_translation_key,
             )
             if created_service is not None:
                 context_map[service_key] = created_service.subentry_id
@@ -3658,8 +3667,9 @@ class ConfigFlow(
                 entry,
                 service_subentry,
                 data=service_payload,
-                title=entry_title,
+                title=service_title,
                 unique_id=service_unique_id,
+                translation_key=service_translation_key,
             )
             context_map[service_key] = service_subentry.subentry_id
 
@@ -3672,6 +3682,7 @@ class ConfigFlow(
                 title=tracker_title,
                 unique_id=tracker_unique_id,
                 subentry_type=SUBENTRY_TYPE_TRACKER,
+                translation_key=tracker_translation_key,
             )
             if created_tracker is not None:
                 context_map[tracker_key] = created_tracker.subentry_id
@@ -3683,6 +3694,7 @@ class ConfigFlow(
                 data=tracker_payload,
                 title=tracker_title,
                 unique_id=tracker_unique_id,
+                translation_key=tracker_translation_key,
             )
             context_map[tracker_key] = tracker_subentry.subentry_id
 
@@ -3694,6 +3706,7 @@ class ConfigFlow(
         title: str,
         unique_id: str | None,
         subentry_type: str,
+        translation_key: str | None = None,
     ) -> ConfigSubentry | None:
         """Create a config entry subentry using the best available API."""
 
@@ -3703,13 +3716,19 @@ class ConfigFlow(
 
         create_fn = getattr(manager, "async_create_subentry", None)
         if callable(create_fn):
-            result = create_fn(
-                entry,
-                data=data,
-                title=title,
-                unique_id=unique_id,
-                subentry_type=subentry_type,
-            )
+            create_kwargs: dict[str, Any] = {
+                "data": data,
+                "title": title,
+                "unique_id": unique_id,
+                "subentry_type": subentry_type,
+            }
+            if translation_key is not None:
+                create_kwargs["translation_key"] = translation_key
+            try:
+                result = create_fn(entry, **create_kwargs)
+            except TypeError:
+                create_kwargs.pop("translation_key", None)
+                result = create_fn(entry, **create_kwargs)
             if inspect.isawaitable(result):
                 result = await result
             if isinstance(result, ConfigSubentry):
@@ -3720,19 +3739,23 @@ class ConfigFlow(
             callable(add_fn) and ConfigSubentry is not None
         ):  # pragma: no cover - legacy fallback
             subentry_cls = cast(Callable[..., ConfigSubentry], ConfigSubentry)
+            ctor_kwargs: dict[str, Any] = {
+                "data": MappingProxyType(dict(data)),
+                "title": title,
+                "unique_id": unique_id,
+                "subentry_type": subentry_type,
+            }
+            if translation_key is not None:
+                ctor_kwargs["translation_key"] = translation_key
             try:
-                subentry = subentry_cls(
-                    data=MappingProxyType(dict(data)),
-                    subentry_type=subentry_type,
-                    title=title,
-                    unique_id=unique_id,
-                )
+                subentry = subentry_cls(**ctor_kwargs)
             except TypeError:  # pragma: no cover - legacy signature
-                subentry = subentry_cls(
-                    data=MappingProxyType(dict(data)),
-                    title=title,
-                    unique_id=unique_id,
-                )
+                ctor_kwargs.pop("translation_key", None)
+                try:
+                    subentry = subentry_cls(**ctor_kwargs)
+                except TypeError:
+                    ctor_kwargs.pop("subentry_type", None)
+                    subentry = subentry_cls(**ctor_kwargs)
             add_fn(entry, subentry)
             return subentry
 
@@ -3746,6 +3769,7 @@ class ConfigFlow(
         data: dict[str, Any],
         title: str,
         unique_id: str | None,
+        translation_key: str | None = None,
     ) -> None:
         """Update an existing subentry if the API supports it."""
 
@@ -3757,13 +3781,26 @@ class ConfigFlow(
         if not callable(update_fn):
             return
 
-        result = update_fn(
-            entry,
-            subentry,
-            data=data,
-            title=title,
-            unique_id=unique_id,
-        )
+        update_kwargs: dict[str, Any] = {
+            "data": data,
+            "title": title,
+            "unique_id": unique_id,
+        }
+        if translation_key is not None:
+            update_kwargs["translation_key"] = translation_key
+        try:
+            result = update_fn(
+                entry,
+                subentry,
+                **update_kwargs,
+            )
+        except TypeError:
+            update_kwargs.pop("translation_key", None)
+            result = update_fn(
+                entry,
+                subentry,
+                **update_kwargs,
+            )
         if inspect.isawaitable(result):
             await result
 

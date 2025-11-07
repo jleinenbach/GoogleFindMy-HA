@@ -48,6 +48,7 @@ class _ManagerStub:
         data: dict[str, Any],
         title: str | None = None,
         unique_id: str | None = None,
+        translation_key: str | None = None,
     ) -> None:
         assert entry is self.entry
         subentry.data = MappingProxyType(dict(data))
@@ -55,6 +56,8 @@ class _ManagerStub:
             subentry.title = title
         if unique_id is not None:
             subentry.unique_id = unique_id
+        if translation_key is not None:
+            subentry.translation_key = translation_key
         self.updated.append((subentry.subentry_id, dict(subentry.data)))
 
     def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
@@ -98,6 +101,7 @@ class _EntryStub:
             title=title,
             unique_id=f"{self.entry_id}-{key}",
             subentry_id=_stable_subentry_id(self.entry_id, key),
+            translation_key=key,
         )
         self.subentries[subentry.subentry_id] = subentry
         return subentry

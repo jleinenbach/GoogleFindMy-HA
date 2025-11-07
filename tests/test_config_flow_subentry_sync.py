@@ -88,6 +88,7 @@ class _ConfigEntriesManagerStub:
         title: str,
         unique_id: str | None,
         subentry_type: str,
+        translation_key: str | None = None,
     ) -> ConfigSubentry:
         assert entry is self._entry
         subentry = ConfigSubentry(
@@ -96,6 +97,7 @@ class _ConfigEntriesManagerStub:
             title=title,
             unique_id=unique_id,
             subentry_id=_stable_subentry_id(entry.entry_id, data["group_key"]),
+            translation_key=translation_key,
         )
         return self.async_add_subentry(entry, subentry)
 
@@ -118,6 +120,7 @@ class _ConfigEntriesManagerStub:
                 "unique_id": subentry.unique_id,
                 "subentry_type": subentry.subentry_type,
                 "config_subentry_id": subentry.subentry_id,
+                "translation_key": getattr(subentry, "translation_key", None),
                 "object": subentry,
             }
         )
@@ -131,6 +134,7 @@ class _ConfigEntriesManagerStub:
         data: dict[str, Any],
         title: str | None = None,
         unique_id: str | None = None,
+        translation_key: str | None = None,
     ) -> None:
         assert entry is self._entry
         if unique_id is not None:
@@ -144,6 +148,8 @@ class _ConfigEntriesManagerStub:
             subentry.title = title
         if unique_id is not None:
             subentry.unique_id = unique_id
+        if translation_key is not None:
+            subentry.translation_key = translation_key
         self.updated.append(
             {
                 "data": dict(data),
@@ -151,6 +157,7 @@ class _ConfigEntriesManagerStub:
                 "unique_id": unique_id,
                 "config_subentry_id": subentry.subentry_id,
                 "subentry": subentry,
+                "translation_key": translation_key,
             }
         )
 
@@ -250,6 +257,7 @@ async def test_device_selection_creates_feature_groups_with_flags() -> None:
     assert service_record["subentry_type"] == SUBENTRY_TYPE_SERVICE
     assert tracker_record["subentry_type"] == SUBENTRY_TYPE_TRACKER
     assert service_record["unique_id"] == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
+    assert service_record["translation_key"] == SERVICE_SUBENTRY_KEY
 
     assert service_payload["features"] == sorted(SERVICE_FEATURE_PLATFORMS)
     assert "visible_device_ids" not in service_payload
@@ -264,6 +272,7 @@ async def test_device_selection_creates_feature_groups_with_flags() -> None:
     assert flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] is False
     assert flags[OPT_GOOGLE_HOME_FILTER_ENABLED] is False
     assert flags[OPT_ENABLE_STATS_ENTITIES] is True
+    assert tracker_record["translation_key"] == TRACKER_SUBENTRY_KEY
 
 
 @pytest.mark.asyncio
@@ -378,6 +387,7 @@ async def test_device_selection_updates_existing_feature_group() -> None:
     )
     assert created_service["data"]["group_key"] == SERVICE_SUBENTRY_KEY
     assert created_service["unique_id"] == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
+    assert created_service["translation_key"] == SERVICE_SUBENTRY_KEY
 
     assert manager.updated, "tracker subentry should be updated"
     payload = manager.updated[-1]["data"]
@@ -387,6 +397,7 @@ async def test_device_selection_updates_existing_feature_group() -> None:
     assert flags[OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
     assert flags[OPT_GOOGLE_HOME_FILTER_ENABLED] is True
     assert flags[OPT_ENABLE_STATS_ENTITIES] is False
+    assert manager.updated[-1]["translation_key"] == TRACKER_SUBENTRY_KEY
 
 
 def test_service_device_binding_clears_stale_subentry(
