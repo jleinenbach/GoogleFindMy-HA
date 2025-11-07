@@ -22,8 +22,9 @@ from typing import Any
 from collections.abc import Iterable, Mapping
 
 from homeassistant import exceptions as ha_exceptions
+from homeassistant.components.device_tracker import DOMAIN as DEVICE_TRACKER_DOMAIN
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.network import get_url
 
 try:  # Home Assistant 2025.5+: attribute constant exposed
@@ -284,6 +285,69 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
         "Device registry cleanup phase complete. Processed %d hubs and removed %d orphaned device links.",
         processed_hubs,
         cleaned_devices,
+    )
+
+    # --- Phase 3: remove legacy tracker entities from the Entity Registry -----
+    ent_reg = er.async_get(hass)
+
+    managed_entry_ids: set[str] = set()
+    entries_bucket = domain_bucket.get("entries") if isinstance(domain_bucket, Mapping) else None
+    if isinstance(entries_bucket, Mapping):
+        for raw_entry_id in entries_bucket.keys():
+            if isinstance(raw_entry_id, str) and raw_entry_id:
+                managed_entry_ids.add(raw_entry_id)
+
+    for hub_entry_id, _coordinators in _iter_hubs():
+        if isinstance(hub_entry_id, str) and hub_entry_id:
+            managed_entry_ids.add(hub_entry_id)
+
+    removed_entities = 0
+    entities_container = getattr(ent_reg, "entities", None)
+    if isinstance(entities_container, Mapping):
+        for entry in list(entities_container.values()):
+            if getattr(entry, "platform", None) != DOMAIN:
+                continue
+            if getattr(entry, "domain", None) != DEVICE_TRACKER_DOMAIN:
+                continue
+
+            config_entry_id = getattr(entry, "config_entry_id", None)
+            if (
+                not isinstance(config_entry_id, str)
+                or config_entry_id not in managed_entry_ids
+            ):
+                continue
+
+            unique_id = getattr(entry, "unique_id", None)
+            if not isinstance(unique_id, str) or not unique_id:
+                continue
+
+            is_canonical = (
+                unique_id.startswith(f"{config_entry_id}:")
+                and unique_id.count(":") >= 2
+            )
+            if is_canonical:
+                continue
+
+            _LOGGER.info(
+                "[%s] Tracker cleanup: removing legacy entity '%s' (unique_id=%s); it no longer matches the canonical entry-scoped schema.",
+                config_entry_id,
+                getattr(entry, "entity_id", "<unknown>"),
+                unique_id,
+            )
+            try:
+                ent_reg.async_remove(entry.entity_id)
+                removed_entities += 1
+            except Exception as err:  # noqa: BLE001 - defensive logging
+                _LOGGER.error(
+                    "[%s] Tracker cleanup: failed to remove entity %s: %s",
+                    config_entry_id,
+                    getattr(entry, "entity_id", "<unknown>"),
+                    err,
+                )
+
+    _LOGGER.info(
+        "Entity registry cleanup phase complete. Removed %d legacy tracker entities.",
+        removed_entities,
     )
 
 
