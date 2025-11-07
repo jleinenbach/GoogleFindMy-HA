@@ -65,6 +65,11 @@ class _ConfigEntriesHelper:
     def __init__(self, entry: _EntryStub) -> None:
         self._entry = entry
         self.removed_subentries: list[str] = []
+        self.unloaded_subentries: list[str] = []
+
+    async def async_unload(self, entry_id: str) -> bool:
+        self.unloaded_subentries.append(entry_id)
+        return True
 
     async def async_unload_platforms(
         self, entry: _EntryStub, platforms: list[str]
@@ -190,4 +195,8 @@ def test_async_unload_entry_removes_subentries_and_registries(
     assert entity_registry.removals == [first.subentry_id, second.subentry_id]
     assert device_registry.removals == [first.subentry_id, second.subentry_id]
     assert not entry.subentries
+    assert hass.config_entries.unloaded_subentries == [
+        first.subentry_id,
+        second.subentry_id,
+    ]
     assert hass.config_entries.removed_subentries == []
