@@ -133,6 +133,7 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
     Notes:
         - Only called for the legacy secrets.json path.
         - Store JSON-serializable values *as-is*. TokenCache validates and normalizes.
+        - aas_token from secrets.json is actually an ADM token, store as adm_token_{username}
     """
     enhanced_data = dict(secrets_data)
 
@@ -141,6 +142,8 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
     if google_email:
         enhanced_data[username_string] = google_email
 
+    # Store all keys as-is; aas_token will be found by async_get_aas_token()
+    # and used to generate the ADM token via gpsoauth exchange
     for key, value in enhanced_data.items():
         try:
             # Store primitives and JSON-safe structures directly
@@ -363,13 +366,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
+    token_source = entry.data.get("token_source")
 
     if secrets_data:
         await _async_save_secrets_data(secrets_data)
         _LOGGER.debug("Persisted secrets.json bundle to token cache")
+
+        # Proactively generate ADM token from aas_token to avoid 401 errors on first poll
+        if secrets_data.get("aas_token") and google_email:
+            try:
+                from .Auth.adm_token_retrieval import async_get_adm_token
+                _LOGGER.info("Pre-generating ADM token from aas_token for user %s", google_email)
+                adm_token = await async_get_adm_token(google_email)
+                _LOGGER.info("ADM token successfully generated and cached")
+            except Exception as err:
+                _LOGGER.error("Failed to pre-generate ADM token: %s", err, exc_info=True)
     elif oauth_token and google_email:
-        await _async_save_individual_credentials(oauth_token, google_email)
-        _LOGGER.debug("Persisted individual credentials to token cache")
+        # If token_source is "aas_token", store as aas_token instead of oauth_token
+        if token_source == "aas_token":
+            try:
+                await async_set_cached_value("aas_token", oauth_token)
+                await async_set_cached_value(username_string, google_email)
+                _LOGGER.debug("Persisted aas_token to token cache")
+            except OSError as err:
+                _LOGGER.warning("Failed to save aas_token to cache: %s", err)
+        else:
+            await _async_save_individual_credentials(oauth_token, google_email)
+            _LOGGER.debug("Persisted individual credentials to token cache")
     else:
         _LOGGER.error(
             "No credentials found in config entry (neither secrets_data nor oauth_token+google_email)"
