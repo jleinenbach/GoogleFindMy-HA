@@ -1,7 +1,7 @@
-{
+a{
   "domain": "googlefindmy",
   "name": "Google Find My Device",
-  "version": "1.6-b4",
+  "version": "1.6-beta",
   "config_flow": true,
   "diagnostics": true,
   "integration_type": "device",
