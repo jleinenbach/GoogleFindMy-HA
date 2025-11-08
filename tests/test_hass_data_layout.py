@@ -12,7 +12,6 @@ import json
 import logging
 import sys
 
-from contextlib import suppress
 from pathlib import Path
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -20,6 +19,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from unittest.mock import AsyncMock
 
 import pytest
+
+from tests.helpers import drain_loop
 
 from custom_components.googlefindmy.const import (
     ATTR_MODE,
@@ -38,21 +39,6 @@ from custom_components.googlefindmy.const import (
 )
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.exceptions import ServiceValidationError
-
-
-def _drain_loop(loop: asyncio.AbstractEventLoop) -> None:
-    """Cancel and drain all pending tasks before closing the loop."""
-
-    pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-    for task in pending:
-        task.cancel()
-        with suppress(Exception, asyncio.CancelledError):
-            loop.run_until_complete(task)
-
-    loop.run_until_complete(asyncio.sleep(0))
-    loop.close()
-    asyncio.set_event_loop(None)
-
 if TYPE_CHECKING:
     from custom_components.googlefindmy import RuntimeData
 
@@ -564,7 +550,7 @@ def test_service_stats_unique_id_migration_prefers_service_subentry(
         )
         assert entity_registry.updated == ["sensor.googlefindmy_api_updates"]
     finally:
-        _drain_loop(loop)
+        drain_loop(loop)
 
 
 def test_hass_data_layout(
@@ -859,7 +845,7 @@ def test_hass_data_layout(
 
         loop.run_until_complete(_exercise())
     finally:
-        _drain_loop(loop)
+        drain_loop(loop)
 
 
 def test_setup_entry_reactivates_disabled_button_entities(
@@ -994,7 +980,7 @@ def test_setup_entry_reactivates_disabled_button_entities(
         assert registry_entries[0].disabled_by is None
         assert registry.updated == ["button.googlefindmy_disabled"]
     finally:
-        _drain_loop(loop)
+        drain_loop(loop)
 
 
 @pytest.mark.asyncio
@@ -1163,7 +1149,7 @@ def test_setup_entry_failure_does_not_register_cache(
 
         assert register_calls == []
     finally:
-        _drain_loop(loop)
+        drain_loop(loop)
 
 
 def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> None:
