@@ -170,6 +170,11 @@ Subentries may set `unique_id`. The value only needs to be unique within the sco
 
 Subentries change how integrations load and unload config entries. `async_setup_entry` and `async_unload_entry` must differentiate between parent and child entries.
 
+> **Quick reference — `entry_id` vs. `subentry_id`:**
+> * `entry.entry_id` always points to the parent config entry (even when accessed from a child).
+> * `subentry.subentry_id` identifies an individual child and must be passed to `hass.config_entries.async_setup`, `async_reload`, and `async_unload` when operating on that child.
+> * Avoid mixing these identifiers; using the parent `entry_id` for a child operation will reload or unload the wrong entry.
+
 ### A. Routing setup
 
 ```python
@@ -194,7 +199,7 @@ async def _async_setup_parent_entry(hass: HomeAssistant, entry: ConfigEntry) -> 
     if subentries:
         await asyncio.gather(
             *(
-                hass.config_entries.async_setup(subentry.entry_id)
+                hass.config_entries.async_setup(subentry.subentry_id)
                 for subentry in subentries
             )
         )
@@ -228,7 +233,7 @@ async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
     await hass.config_entries.async_reload(entry.entry_id)
 
     for subentry in subentries:
-        await hass.config_entries.async_reload(subentry.entry_id)
+        await hass.config_entries.async_reload(subentry.subentry_id)
 
 ```
 
@@ -254,7 +259,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: ConfigEntry) ->
     subentries = list(entry.subentries.values())
     unload_results = await asyncio.gather(
         *(
-            hass.config_entries.async_unload(subentry.entry_id)
+            hass.config_entries.async_unload(subentry.subentry_id)
             for subentry in subentries
         ),
         return_exceptions=True,
