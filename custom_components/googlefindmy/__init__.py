@@ -4274,9 +4274,9 @@ async def _async_ensure_subentries_are_setup(
         return
 
     _LOGGER.debug(
-        "[%s] Triggering setup for %d subentries",  # noqa: G004
+        "[%s] Triggering setup for %d subentries",
         entry.entry_id,
-        len(pending),
+        len(pending_ids),
     )
     results = await asyncio.gather(
         *(hass.config_entries.async_setup(subentry_id) for subentry_id in pending_ids),
