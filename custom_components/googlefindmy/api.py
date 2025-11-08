@@ -456,6 +456,10 @@ class GoogleFindMyAPI:
             ConfigEntryAuthFailed: If authentication fails.
             UpdateFailed: If the API is rate-limited, returns a server error, or a network/other error occurs.
         """
+        # Register cache provider for multi-entry support
+        from .NovaApi import nova_request
+        nova_request.register_cache_provider(lambda: self._cache)
+
         try:
             if not username:
                 try:
@@ -535,6 +539,10 @@ class GoogleFindMyAPI:
             A dictionary containing the best available location data for the device.
             Returns an empty dictionary on failure.
         """
+        # Register cache provider for multi-entry support
+        from .NovaApi import nova_request
+        nova_request.register_cache_provider(lambda: self._cache)
+
         try:
             _LOGGER.info(
                 "API v3.0 Async: Requesting location for %s (%s)", device_name, device_id
@@ -740,6 +748,10 @@ class GoogleFindMyAPI:
         Returns:
             True if the command was submitted successfully, False otherwise.
         """
+        # Register cache provider for multi-entry support
+        from .NovaApi import nova_request
+        nova_request.register_cache_provider(lambda: self._cache)
+
         token = self._get_fcm_token_for_action()
         if not token:
             return False
@@ -773,6 +785,10 @@ class GoogleFindMyAPI:
         Returns:
             True if the command was submitted successfully, False otherwise.
         """
+        # Register cache provider for multi-entry support
+        from .NovaApi import nova_request
+        nova_request.register_cache_provider(lambda: self._cache)
+
         token = self._get_fcm_token_for_action()
         if not token:
             return False
