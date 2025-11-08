@@ -183,7 +183,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 1. Create the shared client (for example, API session, MQTT connection). Raise `ConfigEntryNotReady` if the connection cannot be established.
 2. Store the client in `hass.data[DOMAIN][entry.entry_id]` so children can retrieve it.
-3. Call `hass.config_entries.async_get_subentries(entry.entry_id)` and `async_setup` each child. This ensures subentries created while the parent was unloaded are loaded on restart.
+3. Enumerate children via `list(entry.subentries.values())` and `async_setup` each child. This ensures subentries created while the parent was unloaded are loaded on restart. Allow setup failures to propagate (do **not** pass `return_exceptions=True` to `asyncio.gather`) so Home Assistant correctly reflects parent/subentry health.
 4. Register an update listener that reloads children when the parent options change.
 
 ### C. Subentry setup
@@ -195,7 +195,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 ### D. Parent unload
 
-1. Fetch all subentries via `async_get_subentries(entry.entry_id)`.
+1. Fetch all subentries via `list(entry.subentries.values())`.
 2. `async_unload` every child and aggregate the boolean results.
 3. When all children unload successfully, remove the shared client from `hass.data` and close connections.
 
@@ -276,7 +276,7 @@ Users can click "Add" on the parent entry card. Home Assistant invokes the regis
 Integrations can create subentries programmatically when runtime discovery finds new devices:
 
 1. Detect the device (for example, MQTT discovery message, Zeroconf advertisement).
-2. Locate the parent config entry and enumerate existing subentries via `hass.config_entries.async_get_subentries(parent_entry_id)`.
+2. Locate the parent config entry and enumerate existing subentries via `list(parent_entry.subentries.values())`.
 3. Create a new subentry if one does not already exist. Home Assistant automatically calls `async_setup_entry` for the new child.
 
 ## Section VIII: Peer-Review Checklist and Troubleshooting
@@ -338,7 +338,7 @@ children fail to appear in the UI, refuse to unload, or leave orphaned registry 
 
 3. **Removal: cascade deletes in the correct order.**
    - Parent unload handlers must wait for every subentry to unload successfully before tearing down shared clients. Use
-     `async_get_subentries(entry.entry_id)` to enumerate children and `async_unload` each one before dropping the parent from
+     `list(entry.subentries.values())` to enumerate children and `async_unload` each one before dropping the parent from
      `hass.data`.
    - Custom cleanup services (for example, registry rebuild tasks) should aggregate both subentry IDs and parent IDs when pruning
      legacy devices. Inspect `custom_components/googlefindmy/services.py` for the reference implementation that collects
