@@ -41,6 +41,7 @@ class _StubConfigEntriesManager:
             entry.entry_id: entry for entry in entries
         }
         self.removed: list[str] = []
+        self.setup_calls: list[str] = []
 
     def async_entries(self, domain: str | None = None) -> list[_StubConfigEntry]:
         values = list(self._entries.values())
@@ -51,9 +52,22 @@ class _StubConfigEntriesManager:
     def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
         return self._entries.get(entry_id)
 
+    def async_get_subentries(self, entry_id: str) -> list[Any]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, dict):
+            return list(subentries.values())
+        return []
+
     async def async_remove(self, entry_id: str) -> None:
         self.removed.append(entry_id)
         self._entries.pop(entry_id, None)
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
 
 @dataclass(slots=True)

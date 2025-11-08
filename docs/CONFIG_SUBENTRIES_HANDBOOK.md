@@ -89,6 +89,8 @@ Home Assistant loads both parents and subentries as `homeassistant.config_entrie
 
 The parent `ConfigFlow` must implement `@classmethod @callback async_get_supported_subentry_types(cls, config_entry)` and return a mapping of subentry type strings to zero-argument factories that build `ConfigSubentryFlow` instances.
 
+> **When to return an empty mapping.** Integrations that *only* manage subentries programmatically (for example, Google Find My Device after the hub and tracker entries are synchronized during `async_setup_entry`) **must** return `{}` here. Doing so prevents Home Assistant from exposing manual “Add subentry” buttons in the UI, keeping the UX aligned with the architecture that expects all children to be created automatically. See `tests/test_config_flow_basic.py::test_supported_subentry_types_disable_manual_flows` and `tests/test_config_flow_hub_entry.py::test_supported_subentry_types_disable_manual_hub_additions` for regression coverage that asserts the UI stays hidden in both basic and hub-specific flows.
+
 ```python
 class ExampleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1

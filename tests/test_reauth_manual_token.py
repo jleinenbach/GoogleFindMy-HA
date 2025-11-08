@@ -80,6 +80,7 @@ class _DummyEntry:
         self.options: dict[str, Any] = {}
         self.title = "Test Entry"
         self.runtime_data = _RuntimeData(cache)
+        self.subentries: dict[str, Any] = {}
 
 
 class _DummyConfigEntries:
@@ -87,9 +88,23 @@ class _DummyConfigEntries:
 
     def __init__(self, entry: _DummyEntry) -> None:
         self._entry = entry
+        self.setup_calls: list[str] = []
 
     def async_get_entry(self, entry_id: str) -> _DummyEntry | None:
         return self._entry if entry_id == self._entry.entry_id else None
+
+    def async_get_subentries(self, entry_id: str) -> list[Any]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, dict):
+            return list(subentries.values())
+        return []
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
 
 class _DummyHass:

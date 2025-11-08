@@ -114,6 +114,7 @@ class _StubConfigEntries:
         self.entry_update_calls: list[tuple[_StubConfigEntry, dict[str, Any]]] = []
         self.unload_calls: list[str] = []
         self.set_disabled_by_calls: list[tuple[str, object | None]] = []
+        self.setup_calls: list[str] = []
 
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
         return list(self._entries)
@@ -165,6 +166,22 @@ class _StubConfigEntries:
     def async_remove_subentry(self, entry: _StubConfigEntry, subentry_id: str) -> bool:
         entry.subentries.pop(subentry_id, None)
         self.removed_subentries.append((entry, subentry_id))
+        return True
+
+    def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
+        for entry in self._entries:
+            if entry.entry_id == entry_id:
+                return entry
+        return None
+
+    def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        return list(entry.subentries.values())
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
         return True
 
     def async_update_entry(self, entry: _StubConfigEntry, **kwargs: Any) -> None:
@@ -649,6 +666,11 @@ def test_hass_data_layout(
 
             if hass._tasks:
                 await asyncio.gather(*hass._tasks)
+
+            expected_subentries = {
+                subentry.subentry_id for subentry in entry.subentries.values()
+            }
+            assert set(hass.config_entries.setup_calls) == expected_subentries
 
             domain_bucket = hass.data[DOMAIN]
             assert entry.entry_id not in domain_bucket

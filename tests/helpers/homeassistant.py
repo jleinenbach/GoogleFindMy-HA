@@ -31,6 +31,7 @@ class FakeConfigEntry:
     domain: str = DOMAIN
     state: ConfigEntryState = ConfigEntryState.NOT_LOADED
     title: str | None = None
+    subentries: dict[str, Any] = field(default_factory=dict)
 
 
 class FakeConfigEntriesManager:
@@ -52,6 +53,7 @@ class FakeConfigEntriesManager:
             # Mirror Home Assistant instances that omit async_migrate helpers.
             self.async_migrate_entry = None  # type: ignore[assignment]
             self.async_migrate = None  # type: ignore[assignment]
+        self.setup_calls: list[str] = []
 
     def add_entry(self, entry: FakeConfigEntry) -> None:
         """Register another entry for subsequent lookups."""
@@ -72,6 +74,25 @@ class FakeConfigEntriesManager:
             if entry.entry_id == entry_id:
                 return entry
         return None
+
+    def async_get_subentries(self, entry_id: str) -> list[Any]:
+        """Return child subentries registered on the provided entry."""
+
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, dict):
+            return list(subentries.values())
+        if isinstance(subentries, (list, tuple)):
+            return list(subentries)
+        return []
+
+    async def async_setup(self, entry_id: str) -> bool:
+        """Record setup attempts for config subentries."""
+
+        self.setup_calls.append(entry_id)
+        return True
 
     def async_update_entry(self, entry: FakeConfigEntry, **kwargs: Any) -> None:
         """Capture entry updates in ``update_calls`` for assertions."""

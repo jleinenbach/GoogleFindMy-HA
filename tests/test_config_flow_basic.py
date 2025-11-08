@@ -29,8 +29,8 @@ def test_flow_module_import_and_handler_registry() -> None:
     assert getattr(handler, "domain", None) == DOMAIN
 
 
-def test_subentry_factories_return_configured_flows() -> None:
-    """Ensure subentry mapping returns factories that instantiate configured flows."""
+def test_supported_subentry_types_disable_manual_flows() -> None:
+    """Config flow should not expose manual subentry factories to the UI."""
 
     import custom_components.googlefindmy.config_flow as config_flow  # noqa: PLC0415
 
@@ -43,44 +43,7 @@ def test_subentry_factories_return_configured_flows() -> None:
 
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)  # type: ignore[arg-type]
 
-    assert set(mapping) == {config_flow.SUBENTRY_TYPE_HUB}, "UI should only expose the hub subentry type"
-
-    factory = mapping[config_flow.SUBENTRY_TYPE_HUB]
-    assert callable(factory)
-    first = factory()
-    second = factory()
-    assert isinstance(first, config_flow.ConfigSubentryFlow)
-    assert isinstance(second, config_flow.ConfigSubentryFlow)
-    assert first is not second, "Factory must yield a fresh flow instance"
-    assert getattr(first, "config_entry", None) is entry
-    assert getattr(second, "config_entry", None) is entry
-
-
-def test_subentry_factories_include_hidden_types_for_manager(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Service and tracker factories remain available to the flow manager."""
-
-    import custom_components.googlefindmy.config_flow as config_flow  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        config_flow.ConfigFlow,
-        "_should_expose_hidden_subentry_types",
-        staticmethod(lambda: True),
-    )
-
-    entry = SimpleNamespace(
-        entry_id="entry-manager",
-        data={},
-        options={},
-        subentries={},
-    )
-
-    mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)  # type: ignore[arg-type]
-
-    assert set(mapping) == {
-        config_flow.SUBENTRY_TYPE_SERVICE,
-        config_flow.SUBENTRY_TYPE_TRACKER,
-        config_flow.SUBENTRY_TYPE_HUB,
-    }
+    assert mapping == {}, "UI should not expose manual subentry types"
 
 
 def test_subentry_update_constructor_allows_config_entry_and_subentry() -> None:

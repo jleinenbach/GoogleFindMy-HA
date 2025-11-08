@@ -106,9 +106,16 @@ class _DummyConfigEntries:
         self.reloaded: list[str] = []
         self.updated_subentries: list[tuple[str, dict[str, Any]]] = []
         self.removed_subentries: list[str] = []
+        self.setup_calls: list[str] = []
 
     def async_get_entry(self, entry_id: str) -> _DummyEntry | None:
         return self._entry if entry_id == self._entry.entry_id else None
+
+    def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        return list(entry.subentries.values())
 
     def async_update_entry(self, entry: _DummyEntry, *, data: dict[str, Any]) -> None:
         assert entry is self._entry
@@ -145,6 +152,10 @@ class _DummyConfigEntries:
         assert DATA_AAS_TOKEN not in self._entry.data
         assert await self._entry.runtime_data.cache.get(DATA_AAS_TOKEN) is None
         self.reloaded.append(entry_id)
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
 
 class _DummyHass:

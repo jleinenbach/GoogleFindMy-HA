@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -33,6 +33,7 @@ class _FakeConfigEntry:
         self.runtime_data = None
         self.disabled_by = None
         self.state = ConfigEntryState.LOADED
+        self.subentries: dict[str, Any] = {}
 
 
 class _FakeConfigEntriesManager:
@@ -40,11 +41,30 @@ class _FakeConfigEntriesManager:
 
     def __init__(self, entry: _FakeConfigEntry) -> None:
         self._entries = [entry]
+        self.setup_calls: list[str] = []
 
     def async_entries(self, domain: str | None = None):  # type: ignore[override]
         if domain is None or domain == DOMAIN:
             return list(self._entries)
         return []
+
+    def async_get_entry(self, entry_id: str) -> _FakeConfigEntry | None:
+        if entry_id == self._entries[0].entry_id:
+            return self._entries[0]
+        return None
+
+    def async_get_subentries(self, entry_id: str) -> list[Any]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, dict):
+            return list(subentries.values())
+        return []
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
 
 class _FakeCoordinator:

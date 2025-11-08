@@ -66,6 +66,7 @@ class _ConfigEntriesHelper:
         self._entry = entry
         self.removed_subentries: list[str] = []
         self.unloaded_subentries: list[str] = []
+        self.setup_calls: list[str] = []
 
     async def async_unload(self, entry_id: str) -> bool:
         self.unloaded_subentries.append(entry_id)
@@ -80,6 +81,21 @@ class _ConfigEntriesHelper:
     def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
         assert entry is self._entry
         self.removed_subentries.append(subentry_id)
+        return True
+
+    def async_get_entry(self, entry_id: str) -> _EntryStub | None:
+        if entry_id == self._entry.entry_id:
+            return self._entry
+        return None
+
+    def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        return list(entry.subentries.values())
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
         return True
 
 

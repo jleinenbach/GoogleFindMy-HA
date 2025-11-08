@@ -49,6 +49,7 @@ class _MigrationConfigEntriesManager:
         self.updated: list[tuple[_MigrationTestEntry, dict[str, Any]]] = []
         self.disabled: list[tuple[str, object | None]] = []
         self.removed: list[str] = []
+        self.setup_calls: list[str] = []
 
     def add_entry(self, entry: _MigrationTestEntry) -> None:
         self._entries[entry.entry_id] = entry
@@ -60,6 +61,15 @@ class _MigrationConfigEntriesManager:
 
     def async_get_entry(self, entry_id: str) -> _MigrationTestEntry | None:
         return self._entries.get(entry_id)
+
+    def async_get_subentries(self, entry_id: str) -> list[Any]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, dict):
+            return list(subentries.values())
+        return []
 
     def async_update_entry(self, entry: _MigrationTestEntry, **kwargs: Any) -> None:
         self.updated.append((entry, dict(kwargs)))
@@ -89,6 +99,10 @@ class _MigrationConfigEntriesManager:
     async def async_remove(self, entry_id: str) -> None:
         self.removed.append(entry_id)
         self._entries.pop(entry_id, None)
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
 
 @dataclass(slots=True)

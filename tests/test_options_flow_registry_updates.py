@@ -84,6 +84,7 @@ class _ManagerWithRegistries:
         self.updated: list[tuple[str, dict[str, Any]]] = []
         self.removed: list[str] = []
         self.reloads: list[str] = []
+        self.setup_calls: list[str] = []
 
     def async_update_entry(self, entry: _EntryStub, *, data: dict[str, Any]) -> None:
         assert entry is self._entry
@@ -93,6 +94,12 @@ class _ManagerWithRegistries:
         if entry_id == self._entry.entry_id:
             return self._entry
         return None
+
+    def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        return list(entry.subentries.values())
 
     def async_update_subentry(
         self,
@@ -136,6 +143,10 @@ class _ManagerWithRegistries:
 
     async def async_reload(self, entry_id: str) -> None:
         self.reloads.append(entry_id)
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
 
 class _HassStub:

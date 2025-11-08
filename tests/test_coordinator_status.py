@@ -44,9 +44,17 @@ class _DummyConfigEntries:
 
     def __init__(self) -> None:
         self.calls: list[object] = []
+        self.setup_calls: list[str] = []
 
     async def async_start_reauth(self, entry: object) -> None:
         self.calls.append(entry)
+
+    def async_get_subentries(self, _entry_id: str) -> list[Any]:
+        return []
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
 
 class _DummyEntry:

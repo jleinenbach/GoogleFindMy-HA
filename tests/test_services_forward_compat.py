@@ -135,11 +135,13 @@ def test_locate_service_handles_falsy_display_names(
             self.title = "stub"
             self.options: dict[str, Any] = {}
             self.data: dict[str, Any] = {}
+            self.subentries: dict[str, Any] = {}
 
     class _StubConfigManager:
         def __init__(self, entries: dict[str, _StubConfigEntry]) -> None:
             self._entries = entries
             self.reload_calls: list[str] = []
+            self.setup_calls: list[str] = []
 
         def async_entries(self, domain: str) -> list[_StubConfigEntry]:
             if domain != DOMAIN:
@@ -151,6 +153,19 @@ def test_locate_service_handles_falsy_display_names(
 
         async def async_reload(self, entry_id: str) -> None:
             self.reload_calls.append(entry_id)
+
+        def async_get_subentries(self, entry_id: str) -> list[Any]:
+            entry = self.async_get_entry(entry_id)
+            if entry is None:
+                return []
+            subentries = getattr(entry, "subentries", None)
+            if isinstance(subentries, dict):
+                return list(subentries.values())
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            self.setup_calls.append(entry_id)
+            return True
 
     class _StubServices:
         def __init__(self) -> None:

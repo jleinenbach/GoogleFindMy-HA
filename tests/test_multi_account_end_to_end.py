@@ -125,11 +125,24 @@ class _StubConfigEntries:
         self.added_subentries: list[tuple[str, ConfigSubentry]] = []
         self.updated_subentries: list[tuple[str, ConfigSubentry]] = []
         self.removed_subentries: list[tuple[str, str]] = []
+        self.setup_calls: list[str] = []
 
     def async_entries(self, domain: str) -> list[_StubConfigEntry]:
         if domain != DOMAIN:
             return []
         return list(self._entries)
+
+    def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
+        for entry in self._entries:
+            if entry.entry_id == entry_id:
+                return entry
+        return None
+
+    def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        return list(entry.subentries.values())
 
     async def async_forward_entry_setups(
         self, entry: _StubConfigEntry, platforms: list[str]
@@ -189,6 +202,10 @@ class _StubConfigEntries:
         self, _entry_id: str
     ) -> None:  # pragma: no cover - not triggered
         return None
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
 
 class _StubHass:
