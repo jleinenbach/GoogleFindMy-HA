@@ -4811,15 +4811,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     )
 
     # --- BEGIN RACE-CONDITION FIX ---
-    # DO NOT await _async_ensure_subentries_are_setup directly here.
-    # The subentries were just created (via async_sync_subentries) in the
-    # _async_setup_parent_entry call above. Awaiting the setup immediately
-    # triggers a race condition where Home Assistant Core raises UnknownEntry
-    # because it has not finished registering the new subentries.
-    #
-    # By scheduling this as a new task, we yield to the event loop,
-    # allowing HA to finalize registration *before* we attempt to set them up.
-    hass.async_create_task(_async_ensure_subentries_are_setup(hass, entry))
+    # Awaiting _async_ensure_subentries_are_setup immediately after creating
+    # the subentries triggers a race condition where Home Assistant Core raises
+    # UnknownEntry because it has not finished registering the new subentries.
+    # Yield to the event loop once so HA finalizes registration *before* setup.
+    await asyncio.sleep(0)
+    await _async_ensure_subentries_are_setup(hass, entry)
     # --- END RACE-CONDITION FIX ---
 
     bucket = domain_bucket
