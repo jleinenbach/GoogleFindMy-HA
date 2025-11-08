@@ -4247,6 +4247,9 @@ async def _async_ensure_subentries_are_setup(
             len(failed_entries),
             failed_entries,
         )
+        raise ConfigEntryNotReady(
+            "Failed to set up subentries: " + ", ".join(failed_entries)
+        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
