@@ -110,6 +110,17 @@ Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
 
+#### `config_entry_with_subentries` factory
+
+The :func:`config_entry_with_subentries` helper in
+``tests.helpers.homeassistant`` builds a :class:`FakeConfigEntry` prepopulated
+with subentries. Provide keyword arguments mapping each subentry key to a
+``ConfigSubentry`` payload dictionary—mirroring the runtime helper contract—so
+tests can focus on their assertions instead of recreating the boilerplate
+structure. The factory normalizes identifiers, attaches the entry to the fake
+registry cache, and returns the configured ``FakeConfigEntry`` ready for use in
+setup and reload assertions.
+
 #### Device registry listing helper
 
 The shared :func:`device_registry_async_entries_for_config_entry` helper in

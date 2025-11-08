@@ -23,6 +23,7 @@ __all__ = [
     "FakeHass",
     "runtime_subentry_manager",
     "runtime_data_with_subentries",
+    "config_entry_with_subentries",
 ]
 
 
@@ -184,6 +185,44 @@ def runtime_data_with_subentries(
     """Create a runtime data namespace exposing the provided subentries."""
 
     return SimpleNamespace(subentry_manager=runtime_subentry_manager(subentries))
+
+
+def config_entry_with_subentries(
+    *,
+    entry_id: str,
+    domain: str = DOMAIN,
+    state: ConfigEntryState = ConfigEntryState.NOT_LOADED,
+    title: str | None = None,
+    subentries: Mapping[str, Any] | Iterable[Any] | None = None,
+    runtime_data: Any | None = None,
+) -> FakeConfigEntry:
+    """Create a config entry that exposes normalized ``subentries``."""
+
+    entry = FakeConfigEntry(
+        entry_id=entry_id,
+        domain=domain,
+        state=state,
+        title=title,
+        runtime_data=runtime_data,
+    )
+    if subentries is None:
+        return entry
+
+    if isinstance(subentries, Mapping):
+        entry.subentries = dict(subentries)
+        return entry
+
+    normalized: dict[str, Any] = {}
+    for subentry in subentries:
+        identifier = getattr(subentry, "subentry_id", None) or getattr(
+            subentry, "entry_id", None
+        )
+        if identifier is None:
+            raise ValueError("Subentries must define 'subentry_id' or 'entry_id'")
+        normalized[str(identifier)] = subentry
+
+    entry.subentries = normalized
+    return entry
 
 
 @dataclass(slots=True)

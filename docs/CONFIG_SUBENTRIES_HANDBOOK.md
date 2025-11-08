@@ -181,6 +181,11 @@ Config subentries expose **two** identifiers. Misusing them leads to reload fail
 
 **Critical rule:** Always pass `subentry.entry_id` to Home Assistant's config entry helpers. Passing `subentry.subentry_id` will raise `UnknownEntry` internally, causing unloads to fail and preventing reload-driven rebuild services from completing. This mirrors the runtime behavior of parents: both parent entries and their children use `entry_id` as the canonical identifier within the global registry.
 
+> **Attribute expectations**
+> * Home Assistant 2025.7+ guarantees that every `ConfigSubentry` exposes **both** attributes. A freshly created child will have a stable `entry_id` immediately, even before the parent finishes setting up, so scheduling helpers should call `async_setup(child.entry_id)` without additional guards.
+> * On legacy cores that predate config subentries, the attribute is simply unavailable because the feature does not exist. The integration detects those builds during import and avoids registering runtime-managed subentries entirely.
+> * Never fall back to `subentry_id` when interacting with lifecycle APIs. If `entry_id` is missing, the runtime is not providing a supported config subentry object and the call should fail loudly instead of mutating the wrong registry entry.
+
 > **Quick reference**
 > * Use `entry.entry_id` (parent) or `subentry.entry_id` (child) with Home Assistant lifecycle helpers.
 > * Use `subentry.subentry_id` only when indexing `entry.subentries`.
@@ -200,6 +205,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 1. Create the shared client (for example, API session, MQTT connection). Raise `ConfigEntryNotReady` if the connection cannot be established.
 2. Store the client in `hass.data[DOMAIN][entry.entry_id]` so children can retrieve it.
 3. Enumerate children via `list(entry.subentries.values())` and `async_setup` each child. This ensures subentries created while the parent was unloaded are loaded on restart. Allow setup failures to propagate (do **not** pass `return_exceptions=True` to `asyncio.gather`) so Home Assistant correctly reflects parent/subentry health.
+   - Log a warning when any child returns `False` so platform owners can spot skipped subentry initializations in production logs. The integration's regression tests assert this behavior; keep the warning intact to preserve visibility into partial setup failures.
 4. Register an update listener that reloads children when the parent options change.
 
 ```python
