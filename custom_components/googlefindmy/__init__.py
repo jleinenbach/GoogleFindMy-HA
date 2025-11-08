@@ -5150,14 +5150,14 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         runtime_data is not None and runtime_data.subentry_manager is not None
     )
 
-    subentries = list(getattr(entry, "subentries", {}).values())
-    target_subentries = [
-        sub
-        for sub in subentries
+    subentries = list(getattr(entry, "subentries", {}).items())
+    target_subentries: list[tuple[str, Any]] = [
+        (subentry_id, sub)
+        for subentry_id, sub in subentries
         if isinstance(getattr(sub, "entry_id", None), str)
     ]
 
-    async def _unload_child_subentry(subentry: Any) -> bool:
+    async def _unload_child_subentry(subentry_id: str, subentry: Any) -> bool:
         # Home Assistant's config entry manager always uses the global
         # entry_id for lifecycle operations (setup/reload/unload). The
         # subentry_id is only the parent's local mapping key and must not
@@ -5182,7 +5182,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         remove_callable = getattr(helper, "async_remove_subentry", None)
         if callable(remove_callable) and not has_managed_subentries:
             try:
-                maybe_awaitable = remove_callable(entry, entry_id)
+                maybe_awaitable = remove_callable(entry, subentry_id)
             except TypeError:
                 maybe_awaitable = remove_callable(entry_id)
             if isinstance(maybe_awaitable, Awaitable):
@@ -5194,7 +5194,10 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         return True
 
     unload_results = await asyncio.gather(
-        *(_unload_child_subentry(sub) for sub in target_subentries),
+        *(
+            _unload_child_subentry(subentry_id, sub)
+            for subentry_id, sub in target_subentries
+        ),
         return_exceptions=True,
     )
 
