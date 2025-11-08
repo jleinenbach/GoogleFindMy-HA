@@ -5182,7 +5182,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         remove_callable = getattr(helper, "async_remove_subentry", None)
         if callable(remove_callable) and not has_managed_subentries:
             try:
-                maybe_awaitable = remove_callable(entry, subentry_id)
+                maybe_awaitable = remove_callable(entry, entry_id)
             except TypeError:
                 maybe_awaitable = remove_callable(entry_id)
             if isinstance(maybe_awaitable, Awaitable):
@@ -5211,9 +5211,8 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         )
         for index, result in enumerate(unload_results):
             if isinstance(result, Exception):
-                sub_id = getattr(
-                    target_subentries[index], "entry_id", f"index {index}"
-                )
+                sub_obj = target_subentries[index][1]
+                sub_id = getattr(sub_obj, "entry_id", f"index {index}")
                 _LOGGER.debug(
                     "[%s] Subentry %s unload failed: %s",
                     entry.entry_id,
