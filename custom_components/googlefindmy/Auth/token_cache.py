@@ -279,10 +279,18 @@ def _unregister_instance(entry_id: str) -> Optional[TokenCache]:
     return _INSTANCES.pop(entry_id, None)
 
 
-def _set_default_entry_id(entry_id: str) -> None:
-    """Set the default entry for facade calls (only for single-entry scenarios)."""
+def _set_default_entry_id(entry_id: str, force: bool = False) -> None:
+    """Set the default entry for facade calls (only for single-entry scenarios).
+
+    Args:
+        entry_id: The entry ID to set as default.
+        force: If True, bypass the multi-entry check (used during validation).
+    """
     global _DEFAULT_ENTRY_ID
-    if len(_INSTANCES) > 1 and _DEFAULT_ENTRY_ID != entry_id:
+    if force:
+        # Validation mode - force set even with multiple entries
+        _DEFAULT_ENTRY_ID = entry_id
+    elif len(_INSTANCES) > 1 and _DEFAULT_ENTRY_ID != entry_id:
         # Immediately disallow ambiguous facade usage in multi-entry setups.
         _DEFAULT_ENTRY_ID = None
         _LOGGER.warning("Multiple config entries are active. Global cache calls are ambiguous and will fail.")
