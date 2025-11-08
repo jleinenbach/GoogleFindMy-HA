@@ -213,7 +213,9 @@ The `hass.config_entries.async_get_subentries` helper referenced in older drafts
 
 Update listeners must also operate exclusively on `entry.subentries`.
 Reload the parent entry before triggering each child so shared resources in
-`hass.data[parent_entry_id]` are recreated before subentry setup resumes:
+`hass.data[parent_entry_id]` are recreated before subentry setup resumes. Wait
+for each child reload sequentially to avoid racing a subentry against the
+parent rebuild:
 
 ```python
 async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -225,14 +227,19 @@ async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
     # children execute their setup routines again.
     await hass.config_entries.async_reload(entry.entry_id)
 
-    if subentries:
-        await asyncio.gather(
-            *(
-                hass.config_entries.async_reload(subentry.entry_id)
-                for subentry in subentries
-            ),
-        )
+    for subentry in subentries:
+        await hass.config_entries.async_reload(subentry.entry_id)
+
 ```
+
+#### Concurrency pitfalls
+
+* Do not schedule parent and child reloads concurrently—the shared client in
+  `hass.data[parent_entry_id]` must be rebuilt before any child setup runs.
+* Avoid reloading subentries in parallel unless every child can safely handle
+  a missing client and retry later. Sequential reloads keep the listener simple
+  and prevent `KeyError`/`ConfigEntryNotReady` loops when shared data is still
+  initializing.
 
 ### D. Parent unload
 
