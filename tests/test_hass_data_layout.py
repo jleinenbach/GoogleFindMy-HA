@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 
 import importlib
@@ -264,7 +265,116 @@ class _StubHass:
         return func(*args)
 
 
- 
+@dataclass(slots=True)
+class AsyncSetupEntryHarness:
+    """Shared scaffolding for tests exercising async_setup_entry."""
+
+    integration: ModuleType
+    coordinator_module: ModuleType
+    button_module: ModuleType
+    map_view_module: ModuleType
+    services_module: ModuleType
+    hass: _StubHass
+    entry: _StubConfigEntry
+    cache: _StubCache
+    coordinator_cls: type[Any]
+    dummy_fcm: SimpleNamespace
+
+
+def _prepare_async_setup_entry_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    loop: asyncio.AbstractEventLoop,
+    *,
+    entry: _StubConfigEntry | None = None,
+    hass: _StubHass | None = None,
+) -> AsyncSetupEntryHarness:
+    """Apply common integration patches and return the prepared context."""
+
+    integration = importlib.import_module("custom_components.googlefindmy")
+    coordinator_module = importlib.import_module(
+        "custom_components.googlefindmy.coordinator"
+    )
+    button_module = importlib.import_module("custom_components.googlefindmy.button")
+    sys.modules.pop("custom_components.googlefindmy.map_view", None)
+    map_view_module = importlib.import_module(
+        "custom_components.googlefindmy.map_view"
+    )
+    services_module = importlib.import_module(
+        "custom_components.googlefindmy.services"
+    )
+
+    cache = _StubCache()
+    monkeypatch.setattr(
+        integration.TokenCache, "create", AsyncMock(return_value=cache)
+    )
+    monkeypatch.setattr(integration, "_register_instance", lambda *_: None)
+    monkeypatch.setattr(integration, "_unregister_instance", lambda *_: cache)
+
+    async_defaults: dict[str, AsyncMock] = {
+        "_async_soft_migrate_data_to_options": AsyncMock(return_value=None),
+        "_async_migrate_unique_ids": AsyncMock(return_value=None),
+        "_async_relink_button_devices": AsyncMock(return_value=None),
+        "_async_relink_subentry_entities": AsyncMock(return_value=None),
+        "_async_save_secrets_data": AsyncMock(return_value=None),
+        "_async_seed_manual_credentials": AsyncMock(return_value=None),
+        "_async_normalize_device_names": AsyncMock(return_value=None),
+        "_async_release_shared_fcm": AsyncMock(return_value=None),
+        "_async_self_heal_duplicate_entities": AsyncMock(return_value=None),
+        "_ensure_post_migration_consistency": AsyncMock(
+            return_value=(True, "user@example.com")
+        ),
+    }
+
+    for attribute, mock in async_defaults.items():
+        monkeypatch.setattr(integration, attribute, mock, raising=False)
+
+    monkeypatch.setattr(integration, "_self_heal_device_registry", lambda *_: None)
+
+    class _RegisterViewStub:
+        def __init__(self, hass_obj: Any) -> None:
+            self.hass = hass_obj
+
+    monkeypatch.setattr(integration, "GoogleFindMyMapView", _RegisterViewStub)
+    monkeypatch.setattr(integration, "GoogleFindMyMapRedirectView", _RegisterViewStub)
+
+    dummy_fcm = SimpleNamespace(
+        register_coordinator=lambda *_: None,
+        unregister_coordinator=lambda *_: None,
+        _start_listening=AsyncMock(return_value=None),
+        request_stop=lambda: None,
+    )
+    monkeypatch.setattr(
+        integration,
+        "_async_acquire_shared_fcm",
+        AsyncMock(return_value=dummy_fcm),
+    )
+
+    coordinator_cls = stub_coordinator_factory()
+    monkeypatch.setattr(coordinator_module, "GoogleFindMyCoordinator", coordinator_cls)
+    monkeypatch.setattr(integration, "GoogleFindMyCoordinator", coordinator_cls)
+    monkeypatch.setattr(button_module, "GoogleFindMyCoordinator", coordinator_cls)
+    monkeypatch.setattr(
+        map_view_module, "GoogleFindMyCoordinator", coordinator_cls, raising=False
+    )
+
+    entry_obj = entry or _StubConfigEntry()
+    hass_obj = hass or _StubHass(entry_obj, loop)
+
+    return AsyncSetupEntryHarness(
+        integration=integration,
+        coordinator_module=coordinator_module,
+        button_module=button_module,
+        map_view_module=map_view_module,
+        services_module=services_module,
+        hass=hass_obj,
+        entry=entry_obj,
+        cache=cache,
+        coordinator_cls=coordinator_cls,
+        dummy_fcm=dummy_fcm,
+    )
+
+
 def test_service_stats_unique_id_migration_prefers_service_subentry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -570,22 +680,6 @@ def test_hass_data_layout(
 
             update_coordinator_module.UpdateFailed = _UpdateFailed
 
-        integration = importlib.import_module("custom_components.googlefindmy")
-        config_entries_module = importlib.import_module("homeassistant.config_entries")
-        state_cls = config_entries_module.ConfigEntryState
-        if not hasattr(state_cls, "SETUP_IN_PROGRESS"):
-            setattr(state_cls, "SETUP_IN_PROGRESS", "setup_in_progress")
-        if not hasattr(state_cls, "SETUP_RETRY"):
-            setattr(state_cls, "SETUP_RETRY", "setup_retry")
-        coordinator_module = importlib.import_module(
-            "custom_components.googlefindmy.coordinator"
-        )
-        button_module = importlib.import_module("custom_components.googlefindmy.button")
-        sys.modules.pop("custom_components.googlefindmy.map_view", None)
-        map_view_module = importlib.import_module(
-            "custom_components.googlefindmy.map_view"
-        )
-
         config_entries_module = importlib.import_module("homeassistant.config_entries")
         state_cls = config_entries_module.ConfigEntryState
         if not hasattr(state_cls, "SETUP_IN_PROGRESS"):
@@ -593,66 +687,15 @@ def test_hass_data_layout(
         if not hasattr(state_cls, "SETUP_RETRY"):
             setattr(state_cls, "SETUP_RETRY", "setup_retry")
 
-        cache = _StubCache()
-        monkeypatch.setattr(
-            integration.TokenCache, "create", AsyncMock(return_value=cache)
+        harness = _prepare_async_setup_entry_harness(
+            monkeypatch, stub_coordinator_factory, loop
         )
-        monkeypatch.setattr(integration, "_register_instance", lambda *_: None)
-        monkeypatch.setattr(integration, "_unregister_instance", lambda *_: cache)
-        monkeypatch.setattr(
-            integration, "_async_soft_migrate_data_to_options", AsyncMock()
-        )
-        monkeypatch.setattr(integration, "_async_migrate_unique_ids", AsyncMock())
-        monkeypatch.setattr(
-            integration, "_async_relink_button_devices", AsyncMock()
-        )
-        monkeypatch.setattr(
-            integration, "_async_relink_subentry_entities", AsyncMock()
-        )
-        monkeypatch.setattr(integration, "_async_save_secrets_data", AsyncMock())
-        monkeypatch.setattr(integration, "_async_seed_manual_credentials", AsyncMock())
-        monkeypatch.setattr(integration, "_async_normalize_device_names", AsyncMock())
-        monkeypatch.setattr(
-            integration, "_async_release_shared_fcm", AsyncMock(return_value=None)
-        )
-
-        class _RegisterViewStub:
-            def __init__(self, hass: Any) -> None:
-                self.hass = hass
-
-        monkeypatch.setattr(integration, "GoogleFindMyMapView", _RegisterViewStub)
-        monkeypatch.setattr(
-            integration, "GoogleFindMyMapRedirectView", _RegisterViewStub
-        )
-
-        dummy_fcm = SimpleNamespace(
-            register_coordinator=lambda *_: None,
-            unregister_coordinator=lambda *_: None,
-            _start_listening=AsyncMock(return_value=None),
-            request_stop=lambda: None,
-        )
-        monkeypatch.setattr(
-            integration,
-            "_async_acquire_shared_fcm",
-            AsyncMock(return_value=dummy_fcm),
-        )
-
-        coordinator_cls = stub_coordinator_factory()
-        # Ensure isinstance checks in platform modules resolve to the stub coordinator.
-        monkeypatch.setattr(
-            coordinator_module, "GoogleFindMyCoordinator", coordinator_cls
-        )
-        monkeypatch.setattr(integration, "GoogleFindMyCoordinator", coordinator_cls)
-        monkeypatch.setattr(button_module, "GoogleFindMyCoordinator", coordinator_cls)
-        monkeypatch.setattr(
-            map_view_module,
-            "GoogleFindMyCoordinator",
-            coordinator_cls,
-            raising=False,
-        )
-
-        entry = _StubConfigEntry()
-        hass = _StubHass(entry, loop)
+        integration = harness.integration
+        button_module = harness.button_module
+        map_view_module = harness.map_view_module
+        entry = harness.entry
+        hass = harness.hass
+        cache = harness.cache
 
         # Recorder history module stub required by the map view handler.
         history_module = ModuleType("homeassistant.components.recorder.history")
@@ -923,93 +966,13 @@ async def test_async_setup_entry_propagates_subentry_registration(
 
     loop = asyncio.get_running_loop()
 
-    integration = importlib.import_module("custom_components.googlefindmy")
-    coordinator_module = importlib.import_module(
-        "custom_components.googlefindmy.coordinator"
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
     )
-    button_module = importlib.import_module("custom_components.googlefindmy.button")
-    sys.modules.pop("custom_components.googlefindmy.map_view", None)
-    map_view_module = importlib.import_module(
-        "custom_components.googlefindmy.map_view"
-    )
-
-    cache = _StubCache()
-    monkeypatch.setattr(
-        integration.TokenCache, "create", AsyncMock(return_value=cache)
-    )
-    monkeypatch.setattr(integration, "_register_instance", lambda *_: None)
-    monkeypatch.setattr(integration, "_unregister_instance", lambda *_: cache)
-    monkeypatch.setattr(
-        integration, "_async_soft_migrate_data_to_options", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        integration, "_async_migrate_unique_ids", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        integration, "_async_relink_button_devices", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        integration, "_async_relink_subentry_entities", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        integration, "_async_save_secrets_data", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        integration, "_async_seed_manual_credentials", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        integration, "_async_normalize_device_names", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        integration, "_async_release_shared_fcm", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        integration,
-        "_async_self_heal_duplicate_entities",
-        AsyncMock(return_value=None),
-    )
-    monkeypatch.setattr(
-        integration,
-        "_ensure_post_migration_consistency",
-        AsyncMock(return_value=(True, "user@example.com")),
-    )
-    monkeypatch.setattr(integration, "_self_heal_device_registry", lambda *_: None)
-
-    class _RegisterViewStub:
-        def __init__(self, hass_obj: Any) -> None:
-            self.hass = hass_obj
-
-    monkeypatch.setattr(integration, "GoogleFindMyMapView", _RegisterViewStub)
-    monkeypatch.setattr(integration, "GoogleFindMyMapRedirectView", _RegisterViewStub)
-
-    services_module = importlib.import_module(
-        "custom_components.googlefindmy.services"
-    )
-    monkeypatch.setattr(
-        services_module,
-        "async_register_services",
-        AsyncMock(return_value=None),
-    )
-
-    dummy_fcm = SimpleNamespace(
-        register_coordinator=lambda *_: None,
-        unregister_coordinator=lambda *_: None,
-        _start_listening=AsyncMock(return_value=None),
-        request_stop=lambda: None,
-    )
-    monkeypatch.setattr(
-        integration,
-        "_async_acquire_shared_fcm",
-        AsyncMock(return_value=dummy_fcm),
-    )
-
-    coordinator_cls = stub_coordinator_factory()
-    monkeypatch.setattr(coordinator_module, "GoogleFindMyCoordinator", coordinator_cls)
-    monkeypatch.setattr(integration, "GoogleFindMyCoordinator", coordinator_cls)
-    monkeypatch.setattr(button_module, "GoogleFindMyCoordinator", coordinator_cls)
-    monkeypatch.setattr(
-        map_view_module, "GoogleFindMyCoordinator", coordinator_cls, raising=False
-    )
+    integration = harness.integration
+    map_view_module = harness.map_view_module
+    entry = harness.entry
+    hass = harness.hass
 
     class _EntityRegistryStub:
         def __init__(self) -> None:
