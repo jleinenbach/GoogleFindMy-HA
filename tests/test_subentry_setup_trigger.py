@@ -16,7 +16,7 @@ from custom_components.googlefindmy.const import DOMAIN
 from tests.helpers.homeassistant import (
     FakeConfigEntriesManager,
     FakeHass,
-    config_entry_with_subentries,
+    config_entry_with_runtime_managed_subentries,
 )
 
 
@@ -37,7 +37,7 @@ async def test_async_ensure_subentries_are_setup_schedules_all_children() -> Non
         subentry_id="child-disabled",
     )
 
-    parent_entry = config_entry_with_subentries(
+    parent_entry = config_entry_with_runtime_managed_subentries(
         entry_id="parent",
         domain=DOMAIN,
         subentries=[pending_subentry, active_subentry, disabled_subentry],
@@ -70,7 +70,7 @@ async def test_async_ensure_subentries_are_setup_warns_and_raises_on_failure(
         subentry_id="child-failure",
     )
 
-    parent_entry = config_entry_with_subentries(
+    parent_entry = config_entry_with_runtime_managed_subentries(
         entry_id="parent",
         domain=DOMAIN,
         subentries=[successful_subentry, failing_subentry],
@@ -93,6 +93,30 @@ async def test_async_ensure_subentries_are_setup_warns_and_raises_on_failure(
         failing_subentry.entry_id,
     ]
     assert any(
-        "Failed to set up" in record.getMessage() and failing_subentry.entry_id in record.getMessage()
+        "setup returned False" in record.getMessage()
+        and failing_subentry.entry_id in record.getMessage()
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_subentries_are_setup_falls_back_to_subentry_id() -> None:
+    """Freshly created subentries without entry_id should fall back to subentry_id."""
+
+    pending_subentry = SimpleNamespace(
+        entry_id=None,
+        subentry_id="child-created",
+    )
+
+    parent_entry = config_entry_with_runtime_managed_subentries(
+        entry_id="parent",
+        domain=DOMAIN,
+        subentries={pending_subentry.subentry_id: pending_subentry},
+    )
+
+    manager = FakeConfigEntriesManager([parent_entry])
+    hass = FakeHass(config_entries=manager)
+
+    await _async_ensure_subentries_are_setup(hass, parent_entry)
+
+    assert manager.setup_calls == [pending_subentry.subentry_id]
