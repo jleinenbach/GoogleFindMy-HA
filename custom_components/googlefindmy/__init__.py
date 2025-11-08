@@ -4211,6 +4211,76 @@ async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bo
     return True
 
 
+async def _async_ensure_subentries_are_setup(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Ensure programmatically created subentries are fully set up.
+
+    Home Assistant's config subentry handbook requires parent entries to trigger
+    setup for their child subentries after synchronizing them. See
+    docs/CONFIG_SUBENTRIES_HANDBOOK.md (Section IV.B, step 3).
+    """
+
+    subentries = hass.config_entries.async_get_subentries(entry.entry_id)
+    if not subentries:
+        return
+
+    setup_ready_states: set[object] = {ConfigEntryState.LOADED}
+    setup_in_progress = getattr(ConfigEntryState, "SETUP_IN_PROGRESS", None)
+    if setup_in_progress is not None:
+        setup_ready_states.add(setup_in_progress)
+
+    pending: list[ConfigEntry | ConfigSubentry] = []
+    for subentry in subentries:
+        disabled_by = getattr(subentry, "disabled_by", None)
+        if disabled_by is not None:
+            _LOGGER.debug(
+                "[%s] Skipping setup for disabled subentry '%s'",  # noqa: G004
+                entry.entry_id,
+                subentry.entry_id,
+            )
+            continue
+        state = cast(ConfigEntryState | None, getattr(subentry, "state", None))
+        if state in setup_ready_states:
+            _LOGGER.debug(
+                "[%s] Subentry '%s' already in active state %s",  # noqa: G004
+                entry.entry_id,
+                subentry.entry_id,
+                state,
+            )
+            continue
+        pending.append(subentry)
+
+    if not pending:
+        return
+
+    _LOGGER.debug(
+        "[%s] Triggering setup for %d subentries",  # noqa: G004
+        entry.entry_id,
+        len(pending),
+    )
+    results = await asyncio.gather(
+        *(hass.config_entries.async_setup(subentry.entry_id) for subentry in pending),
+        return_exceptions=True,
+    )
+    for subentry, result in zip(pending, results):
+        if isinstance(result, Exception):
+            _LOGGER.warning(
+                "[%s] Subentry '%s' setup raised %s: %s",  # noqa: G004
+                entry.entry_id,
+                subentry.entry_id,
+                type(result).__name__,
+                result,
+            )
+            continue
+        if result is False:
+            _LOGGER.warning(
+                "[%s] Subentry '%s' setup returned False",  # noqa: G004
+                entry.entry_id,
+                subentry.entry_id,
+            )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """Set up a config entry.
 
@@ -4688,18 +4758,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         ]
     )
 
-    # Ensure Home Assistant sets up the child subentries once they exist.
-    subentries = hass.config_entries.async_get_subentries(entry.entry_id)
-    if subentries:
-        _LOGGER.debug(
-            "[%s] Triggering setup for %d subentries", entry.entry_id, len(subentries)
-        )
-        await asyncio.gather(
-            *(
-                hass.config_entries.async_setup(subentry.entry_id)
-                for subentry in subentries
-            )
-        )
+    await _async_ensure_subentries_are_setup(hass, entry)
 
     bucket = domain_bucket
 
