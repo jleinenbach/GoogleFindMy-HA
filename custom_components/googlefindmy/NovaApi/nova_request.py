@@ -370,28 +370,52 @@ class AsyncTTLPolicy(TTLPolicy):
 
 def _get_initial_token_sync(username: str, _logger) -> str:
     """Get or create the initial ADM token in sync path and ensure TTL metadata is recorded."""
-    token = get_cached_value(f"adm_token_{username}") or get_cached_value("adm_token")
+    # Safe cache access - handle multi-entry scenarios during validation
+    token = None
+    try:
+        token = get_cached_value(f"adm_token_{username}") or get_cached_value("adm_token")
+    except Exception:  # noqa: BLE001
+        # Cache not available during validation
+        pass
+
     if not token:
         _logger.info("Attempting to generate new ADM token...")
         token = get_adm_token(username)
         if token:
-            set_cached_value(f"adm_token_issued_at_{username}", time.time())
-            if not get_cached_value(f"adm_probe_startup_left_{username}"):
-                set_cached_value(f"adm_probe_startup_left_{username}", 3)
+            try:
+                set_cached_value(f"adm_token_issued_at_{username}", time.time())
+                probe_left = get_cached_value(f"adm_probe_startup_left_{username}")
+                if not probe_left:
+                    set_cached_value(f"adm_probe_startup_left_{username}", 3)
+            except Exception:  # noqa: BLE001
+                # Cache not available - skip TTL metadata
+                pass
     if not token: raise ValueError("No ADM token available - please reconfigure authentication")
     return token
 
 
 async def _get_initial_token_async(username: str, _logger) -> str:
     """Get or create the initial ADM token in async path and ensure TTL metadata is recorded."""
-    token = await async_get_cached_value(f"adm_token_{username}") or await async_get_cached_value("adm_token")
+    # Safe cache access - handle multi-entry scenarios during validation
+    token = None
+    try:
+        token = await async_get_cached_value(f"adm_token_{username}") or await async_get_cached_value("adm_token")
+    except Exception:  # noqa: BLE001
+        # Cache not available during validation
+        pass
+
     if not token:
         _logger.info("Attempting to generate new ADM token (async)...")
         token = await async_get_adm_token_api(username)
         if token:
-            await async_set_cached_value(f"adm_token_issued_at_{username}", time.time())
-            if not await async_get_cached_value(f"adm_probe_startup_left_{username}"):
-                await async_set_cached_value(f"adm_probe_startup_left_{username}", 3)
+            try:
+                await async_set_cached_value(f"adm_token_issued_at_{username}", time.time())
+                probe_left = await async_get_cached_value(f"adm_probe_startup_left_{username}")
+                if not probe_left:
+                    await async_set_cached_value(f"adm_probe_startup_left_{username}", 3)
+            except Exception:  # noqa: BLE001
+                # Cache not available - skip TTL metadata
+                pass
     if not token: raise ValueError("No ADM token available - please reconfigure authentication")
     return token
 
@@ -464,7 +488,14 @@ def nova_request(api_scope: str, hex_payload: str) -> str:
         pass
 
     url = f"https://android.googleapis.com/nova/{api_scope}"
-    username = get_username()
+
+    # Safe username retrieval - handle cache errors during multi-entry validation
+    try:
+        username = get_username()
+    except Exception:  # noqa: BLE001
+        # Cache not available during validation or multi-entry scenario
+        raise ValueError("Username is not available for nova_request.")
+
     token = _get_initial_token_sync(username, _LOGGER)
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
@@ -477,9 +508,24 @@ def nova_request(api_scope: str, hex_payload: str) -> str:
     except (binascii.Error, ValueError) as e:
         raise ValueError("Invalid hex payload for Nova request") from e
 
+    # Wrap cache functions to handle multi-entry scenarios gracefully during config flow validation
+    def safe_get_cached_value(key: str):
+        try:
+            return get_cached_value(key)
+        except Exception:  # noqa: BLE001
+            # Cache unavailable (multi-entry validation) - return None to skip TTL logic
+            return None
+
+    def safe_set_cached_value(key: str, value):
+        try:
+            set_cached_value(key, value)
+        except Exception:  # noqa: BLE001
+            # Cache unavailable (multi-entry validation) - skip caching
+            pass
+
     policy = TTLPolicy(
         username=username, logger=_LOGGER,
-        get_value=get_cached_value, set_value=set_cached_value,
+        get_value=safe_get_cached_value, set_value=safe_set_cached_value,
         refresh_fn=lambda: get_adm_token(username),
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
     )
@@ -572,8 +618,19 @@ async def async_nova_request(
         NovaError: on other unrecoverable errors like network issues after retries.
     """
     url = f"https://android.googleapis.com/nova/{api_scope}"
-    user = username or await async_get_username()
-    if not user: raise ValueError("Username is not available for async_nova_request.")
+
+    # Safe username retrieval - handle cache errors during multi-entry validation
+    if username:
+        user = username
+    else:
+        try:
+            user = await async_get_username()
+        except Exception:  # noqa: BLE001
+            # Cache not available during validation or multi-entry scenario
+            user = None
+
+    if not user:
+        raise ValueError("Username is not available for async_nova_request.")
 
     token = await _get_initial_token_async(user, _LOGGER)
     headers = {
@@ -589,9 +646,24 @@ async def async_nova_request(
     except (binascii.Error, ValueError) as e:
         raise ValueError("Invalid hex payload for Nova request") from e
 
+    # Wrap cache functions to handle multi-entry scenarios gracefully during config flow validation
+    async def safe_get_cached_value(key: str):
+        try:
+            return await async_get_cached_value(key)
+        except Exception:  # noqa: BLE001
+            # Cache unavailable (multi-entry validation) - return None to skip TTL logic
+            return None
+
+    async def safe_set_cached_value(key: str, value):
+        try:
+            await async_set_cached_value(key, value)
+        except Exception:  # noqa: BLE001
+            # Cache unavailable (multi-entry validation) - skip caching
+            pass
+
     policy = AsyncTTLPolicy(
         username=user, logger=_LOGGER,
-        get_value=async_get_cached_value, set_value=async_set_cached_value,
+        get_value=safe_get_cached_value, set_value=safe_set_cached_value,
         refresh_fn=lambda: async_get_adm_token_api(user),
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
     )
