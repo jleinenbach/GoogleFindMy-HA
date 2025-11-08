@@ -1,5 +1,5 @@
 # tests/test_multi_account_end_to_end.py
-"""End-to-end multi-account scenario covering services and coordinator hooks."""
+"""End-to-end regression coverage for multi-account setups."""
 
 from __future__ import annotations
 
@@ -459,6 +459,8 @@ def test_multi_account_end_to_end(
             assert await integration.async_setup(hass, {})
             assert await integration.async_setup_entry(hass, entry_one)
             assert await integration.async_setup_entry(hass, entry_two)
+            assert entry_one._background_tasks, "Subentry setup task was not scheduled"
+            assert entry_two._background_tasks, "Subentry setup task was not scheduled"
 
             if hass._tasks:
                 await asyncio.gather(*hass._tasks)
