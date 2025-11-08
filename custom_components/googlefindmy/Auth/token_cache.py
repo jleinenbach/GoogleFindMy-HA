@@ -299,7 +299,25 @@ def _set_default_entry_id(entry_id: str, force: bool = False) -> None:
 
 
 def _get_default_cache() -> TokenCache:
-    """Return the default cache instance or raise if ambiguous."""
+    """Return the default cache instance or raise if ambiguous.
+
+    Priority order for multi-entry support:
+    1. Registered cache provider (from nova_request during API calls)
+    2. Default entry ID (single entry or explicitly set)
+    3. Single instance (only one entry exists)
+    4. Error (multiple entries, ambiguous)
+    """
+    # Check for registered cache provider first (multi-entry support)
+    try:
+        from ..NovaApi import nova_request
+        provider_cache = nova_request._get_cache_provider()
+        if provider_cache:
+            return provider_cache
+    except Exception:  # noqa: BLE001
+        # Nova request not available or no provider registered
+        pass
+
+    # Fall back to default entry ID logic
     if _DEFAULT_ENTRY_ID and (cache := _INSTANCES.get(_DEFAULT_ENTRY_ID)):
         return cache
     if len(_INSTANCES) == 1:
