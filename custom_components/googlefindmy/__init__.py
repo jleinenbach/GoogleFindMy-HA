@@ -4267,10 +4267,25 @@ async def _async_ensure_subentries_are_setup(
         len(pending),
     )
     results = await asyncio.gather(
-        *(hass.config_entries.async_setup(subentry.entry_id) for subentry in pending)
+        *(hass.config_entries.async_setup(subentry.entry_id) for subentry in pending),
+        return_exceptions=True,
     )
+    first_exception: BaseException | None = None
     false_failures: list[str] = []
     for subentry, result in zip(pending, results):
+        if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            _LOGGER.warning(
+                "[%s] Subentry '%s' setup raised %s: %s",  # noqa: G004
+                entry.entry_id,
+                subentry.entry_id,
+                type(result).__name__,
+                result,
+            )
+            if first_exception is None:
+                first_exception = result
+            continue
         if result is False:
             _LOGGER.warning(
                 "[%s] Subentry '%s' setup returned False",  # noqa: G004
@@ -4278,6 +4293,8 @@ async def _async_ensure_subentries_are_setup(
                 subentry.entry_id,
             )
             false_failures.append(subentry.entry_id)
+    if first_exception is not None:
+        raise first_exception
     if false_failures:
         raise ConfigEntryNotReady(
             "One or more subentries returned False during setup: %s"
