@@ -170,12 +170,23 @@ Subentries may set `unique_id`. The value only needs to be unique within the sco
 
 Subentries change how integrations load and unload config entries. `async_setup_entry` and `async_unload_entry` must differentiate between parent and child entries.
 
-> **Quick reference — `entry_id` vs. `subentry_id`:**
-> * `entry.entry_id` always points to the parent config entry (even when accessed from a child).
-> * `subentry.subentry_id` identifies an individual child and must be passed to `hass.config_entries.async_setup`, `async_reload`, and `async_unload` when operating on that child.
-> * Avoid mixing these identifiers; using the parent `entry_id` for a child operation will reload or unload the wrong entry.
+### A. Identifier guardrails (`entry_id` vs. `subentry_id`)
 
-### A. Routing setup
+Config subentries expose **two** identifiers. Misusing them leads to reload failures that surface as stuck entries or missing entities.
+
+| Identifier | Scope | When to use |
+| ---------- | ----- | ----------- |
+| `subentry.subentry_id` | Key inside `parent_entry.subentries` | Iterating or mutating the parent mapping (for example, to look up a specific child in memory). |
+| `subentry.entry_id` | Global config entry registry key | **Every lifecycle helper** (`async_setup`, `async_reload`, `async_unload`, `async_remove_subentry`, etc.). |
+
+**Critical rule:** Always pass `subentry.entry_id` to Home Assistant's config entry helpers. Passing `subentry.subentry_id` will raise `UnknownEntry` internally, causing unloads to fail and preventing reload-driven rebuild services from completing. This mirrors the runtime behavior of parents: both parent entries and their children use `entry_id` as the canonical identifier within the global registry.
+
+> **Quick reference**
+> * Use `entry.entry_id` (parent) or `subentry.entry_id` (child) with Home Assistant lifecycle helpers.
+> * Use `subentry.subentry_id` only when indexing `entry.subentries`.
+> * Never mix the identifiers. If a helper expects an `entry_id`, always supply the global `entry_id` attribute exposed by the `ConfigEntry` or `ConfigSubentry` instance.
+
+### B. Routing setup
 
 ```python
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -184,7 +195,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return await _async_setup_parent_entry(hass, entry)
 ```
 
-### B. Parent setup
+### C. Parent setup
 
 1. Create the shared client (for example, API session, MQTT connection). Raise `ConfigEntryNotReady` if the connection cannot be established.
 2. Store the client in `hass.data[DOMAIN][entry.entry_id]` so children can retrieve it.
@@ -199,7 +210,7 @@ async def _async_setup_parent_entry(hass: HomeAssistant, entry: ConfigEntry) -> 
     if subentries:
         await asyncio.gather(
             *(
-                hass.config_entries.async_setup(subentry.subentry_id)
+                hass.config_entries.async_setup(subentry.entry_id)
                 for subentry in subentries
             )
         )
@@ -209,7 +220,7 @@ async def _async_setup_parent_entry(hass: HomeAssistant, entry: ConfigEntry) -> 
 
 The `hass.config_entries.async_get_subentries` helper referenced in older drafts of the handbook does **not** exist. Always enumerate children from the parent entry's `subentries` mapping as shown above.
 
-### C. Subentry setup
+### D. Subentry setup
 
 1. Read `parent_entry_id = entry.parent_entry_id`.
 2. Retrieve the shared client from `hass.data[parent_entry_id]`. If the key is missing, raise `ConfigEntryNotReady` to retry later.
@@ -233,7 +244,7 @@ async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
     await hass.config_entries.async_reload(entry.entry_id)
 
     for subentry in subentries:
-        await hass.config_entries.async_reload(subentry.subentry_id)
+        await hass.config_entries.async_reload(subentry.entry_id)
 
 ```
 
@@ -246,7 +257,7 @@ async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
   and prevent `KeyError`/`ConfigEntryNotReady` loops when shared data is still
   initializing.
 
-### D. Parent unload
+### E. Parent unload
 
 1. Fetch all subentries via `list(entry.subentries.values())`.
 2. `async_unload` every child and aggregate the boolean results.
@@ -259,7 +270,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: ConfigEntry) ->
     subentries = list(entry.subentries.values())
     unload_results = await asyncio.gather(
         *(
-            hass.config_entries.async_unload(subentry.subentry_id)
+            hass.config_entries.async_unload(subentry.entry_id)
             for subentry in subentries
         ),
         return_exceptions=True,
@@ -268,12 +279,12 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: ConfigEntry) ->
     # ... continue with parent unload logic ...
 ```
 
-### E. Subentry unload
+### F. Subentry unload
 
 1. Call `await hass.config_entries.async_unload_platforms(entry, PLATFORMS)`.
 2. Delete `entry.runtime_data` (if present) after the platforms unload.
 
-### F. Cascading removal
+### G. Cascading removal
 
 Home Assistant enforces cascade deletion: removing a parent entry triggers unload/remove for each child before finalizing the parent removal. Implement `async_remove_entry` only when external cleanups (for example, cloud webhooks) require it.
 
