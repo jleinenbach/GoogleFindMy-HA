@@ -291,6 +291,12 @@ def _prepare_async_setup_entry_harness(
 ) -> AsyncSetupEntryHarness:
     """Apply common integration patches and return the prepared context."""
 
+    # Harness attribute usage expectations:
+    # * test_hass_data_layout relies on integration, button_module,
+    #   map_view_module, hass, entry, and cache.
+    # * test_async_setup_entry_propagates_subentry_registration consumes
+    #   integration, hass, and entry.
+
     integration = importlib.import_module("custom_components.googlefindmy")
     coordinator_module = importlib.import_module(
         "custom_components.googlefindmy.coordinator"
