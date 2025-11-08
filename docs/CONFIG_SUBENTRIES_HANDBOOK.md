@@ -186,6 +186,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 3. Enumerate children via `list(entry.subentries.values())` and `async_setup` each child. This ensures subentries created while the parent was unloaded are loaded on restart. Allow setup failures to propagate (do **not** pass `return_exceptions=True` to `asyncio.gather`) so Home Assistant correctly reflects parent/subentry health.
 4. Register an update listener that reloads children when the parent options change.
 
+```python
+async def _async_setup_parent_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up the parent entry and its children."""
+
+    subentries = list(entry.subentries.values())
+    if subentries:
+        await asyncio.gather(
+            *(
+                hass.config_entries.async_setup(subentry.entry_id)
+                for subentry in subentries
+            )
+        )
+
+    # ... continue with parent setup logic ...
+```
+
+The `hass.config_entries.async_get_subentries` helper referenced in older drafts of the handbook does **not** exist. Always enumerate children from the parent entry's `subentries` mapping as shown above.
+
 ### C. Subentry setup
 
 1. Read `parent_entry_id = entry.parent_entry_id`.
@@ -193,11 +211,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 3. Attach any subentry-specific runtime data (for example, `entry.runtime_data = SubentryHandler(client, entry.data)`).
 4. Forward setup to the platforms with `await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)`.
 
+Update listeners must also operate exclusively on `entry.subentries`.
+Reload the parent entry before triggering each child so shared resources in
+`hass.data[parent_entry_id]` are recreated before subentry setup resumes. Wait
+for each child reload sequentially to avoid racing a subentry against the
+parent rebuild:
+
+```python
+async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Handle options updates on the parent entry."""
+
+    subentries = list(entry.subentries.values())
+
+    # Reload the parent first so shared state in hass.data is rebuilt before
+    # children execute their setup routines again.
+    await hass.config_entries.async_reload(entry.entry_id)
+
+    for subentry in subentries:
+        await hass.config_entries.async_reload(subentry.entry_id)
+
+```
+
+#### Concurrency pitfalls
+
+* Do not schedule parent and child reloads concurrently—the shared client in
+  `hass.data[parent_entry_id]` must be rebuilt before any child setup runs.
+* Avoid reloading subentries in parallel unless every child can safely handle
+  a missing client and retry later. Sequential reloads keep the listener simple
+  and prevent `KeyError`/`ConfigEntryNotReady` loops when shared data is still
+  initializing.
+
 ### D. Parent unload
 
 1. Fetch all subentries via `list(entry.subentries.values())`.
 2. `async_unload` every child and aggregate the boolean results.
 3. When all children unload successfully, remove the shared client from `hass.data` and close connections.
+
+```python
+async def _async_unload_parent_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload the parent entry and every child."""
+
+    subentries = list(entry.subentries.values())
+    unload_results = await asyncio.gather(
+        *(
+            hass.config_entries.async_unload(subentry.entry_id)
+            for subentry in subentries
+        ),
+        return_exceptions=True,
+    )
+
+    # ... continue with parent unload logic ...
+```
 
 ### E. Subentry unload
 
@@ -276,7 +340,7 @@ Users can click "Add" on the parent entry card. Home Assistant invokes the regis
 Integrations can create subentries programmatically when runtime discovery finds new devices:
 
 1. Detect the device (for example, MQTT discovery message, Zeroconf advertisement).
-2. Locate the parent config entry and enumerate existing subentries via `list(parent_entry.subentries.values())`.
+2. Locate the parent config entry and enumerate existing subentries via `list(parent_entry.subentries.values())` (or inspect the `parent_entry.subentries` mapping directly).
 3. Create a new subentry if one does not already exist. Home Assistant automatically calls `async_setup_entry` for the new child.
 
 ## Section VIII: Peer-Review Checklist and Troubleshooting

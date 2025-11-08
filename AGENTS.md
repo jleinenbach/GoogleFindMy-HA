@@ -74,6 +74,7 @@
 * [Communicate uncertainty](#5-communicate-uncertainty)
 * [Type checking (mypy)](#7-type-checking-mypy)
 
+<a id="language-policy"></a>
 > **Scope & authority**
 >
 > **Directory scope:** applies to the entire repository (with continued emphasis on `custom_components/googlefindmy/**` and tests under `tests/**`).
@@ -88,6 +89,13 @@
 * [`tests/AGENTS.md`](tests/AGENTS.md) — Home Assistant config flow test stubs, helpers, discovery/update scaffolding details, **and** the package-layout note that requires package-relative imports now that `tests/` ships with an `__init__.py`. Also documents the coordinator device-registry expectations for `via_device` tuple handling so future stub updates remain aligned with Home Assistant 2025.10. The `_ensure_button_dependencies()` helper in `tests/test_button_setup.py` already prepares sufficient stubs to `import custom_components.googlefindmy.button`, so tests can reference coordinator attributes directly without reloading source snippets.
 * [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Full Home Assistant 2025.7+ handbook covering the architecture, config flow factories, lifecycle routing, discovery patterns, translation rules, and peer-review checklist for configuration subentries. Keep code and tests aligned with this contract.
   * Section VIII.D contains the new device/entity registry troubleshooting playbooks. Reference them whenever you touch `_async_setup_subentry`, registry rebuild services, or device cleanup helpers, and summarize the relevant diagnostics in your PR description.
+
+### Documentation quick links
+
+* [Docs & i18n requirements (§9)](#9-docs--i18n-minimal-but-strict)
+* [Rule §9.DOC (documentation accuracy)](#rule-9doc-canonical)
+* [Language policy (English-only docs)](#language-policy)
+* [Docstrings & typing expectations (§11.1)](#docstrings--typing)
 * **Tracker device linkage:** Tracker entities rely on Home Assistant's automatic parent-device assignment for the `TRACKER_SUBENTRY_KEY`. Do not introduce manual `via_device` pointers for tracker `DeviceInfo` payloads; only service-level entities may declare `via_device` tuples when modelling nested hardware chains documented upstream. When updating tracker devices via `async_update_device`, always include `add_config_entry_id` (or `config_entry_id` on legacy cores) whenever a tracker subentry identifier is present so Home Assistant keeps the device associated with its config entry.
 * **Config entry version source of truth:** Use `custom_components/googlefindmy/const.py::CONFIG_ENTRY_VERSION` whenever flows, migrations, or tests need the integration's config-entry version. Do not introduce duplicate version constants in other modules.
 * [`custom_components/googlefindmy/ProtoDecoders/AGENTS.md`](custom_components/googlefindmy/ProtoDecoders/AGENTS.md) — Protobuf overlay structure requirements, including the mandate that generated message classes remain nominal subclasses of `google.protobuf.message.Message` so helper utilities typed against the concrete base keep accepting them.
@@ -247,6 +255,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 * Keep runtime objects on `entry.runtime_data` (typed); avoid module-global singletons.
 * Inject the session via `async_get_clientsession(hass)`; never create raw `ClientSession`.
 * Entities: stable `unique_id`, `_attr_has_entity_name = True`, correct `device_info` (identifiers/model), proper device classes & categories; noisy defaults disabled.
+<a id="docstrings--typing"></a>
 * **Docstrings & typing.** English docstrings for public classes/functions; full type hints; track the **current HA core baseline** for Python/typing strictness.
 * **Strict typing for touched modules.** Run the repository mypy command (see "Local run") and resolve all `--strict` findings for every modified Python file, including tests, before finalizing a PR.
 
@@ -404,6 +413,7 @@ Add to the PR description:
   * ⚠️ Hassfest rejects `config.menu` objects. When a flow shows a menu, translate the options under `config.step.<step_id>.menu_options` (or the matching `options.*`/`config_subentries.*` section) instead of adding a top-level `menu` block.
 * Translate service and exception texts (`translation_key`).
 * Update README only when user-visible behavior/options change.
+<a id="rule-9doc-canonical"></a>
 * **Rule §9.DOC (canonical):** Keep documentation and docstrings accurate for existing features by correcting errors and augmenting missing details without shortening or deleting content. When functionality is intentionally removed or deprecated, remove or reduce the corresponding documentation to reflect that change while preserving historical clarity.
   * **Decision algorithm:** IF functionality is intentionally removed/deprecated → update or remove the related documentation to match the removal (include deprecation context as needed); ELSE → correct/augment the documentation without shortening it.
 
