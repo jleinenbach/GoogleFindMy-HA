@@ -103,12 +103,26 @@ unavailable.
   integration can convert authentication issues into the correct abort reasons.
 * The custom `UNDEFINED` sentinel behaves like the upstream constant and is
   available for any tests that need to assert default/optional handling.
+* When helpers raise `ConfigEntryNotReady`, companion regression tests should
+  assert both the warning log and the exception so behavior stays aligned with
+  the integration's automatic retry expectations.
 
 ### Adding new helpers
 
 Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
+
+#### `config_entry_with_subentries` factory
+
+The :func:`config_entry_with_subentries` helper in
+``tests.helpers.homeassistant`` builds a :class:`FakeConfigEntry` prepopulated
+with subentries. Provide keyword arguments mapping each subentry key to a
+``ConfigSubentry`` payload dictionary—mirroring the runtime helper contract—so
+tests can focus on their assertions instead of recreating the boilerplate
+structure. The factory normalizes identifiers, attaches the entry to the fake
+registry cache, and returns the configured ``FakeConfigEntry`` ready for use in
+setup and reload assertions.
 
 #### Device registry listing helper
 
