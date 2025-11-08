@@ -211,20 +211,27 @@ The `hass.config_entries.async_get_subentries` helper referenced in older drafts
 3. Attach any subentry-specific runtime data (for example, `entry.runtime_data = SubentryHandler(client, entry.data)`).
 4. Forward setup to the platforms with `await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)`.
 
-Update listeners must also operate exclusively on `entry.subentries`:
+Update listeners must also operate exclusively on `entry.subentries`.
+Reload the parent entry before triggering each child so shared resources in
+`hass.data[parent_entry_id]` are recreated before subentry setup resumes:
 
 ```python
 async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options updates on the parent entry."""
 
     subentries = list(entry.subentries.values())
-    await asyncio.gather(
-        hass.config_entries.async_reload(entry.entry_id),
-        *(
-            hass.config_entries.async_reload(subentry.entry_id)
-            for subentry in subentries
-        ),
-    )
+
+    # Reload the parent first so shared state in hass.data is rebuilt before
+    # children execute their setup routines again.
+    await hass.config_entries.async_reload(entry.entry_id)
+
+    if subentries:
+        await asyncio.gather(
+            *(
+                hass.config_entries.async_reload(subentry.entry_id)
+                for subentry in subentries
+            ),
+        )
 ```
 
 ### D. Parent unload
