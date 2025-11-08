@@ -33,6 +33,21 @@ configuration. Prefer decorating new coroutine tests with
 keeps event-loop handling centralized and avoids duplicated scaffolding in
 each test module.
 
+### Async setup entry harness expectations
+
+The shared ``AsyncSetupEntryHarness`` in
+``tests/test_hass_data_layout.py`` centralizes repeated patching for
+``async_setup_entry`` coverage. Keep the documented attribute consumers in
+sync with reality when refactoring:
+
+* ``test_hass_data_layout`` relies on ``integration``, ``button_module``,
+  ``map_view_module``, ``hass``, ``entry``, and ``cache``.
+* ``test_async_setup_entry_propagates_subentry_registration`` consumes only
+  ``integration``, ``hass``, and ``entry``.
+
+If a test stops using an attribute, update both the harness comment and this
+list so future cleanups can trim unused fields confidently.
+
 ## ADM token retrieval contract
 
 The ADM token helpers (`custom_components/googlefindmy/Auth/adm_token_retrieval.py`)
