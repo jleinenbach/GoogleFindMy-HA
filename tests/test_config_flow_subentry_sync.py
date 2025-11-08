@@ -31,7 +31,6 @@ from custom_components.googlefindmy.const import (
     OPT_OPTIONS_SCHEMA_VERSION,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
-    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
@@ -58,6 +57,7 @@ class _ConfigEntriesManagerStub:
         self.updated: list[dict[str, Any]] = []
         self.entry_updates: list[dict[str, Any]] = []
         self.removed: list[str] = []
+        self.setup_calls: list[str] = []
 
     def async_entries(self, domain: str | None = None) -> list[Any]:
         if domain and domain != DOMAIN:
@@ -68,6 +68,16 @@ class _ConfigEntriesManagerStub:
         if entry_id == self._entry.entry_id:
             return self._entry
         return None
+
+    def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        return list(entry.subentries.values())
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
     def async_update_entry(self, entry: _EntryStub, **kwargs: Any) -> None:
         assert entry is self._entry
@@ -693,33 +703,13 @@ async def test_subentry_manager_preserves_adopted_owner_during_cleanup() -> None
     assert hass.config_entries.removed == []
 
 
-def test_supported_subentry_types_hide_service_and_tracker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """UI mapping hides service/tracker while manager access still resolves them."""
+def test_supported_subentry_types_disable_manual_additions() -> None:
+    """Config flow should not expose manual subentry factories to Home Assistant."""
 
     entry = _EntryStub()
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)
 
-    assert set(mapping) == {SUBENTRY_TYPE_HUB}
-    hub_factory = mapping[SUBENTRY_TYPE_HUB]
-    assert callable(hub_factory)
-    assert isinstance(hub_factory(), config_flow.HubSubentryFlowHandler)
-
-    monkeypatch.setattr(
-        config_flow.ConfigFlow,
-        "_should_expose_hidden_subentry_types",
-        staticmethod(lambda: True),
-    )
-
-    manager_mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)
-
-    assert set(manager_mapping) == {
-        SUBENTRY_TYPE_SERVICE,
-        SUBENTRY_TYPE_TRACKER,
-        SUBENTRY_TYPE_HUB,
-    }
-
-    assert isinstance(manager_mapping[SUBENTRY_TYPE_SERVICE](), config_flow.ServiceSubentryFlowHandler)
-    assert isinstance(manager_mapping[SUBENTRY_TYPE_TRACKER](), config_flow.TrackerSubentryFlowHandler)
+    assert mapping == {}
 
 
 @pytest.mark.asyncio

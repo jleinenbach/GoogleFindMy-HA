@@ -4688,6 +4688,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         ]
     )
 
+    # Ensure Home Assistant sets up the child subentries once they exist.
+    subentries = hass.config_entries.async_get_subentries(entry.entry_id)
+    if subentries:
+        _LOGGER.debug(
+            "[%s] Triggering setup for %d subentries", entry.entry_id, len(subentries)
+        )
+        await asyncio.gather(
+            *(
+                hass.config_entries.async_setup(subentry.entry_id)
+                for subentry in subentries
+            )
+        )
+
     bucket = domain_bucket
 
     # Coordinator setup (DR listeners, initial index, etc.)

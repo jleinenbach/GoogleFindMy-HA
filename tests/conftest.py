@@ -433,6 +433,7 @@ def _stub_homeassistant() -> None:
             self.unique_id: str | None = unique_id
             self.subentry_id: str = subentry_id or _next_subentry_id()
             self.translation_key: str | None = translation_key
+            self.entry_id: str = self.subentry_id
 
         def as_dict(self) -> dict[str, object]:  # pragma: no cover - helper parity
             return {

@@ -35,6 +35,7 @@ class _ManagerStub:
         self.updated: list[tuple[str, dict[str, Any]]] = []
         self.removed: list[str] = []
         self.reloads: list[str] = []
+        self.setup_calls: list[str] = []
 
     def async_update_entry(self, entry: _EntryStub, *, data: dict[str, Any]) -> None:
         assert entry is self.entry
@@ -68,6 +69,21 @@ class _ManagerStub:
 
     async def async_reload(self, entry_id: str) -> None:
         self.reloads.append(entry_id)
+
+    def async_get_entry(self, entry_id: str) -> _EntryStub | None:
+        if entry_id == self.entry.entry_id:
+            return self.entry
+        return None
+
+    def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
+        entry = self.async_get_entry(entry_id)
+        if entry is None:
+            return []
+        return list(entry.subentries.values())
+
+    async def async_setup(self, entry_id: str) -> bool:
+        self.setup_calls.append(entry_id)
+        return True
 
 
 class _EntryStub:

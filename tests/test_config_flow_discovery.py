@@ -64,9 +64,19 @@ def test_async_step_discovery_new_entry(
     monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
 
     class _ConfigEntries:
+        def __init__(self) -> None:
+            self.setup_calls: list[str] = []
+
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return []
+
+        def async_get_subentries(self, _entry_id: str) -> list[Any]:
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            self.setup_calls.append(entry_id)
+            return True
 
     class _FlowHass:
         def __init__(self) -> None:
@@ -161,13 +171,36 @@ def test_async_step_discovery_existing_entry_updates(
                 CONF_GOOGLE_EMAIL: "existing@example.com",
                 CONF_OAUTH_TOKEN: "old",
             }
+            self.entry_id = "existing-entry"
+            self.subentries: dict[str, Any] = {}
 
     entry = _Entry()
 
     class _ConfigEntries:
+        def __init__(self) -> None:
+            self.setup_calls: list[str] = []
+
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return [entry]
+
+        def async_get_entry(self, entry_id: str) -> _Entry | None:
+            if entry_id == entry.entry_id:
+                return entry
+            return None
+
+        def async_get_subentries(self, entry_id: str) -> list[Any]:
+            resolved = self.async_get_entry(entry_id)
+            if resolved is None:
+                return []
+            subentries = getattr(resolved, "subentries", None)
+            if isinstance(subentries, dict):
+                return list(subentries.values())
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            self.setup_calls.append(entry_id)
+            return True
 
     class _FlowHass:
         def __init__(self) -> None:
@@ -256,6 +289,7 @@ def test_async_step_discovery_update_info_existing_entry(
                 CONF_OAUTH_TOKEN: "old-token",
             }
             self.unique_id = unique_account_id("existing@example.com")
+            self.subentries: dict[str, Any] = {}
 
     entry = _Entry()
 
@@ -264,6 +298,7 @@ def test_async_step_discovery_update_info_existing_entry(
             self.updated: list[tuple[Any, dict[str, Any]]] = []
             self.reloaded: list[str] = []
             self.lookups: list[str] = []
+            self.setup_calls: list[str] = []
 
         def async_entries(self, domain: str) -> list[Any]:
             self.lookups.append(domain)
@@ -275,6 +310,24 @@ def test_async_step_discovery_update_info_existing_entry(
 
         def async_reload(self, entry_id: str) -> None:
             self.reloaded.append(entry_id)
+
+        def async_get_entry(self, entry_id: str) -> Any | None:
+            if entry_id == entry.entry_id:
+                return entry
+            return None
+
+        def async_get_subentries(self, entry_id: str) -> list[Any]:
+            resolved = self.async_get_entry(entry_id)
+            if resolved is None:
+                return []
+            subentries = getattr(resolved, "subentries", None)
+            if isinstance(subentries, dict):
+                return list(subentries.values())
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            self.setup_calls.append(entry_id)
+            return True
 
     class _Hass:
         def __init__(self) -> None:
@@ -388,8 +441,18 @@ def test_async_step_discovery_update_info_invalid_payload() -> None:
     """Invalid discovery-update payloads should abort early."""
 
     class _ConfigEntries:
+        def __init__(self) -> None:
+            self.setup_calls: list[str] = []
+
         def async_entries(self, domain: str) -> list[Any]:
             return []
+
+        def async_get_subentries(self, _entry_id: str) -> list[Any]:
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            self.setup_calls.append(entry_id)
+            return True
 
     class _Hass:
         def __init__(self) -> None:
@@ -491,13 +554,35 @@ def test_async_step_discovery_update_info_ingest_invalid_auth(
                 CONF_OAUTH_TOKEN: "old-token",
             }
             self.unique_id = unique_account_id("existing@example.com")
+            self.subentries: dict[str, Any] = {}
 
     entry = _Entry()
 
     class _ConfigEntries:
+        def __init__(self) -> None:
+            self.setup_calls: list[str] = []
+
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return [entry]
+
+        def async_get_entry(self, entry_id: str) -> Any | None:
+            if entry_id == entry.entry_id:
+                return entry
+            return None
+
+        def async_get_subentries(self, entry_id: str) -> list[Any]:
+            resolved = self.async_get_entry(entry_id)
+            if resolved is None:
+                return []
+            subentries = getattr(resolved, "subentries", None)
+            if isinstance(subentries, dict):
+                return list(subentries.values())
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            self.setup_calls.append(entry_id)
+            return True
 
     class _Hass:
         def __init__(self) -> None:
@@ -661,8 +746,18 @@ def test_async_step_discovery_invalid_payload() -> None:
     """Invalid payloads should abort with the documented reason."""
 
     class _ConfigEntries:
+        def __init__(self) -> None:
+            self.setup_calls: list[str] = []
+
         def async_entries(self, domain: str) -> list[Any]:
             return []
+
+        def async_get_subentries(self, _entry_id: str) -> list[Any]:
+            return []
+
+        async def async_setup(self, entry_id: str) -> bool:
+            self.setup_calls.append(entry_id)
+            return True
 
     class _FlowHass:
         def __init__(self) -> None:

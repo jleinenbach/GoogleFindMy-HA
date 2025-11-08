@@ -2198,75 +2198,19 @@ class ConfigFlow(
         """Return the options flow for an existing config entry."""
         return OptionsFlowHandler()
 
-    @staticmethod
-    def _should_expose_hidden_subentry_types() -> bool:
-        """Return True when all subentry types should be exposed to the caller."""
-
-        frame = inspect.currentframe()
-        if frame is None:
-            return False
-        try:
-            caller = frame.f_back
-            while caller is not None:
-                module_name = caller.f_globals.get("__name__")
-                if module_name == "homeassistant.config_entries" and caller.f_code.co_name in {
-                    "async_create_flow",
-                    "async_finish_flow",
-                }:
-                    return True
-                caller = caller.f_back
-        finally:
-            del frame
-        return False
-
     @classmethod
     @_typed_callback
     def async_get_supported_subentry_types(
         cls,
         _config_entry: ConfigEntry,
     ) -> dict[str, Callable[[], ConfigSubentryFlow]]:
-        """Return mapping of supported subentry types to their flow handlers."""
+        """Disable manual subentry creation via the config entry UI."""
 
-        # Home Assistant's config entry manager (2025.x and later) invokes the
-        # mapping values as ``factory()`` when the user presses an "Add"
-        # subentry button. Returning bare handler classes would therefore
-        # reintroduce the previous ``TypeError: missing 'config_entry'`` that
-        # surfaced before these factories were added.
-
-        def _factory(
-            flow_cls: type[ConfigSubentryFlow],
-        ) -> Callable[[], ConfigSubentryFlow]:
-            def _new() -> ConfigSubentryFlow:
-                try:
-                    return flow_cls(_config_entry)
-                except TypeError:
-                    instance = flow_cls()
-                    setattr(instance, "config_entry", _config_entry)
-                    return instance
-
-            return _new
-
-        expose_hidden_types = cls._should_expose_hidden_subentry_types()
-
-        handlers: dict[str, Callable[[], ConfigSubentryFlow]] = {
-            SUBENTRY_TYPE_SERVICE: _factory(ServiceSubentryFlowHandler),
-            SUBENTRY_TYPE_TRACKER: _factory(TrackerSubentryFlowHandler),
-        }
-
-        if (
-            ConfigSubentry is not None
-            and ConfigSubentryFlow is not _FALLBACK_CONFIG_SUBENTRY_FLOW
-        ):
-            handlers[SUBENTRY_TYPE_HUB] = _factory(HubSubentryFlowHandler)
-
-        if expose_hidden_types:
-            return handlers
-
-        return {
-            key: factory
-            for key, factory in handlers.items()
-            if key == SUBENTRY_TYPE_HUB
-        }
+        # Subentries are provisioned programmatically by the integration
+        # coordinator. Returning an empty mapping prevents Home Assistant from
+        # displaying "Add subentry" menu items that would otherwise surface
+        # unsupported manual entry points in the UI.
+        return {}
 
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
