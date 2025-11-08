@@ -4263,6 +4263,7 @@ async def _async_ensure_subentries_are_setup(
         *(hass.config_entries.async_setup(subentry.entry_id) for subentry in pending),
         return_exceptions=True,
     )
+    first_failure: Exception | None = None
     for subentry, result in zip(pending, results):
         if isinstance(result, Exception):
             _LOGGER.warning(
@@ -4272,6 +4273,8 @@ async def _async_ensure_subentries_are_setup(
                 type(result).__name__,
                 result,
             )
+            if first_failure is None:
+                first_failure = result
             continue
         if result is False:
             _LOGGER.warning(
@@ -4279,6 +4282,12 @@ async def _async_ensure_subentries_are_setup(
                 entry.entry_id,
                 subentry.entry_id,
             )
+            if first_failure is None:
+                first_failure = ConfigEntryNotReady(
+                    f"Subentry '{subentry.entry_id}' setup returned False"
+                )
+    if first_failure is not None:
+        raise first_failure
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
