@@ -4240,7 +4240,7 @@ async def _async_ensure_subentries_are_setup(
                 subentry.entry_id,
             )
             continue
-        state = cast(ConfigEntryState | None, getattr(subentry, "state", None))
+        state = getattr(subentry, "state", None)
         if state in setup_ready_states:
             _LOGGER.debug(
                 "[%s] Subentry '%s' already in active state %s",  # noqa: G004
