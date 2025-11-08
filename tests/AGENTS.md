@@ -103,6 +103,9 @@ unavailable.
   integration can convert authentication issues into the correct abort reasons.
 * The custom `UNDEFINED` sentinel behaves like the upstream constant and is
   available for any tests that need to assert default/optional handling.
+* When helpers raise `ConfigEntryNotReady`, companion regression tests should
+  assert both the warning log and the exception so behavior stays aligned with
+  the integration's automatic retry expectations.
 
 ### Adding new helpers
 
