@@ -4218,7 +4218,7 @@ async def _async_ensure_subentries_are_setup(
 
     Home Assistant's config subentry handbook requires parent entries to trigger
     setup for their child subentries after synchronizing them. See
-    docs/CONFIG_SUBENTRIES_HANDBOOK.md (Section IV.B, step 3).
+    docs/CONFIG_SUBENTRIES_HANDBOOK.md (Section IV.C, step 3).
     NOTE: This MUST iterate the subentries from the runtime_data manager,
     as ``entry.subentries`` may be stale immediately after ``async_sync`` creates
     or updates the managed subentries.
@@ -5154,12 +5154,16 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
     target_subentries = [
         sub
         for sub in subentries
-        if isinstance(getattr(sub, "subentry_id", None), str)
+        if isinstance(getattr(sub, "entry_id", None), str)
     ]
 
     async def _unload_child_subentry(subentry: Any) -> bool:
-        subentry_id = getattr(subentry, "subentry_id", None)
-        if not isinstance(subentry_id, str):
+        # Home Assistant's config entry manager always uses the global
+        # entry_id for lifecycle operations (setup/reload/unload). The
+        # subentry_id is only the parent's local mapping key and must not
+        # be passed to hass.config_entries helpers.
+        entry_id = getattr(subentry, "entry_id", None)
+        if not isinstance(entry_id, str):
             return True
 
         helper = getattr(hass, "config_entries", None)
@@ -5168,7 +5172,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
         unload_callable = getattr(helper, "async_unload", None)
         if callable(unload_callable):
-            maybe_awaitable: Any = unload_callable(subentry_id)
+            maybe_awaitable: Any = unload_callable(entry_id)
             if isinstance(maybe_awaitable, Awaitable):
                 resolved_result = await maybe_awaitable
             else:
@@ -5178,9 +5182,9 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         remove_callable = getattr(helper, "async_remove_subentry", None)
         if callable(remove_callable) and not has_managed_subentries:
             try:
-                maybe_awaitable = remove_callable(entry, subentry_id)
+                maybe_awaitable = remove_callable(entry, entry_id)
             except TypeError:
-                maybe_awaitable = remove_callable(subentry_id)
+                maybe_awaitable = remove_callable(entry_id)
             if isinstance(maybe_awaitable, Awaitable):
                 resolved_result = await maybe_awaitable
             else:
@@ -5205,7 +5209,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         for index, result in enumerate(unload_results):
             if isinstance(result, Exception):
                 sub_id = getattr(
-                    target_subentries[index], "subentry_id", f"index {index}"
+                    target_subentries[index], "entry_id", f"index {index}"
                 )
                 _LOGGER.debug(
                     "[%s] Subentry %s unload failed: %s",
