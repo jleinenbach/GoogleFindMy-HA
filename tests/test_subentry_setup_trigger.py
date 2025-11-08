@@ -24,24 +24,24 @@ async def test_async_ensure_subentries_are_setup_filters_states() -> None:
 
     parent_entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
     pending_subentry = SimpleNamespace(
-        entry_id="child-pending",
+        subentry_id="child-pending",
         state=ConfigEntryState.NOT_LOADED,
         disabled_by=None,
     )
     active_subentry = SimpleNamespace(
-        entry_id="child-active",
+        subentry_id="child-active",
         state=ConfigEntryState.LOADED,
         disabled_by=None,
     )
     disabled_subentry = SimpleNamespace(
-        entry_id="child-disabled",
+        subentry_id="child-disabled",
         state=ConfigEntryState.NOT_LOADED,
         disabled_by="user",
     )
     parent_entry.subentries = {
-        pending_subentry.entry_id: pending_subentry,
-        active_subentry.entry_id: active_subentry,
-        disabled_subentry.entry_id: disabled_subentry,
+        pending_subentry.subentry_id: pending_subentry,
+        active_subentry.subentry_id: active_subentry,
+        disabled_subentry.subentry_id: disabled_subentry,
     }
 
     manager = FakeConfigEntriesManager([parent_entry])
@@ -49,4 +49,4 @@ async def test_async_ensure_subentries_are_setup_filters_states() -> None:
 
     await _async_ensure_subentries_are_setup(hass, parent_entry)
 
-    assert manager.setup_calls == [pending_subentry.entry_id]
+    assert manager.setup_calls == [pending_subentry.subentry_id]

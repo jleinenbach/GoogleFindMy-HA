@@ -4238,13 +4238,24 @@ async def _async_ensure_subentries_are_setup(
         setup_ready_states.add(setup_in_progress)
 
     pending: list[ConfigEntry | ConfigSubentry] = []
+    pending_ids: list[str] = []
     for subentry in subentries:
+        subentry_id: str | None = getattr(subentry, "subentry_id", None)
+        if subentry_id is None:
+            subentry_id = getattr(subentry, "entry_id", None)
+        if subentry_id is None:
+            _LOGGER.debug(
+                "[%s] Skipping setup for subentry without identifier: %s",  # noqa: G004
+                entry.entry_id,
+                subentry,
+            )
+            continue
         disabled_by = getattr(subentry, "disabled_by", None)
         if disabled_by is not None:
             _LOGGER.debug(
                 "[%s] Skipping setup for disabled subentry '%s'",  # noqa: G004
                 entry.entry_id,
-                subentry.entry_id,
+                subentry_id,
             )
             continue
         state: ConfigEntryState | None = getattr(subentry, "state", None)
@@ -4252,11 +4263,12 @@ async def _async_ensure_subentries_are_setup(
             _LOGGER.debug(
                 "[%s] Subentry '%s' already in active state %s",  # noqa: G004
                 entry.entry_id,
-                subentry.entry_id,
+                subentry_id,
                 state,
             )
             continue
         pending.append(subentry)
+        pending_ids.append(subentry_id)
 
     if not pending:
         return
@@ -4267,19 +4279,19 @@ async def _async_ensure_subentries_are_setup(
         len(pending),
     )
     results = await asyncio.gather(
-        *(hass.config_entries.async_setup(subentry.entry_id) for subentry in pending),
+        *(hass.config_entries.async_setup(subentry_id) for subentry_id in pending_ids),
         return_exceptions=True,
     )
     first_exception: BaseException | None = None
     false_failures: list[str] = []
-    for subentry, result in zip(pending, results):
+    for subentry, subentry_id, result in zip(pending, pending_ids, results):
         if isinstance(result, BaseException):
             if isinstance(result, asyncio.CancelledError):
                 raise result
             _LOGGER.warning(
                 "[%s] Subentry '%s' setup raised %s: %s",  # noqa: G004
                 entry.entry_id,
-                subentry.entry_id,
+                subentry_id,
                 type(result).__name__,
                 result,
                 exc_info=(type(result), result, result.__traceback__),
@@ -4291,9 +4303,9 @@ async def _async_ensure_subentries_are_setup(
             _LOGGER.warning(
                 "[%s] Subentry '%s' setup returned False",  # noqa: G004
                 entry.entry_id,
-                subentry.entry_id,
+                subentry_id,
             )
-            false_failures.append(subentry.entry_id)
+            false_failures.append(subentry_id)
     if first_exception is not None:
         raise first_exception
     if false_failures:

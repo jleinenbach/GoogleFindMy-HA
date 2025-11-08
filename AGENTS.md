@@ -422,6 +422,7 @@ Add to the PR description:
 ## 10) Local commands (VERIFY)
 
 * `pre-commit run --all-files`
+* `ruff check`
 * `pytest -q`
 * `mypy --strict --install-types --non-interactive custom_components/googlefindmy tests`
 
@@ -575,7 +576,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * [ ] I/O optimized (batch/atomic); caches with clear TTL/invalidations.
 * [ ] HA-specific: Coordinator, injected session, `get_url`, config-flow test, Repairs/Diagnostics, HA Store.
 * [ ] Tests: cover happy/edge/error paths; regressions for fixes; deterministic/time-safe.
-* [ ] Local verify commands passed (`pre-commit`, `hassfest`, `pytest`).
+* [ ] Local verify commands passed (`pre-commit run --all-files`, `ruff check`, `pytest -q`, `mypy --strict --install-types --non-interactive custom_components/googlefindmy tests`); hassfest continues to run in CI.
 
 ---
 
