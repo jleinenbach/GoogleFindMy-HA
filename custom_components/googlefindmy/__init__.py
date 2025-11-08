@@ -4810,14 +4810,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         ]
     )
 
-    # --- BEGIN RACE-CONDITION FIX ---
+    # --- BEGIN RACE-CONDITION AND ERROR-HANDLING FIX ---
     # Awaiting _async_ensure_subentries_are_setup immediately after creating
     # the subentries triggers a race condition where Home Assistant Core raises
     # UnknownEntry because it has not finished registering the new subentries.
-    # Yield to the event loop once so HA finalizes registration *before* setup.
-    await asyncio.sleep(0)
-    await _async_ensure_subentries_are_setup(hass, entry)
-    # --- END RACE-CONDITION FIX ---
+    # Schedule the setup in a background task so HA finalizes registration
+    # before the setup runs. Using ConfigEntry.async_create_background_task keeps
+    # the task tied to the entry lifecycle so ConfigEntryNotReady propagates
+    # correctly when setup fails, while still deferring execution until after
+    # the registry has recorded the new child entries. Avoid
+    # hass.async_create_task here; it would detach failure handling from the
+    # config entry lifecycle and reintroduce silent retries.
+    entry.async_create_background_task(
+        _async_ensure_subentries_are_setup(hass, entry),
+        name=f"{DOMAIN}.ensure_subentries_setup.{entry.entry_id}",
+    )
+    # --- END RACE-CONDITION AND ERROR-HANDLING FIX ---
 
     bucket = domain_bucket
 
