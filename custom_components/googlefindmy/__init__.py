@@ -4219,16 +4219,25 @@ async def _async_ensure_subentries_are_setup(
     Home Assistant's config subentry handbook requires parent entries to trigger
     setup for their child subentries after synchronizing them. See
     docs/CONFIG_SUBENTRIES_HANDBOOK.md (Section IV.B, step 3).
+    NOTE: This MUST iterate the subentries from the runtime_data manager,
+    as ``entry.subentries`` may be stale immediately after ``async_sync`` creates
+    or updates the managed subentries.
     """
 
-    subentries_map: Mapping[str, ConfigEntry | ConfigSubentry] | None = cast(
-        Mapping[str, ConfigEntry | ConfigSubentry] | None,
-        getattr(entry, "subentries", None),
-    )
-    if not subentries_map:
+    runtime_data: RuntimeData | None = getattr(entry, "runtime_data", None)
+    if runtime_data is None:
         return
 
-    subentries = list(subentries_map.values())
+    subentry_manager = getattr(runtime_data, "subentry_manager", None)
+    if subentry_manager is None:
+        return
+
+    managed = subentry_manager.managed_subentries
+    if not managed:
+        return
+
+    # Iterate the authoritative runtime-managed subentries, not entry.subentries.
+    subentries = list(managed.values())
     if not subentries:
         return
 
@@ -4240,12 +4249,12 @@ async def _async_ensure_subentries_are_setup(
     pending: list[ConfigEntry | ConfigSubentry] = []
     pending_ids: list[str] = []
     for subentry in subentries:
-        subentry_id: str | None = getattr(subentry, "subentry_id", None)
-        if subentry_id is None:
-            subentry_id = getattr(subentry, "entry_id", None)
+        # ConfigEntry/ConfigSubentry both expose ``entry_id`` when managed
+        # through the runtime subentry manager.
+        subentry_id: str | None = getattr(subentry, "entry_id", None)
         if subentry_id is None:
             _LOGGER.debug(
-                "[%s] Skipping setup for subentry without identifier: %s",  # noqa: G004
+                "[%s] Skipping setup for subentry without identifier: %s",
                 entry.entry_id,
                 subentry,
             )

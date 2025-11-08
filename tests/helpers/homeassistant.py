@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from types import SimpleNamespace
 from typing import Any
 
 from custom_components.googlefindmy.const import DOMAIN
@@ -20,6 +21,8 @@ __all__ = [
     "device_registry_async_entries_for_config_entry",
     "FakeEntityRegistry",
     "FakeHass",
+    "runtime_subentry_manager",
+    "runtime_data_with_subentries",
 ]
 
 
@@ -32,6 +35,7 @@ class FakeConfigEntry:
     state: ConfigEntryState = ConfigEntryState.NOT_LOADED
     title: str | None = None
     subentries: dict[str, Any] = field(default_factory=dict)
+    runtime_data: Any | None = None
 
 
 class FakeConfigEntriesManager:
@@ -136,6 +140,50 @@ class FakeServiceRegistry:
         """Register a handler keyed by ``(domain, service)``."""
 
         self.handlers[(domain, service)] = handler
+
+
+def runtime_subentry_manager(
+    subentries: Mapping[str, Any] | Iterable[Any],
+) -> SimpleNamespace:
+    """Return a runtime-style manager exposing ``managed_subentries``.
+
+    Parameters
+    ----------
+    subentries:
+        Either a mapping of identifiers to subentry objects or an iterable of
+        objects that define an ``entry_id`` attribute.
+    """
+
+    if isinstance(subentries, Mapping):
+        managed = dict(subentries)
+    else:
+        managed = {
+            subentry.entry_id: subentry
+            for subentry in subentries
+            if getattr(subentry, "entry_id", None) is not None
+        }
+
+    class _RuntimeSubentryManager:
+        """Expose a mutable mapping mirroring Home Assistant's manager."""
+
+        def __init__(self, mapping: dict[str, Any]) -> None:
+            self._managed = dict(mapping)
+
+        @property
+        def managed_subentries(self) -> dict[str, Any]:
+            """Return a shallow copy of the managed subentry mapping."""
+
+            return dict(self._managed)
+
+    return _RuntimeSubentryManager(managed)
+
+
+def runtime_data_with_subentries(
+    subentries: Mapping[str, Any] | Iterable[Any],
+) -> SimpleNamespace:
+    """Create a runtime data namespace exposing the provided subentries."""
+
+    return SimpleNamespace(subentry_manager=runtime_subentry_manager(subentries))
 
 
 @dataclass(slots=True)
