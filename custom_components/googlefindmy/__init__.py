@@ -4253,9 +4253,10 @@ async def _async_ensure_subentries_are_setup(
         # ConfigEntry/ConfigSubentry both expose ``entry_id`` when managed
         # through the runtime subentry manager, but freshly created subentries
         # may not yet have Home Assistant's ``entry_id`` attribute populated.
-        # Fall back to ``subentry_id`` to extract the global ULID when needed.
+        # Fall back to ``subentry_id`` to extract the global ULID when needed,
+        # as both attributes refer to the same global identifier.
         subentry_id: str | None = getattr(subentry, "entry_id", None)
-        if not isinstance(subentry_id, str) or not subentry_id:
+        if subentry_id is None:
             subentry_id = getattr(subentry, "subentry_id", None)
 
         if not isinstance(subentry_id, str) or not subentry_id:
@@ -4809,7 +4810,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         ]
     )
 
-    await _async_ensure_subentries_are_setup(hass, entry)
+    # --- BEGIN RACE-CONDITION FIX ---
+    # DO NOT await _async_ensure_subentries_are_setup directly here.
+    # The subentries were just created (via async_sync_subentries) in the
+    # _async_setup_parent_entry call above. Awaiting the setup immediately
+    # triggers a race condition where Home Assistant Core raises UnknownEntry
+    # because it has not finished registering the new subentries.
+    #
+    # By scheduling this as a new task, we yield to the event loop,
+    # allowing HA to finalize registration *before* we attempt to set them up.
+    hass.async_create_task(_async_ensure_subentries_are_setup(hass, entry))
+    # --- END RACE-CONDITION FIX ---
 
     bucket = domain_bucket
 
