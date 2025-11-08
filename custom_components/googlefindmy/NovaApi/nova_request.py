@@ -110,6 +110,30 @@ def unregister_hass() -> None:
     global _HASS_REF
     _HASS_REF = None
 
+# Cache provider hook for multi-entry support
+_CACHE_PROVIDER: Callable[[], any] | None = None
+
+def register_cache_provider(provider: Callable[[], any]) -> None:
+    """Register a callable that returns the entry-specific cache.
+
+    Args:
+        provider: Callable that returns a TokenCache instance.
+
+    This allows multi-entry scenarios where each API instance uses its own cache
+    instead of relying on the global cache facade.
+    """
+    global _CACHE_PROVIDER
+    _CACHE_PROVIDER = provider
+
+def unregister_cache_provider() -> None:
+    """Unregister the cache provider."""
+    global _CACHE_PROVIDER
+    _CACHE_PROVIDER = None
+
+def _get_cache_provider():
+    """Get the registered cache provider or None."""
+    return _CACHE_PROVIDER() if _CACHE_PROVIDER else None
+
 # --- Refresh Locks ---
 _sync_refresh_lock = threading.Lock()
 _async_refresh_lock: asyncio.Lock | None = None
@@ -396,23 +420,37 @@ def _get_initial_token_sync(username: str, _logger) -> str:
 
 async def _get_initial_token_async(username: str, _logger) -> str:
     """Get or create the initial ADM token in async path and ensure TTL metadata is recorded."""
+    # Try to use entry-specific cache if registered (multi-entry support)
+    cache = _get_cache_provider()
+
     # Safe cache access - handle multi-entry scenarios during validation
     token = None
     try:
-        token = await async_get_cached_value(f"adm_token_{username}") or await async_get_cached_value("adm_token")
+        if cache:
+            # Use entry-specific cache
+            token = await cache.get(f"adm_token_{username}") or await cache.get("adm_token")
+        else:
+            # Fall back to global facade
+            token = await async_get_cached_value(f"adm_token_{username}") or await async_get_cached_value("adm_token")
     except Exception:  # noqa: BLE001
         # Cache not available during validation
         pass
 
     if not token:
         _logger.info("Attempting to generate new ADM token (async)...")
-        token = await async_get_adm_token_api(username)
+        token = await async_get_adm_token_api(username, cache=cache)
         if token:
             try:
-                await async_set_cached_value(f"adm_token_issued_at_{username}", time.time())
-                probe_left = await async_get_cached_value(f"adm_probe_startup_left_{username}")
-                if not probe_left:
-                    await async_set_cached_value(f"adm_probe_startup_left_{username}", 3)
+                if cache:
+                    await cache.set(f"adm_token_issued_at_{username}", time.time())
+                    probe_left = await cache.get(f"adm_probe_startup_left_{username}")
+                    if not probe_left:
+                        await cache.set(f"adm_probe_startup_left_{username}", 3)
+                else:
+                    await async_set_cached_value(f"adm_token_issued_at_{username}", time.time())
+                    probe_left = await async_get_cached_value(f"adm_probe_startup_left_{username}")
+                    if not probe_left:
+                        await async_set_cached_value(f"adm_probe_startup_left_{username}", 3)
             except Exception:  # noqa: BLE001
                 # Cache not available - skip TTL metadata
                 pass
