@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
-from contextlib import suppress
 from dataclasses import dataclass, field
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -23,6 +22,8 @@ from custom_components.googlefindmy.const import (
 )
 from homeassistant.core import ServiceCall
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
+
+from tests.helpers import drain_loop
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy import RuntimeData
@@ -516,11 +517,4 @@ def test_multi_account_end_to_end(
         assert len(unregister_calls) == 1
         assert len(session_unreg_calls) == 1
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)

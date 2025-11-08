@@ -7,7 +7,6 @@ import asyncio
 import base64
 import importlib
 import sys
-from contextlib import suppress
 from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
 from typing import Any, Awaitable, Coroutine, TypeVar, cast
@@ -20,6 +19,8 @@ from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
     _call_in_executor,
 )
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
+
+from tests.helpers import drain_loop
 
 _T = TypeVar("_T")
 
@@ -53,6 +54,7 @@ def test_async_acquire_discards_invalid_cached_receiver(
     monkeypatch.setitem(sys.modules, "homeassistant.loader", loader_module)
 
     module = importlib.import_module("custom_components.googlefindmy")
+    monkeypatch.setattr(module, "_RUNTIME_IMPORTS_LOADED", True)
     async_acquire_shared_fcm = cast(
         Callable[[object], Awaitable[FcmReceiverHA]],
         getattr(module, "_async_acquire_shared_fcm"),
@@ -313,15 +315,7 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
         assert "token-one" not in receiver._token_to_entries
         assert "entry-one" not in receiver._entry_to_tokens
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(Exception):
-                loop.run_until_complete(task)
-
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 def test_receiver_reuses_hass_managed_session(

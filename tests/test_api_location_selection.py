@@ -12,6 +12,8 @@ from aiohttp import ClientSession
 import custom_components.googlefindmy.api as api_module
 from custom_components.googlefindmy.api import GoogleFindMyAPI
 
+from tests.helpers import drain_loop
+
 
 class _StubCache:
     """Minimal cache satisfying the API protocol for unit tests."""
@@ -188,7 +190,7 @@ def test_sync_wrappers_use_provided_session_loop() -> None:
         assert harness.loops == [loop]
     finally:
         loop.run_until_complete(session.close())
-        loop.close()
+        drain_loop(loop)
 
 
 def test_process_device_list_response_deduplicates_canonic_ids(
