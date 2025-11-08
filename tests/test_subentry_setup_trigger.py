@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from homeassistant.exceptions import ConfigEntryNotReady
+
 from custom_components.googlefindmy import _async_ensure_subentries_are_setup
 from custom_components.googlefindmy.const import DOMAIN
 
@@ -54,8 +56,10 @@ async def test_async_ensure_subentries_are_setup_schedules_all_children() -> Non
 
 
 @pytest.mark.asyncio
-async def test_async_ensure_subentries_are_setup_warns_on_failure(caplog: pytest.LogCaptureFixture) -> None:
-    """Log a warning when subentry setup returns a falsey value."""
+async def test_async_ensure_subentries_are_setup_warns_and_raises_on_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log a warning and raise ConfigEntryNotReady when subentry setup fails."""
 
     successful_subentry = SimpleNamespace(
         entry_id="child-success",
@@ -81,7 +85,7 @@ async def test_async_ensure_subentries_are_setup_warns_on_failure(caplog: pytest
     manager.async_setup = failing_setup  # type: ignore[assignment]
     hass = FakeHass(config_entries=manager)
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING), pytest.raises(ConfigEntryNotReady):
         await _async_ensure_subentries_are_setup(hass, parent_entry)
 
     assert manager.setup_calls == [
