@@ -4254,9 +4254,11 @@ async def _async_ensure_subentries_are_setup(
         # through the runtime subentry manager, but freshly created subentries
         # may not yet have Home Assistant's ``entry_id`` attribute populated.
         # Fall back to ``subentry_id`` to extract the global ULID when needed,
-        # as both attributes refer to the same global identifier.
+        # as both attributes refer to the same global identifier. Treat empty
+        # strings and non-string types the same as a missing ``entry_id`` so
+        # freshly constructed stubs still resolve their identifier.
         subentry_id: str | None = getattr(subentry, "entry_id", None)
-        if subentry_id is None:
+        if not isinstance(subentry_id, str) or not subentry_id:
             subentry_id = getattr(subentry, "subentry_id", None)
 
         if not isinstance(subentry_id, str) or not subentry_id:
