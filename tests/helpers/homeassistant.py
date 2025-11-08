@@ -24,6 +24,7 @@ __all__ = [
     "runtime_subentry_manager",
     "runtime_data_with_subentries",
     "config_entry_with_subentries",
+    "config_entry_with_runtime_managed_subentries",
 ]
 
 
@@ -222,6 +223,41 @@ def config_entry_with_subentries(
         normalized[str(identifier)] = subentry
 
     entry.subentries = normalized
+    return entry
+
+
+def config_entry_with_runtime_managed_subentries(
+    *,
+    entry_id: str,
+    domain: str = DOMAIN,
+    state: ConfigEntryState = ConfigEntryState.NOT_LOADED,
+    title: str | None = None,
+    subentries: Mapping[str, Any] | Iterable[Any] | None = None,
+) -> FakeConfigEntry:
+    """Create a config entry with a runtime subentry manager attached."""
+
+    entry = config_entry_with_subentries(
+        entry_id=entry_id,
+        domain=domain,
+        state=state,
+        title=title,
+        subentries=subentries,
+    )
+    existing = getattr(entry, "subentries", None)
+    if isinstance(existing, Mapping):
+        mapping = dict(existing)
+    elif existing is None:
+        mapping = {}
+    else:
+        mapping = {}
+        for subentry in existing:
+            identifier = getattr(subentry, "subentry_id", None)
+            if not identifier:
+                identifier = getattr(subentry, "entry_id", None)
+            if not identifier:
+                continue
+            mapping[str(identifier)] = subentry
+    entry.runtime_data = runtime_data_with_subentries(mapping)
     return entry
 
 

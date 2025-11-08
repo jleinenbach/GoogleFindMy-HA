@@ -4214,41 +4214,121 @@ async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bo
 async def _async_ensure_subentries_are_setup(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
-    """Schedule setup for all known subentries on a parent entry."""
+    """Ensure programmatically created subentries are fully set up.
 
-    subentries = list(getattr(entry, "subentries", {}).values())
+    Home Assistant's config subentry handbook requires parent entries to trigger
+    setup for their child subentries after synchronizing them. See
+    docs/CONFIG_SUBENTRIES_HANDBOOK.md (Section IV.C, step 3).
+    NOTE: This MUST iterate the subentries from the runtime_data manager,
+    as ``entry.subentries`` may be stale immediately after ``async_sync`` creates
+    or updates the managed subentries.
+    """
+
+    runtime_data: RuntimeData | None = getattr(entry, "runtime_data", None)
+    if runtime_data is None:
+        return
+
+    subentry_manager = getattr(runtime_data, "subentry_manager", None)
+    if subentry_manager is None:
+        return
+
+    managed = subentry_manager.managed_subentries
+    if not managed:
+        return
+
+    # Iterate the authoritative runtime-managed subentries, not entry.subentries.
+    subentries = list(managed.values())
     if not subentries:
-        _LOGGER.debug("[%s] No subentries found to set up.", entry.entry_id)
+        return
+
+    setup_ready_states: set[object] = {ConfigEntryState.LOADED}
+    setup_in_progress = getattr(ConfigEntryState, "SETUP_IN_PROGRESS", None)
+    if setup_in_progress is not None:
+        setup_ready_states.add(setup_in_progress)
+
+    pending: list[ConfigEntry | ConfigSubentry] = []
+    pending_ids: list[str] = []
+    for subentry in subentries:
+        # --- BEGIN ID fallback guard ---
+        # ConfigEntry/ConfigSubentry both expose ``entry_id`` when managed
+        # through the runtime subentry manager, but freshly created subentries
+        # may not yet have Home Assistant's ``entry_id`` attribute populated.
+        # Fall back to ``subentry_id`` to extract the global ULID when needed.
+        subentry_id: str | None = getattr(subentry, "entry_id", None)
+        if not isinstance(subentry_id, str) or not subentry_id:
+            subentry_id = getattr(subentry, "subentry_id", None)
+
+        if not isinstance(subentry_id, str) or not subentry_id:
+            _LOGGER.debug(
+                "[%s] Skipping setup for subentry without identifier: %s",
+                entry.entry_id,
+                subentry,
+            )
+            continue
+        # --- END ID fallback guard ---
+
+        disabled_by = getattr(subentry, "disabled_by", None)
+        if disabled_by is not None:
+            _LOGGER.debug(
+                "[%s] Skipping setup for disabled subentry '%s'",  # noqa: G004
+                entry.entry_id,
+                subentry_id,
+            )
+            continue
+        state: ConfigEntryState | None = getattr(subentry, "state", None)
+        if state in setup_ready_states:
+            _LOGGER.debug(
+                "[%s] Subentry '%s' already in active state %s",  # noqa: G004
+                entry.entry_id,
+                subentry_id,
+                state,
+            )
+            continue
+        pending.append(subentry)
+        pending_ids.append(subentry_id)
+
+    if not pending:
         return
 
     _LOGGER.debug(
-        "[%s] Scheduling setup for %d subentries: %s",
+        "[%s] Triggering setup for %d subentries",
         entry.entry_id,
-        len(subentries),
-        [subentry.subentry_id for subentry in subentries],
+        len(pending_ids),
     )
-
-    setup_results = await asyncio.gather(
-        *(
-            hass.config_entries.async_setup(subentry.entry_id)
-            for subentry in subentries
-        )
+    results = await asyncio.gather(
+        *(hass.config_entries.async_setup(subentry_id) for subentry_id in pending_ids),
+        return_exceptions=True,
     )
-
-    failed_entries = [
-        subentry.entry_id
-        for subentry, result in zip(subentries, setup_results)
-        if result is not True
-    ]
-    if failed_entries:
-        _LOGGER.warning(
-            "[%s] Failed to set up %d subentries: %s",
-            entry.entry_id,
-            len(failed_entries),
-            failed_entries,
-        )
+    first_exception: BaseException | None = None
+    false_failures: list[str] = []
+    for subentry, subentry_id, result in zip(pending, pending_ids, results):
+        if isinstance(result, BaseException):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            _LOGGER.warning(
+                "[%s] Subentry '%s' setup raised %s: %s",  # noqa: G004
+                entry.entry_id,
+                subentry_id,
+                type(result).__name__,
+                result,
+                exc_info=(type(result), result, result.__traceback__),
+            )
+            if first_exception is None:
+                first_exception = result
+            continue
+        if result is False:
+            _LOGGER.warning(
+                "[%s] Subentry '%s' setup returned False",  # noqa: G004
+                entry.entry_id,
+                subentry_id,
+            )
+            false_failures.append(subentry_id)
+    if first_exception is not None:
+        raise first_exception
+    if false_failures:
         raise ConfigEntryNotReady(
-            "Failed to set up subentries: " + ", ".join(failed_entries)
+            "One or more subentries returned False during setup: %s"
+            % ", ".join(false_failures)
         )
 
 

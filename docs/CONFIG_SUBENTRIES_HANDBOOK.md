@@ -179,17 +179,18 @@ Config subentries expose **two** identifiers. Misusing them leads to reload fail
 | `subentry.subentry_id` | Key inside `parent_entry.subentries` | Iterating or mutating the parent mapping (for example, to look up a specific child in memory). |
 | `subentry.entry_id` | Global config entry registry key | **Every lifecycle helper** (`async_setup`, `async_reload`, `async_unload`, `async_remove_subentry`, etc.). |
 
-**Critical rule:** Always pass `subentry.entry_id` to Home Assistant's config entry helpers. Passing `subentry.subentry_id` will raise `UnknownEntry` internally, causing unloads to fail and preventing reload-driven rebuild services from completing. This mirrors the runtime behavior of parents: both parent entries and their children use `entry_id` as the canonical identifier within the global registry.
+**Critical rule:** Always pass the subentry's global ULID to Home Assistant's config entry helpers. In steady state this is exposed via `subentry.entry_id`; when a child has just been created in the same transaction and Home Assistant has not yet populated `entry_id`, fall back to `subentry.subentry_id`. Passing a blank identifier or mixing in logical keys (for example, `core_tracking`) will raise `UnknownEntry` internally and prevent reload-driven rebuild services from completing.
 
-> **Attribute expectations**
-> * Home Assistant 2025.7+ guarantees that every `ConfigSubentry` exposes **both** attributes. A freshly created child will have a stable `entry_id` immediately, even before the parent finishes setting up, so scheduling helpers should call `async_setup(child.entry_id)` without additional guards.
-> * On legacy cores that predate config subentries, the attribute is simply unavailable because the feature does not exist. The integration detects those builds during import and avoids registering runtime-managed subentries entirely.
-> * Never fall back to `subentry_id` when interacting with lifecycle APIs. If `entry_id` is missing, the runtime is not providing a supported config subentry object and the call should fail loudly instead of mutating the wrong registry entry.
-
+> **Attribute expectations (The Setup Race Condition)**
+>
+> * Home Assistant 2025.7+ guarantees that `ConfigSubentry` objects expose `entry_id` and `subentry_id`, both referencing the same global ULID.
+> * **CAUTION (Race Condition):** When a parent programmatically creates a subentry and immediately triggers setup in the same transaction, Home Assistant may not have populated `.entry_id` yet. The resulting `AttributeError` (or `None`) indicates that `.subentry_id` is currently the only reliable attribute holding the ULID.
+> * **Implementation rule:** Parent workflows that call lifecycle helpers right after creating children (such as `_async_ensure_subentries_are_setup`) MUST try `getattr(subentry, "entry_id")` first and fall back to `getattr(subentry, "subentry_id")` when the primary attribute is missing or falsey.
+>
 > **Quick reference**
-> * Use `entry.entry_id` (parent) or `subentry.entry_id` (child) with Home Assistant lifecycle helpers.
-> * Use `subentry.subentry_id` only when indexing `entry.subentries`.
-> * Never mix the identifiers. If a helper expects an `entry_id`, always supply the global `entry_id` attribute exposed by the `ConfigEntry` or `ConfigSubentry` instance.
+> * Use `subentry.entry_id` (or the fallback to `subentry.subentry_id`) with Home Assistant lifecycle helpers.
+> * Use `subentry.subentry_id` when indexing `entry.subentries`.
+> * The warning "Never mix identifiers" applies to confusing the global ULID (`entry_id`/`subentry_id`) with logical keys (`core_tracking`, `service`, etc.).
 
 ### B. Routing setup
 
