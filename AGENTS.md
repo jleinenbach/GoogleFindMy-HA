@@ -482,6 +482,12 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ### 11.1 Language & style (self-documenting)
 
+#### Logging formatting (ruff G004)
+
+* **Default:** Use lazy logging with `%`-style placeholders so expensive formatting is deferred until the log level is enabled.
+* **Permitted `# noqa: G004` usage:** Only on `_LOGGER.debug(...)` calls where the f-string formats existing variables without invoking additional functions.
+* **Prohibited:** Never suppress `G004` for `_LOGGER.info()`, `_LOGGER.warning()`, `_LOGGER.error()`, or `_LOGGER.critical()`; these levels must always use lazy formatting.
+
 * **PEP 8/PEP 257 mandatory.** Consistent formatting, clear docstrings; meaningful names.
 * **Typing is strict.** Use Python typing everywhere; prefer **PEP 695** generics where helpful.
 * **Exceptions.** Raise precise types; use **`raise … from …`** to preserve causal chains; avoid broad `except:`; never swallow errors silently.
