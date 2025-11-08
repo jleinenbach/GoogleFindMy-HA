@@ -970,7 +970,6 @@ async def test_async_setup_entry_propagates_subentry_registration(
         monkeypatch, stub_coordinator_factory, loop
     )
     integration = harness.integration
-    map_view_module = harness.map_view_module
     entry = harness.entry
     hass = harness.hass
 
