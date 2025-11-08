@@ -113,9 +113,24 @@ class _StubConfigEntry:
         self.state: ConfigEntryState = ConfigEntryState.LOADED
         self.disabled_by: str | None = None
         self._unload_callbacks: list[Callable[[], None]] = []
+        self._hass: _StubHass | None = None
+        self._background_tasks: list[asyncio.Task[Any]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
         self._unload_callbacks.append(callback)
+
+    def _attach_hass(self, hass: "_StubHass") -> None:
+        self._hass = hass
+
+    def async_create_background_task(
+        self, coro: Awaitable[Any], *, name: str | None = None
+    ) -> asyncio.Task[Any]:
+        if self._hass is None:
+            msg = "ConfigEntry is not attached to a hass instance"
+            raise RuntimeError(msg)
+        task = self._hass.async_create_task(coro, name=name)
+        self._background_tasks.append(task)
+        return task
 
 
 class _StubConfigEntries:
@@ -222,6 +237,8 @@ class _StubHass:
         self.services = _StubServices()
         self.config_entries: _StubConfigEntries = _StubConfigEntries(entries)
         self._tasks: list[asyncio.Task[Any]] = []
+        for entry in entries:
+            entry._attach_hass(self)
 
     def async_create_task(
         self, coro: Awaitable[Any], *, name: str | None = None
