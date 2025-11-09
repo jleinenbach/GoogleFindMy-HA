@@ -88,25 +88,43 @@ class GoogleFindMyMapView(HomeAssistantView):
             # ---- 3) Resolve a human-readable device name from coordinator snapshot (best effort) ----
             coordinator_data = self.hass.data.get(DOMAIN, {})
             device_name = "Unknown Device"
-            for entry_id, coordinator in coordinator_data.items():
-                if entry_id == "config_data":
+
+            # Extract the raw Google device ID from the full device identifier
+            # In multi-account mode, device_id may be formatted as "{entry_id}_{google_device_id}"
+            # We need to extract the google_device_id portion for matching against coordinator data
+            raw_device_id = device_id
+            if "_" in device_id:
+                # Try to extract the Google device ID by removing the entry_id prefix
+                for entry_id_key in coordinator_data.keys():
+                    if entry_id_key == "config_data":
+                        continue
+                    # Check if device_id starts with this entry_id
+                    if device_id.startswith(f"{entry_id_key}_"):
+                        raw_device_id = device_id[len(entry_id_key) + 1:]  # +1 for underscore
+                        break
+
+            for entry_id_key, coordinator in coordinator_data.items():
+                if entry_id_key == "config_data":
                     continue
                 data_list = getattr(coordinator, "data", None) or []
                 for device in data_list:
-                    if device.get("id") == device_id:
+                    if device.get("id") == raw_device_id:
                         device_name = device.get("name", device_name)
                         break
+                if device_name != "Unknown Device":
+                    break
 
             # ---- 4) Find the device_tracker entity (entity registry) ----
             # Prefer the actual entity id over a guess.
-            entity_id_guess = f"device_tracker.{device_id.replace('-', '_').lower()}"
+            # Use raw_device_id for entity matching since unique_id uses the raw Google device ID
+            entity_id_guess = f"device_tracker.{raw_device_id.replace('-', '_').lower()}"
             entity_registry = async_get_entity_registry(self.hass)
             entity_id: Optional[str] = None
 
             for entity in entity_registry.entities.values():
                 if (
                     entity.unique_id
-                    and device_id in entity.unique_id
+                    and raw_device_id in entity.unique_id
                     and entity.platform == DOMAIN
                     and entity.entity_id.startswith("device_tracker.")
                 ):
