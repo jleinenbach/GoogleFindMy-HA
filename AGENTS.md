@@ -120,6 +120,7 @@
     - [`async_unload` parent workflow](docs/CONFIG_SUBENTRIES_HANDBOOK.md#e-parent-unload)
     - [`async_remove_subentry` cascade rules](docs/CONFIG_SUBENTRIES_HANDBOOK.md#g-cascading-removal)
   * Home Assistant's subentry helpers (`async_add_subentry`, `async_update_subentry`, `async_remove_subentry`) may return a `ConfigSubentry`, a sentinel boolean/`None`, or an awaitable yielding one of those values. Always normalize results through the shared `_await_subentry_result` helper (or an equivalent `inspect.isawaitable` guard) so asynchronous responses update the manager cache correctly.
+  * **Race-condition mitigation:** When programmatically creating subentries, immediately yield control back to the event loop (for example, `await asyncio.sleep(0)`) before invoking `hass.config_entries.async_setup(...)`. This prevents `homeassistant.config_entries.UnknownEntry` errors while the config-entry registry finalizes the new child entry. Leave a short inline comment describing the yield so future contributors retain the guard.
 
 #### Deprecations & migrations
 
