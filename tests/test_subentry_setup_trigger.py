@@ -1,5 +1,5 @@
 # tests/test_subentry_setup_trigger.py
-"""Tests for ensuring programmatically created subentries get set up."""
+"""Regression coverage for subentry setup helpers."""
 
 from __future__ import annotations
 
@@ -12,15 +12,61 @@ from homeassistant.exceptions import ConfigEntryNotReady
 
 from custom_components.googlefindmy import (
     MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
+    RuntimeData,
     _async_ensure_subentries_are_setup,
+    _async_setup_subentry,
+    _domain_data,
+    _ensure_entries_bucket,
 )
 from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.entity import resolve_coordinator
 
 from tests.helpers.homeassistant import (
     FakeConfigEntriesManager,
     FakeHass,
     config_entry_with_runtime_managed_subentries,
 )
+
+
+@pytest.mark.asyncio
+async def test_async_setup_subentry_inherits_parent_runtime_data() -> None:
+    """Child setup should reuse the parent's runtime data bucket."""
+
+    hass = FakeHass(config_entries=FakeConfigEntriesManager())
+    bucket = _domain_data(hass)
+    entries_bucket = _ensure_entries_bucket(bucket)
+
+    parent_entry_id = "parent-entry"
+    coordinator = object()
+    runtime_data = RuntimeData(
+        coordinator=coordinator,  # type: ignore[arg-type]
+        token_cache=object(),  # type: ignore[arg-type]
+        subentry_manager=SimpleNamespace(),  # type: ignore[arg-type]
+        fcm_receiver=None,
+        google_home_filter=None,
+    )
+    entries_bucket[parent_entry_id] = runtime_data
+
+    forward_calls: list[tuple[object, tuple[object, ...]]] = []
+
+    async def forward(entry: SimpleNamespace, platforms: list[object]) -> None:
+        forward_calls.append((entry, tuple(platforms)))
+        assert entry.runtime_data is runtime_data
+
+    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
+
+    child_entry = SimpleNamespace(
+        entry_id="child-entry",
+        data={"group_key": "child"},
+        parent_entry_id=parent_entry_id,
+        subentry_type="tracker",
+        runtime_data=None,
+    )
+
+    assert await _async_setup_subentry(hass, child_entry) is True
+    assert child_entry.runtime_data is runtime_data
+    assert resolve_coordinator(child_entry) is coordinator
+    assert forward_calls, "Expected platform forwarding during setup"
 
 
 @pytest.mark.asyncio
