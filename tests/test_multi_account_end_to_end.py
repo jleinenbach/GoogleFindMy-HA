@@ -24,6 +24,7 @@ from homeassistant.core import ServiceCall
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 
 from tests.helpers import drain_loop
+from tests.helpers.homeassistant import resolve_config_entry_lookup
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy import RuntimeData
@@ -143,6 +144,10 @@ class _StubConfigEntry:
 
 
 class _StubConfigEntries:
+    """Mirror FakeConfigEntriesManager lookups for multi-entry harnesses.
+
+    See ``tests/AGENTS.md`` for the shared alignment reminders.
+    """
     def __init__(self, entries: list[_StubConfigEntry]) -> None:
         self._entries: list[_StubConfigEntry] = entries
         self.forward_calls: list[tuple[str, tuple[str, ...]]] = []
@@ -156,11 +161,10 @@ class _StubConfigEntries:
             return []
         return list(self._entries)
 
-    def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
-        for entry in self._entries:
-            if entry.entry_id == entry_id:
-                return entry
-        return None
+    def async_get_entry(
+        self, entry_id: str
+    ) -> _StubConfigEntry | ConfigSubentry | None:
+        return resolve_config_entry_lookup(self._entries, entry_id)
 
     def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
         entry = self.async_get_entry(entry_id)

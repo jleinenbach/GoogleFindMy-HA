@@ -27,6 +27,7 @@ __all__ = [
     "runtime_data_with_subentries",
     "config_entry_with_subentries",
     "config_entry_with_runtime_managed_subentries",
+    "resolve_config_entry_lookup",
 ]
 
 
@@ -53,6 +54,50 @@ class _TransientUnknownEntryConfig:
 TransientUnknownConfigInput = (
     _TransientUnknownEntryConfig | Mapping[str, int] | int
 )
+
+
+def resolve_config_entry_lookup(
+    entries: Iterable[Any], entry_id: str
+) -> Any | None:
+    """Return an entry or subentry matching ``entry_id``.
+
+    This mirrors the lookup contract exercised by
+    ``FakeConfigEntriesManager`` so purpose-built test stubs can reuse the
+    logic without duplicating it.
+    """
+
+    for entry in entries:
+        if getattr(entry, "entry_id", None) == entry_id:
+            return entry
+
+    for entry in entries:
+        runtime_data = getattr(entry, "runtime_data", None)
+        manager = getattr(runtime_data, "subentry_manager", None)
+        managed = getattr(manager, "managed_subentries", None)
+        if isinstance(managed, dict):
+            candidate = managed.get(entry_id)
+            if candidate is not None:
+                return candidate
+            for subentry in managed.values():
+                candidate_entry_id = getattr(subentry, "entry_id", None)
+                if isinstance(candidate_entry_id, str) and candidate_entry_id == entry_id:
+                    return subentry
+                candidate_subentry_id = getattr(subentry, "subentry_id", None)
+                if isinstance(candidate_subentry_id, str) and candidate_subentry_id == entry_id:
+                    return subentry
+
+    for entry in entries:
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, dict):
+            for subentry in subentries.values():
+                candidate_entry_id = getattr(subentry, "entry_id", None)
+                if isinstance(candidate_entry_id, str) and candidate_entry_id == entry_id:
+                    return subentry
+                candidate_subentry_id = getattr(subentry, "subentry_id", None)
+                if isinstance(candidate_subentry_id, str) and candidate_subentry_id == entry_id:
+                    return subentry
+
+    return None
 
 
 class FakeConfigEntriesManager:
@@ -157,24 +202,7 @@ class FakeConfigEntriesManager:
         if config is not None and config.lookup_misses > 0:
             config.lookup_misses -= 1
             return None
-        for entry in self._entries:
-            if entry.entry_id == entry_id:
-                return entry
-            runtime_data = getattr(entry, "runtime_data", None)
-            manager = getattr(runtime_data, "subentry_manager", None)
-            if manager is None:
-                continue
-            managed = getattr(manager, "managed_subentries", None)
-            if isinstance(managed, dict):
-                candidate = managed.get(entry_id)
-                if candidate is not None:
-                    return candidate
-                for subentry in managed.values():
-                    if getattr(subentry, "entry_id", None) == entry_id:
-                        return subentry
-                    if getattr(subentry, "subentry_id", None) == entry_id:
-                        return subentry
-        return None
+        return resolve_config_entry_lookup(self._entries, entry_id)
 
     def async_get_subentries(self, entry_id: str) -> list[Any]:
         """Return child subentries registered on the provided entry."""
