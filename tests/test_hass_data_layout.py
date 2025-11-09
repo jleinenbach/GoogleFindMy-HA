@@ -126,7 +126,7 @@ class _StubHttp:
 
 
 class _StubConfigEntries:
-    """Minimal config_entries manager stub."""
+    """Align subentry lookup/registration with FakeConfigEntriesManager for retry coverage."""
 
     def __init__(self, entry: _StubConfigEntry) -> None:
         self._entries: list[_StubConfigEntry] = [entry]
