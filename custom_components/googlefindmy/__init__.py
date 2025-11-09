@@ -4343,6 +4343,7 @@ async def _async_ensure_subentries_are_setup(
     attempt_counts: dict[str, int] = {subentry_id: 0 for subentry_id in active_pending}
     first_exception: BaseException | None = None
     false_failures: list[str] = []
+    exhausted_missing: list[str] = []
     while active_pending:
         missing_ids: list[str] = []
         to_setup: list[str] = []
@@ -4355,7 +4356,9 @@ async def _async_ensure_subentries_are_setup(
                     subentry_id,
                     MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
                 )
-                return
+                exhausted_missing.append(subentry_id)
+                active_pending.remove(subentry_id)
+                continue
             if hass.config_entries.async_get_entry(subentry_id) is None:
                 attempt_counts[subentry_id] = attempts + 1
                 missing_ids.append(subentry_id)
@@ -4419,6 +4422,14 @@ async def _async_ensure_subentries_are_setup(
 
     if first_exception is not None:
         raise first_exception
+    if exhausted_missing:
+        raise ConfigEntryNotReady(
+            "One or more subentries were not registered after %d attempts: %s"
+            % (
+                MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
+                ", ".join(exhausted_missing),
+            )
+        )
     if false_failures:
         raise ConfigEntryNotReady(
             "One or more subentries returned False during setup: %s"
