@@ -293,7 +293,7 @@ def _set_default_entry_id(entry_id: str, force: bool = False) -> None:
     elif len(_INSTANCES) > 1 and _DEFAULT_ENTRY_ID != entry_id:
         # Immediately disallow ambiguous facade usage in multi-entry setups.
         _DEFAULT_ENTRY_ID = None
-        _LOGGER.warning("Multiple config entries are active. Global cache calls are ambiguous and will fail.")
+        _LOGGER.debug("Multiple config entries detected. Entry-specific cache instances will be used (expected behavior).")
     else:
         _DEFAULT_ENTRY_ID = entry_id
 
