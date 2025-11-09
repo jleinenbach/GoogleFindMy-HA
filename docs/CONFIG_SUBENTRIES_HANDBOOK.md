@@ -7,6 +7,7 @@ This handbook captures the Home Assistant 2025.7+ contract for configuration sub
 - **Global identifier handling:** Use `subentry.entry_id` for lifecycle helpers and fall back to `subentry.subentry_id` only when a freshly created child has not yet populated `entry_id`. Both attributes refer to the same ULID.
 - **Deferred lifecycle setup:** When a parent creates subentries in the same transaction, schedule `_async_ensure_subentries_are_setup` (or equivalent helpers) via `entry.async_create_background_task(hass, ...)` so Home Assistant can finish registering the children before setup begins while preserving ConfigEntry lifecycle error handling. See the inline race-condition commentary in `custom_components/googlefindmy/__init__.py` near the `_async_ensure_subentries_are_setup` scheduling block for the canonical implementation details.
 - **Device/registry repairs:** Follow Section VIII.D for orphan detection and rebuild workflows; always include the child `entry_id` when updating tracker/service devices.
+- **Style note for quick references:** When adding concise checklists or reminders inside a subsection, anchor them at the `####` level (for example, `#### Race-condition checklist`) beneath the owning `###` heading so the handbook's numbering remains stable and navigation panes keep related guidance grouped together.
 
 ## Section I: Architectural Mandate — Why Config Subentries Exist
 
