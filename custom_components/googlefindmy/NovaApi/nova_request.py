@@ -131,8 +131,20 @@ def unregister_cache_provider() -> None:
     _CACHE_PROVIDER = None
 
 def _get_cache_provider():
-    """Get the registered cache provider or None."""
-    return _CACHE_PROVIDER() if _CACHE_PROVIDER else None
+    """Get the registered cache provider or None.
+
+    Returns None if no provider is registered or if the provider's cache is closed.
+    """
+    if not _CACHE_PROVIDER:
+        return None
+    try:
+        cache = _CACHE_PROVIDER()
+        # Check if cache is closed (has _closed attribute that's True)
+        if cache and getattr(cache, '_closed', False):
+            return None
+        return cache
+    except Exception:  # noqa: BLE001
+        return None
 
 # --- Refresh Locks ---
 _sync_refresh_lock = threading.Lock()
@@ -438,7 +450,7 @@ async def _get_initial_token_async(username: str, _logger) -> str:
 
     if not token:
         _logger.info("Attempting to generate new ADM token (async)...")
-        token = await async_get_adm_token_api(username, cache=cache)
+        token = await async_get_adm_token_api(username)
         if token:
             try:
                 if cache:
