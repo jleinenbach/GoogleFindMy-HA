@@ -201,6 +201,14 @@ Config subentries expose **two** identifiers. Misusing them leads to reload fail
 > * Use `subentry.subentry_id` when indexing `entry.subentries`.
 > * The warning "Never mix identifiers" applies to confusing the global ULID (`entry_id`/`subentry_id`) with logical keys (`core_tracking`, `service`, etc.).
 
+#### Race-condition checklist
+
+When spawning lifecycle work for freshly created children, confirm the config entry registry has finalized the record before calling helpers such as `async_setup`, `async_reload`, or `async_remove_subentry`:
+
+1. Yield to the event loop (for example, `await asyncio.sleep(0)`) from the background task that will invoke the lifecycle helper.
+2. Validate registry visibility **after** yielding by fetching the child entry via `hass.config_entries.async_get_entry(child_ulid)` (or equivalent) and ensure the result is not `None`.
+3. Only call the lifecycle helper once the registry lookup succeeds; if it fails, continue yielding and re-checking instead of assuming a single `await asyncio.sleep(0)` resolved the race.
+
 ### B. Routing setup
 
 ```python
