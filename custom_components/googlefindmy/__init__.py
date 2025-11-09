@@ -4204,6 +4204,10 @@ async def _async_ensure_subentries_are_setup(
     or updates the managed subentries.
     """
 
+    # Yield once so Home Assistant finishes registering freshly created subentries
+    # before we request their setup; otherwise ``async_setup`` can raise UnknownEntry.
+    await asyncio.sleep(0)
+
     runtime_data: RuntimeData | None = getattr(entry, "runtime_data", None)
     if runtime_data is None:
         return
