@@ -66,6 +66,13 @@ isolation. The recent additions mirror enough of the `ConfigFlow` contract to
 support discovery update tests and follow the real integration's behavior
 closely enough for regression coverage.
 
+When updating `_StubConfigEntries` in
+`tests/test_hass_data_layout.py`, keep its lookup and registration
+semantics aligned with `tests.helpers.homeassistant.FakeConfigEntriesManager`.
+The stub intentionally mirrors the shared helper so subentry registration
+retries in layout tests exercise the same pathways guarded by the reusable
+manager.
+
 #### Transient `UnknownEntry` simulation helpers
 
 `tests.helpers.homeassistant.FakeConfigEntriesManager` now ships with
