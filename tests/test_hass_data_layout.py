@@ -219,6 +219,15 @@ class _StubConfigEntries:
         for entry in self._entries:
             if entry.entry_id == entry_id:
                 return entry
+            subentries = getattr(entry, "subentries", None)
+            if isinstance(subentries, dict):
+                for subentry in subentries.values():
+                    candidate_id = getattr(subentry, "entry_id", None)
+                    if isinstance(candidate_id, str) and candidate_id == entry_id:
+                        return subentry
+                    candidate_id = getattr(subentry, "subentry_id", None)
+                    if isinstance(candidate_id, str) and candidate_id == entry_id:
+                        return subentry
         return None
 
     def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
