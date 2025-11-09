@@ -279,19 +279,45 @@ def _unregister_instance(entry_id: str) -> Optional[TokenCache]:
     return _INSTANCES.pop(entry_id, None)
 
 
-def _set_default_entry_id(entry_id: str) -> None:
-    """Set the default entry for facade calls (only for single-entry scenarios)."""
+def _set_default_entry_id(entry_id: str, force: bool = False) -> None:
+    """Set the default entry for facade calls (only for single-entry scenarios).
+
+    Args:
+        entry_id: The entry ID to set as default.
+        force: If True, bypass the multi-entry check (used during validation).
+    """
     global _DEFAULT_ENTRY_ID
-    if len(_INSTANCES) > 1 and _DEFAULT_ENTRY_ID != entry_id:
+    if force:
+        # Validation mode - force set even with multiple entries
+        _DEFAULT_ENTRY_ID = entry_id
+    elif len(_INSTANCES) > 1 and _DEFAULT_ENTRY_ID != entry_id:
         # Immediately disallow ambiguous facade usage in multi-entry setups.
         _DEFAULT_ENTRY_ID = None
-        _LOGGER.warning("Multiple config entries are active. Global cache calls are ambiguous and will fail.")
+        _LOGGER.debug("Multiple config entries detected. Entry-specific cache instances will be used (expected behavior).")
     else:
         _DEFAULT_ENTRY_ID = entry_id
 
 
 def _get_default_cache() -> TokenCache:
-    """Return the default cache instance or raise if ambiguous."""
+    """Return the default cache instance or raise if ambiguous.
+
+    Priority order for multi-entry support:
+    1. Registered cache provider (from nova_request during API calls)
+    2. Default entry ID (single entry or explicitly set)
+    3. Single instance (only one entry exists)
+    4. Error (multiple entries, ambiguous)
+    """
+    # Check for registered cache provider first (multi-entry support)
+    try:
+        from ..NovaApi import nova_request
+        provider_cache = nova_request._get_cache_provider()
+        if provider_cache:
+            return provider_cache
+    except Exception:  # noqa: BLE001
+        # Nova request not available or no provider registered
+        pass
+
+    # Fall back to default entry ID logic
     if _DEFAULT_ENTRY_ID and (cache := _INSTANCES.get(_DEFAULT_ENTRY_ID)):
         return cache
     if len(_INSTANCES) == 1:

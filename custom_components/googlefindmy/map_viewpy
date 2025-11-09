@@ -90,12 +90,12 @@ class GoogleFindMyMapView(HomeAssistantView):
             device_name = "Unknown Device"
 
             # Extract the raw Google device ID from the full device identifier
-            # In multi-account mode, device_id may be formatted as "{entry_id}_{google_device_id}"
+            # In multi-account mode, device_id is formatted as "{entry_id}_{google_device_id}"
             # We need to extract the google_device_id portion for matching against coordinator data
             raw_device_id = device_id
             if "_" in device_id:
                 # Try to extract the Google device ID by removing the entry_id prefix
-                for entry_id_key in coordinator_data.keys():
+                for entry_id_key, coordinator in coordinator_data.items():
                     if entry_id_key == "config_data":
                         continue
                     # Check if device_id starts with this entry_id

@@ -46,6 +46,7 @@ except ImportError:  # noqa: F401 - broad env compatibility
     selector = None  # type: ignore[assignment]
 
 from .api import GoogleFindMyAPI
+from .Auth.token_cache import _register_instance, _unregister_instance, _set_default_entry_id
 from .const import (
     # Core
     DOMAIN,
@@ -140,6 +141,21 @@ STEP_INDIVIDUAL_DATA_SCHEMA = vol.Schema(
 # ---------------------------
 # Extractors (email + tokens with preference & failover list)
 # ---------------------------
+def _extract_fcm_credentials_from_secrets(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract fcm_credentials from secrets.json if present.
+
+    Returns:
+        The fcm_credentials dict, or None if not found.
+    """
+    try:
+        fcm_creds = data.get("fcm_credentials")
+        if isinstance(fcm_creds, dict):
+            return fcm_creds
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _extract_email_from_secrets(data: Dict[str, Any]) -> Optional[str]:
     """Best-effort extractor for the Google account email from secrets.json."""
     candidates = [
@@ -227,18 +243,54 @@ def _extract_oauth_from_secrets(data: Dict[str, Any]) -> Optional[str]:
     return cands[0][1]
 
 
-async def async_pick_working_token(email: str, candidates: List[Tuple[str, str]]) -> Optional[str]:
+async def async_pick_working_token(
+    email: str,
+    candidates: List[Tuple[str, str]],
+    secrets_data: Optional[Dict[str, Any]] = None,
+) -> Optional[Tuple[str, str]]:
     """Try tokens in order until one passes a minimal online validation.
 
     This performs a very lightweight API call (`async_get_basic_device_list`)
     to verify the token works for the given Google account.
+
+    Args:
+        email: Google account email.
+        candidates: List of (source_name, token) tuples to try.
+        secrets_data: Optional parsed secrets.json dict (for extracting android_id).
+
+    Returns:
+        Tuple of (source_name, token) if validation succeeds, None otherwise.
     """
+    # Extract fcm_credentials from secrets if available (contains android_id)
+    fcm_creds = None
+    if isinstance(secrets_data, dict):
+        fcm_creds = _extract_fcm_credentials_from_secrets(secrets_data)
+
     for source, token in candidates:
         try:
-            api = GoogleFindMyAPI(oauth_token=token, google_email=email)
-            await api.async_get_basic_device_list(email)
-            _LOGGER.debug("Token from '%s' validated successfully.", source)
-            return token
+            # Pass token to correct parameter based on source type
+            # If source is "aas_token", it's already an AAS token, not an OAuth token
+            api = GoogleFindMyAPI(
+                oauth_token=token if source != "aas_token" else None,
+                google_email=email,
+                fcm_credentials=fcm_creds,
+                aas_token=token if source == "aas_token" else None,
+            )
+
+            # Temporarily register the ephemeral cache to allow token generation during validation
+            # when multiple entries are active. Use a unique temporary entry_id.
+            temp_entry_id = f"__validation_{id(api)}"
+            _register_instance(temp_entry_id, api._cache)  # type: ignore[arg-type]
+            _set_default_entry_id(temp_entry_id, force=True)
+
+            try:
+                await api.async_get_basic_device_list(email)
+                _LOGGER.debug("Token from '%s' validated successfully.", source)
+                return (source, token)
+            finally:
+                # Clean up temporary registration
+                _unregister_instance(temp_entry_id)
+
         except Exception as err:  # noqa: BLE001 - network/auth errors
             _LOGGER.warning("Token from '%s' failed validation: %s", source, err)
             continue
@@ -368,18 +420,24 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = err
             else:
                 assert method == "secrets" and email and cands
-                chosen = await async_pick_working_token(email, cands)
-                if not chosen:
+                # Parse secrets.json for passing to validation
+                parsed_secrets = json.loads(user_input.get("secrets_json") or "{}")
+                result = await async_pick_working_token(email, cands, parsed_secrets)
+                if not result:
                     # Syntax was OK but none of the candidates worked online
                     errors["base"] = "cannot_connect"
                 else:
+                    # Unpack source and token
+                    token_source, chosen_token = result
                     # Store only minimal credentials transiently for next step
                     self._auth_data = {
                         DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                        CONF_OAUTH_TOKEN: chosen,
+                        CONF_OAUTH_TOKEN: chosen_token,
                         CONF_GOOGLE_EMAIL: email,
                         # Keep the original bundle transiently (not stored in entry)
-                        DATA_SECRET_BUNDLE: json.loads(user_input.get("secrets_json") or "{}"),
+                        DATA_SECRET_BUNDLE: parsed_secrets,
+                        # Store token source so we know how to use it in device_selection
+                        "token_source": token_source,
                     }
                     return await self.async_step_device_selection()
 
@@ -415,12 +473,26 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, Optional[str]]:
         """Build API instance for setup using minimal credentials."""
         email = self._auth_data.get(CONF_GOOGLE_EMAIL)
-        oauth = self._auth_data.get(CONF_OAUTH_TOKEN)
+        token = self._auth_data.get(CONF_OAUTH_TOKEN)
+        token_source = self._auth_data.get("token_source")  # May be None for manual path
 
-        if not (email and oauth):
+        if not (email and token):
             raise HomeAssistantError("Missing credentials in setup flow.")
 
-        api = GoogleFindMyAPI(oauth_token=oauth, google_email=email)
+        # Extract fcm_credentials from secrets bundle if available (contains android_id)
+        fcm_creds = None
+        secret_bundle = self._auth_data.get(DATA_SECRET_BUNDLE)
+        if isinstance(secret_bundle, dict):
+            fcm_creds = _extract_fcm_credentials_from_secrets(secret_bundle)
+
+        # Pass token to correct parameter based on source type
+        # If source is "aas_token", it's already an AAS token, not an OAuth token
+        api = GoogleFindMyAPI(
+            oauth_token=token if token_source != "aas_token" else None,
+            google_email=email,
+            fcm_credentials=fcm_creds,
+            aas_token=token if token_source == "aas_token" else None,
+        )
         return api, email
 
     # ---------- Device selection (now: connection test + non-secret settings) ----------
@@ -442,12 +514,24 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not self._available_devices:
             try:
                 api, username = await self._async_build_api_and_username()
-                devices = await api.async_get_basic_device_list(username)
-                if not devices:
-                    errors["base"] = "no_devices"
-                else:
-                    # store as (name, id) for potential future use (kept for parity)
-                    self._available_devices = [(d["name"], d["id"]) for d in devices]
+
+                # Temporarily register the ephemeral cache to allow token generation during validation
+                # when multiple entries are active. Use a unique temporary entry_id.
+                temp_entry_id = f"__validation_{id(api)}"
+                _register_instance(temp_entry_id, api._cache)  # type: ignore[arg-type]
+                _set_default_entry_id(temp_entry_id, force=True)
+
+                try:
+                    devices = await api.async_get_basic_device_list(username)
+                    if not devices:
+                        errors["base"] = "no_devices"
+                    else:
+                        # store as (name, id) for potential future use (kept for parity)
+                        self._available_devices = [(d["name"], d["id"]) for d in devices]
+                finally:
+                    # Clean up temporary registration
+                    _unregister_instance(temp_entry_id)
+
             except Exception as err:  # noqa: BLE001 - API/transport errors
                 _LOGGER.error("Failed to fetch devices during setup: %s", err)
                 errors["base"] = "cannot_connect"
@@ -486,6 +570,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_GOOGLE_EMAIL: self._auth_data.get(CONF_GOOGLE_EMAIL),
             }
 
+            # Store secrets bundle for runtime access to fcm_credentials and android_id
+            if self._auth_data.get(DATA_SECRET_BUNDLE):
+                data_payload[DATA_SECRET_BUNDLE] = self._auth_data[DATA_SECRET_BUNDLE]
+
+            # Store token source so runtime knows how to use the token
+            if self._auth_data.get("token_source"):
+                data_payload["token_source"] = self._auth_data["token_source"]
+
             # Options (no OPT_TRACKED_DEVICES anymore)
             options_payload: Dict[str, Any] = {
                 OPT_LOCATION_POLL_INTERVAL: user_input.get(
@@ -508,17 +600,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
             }
 
+            # Use email in title for multi-account support
+            google_email = self._auth_data.get(CONF_GOOGLE_EMAIL, "Unknown")
+            entry_title = f"Google Find My Device ({google_email})"
+
             # Prefer modern HA that supports options at create time; fallback to data-only.
             try:
                 return self.async_create_entry(
-                    title="Google Find My Device",
+                    title=entry_title,
                     data=data_payload,
                     options=options_payload,  # type: ignore[call-arg]
                 )
             except TypeError:
                 shadow = dict(data_payload)
                 shadow.update(options_payload)
-                return self.async_create_entry(title="Google Find My Device", data=shadow)
+                return self.async_create_entry(title=entry_title, data=shadow)
 
         return self.async_show_form(step_id="device_selection", data_schema=schema)
 
@@ -600,9 +696,13 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show a small menu: edit settings vs. update credentials vs. visibility."""
+        # Show which account is being configured to prevent confusion
+        current_email = self.config_entry.data.get(CONF_GOOGLE_EMAIL, "Unknown")
+
         return self.async_show_menu(
             step_id="init",
             menu_options=["settings", "credentials", "visibility"],
+            description_placeholders={"account_email": current_email},
         )
 
     # ---------- Helpers to access live cache/API ----------
@@ -776,6 +876,7 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             validation with token failover.
         """
         errors: Dict[str, str] = {}
+        current_email = self.config_entry.data.get(CONF_GOOGLE_EMAIL, "Unknown")
 
         if selector is not None:
             schema = vol.Schema(
@@ -834,7 +935,12 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                     _LOGGER.error("Credentials update failed: %s", err2)
                     errors["base"] = "cannot_connect"
 
-        return self.async_show_form(step_id="credentials", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="credentials",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"account_email": current_email},
+        )
 
 
 # ---------- Custom exceptions ----------

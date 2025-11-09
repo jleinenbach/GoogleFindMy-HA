@@ -40,11 +40,27 @@
   "options": {
     "step": {
       "init": {
+        "title": "Configure Google Find My Device",
+        "description": "Configuring account: {account_email}\n\nTo add another account, use '+ Add Integration' from the Integrations page.",
+        "menu_options": {
+          "settings": "Settings",
+          "credentials": "Update Credentials",
+          "visibility": "Device Visibility"
+        },
         "data": {
           "map_view_token_expiration": "Enable map view token expiration"
         },
         "data_description": {
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire."
+        }
+      },
+      "credentials": {
+        "title": "Update Credentials for {account_email}",
+        "description": "⚠️ This will update credentials for the current account only.\n\nTo add a different account, cancel this and use '+ Add Integration' from the Integrations page instead.",
+        "data": {
+          "new_secrets_json": "New secrets.json content (optional)",
+          "new_oauth_token": "New OAuth Token (optional)",
+          "new_google_email": "New Google Email (optional)"
         }
       }
     }

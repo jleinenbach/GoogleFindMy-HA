@@ -56,7 +56,9 @@ class GoogleFindMyPollingSensor(CoordinatorEntity, BinarySensorEntity):
     def __init__(self, coordinator: GoogleFindMyCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{DOMAIN}_polling"
+        # Include entry_id for multi-account support
+        entry_id = coordinator.config_entry.entry_id if coordinator.config_entry else "default"
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_polling"
         # _attr_name is intentionally not set; it's derived from translation_key.
 
     @property
@@ -84,9 +86,16 @@ class GoogleFindMyPollingSensor(CoordinatorEntity, BinarySensorEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Return DeviceInfo for the integration's diagnostic device."""
+        # Include entry_id for multi-account support
+        entry_id = self.coordinator.config_entry.entry_id if self.coordinator.config_entry else "default"
+        # Get account email for better naming
+        google_email = "Unknown"
+        if self.coordinator.config_entry:
+            google_email = self.coordinator.config_entry.data.get("google_email", "Unknown")
+
         return DeviceInfo(
-            identifiers={(DOMAIN, "integration")},
-            name="Google Find My Integration",
+            identifiers={(DOMAIN, f"integration_{entry_id}")},
+            name=f"Google Find My Integration ({google_email})",
             manufacturer="BSkando",
             model="Find My Device Integration",
             sw_version=INTEGRATION_VERSION,  # Display integration version

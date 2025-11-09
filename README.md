@@ -23,6 +23,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 - ✅ **Attribute grading system**: Best location data is selected automatically based on recency, accuracy, and source of data
 - 📍 **Historical Map-View**: Each tracker has a filterable Map-View that shows tracker movement with location data
 - 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
+- #️⃣ **Multi-Account Support**: Add multiple Find Hub Google accounts that show up separately
 - ❣️ **More to come!**
   
 >[!NOTE]

@@ -515,15 +515,14 @@ class FcmReceiverHA:
     async def _process_background_update(self, canonic_id: str, hex_string: str) -> None:
         """Decode location, enqueue for debounce, and schedule a flush.
 
-        This method performs CPU-bound protobuf decryption in a thread executor,
-        enriches diagnostics, and then **does not** touch coordinator state
+        This method performs CPU-bound protobuf decryption using the async API,
+        which maintains cache context for multi-account support.
+        Enriches diagnostics, and then **does not** touch coordinator state
         directly. Instead it stores the latest payload in `_pending` and triggers
         a debounced flush for the corresponding device id.
         """
         try:
-            location_data = await asyncio.get_event_loop().run_in_executor(
-                None, self._decode_background_location, hex_string
-            )
+            location_data = await self._decode_background_location_async(hex_string)
             if not location_data:
                 _LOGGER.debug("No location data in background update for %s", canonic_id)
                 return
@@ -660,13 +659,13 @@ class FcmReceiverHA:
 
     # -------------------- Decode helper --------------------
 
-    def _decode_background_location(self, hex_string: str) -> dict:
-        """Decode background location using our protobuf decoders (CPU-bound).
+    async def _decode_background_location_async(self, hex_string: str) -> dict:
+        """Decode background location using async API (maintains cache context).
 
         Implementation detail:
-        - Calls the **sync** facade `decrypt_location_response_locations(...)` from a worker
-          thread via `run_in_executor` (see caller). This guarantees we never call the
-          sync facade while a running event loop exists in the same thread (see its contract).
+        - Uses the **async** `async_decrypt_location_response_locations(...)` which
+          maintains the cache context for multi-account support.
+        - CPU-bound crypto work is offloaded to executor within the async API.
         - The decoder layer is responsible for:
             * fail-fast validation of coordinates,
             * attaching an internal `_report_hint` based on report type (if known),
@@ -675,11 +674,13 @@ class FcmReceiverHA:
         try:
             from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf  # type: ignore
             from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (  # type: ignore
-                decrypt_location_response_locations,
+                async_decrypt_location_response_locations,
             )
 
+            # Parse in current thread (lightweight)
             device_update = parse_device_update_protobuf(hex_string)
-            locations = decrypt_location_response_locations(device_update) or []
+            # Decrypt async (maintains cache context, offloads CPU work)
+            locations = await async_decrypt_location_response_locations(device_update) or []
             return locations[0] if locations else {}
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to decode background location data: %s", err)

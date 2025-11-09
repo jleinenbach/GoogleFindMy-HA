@@ -135,8 +135,8 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
     _attr_has_entity_name = False
     _attr_source_type = SourceType.GPS
     _attr_entity_category = None  # ensure tracker is not diagnostic
-    # Default to disabled in the registry (user must enable the device/entities)
-    _attr_entity_registry_enabled_default = False
+    # Enable by default - device tracking is the core functionality
+    _attr_entity_registry_enabled_default = True
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----
     @staticmethod
@@ -237,8 +237,13 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
             # Only pass a real name; never pass default_name here.
             name_kwargs["name"] = display_name
 
+        # Include config entry ID in identifier for multi-account support
+        # This ensures devices from different accounts appear as separate entries
+        entry_id = self.coordinator.config_entry.entry_id if self.coordinator.config_entry else "default"
+        device_identifier = f"{entry_id}_{self._device['id']}"
+
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device["id"])},
+            identifiers={(DOMAIN, device_identifier)},
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}" if base_url else None,

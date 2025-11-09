@@ -127,12 +127,17 @@ def _redact_url_token(url: str) -> str:
         return url
 
 
-async def _async_save_secrets_data(secrets_data: dict) -> None:
+async def _async_save_secrets_data(secrets_data: dict, cache: Any) -> None:
     """Persist a legacy secrets.json bundle into the async token cache.
 
     Notes:
         - Only called for the legacy secrets.json path.
         - Store JSON-serializable values *as-is*. TokenCache validates and normalizes.
+        - aas_token from secrets.json is actually an ADM token, store as adm_token_{username}
+
+    Args:
+        secrets_data: The parsed secrets.json dictionary.
+        cache: The entry-specific TokenCache instance.
     """
     enhanced_data = dict(secrets_data)
 
@@ -141,23 +146,47 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
     if google_email:
         enhanced_data[username_string] = google_email
 
+    # Store all keys as-is; aas_token will be found by async_get_aas_token()
+    # and used to generate the ADM token via gpsoauth exchange
     for key, value in enhanced_data.items():
         try:
             # Store primitives and JSON-safe structures directly
             if isinstance(value, (str, int, float, bool)) or isinstance(value, (dict, list)):
-                await async_set_cached_value(key, value)
+                await cache.set(key, value)
             else:
                 # Last-resort: try to JSON-encode unknown objects
-                await async_set_cached_value(key, json.dumps(value))
+                await cache.set(key, json.dumps(value))
         except (OSError, TypeError) as err:
             _LOGGER.warning("Failed to save '%s' to persistent cache: %s", key, err)
 
+    # CRITICAL: Store owner_key and shared_key under per-user keys for E2EE to work correctly
+    # The get_owner_key.py code looks for "owner_key_<username>" first
+    if google_email:
+        if "owner_key" in secrets_data:
+            try:
+                await cache.set(f"owner_key_{google_email}", secrets_data["owner_key"])
+                _LOGGER.debug("Stored owner_key under per-user key for %s", google_email)
+            except Exception as err:
+                _LOGGER.warning("Failed to save per-user owner_key: %s", err)
+        if "shared_key" in secrets_data:
+            try:
+                await cache.set(f"shared_key_{google_email}", secrets_data["shared_key"])
+                _LOGGER.debug("Stored shared_key under per-user key for %s", google_email)
+            except Exception as err:
+                _LOGGER.warning("Failed to save per-user shared_key: %s", err)
 
-async def _async_save_individual_credentials(oauth_token: str, google_email: str) -> None:
-    """Persist individual credentials (oauth_token + email) to the token cache."""
+
+async def _async_save_individual_credentials(oauth_token: str, google_email: str, cache: Any) -> None:
+    """Persist individual credentials (oauth_token + email) to the token cache.
+
+    Args:
+        oauth_token: The OAuth token to store.
+        google_email: The Google account email.
+        cache: The entry-specific TokenCache instance.
+    """
     try:
-        await async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
-        await async_set_cached_value(username_string, google_email)
+        await cache.set(CONF_OAUTH_TOKEN, oauth_token)
+        await cache.set(username_string, google_email)
     except OSError as err:
         _LOGGER.warning("Failed to save individual credentials to cache: %s", err)
 
@@ -197,7 +226,11 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         dev_reg = dr.async_get(hass)
         updated = 0
         for device in list(dev_reg.devices.values()):
-            if not any(domain == DOMAIN for domain, _ in device.identifiers):
+            # Defensive: handle malformed identifiers
+            try:
+                if not any(len(ident) == 2 and ident[0] == DOMAIN for ident in device.identifiers):
+                    continue
+            except (TypeError, ValueError):
                 continue
             if device.name_by_user:
                 continue  # user-chosen names stay untouched
@@ -313,6 +346,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _register_instance(entry.entry_id, cache)
     _set_default_entry_id(entry.entry_id)
 
+    # NOTE: We don't register a global cache provider here anymore because it would
+    # overwrite the previous entry's cache. Instead, the per-user owner_key/shared_key
+    # storage ensures each account uses the correct keys from its own cache.
+
     # Ensure deferred writes are flushed on HA shutdown
     async def _flush_on_stop(event) -> None:
         """Flush deferred saves on Home Assistant stop."""
@@ -363,13 +400,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
+    token_source = entry.data.get("token_source")
 
     if secrets_data:
-        await _async_save_secrets_data(secrets_data)
+        await _async_save_secrets_data(secrets_data, cache)
         _LOGGER.debug("Persisted secrets.json bundle to token cache")
+
+        # NOTE: ADM token pre-generation skipped during setup to avoid multi-entry cache conflicts
+        # The token will be generated on-demand during the first API call
+        if secrets_data.get("aas_token") and google_email:
+            _LOGGER.debug("AAS token present for user %s; ADM token will be generated on first API call", google_email)
     elif oauth_token and google_email:
-        await _async_save_individual_credentials(oauth_token, google_email)
-        _LOGGER.debug("Persisted individual credentials to token cache")
+        # If token_source is "aas_token", store as aas_token instead of oauth_token
+        if token_source == "aas_token":
+            try:
+                await cache.set("aas_token", oauth_token)
+                await cache.set(username_string, google_email)
+                _LOGGER.debug("Persisted aas_token to token cache")
+            except OSError as err:
+                _LOGGER.warning("Failed to save aas_token to cache: %s", err)
+        else:
+            await _async_save_individual_credentials(oauth_token, google_email, cache)
+            _LOGGER.debug("Persisted individual credentials to token cache")
     else:
         _LOGGER.error(
             "No credentials found in config entry (neither secrets_data nor oauth_token+google_email)"
@@ -543,6 +595,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as err:
             _LOGGER.warning("Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err)
 
+    # Clear any lingering cache provider registration
+    try:
+        from .NovaApi import nova_request
+        nova_request.unregister_cache_provider()
+    except Exception:  # noqa: BLE001
+        pass
+
     if unload_ok:
         # Drop coordinator from hass.data
         hass.data.setdefault(DOMAIN, {}).pop(entry.entry_id, None)
@@ -586,10 +645,17 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             # 1) Treat as HA device_id
             dev = dr.async_get(hass).async_get(arg)
             if dev:
-                for domain, ident in dev.identifiers:
-                    if domain == DOMAIN:
-                        name = dev.name_by_user or dev.name or ident
-                        return ident, name
+                # Defensive: handle malformed identifiers
+                try:
+                    for identifier in dev.identifiers:
+                        if not isinstance(identifier, (tuple, list)) or len(identifier) != 2:
+                            continue
+                        domain, ident = identifier
+                        if domain == DOMAIN:
+                            name = dev.name_by_user or dev.name or ident
+                            return ident, name
+                except (ValueError, TypeError) as e:
+                    _LOGGER.debug("Skipping malformed device identifiers for %s: %s", arg, e)
 
             # 2) Treat as entity_id
             if "." in arg:
@@ -597,10 +663,17 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 if ent and ent.platform == DOMAIN and ent.device_id:
                     dev = dr.async_get(hass).async_get(ent.device_id)
                     if dev:
-                        for domain, ident in dev.identifiers:
-                            if domain == DOMAIN:
-                                name = dev.name_by_user or dev.name or ident
-                                return ident, name
+                        # Defensive: handle malformed identifiers
+                        try:
+                            for identifier in dev.identifiers:
+                                if not isinstance(identifier, (tuple, list)) or len(identifier) != 2:
+                                    continue
+                                domain, ident = identifier
+                                if domain == DOMAIN:
+                                    name = dev.name_by_user or dev.name or ident
+                                    return ident, name
+                        except (ValueError, TypeError) as e:
+                            _LOGGER.debug("Skipping malformed device identifiers for entity %s: %s", arg, e)
 
             # 3) Fallback: assume arg is the canonical Google ID (no coordinator dependency here)
             return arg, arg
@@ -609,13 +682,17 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             """Resolve the owning coordinator for a canonical device id via Device Registry."""
             dev_reg = dr.async_get(hass)
             for dev in dev_reg.devices.values():
-                if any(domain == DOMAIN and ident == canonical_id for domain, ident in dev.identifiers):
-                    for entry_id in dev.config_entries:
-                        entry = hass.config_entries.async_get_entry(entry_id)
-                        if entry and entry.domain == DOMAIN:
-                            coord = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-                            if coord:
-                                return coord
+                # Defensive: handle malformed identifiers
+                try:
+                    if any(len(ident) == 2 and ident[0] == DOMAIN and ident[1] == canonical_id for ident in dev.identifiers):
+                        for entry_id in dev.config_entries:
+                            entry = hass.config_entries.async_get_entry(entry_id)
+                            if entry and entry.domain == DOMAIN:
+                                coord = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                                if coord:
+                                    return coord
+                except (TypeError, ValueError):
+                    continue
             return None
 
         async def async_locate_device_service(call: ServiceCall) -> None:
@@ -737,17 +814,21 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             dev_reg = dr.async_get(hass)
             updated_count = 0
             for device in dev_reg.devices.values():
-                if any(identifier[0] == DOMAIN for identifier in device.identifiers):
-                    dev_id = next((ident for domain, ident in device.identifiers if domain == DOMAIN), None)
-                    if dev_id:
-                        new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
-                        dev_reg.async_update_device(device_id=device.id, configuration_url=new_config_url)
-                        updated_count += 1
-                        _LOGGER.debug(
-                            "Updated URL for device %s: %s",
-                            device.name_by_user or device.name,
-                            _redact_url_token(new_config_url),
-                        )
+                # Defensive: handle malformed identifiers
+                try:
+                    if any(len(identifier) >= 1 and identifier[0] == DOMAIN for identifier in device.identifiers):
+                        dev_id = next((ident[1] for ident in device.identifiers if len(ident) == 2 and ident[0] == DOMAIN), None)
+                        if dev_id:
+                            new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
+                            dev_reg.async_update_device(device_id=device.id, configuration_url=new_config_url)
+                            updated_count += 1
+                            _LOGGER.debug(
+                                "Updated URL for device %s: %s",
+                                device.name_by_user or device.name,
+                                _redact_url_token(new_config_url),
+                            )
+                except (TypeError, ValueError, IndexError):
+                    continue
 
             _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
@@ -811,9 +892,13 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             else:
                 candidate_devices = set()
                 for dev in dev_reg.devices.values():
-                    if any(domain == DOMAIN for domain, _ in dev.identifiers):
-                        candidate_devices.add(dev.id)
-                        affected_entry_ids.update(dev.config_entries)
+                    # Defensive: handle malformed identifiers
+                    try:
+                        if any(len(ident) == 2 and ident[0] == DOMAIN for ident in dev.identifiers):
+                            candidate_devices.add(dev.id)
+                            affected_entry_ids.update(dev.config_entries)
+                    except (TypeError, ValueError):
+                        continue
 
             if not candidate_devices:
                 _LOGGER.info("googlefindmy.rebuild_registry: no matching devices to rebuild.")

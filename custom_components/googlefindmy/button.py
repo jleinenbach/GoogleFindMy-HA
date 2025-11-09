@@ -141,7 +141,7 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
 
     # Best practice: let HA compose "<Device Name> <translated entity name>"
     _attr_has_entity_name = True
-    _attr_entity_registry_enabled_default = False
+    _attr_entity_registry_enabled_default = True  # Enable by default - core functionality
     _attr_should_poll = False
     entity_description = PLAY_SOUND_DESCRIPTION
 
@@ -238,8 +238,12 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         if use_name:
             info_kwargs["name"] = use_name
 
+        # Include config entry ID in identifier for multi-account support
+        entry_id = self.coordinator.config_entry.entry_id if self.coordinator.config_entry else "default"
+        device_identifier = f"{entry_id}_{self._device['id']}"
+
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device["id"])},
+            identifiers={(DOMAIN, device_identifier)},
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
@@ -304,7 +308,7 @@ class GoogleFindMyStopSoundButton(CoordinatorEntity, ButtonEntity):
     """Button to trigger 'Stop Sound' on a Google Find My Device."""
 
     _attr_has_entity_name = True
-    _attr_entity_registry_enabled_default = False
+    _attr_entity_registry_enabled_default = True  # Enable by default - core functionality
     _attr_should_poll = False
     entity_description = STOP_SOUND_DESCRIPTION
 
@@ -398,8 +402,12 @@ class GoogleFindMyStopSoundButton(CoordinatorEntity, ButtonEntity):
         if use_name:
             info_kwargs["name"] = use_name
 
+        # Include config entry ID in identifier for multi-account support
+        entry_id = self.coordinator.config_entry.entry_id if self.coordinator.config_entry else "default"
+        device_identifier = f"{entry_id}_{self._device['id']}"
+
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device["id"])},
+            identifiers={(DOMAIN, device_identifier)},
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
@@ -553,8 +561,12 @@ class GoogleFindMyLocateButton(CoordinatorEntity, ButtonEntity):
         if use_name:
             info_kwargs["name"] = use_name
 
+        # Include config entry ID in identifier for multi-account support
+        entry_id = self.coordinator.config_entry.entry_id if self.coordinator.config_entry else "default"
+        device_identifier = f"{entry_id}_{self._device['id']}"
+
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device["id"])},
+            identifiers={(DOMAIN, device_identifier)},
             manufacturer="Google",
             model="Find My Device",
             configuration_url=f"{base_url}{path}",
