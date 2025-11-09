@@ -730,6 +730,7 @@ Before proposing a change Codex must:
 
 * Prefer the Home Assistant config flow metaclass to register flows. Manual assignments to `HANDLERS` are legacy fallbacks that should only be reintroduced when Home Assistant removes the metaclass hook or when a regression in upstream releases prevents automatic registration.
 * If a fallback becomes necessary, document the affected core version, link to the upstream issue or breaking change notice, and mark the block with a TODO referencing the removal criteria so the workaround is pruned once the regression is resolved.
+* When strict typing requires forwarding metaclass keywords (for example, `domain=DOMAIN`), reuse the `_DomainAwareConfigFlow` helper in `custom_components/googlefindmy/config_flow.py`—or introduce an analogous keyword-aware shim in the same module—so `mypy --strict` accepts the keyword without reintroducing manual `HANDLERS` fallbacks.
 
 ### 4. User as data source
 
