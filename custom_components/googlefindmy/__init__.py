@@ -4824,6 +4824,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # hass.async_create_task here; it would detach failure handling from the
     # config entry lifecycle and reintroduce silent retries.
     entry.async_create_background_task(
+        hass,
         _async_ensure_subentries_are_setup(hass, entry),
         name=f"{DOMAIN}.ensure_subentries_setup.{entry.entry_id}",
     )

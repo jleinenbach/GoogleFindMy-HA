@@ -124,12 +124,20 @@ class _StubConfigEntry:
         self._hass = hass
 
     def async_create_background_task(
-        self, coro: Awaitable[Any], *, name: str | None = None
+        self,
+        hass: "_StubHass",
+        target: Awaitable[Any],
+        *,
+        name: str | None = None,
+        eager_start: bool = True,
     ) -> asyncio.Task[Any]:
         if self._hass is None:
             msg = "ConfigEntry is not attached to a hass instance"
             raise RuntimeError(msg)
-        task = self._hass.async_create_task(coro, name=name)
+        if hass is not self._hass:
+            msg = "ConfigEntry is attached to a different hass instance"
+            raise RuntimeError(msg)
+        task = self._hass.async_create_task(target, name=name)
         self._background_tasks.append(task)
         return task
 

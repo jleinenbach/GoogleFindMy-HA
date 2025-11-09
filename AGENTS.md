@@ -91,6 +91,14 @@
 * [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10/2025.11 technical migration playbook for deprecations, breaking changes, and behavioral shifts. Treat its critical checklist as mandatory when touching affected APIs.
   * Section VIII.D contains the new device/entity registry troubleshooting playbooks. Reference them whenever you touch `_async_setup_subentry`, registry rebuild services, or device cleanup helpers, and summarize the relevant diagnostics in your PR description.
 
+### Home Assistant helper signature changelog
+
+* **`ConfigEntry.async_create_background_task(hass, target, *, name=None, eager_start=True)` (Home Assistant 2025.7+)** — pass
+  the `hass` instance explicitly as the first argument, followed by the awaitable/awaitable-returning target. Stubs under
+  `tests/` must forward the `target` callable/awaitable to `HomeAssistant.async_create_task` so lifecycle handling mirrors the
+  runtime integration. See `custom_components/googlefindmy/__init__.py` for the in-tree usage reference and keep this section
+  updated whenever Home Assistant revises helper signatures relied upon by the integration.
+
 ### Documentation quick links
 
 * [Docs & i18n requirements (§9)](#9-docs--i18n-minimal-but-strict)
