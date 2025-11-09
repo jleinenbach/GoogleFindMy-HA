@@ -158,7 +158,7 @@ async def _retrieve_owner_key(username: str) -> str:
         "Retrieved owner key (version=%s, len=%s) for user=%s",
         owner_key_version,
         len(owner_key),
-        username,
+        username[:3] + "***" + username[-10:] if len(username) > 13 else "***",  # Redact email for privacy
     )
 
     return bytes(owner_key).hex()
