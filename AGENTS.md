@@ -79,6 +79,10 @@
 >
 > **Directory scope:** applies to the entire repository (with continued emphasis on `custom_components/googlefindmy/**` and tests under `tests/**`).
 > **File headers:** Every Python file within scope must include a comment containing its repository-relative path (e.g., `# tests/test_example.py`). When a file has a shebang (`#!`), the shebang stays on the first line and the path comment immediately follows it.
+
+#### Quick reminder — path headers vs. future imports
+
+Always keep any `from __future__` imports immediately after the module docstring, even when the file starts with the repository-relative path header described above. This ordering prevents pytest's import hook from rejecting the file during rewrites.
 > **Precedence:** (1) Official **Home Assistant Developer Docs** → (2) this AGENTS.md → (3) repository conventions. This file never overrides security/legal policies.
 > **Language policy:** Keep the project consistently in English for documentation, inline code comments, and docstrings. (Translation files remain multilingual.)
 > **Non-blocking:** Missing optional artifacts (README sections, `quality_scale.yaml`, CODEOWNERS, CI files) **must not block** urgent fixes. The agent proposes a minimal stub or follow-up task instead.

@@ -4214,11 +4214,13 @@ async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bo
         return False
 
     bucket = _domain_data(hass)
-    entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(bucket)
+    entries_bucket = _ensure_entries_bucket(bucket)
 
-    try:
-        parent_runtime_data = entries_bucket[parent_entry_id]
-    except KeyError as err:
+    parent_payload = cast(
+        RuntimeData | GoogleFindMyCoordinator | None,
+        entries_bucket.get(parent_entry_id),
+    )
+    if parent_payload is None:
         _LOGGER.debug(
             "[%s] Parent runtime data bucket missing for %s; deferring setup",  # noqa: G004
             entry.entry_id,
@@ -4226,20 +4228,28 @@ async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bo
         )
         raise ConfigEntryNotReady(
             f"Parent entry {parent_entry_id} not yet initialized"
-        ) from err
+        )
 
-    if not isinstance(parent_runtime_data, RuntimeData):
+    coordinator: GoogleFindMyCoordinator | None = None
+    if isinstance(parent_payload, GoogleFindMyCoordinator):
+        coordinator = parent_payload
+    else:
+        coordinator = getattr(parent_payload, "coordinator", None)
+
+    if coordinator is None:
         _LOGGER.debug(
-            "[%s] Parent runtime data bucket for %s contains unexpected type %s; deferring setup",
+            "[%s] Parent runtime data for %s is missing a ready coordinator; deferring setup",
             entry.entry_id,
             parent_entry_id,
-            type(parent_runtime_data),
         )
         raise ConfigEntryNotReady(
-            f"Parent entry {parent_entry_id} runtime data pending rebuild"
+            f"Parent entry {parent_entry_id} coordinator not ready"
         )
 
-    entry.runtime_data = parent_runtime_data
+    if isinstance(parent_payload, RuntimeData):
+        entry.runtime_data = parent_payload
+    else:
+        entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
