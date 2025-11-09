@@ -1,5 +1,4 @@
 # tests/test_subentry_setup_trigger.py
-
 """Tests for ensuring programmatically created subentries get set up."""
 
 from __future__ import annotations
@@ -124,3 +123,32 @@ async def test_async_ensure_subentries_are_setup_falls_back_to_subentry_id(
     await _async_ensure_subentries_are_setup(hass, parent_entry)
 
     assert manager.setup_calls == [pending_subentry.subentry_id]
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_subentries_are_setup_retries_missing_child() -> None:
+    """Late-registered subentries should be retried until setup succeeds."""
+
+    pending_subentry = SimpleNamespace(
+        entry_id="child-retry",
+        subentry_id="child-retry",
+    )
+
+    parent_entry = config_entry_with_runtime_managed_subentries(
+        entry_id="parent",
+        domain=DOMAIN,
+        subentries=[pending_subentry],
+    )
+
+    manager = FakeConfigEntriesManager([parent_entry])
+    manager.set_transient_unknown_entry(
+        pending_subentry.entry_id,
+        lookup_misses=2,
+        setup_failures=1,
+    )
+    hass = FakeHass(config_entries=manager)
+
+    await _async_ensure_subentries_are_setup(hass, parent_entry)
+
+    assert manager.lookup_attempts[pending_subentry.entry_id] >= 3
+    assert manager.setup_calls == [pending_subentry.entry_id, pending_subentry.entry_id]

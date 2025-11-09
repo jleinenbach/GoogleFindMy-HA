@@ -55,6 +55,10 @@ try:  # pragma: no cover - ConfigEntryDisabler introduced in HA 2023.12
     from homeassistant.config_entries import ConfigEntryDisabler as _ConfigEntryDisabler
 except ImportError:  # pragma: no cover - legacy Home Assistant builds
     _ConfigEntryDisabler = None
+try:  # pragma: no cover - UnknownEntry introduced alongside subentry helpers
+    from homeassistant.config_entries import UnknownEntry as _ConfigUnknownEntry
+except ImportError:  # pragma: no cover - legacy Home Assistant builds
+    _ConfigUnknownEntry = None
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STARTED,
     EVENT_HOMEASSISTANT_STOP,
@@ -155,6 +159,22 @@ from .email import normalize_email, unique_account_id
 
 # Eagerly import diagnostics to prevent blocking calls on-demand
 from . import diagnostics  # noqa: F401
+
+UnknownEntry: type[Exception]
+if _ConfigUnknownEntry is None:  # pragma: no cover - legacy Home Assistant builds
+    UnknownEntry = cast(
+        "type[Exception]",
+        type(
+            "UnknownEntry",
+            (cast("type[Exception]", HomeAssistantError),),
+            {
+                "__doc__": "Fallback UnknownEntry placeholder for pre-subentry Home Assistant cores.",
+                "__module__": __name__,
+            },
+        ),
+    )
+else:
+    UnknownEntry = cast("type[Exception]", _ConfigUnknownEntry)
 
 __all__ = [
     "Common_pb2",
@@ -4226,6 +4246,9 @@ async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bo
     return True
 
 
+MAX_SUBENTRY_REGISTRATION_ATTEMPTS = 5
+
+
 async def _async_ensure_subentries_are_setup(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
@@ -4265,7 +4288,6 @@ async def _async_ensure_subentries_are_setup(
     if setup_in_progress is not None:
         setup_ready_states.add(setup_in_progress)
 
-    pending: list[ConfigEntry | ConfigSubentry] = []
     pending_ids: list[str] = []
     for subentry in subentries:
         # --- BEGIN ID fallback guard ---
@@ -4306,10 +4328,9 @@ async def _async_ensure_subentries_are_setup(
                 state,
             )
             continue
-        pending.append(subentry)
         pending_ids.append(subentry_id)
 
-    if not pending:
+    if not pending_ids:
         return
 
     _LOGGER.debug(
@@ -4317,34 +4338,85 @@ async def _async_ensure_subentries_are_setup(
         entry.entry_id,
         len(pending_ids),
     )
-    results = await asyncio.gather(
-        *(hass.config_entries.async_setup(subentry_id) for subentry_id in pending_ids),
-        return_exceptions=True,
-    )
+    pending_order = pending_ids[:]
+    active_pending: set[str] = set(pending_ids)
+    attempt_counts: dict[str, int] = {subentry_id: 0 for subentry_id in active_pending}
     first_exception: BaseException | None = None
     false_failures: list[str] = []
-    for subentry, subentry_id, result in zip(pending, pending_ids, results):
-        if isinstance(result, BaseException):
-            if isinstance(result, asyncio.CancelledError):
-                raise result
-            _LOGGER.warning(
-                "[%s] Subentry '%s' setup raised %s: %s",  # noqa: G004
-                entry.entry_id,
-                subentry_id,
-                type(result).__name__,
-                result,
-                exc_info=(type(result), result, result.__traceback__),
+    while active_pending:
+        missing_ids: list[str] = []
+        to_setup: list[str] = []
+        for subentry_id in [sid for sid in pending_order if sid in active_pending]:
+            attempts = attempt_counts[subentry_id]
+            if attempts >= MAX_SUBENTRY_REGISTRATION_ATTEMPTS:
+                _LOGGER.warning(
+                    "[%s] Subentry '%s' not registered after %d attempts; skipping setup",  # noqa: G004
+                    entry.entry_id,
+                    subentry_id,
+                    MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
+                )
+                return
+            if hass.config_entries.async_get_entry(subentry_id) is None:
+                attempt_counts[subentry_id] = attempts + 1
+                missing_ids.append(subentry_id)
+                _LOGGER.debug(
+                    "[%s] Subentry '%s' not yet registered (attempt %d/%d); waiting",  # noqa: G004
+                    entry.entry_id,
+                    subentry_id,
+                    attempt_counts[subentry_id],
+                    MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
+                )
+                continue
+            to_setup.append(subentry_id)
+
+        if to_setup:
+            results = await asyncio.gather(
+                *(hass.config_entries.async_setup(subentry_id) for subentry_id in to_setup),
+                return_exceptions=True,
             )
-            if first_exception is None:
-                first_exception = result
-            continue
-        if result is False:
-            _LOGGER.warning(
-                "[%s] Subentry '%s' setup returned False",  # noqa: G004
-                entry.entry_id,
-                subentry_id,
-            )
-            false_failures.append(subentry_id)
+            for subentry_id, result in zip(to_setup, results):
+                if isinstance(result, BaseException):
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
+                    if isinstance(result, UnknownEntry):
+                        attempt_counts[subentry_id] = attempt_counts[subentry_id] + 1
+                        missing_ids.append(subentry_id)
+                        _LOGGER.debug(
+                            "[%s] Subentry '%s' not ready in registry (attempt %d/%d); retrying",  # noqa: G004
+                            entry.entry_id,
+                            subentry_id,
+                            attempt_counts[subentry_id],
+                            MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
+                        )
+                        continue
+                    _LOGGER.warning(
+                        "[%s] Subentry '%s' setup raised %s: %s",  # noqa: G004
+                        entry.entry_id,
+                        subentry_id,
+                        type(result).__name__,
+                        result,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+                    if first_exception is None:
+                        first_exception = result
+                    active_pending.remove(subentry_id)
+                    continue
+                if result is False:
+                    _LOGGER.warning(
+                        "[%s] Subentry '%s' setup returned False",  # noqa: G004
+                        entry.entry_id,
+                        subentry_id,
+                    )
+                    false_failures.append(subentry_id)
+                    active_pending.remove(subentry_id)
+                    continue
+                active_pending.remove(subentry_id)
+
+        if not missing_ids:
+            break
+
+        await asyncio.sleep(0)
+
     if first_exception is not None:
         raise first_exception
     if false_failures:

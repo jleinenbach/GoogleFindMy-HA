@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
+from custom_components.googlefindmy import UnknownEntry
 from custom_components.googlefindmy.const import DOMAIN
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import ServiceCall
@@ -40,6 +42,19 @@ class FakeConfigEntry:
     runtime_data: Any | None = None
 
 
+@dataclass(slots=True)
+class _TransientUnknownEntryConfig:
+    """Configuration describing transient UnknownEntry behavior."""
+
+    lookup_misses: int = 0
+    setup_failures: int = 0
+
+
+TransientUnknownConfigInput = (
+    _TransientUnknownEntryConfig | Mapping[str, int] | int
+)
+
+
 class FakeConfigEntriesManager:
     """Provide config entry access and capture reload/update attempts."""
 
@@ -49,6 +64,7 @@ class FakeConfigEntriesManager:
         *,
         migration_success: bool = True,
         supports_migrate: bool = True,
+        transient_unknown_entries: Mapping[str, TransientUnknownConfigInput] | None = None,
     ) -> None:
         self._entries: list[FakeConfigEntry] = list(entries or [])
         self.reload_calls: list[str] = []
@@ -60,11 +76,67 @@ class FakeConfigEntriesManager:
             self.async_migrate_entry = None  # type: ignore[assignment]
             self.async_migrate = None  # type: ignore[assignment]
         self.setup_calls: list[str] = []
+        self.lookup_attempts: dict[str, int] = defaultdict(int)
+        self._transient_unknown: dict[str, _TransientUnknownEntryConfig] = {}
+        if transient_unknown_entries:
+            for entry_id, config in transient_unknown_entries.items():
+                self.set_transient_unknown_entry(entry_id, config=config)
 
     def add_entry(self, entry: FakeConfigEntry) -> None:
         """Register another entry for subsequent lookups."""
 
         self._entries.append(entry)
+
+    def set_transient_unknown_entry(
+        self,
+        entry_id: str,
+        *,
+        lookup_misses: int | None = None,
+        setup_failures: int | None = None,
+        config: TransientUnknownConfigInput | None = None,
+    ) -> None:
+        """Configure transient UnknownEntry behavior for a child entry.
+
+        Parameters
+        ----------
+        entry_id:
+            Identifier of the entry whose lookups or setup should simulate
+            transient UnknownEntry races.
+        lookup_misses:
+            Number of initial ``async_get_entry`` calls that should return
+            ``None`` for ``entry_id``.
+        setup_failures:
+            Number of initial ``async_setup`` calls that should raise
+            :class:`UnknownEntry` for ``entry_id``.
+        config:
+            Optional aggregate configuration. When provided, ``lookup_misses``
+            and ``setup_failures`` overrides still take precedence.
+        """
+
+        resolved = self._coerce_transient_unknown_config(config)
+        if lookup_misses is not None:
+            resolved.lookup_misses = lookup_misses
+        if setup_failures is not None:
+            resolved.setup_failures = setup_failures
+        self._transient_unknown[entry_id] = resolved
+
+    @staticmethod
+    def _coerce_transient_unknown_config(
+        config: TransientUnknownConfigInput | None,
+    ) -> _TransientUnknownEntryConfig:
+        if isinstance(config, _TransientUnknownEntryConfig):
+            return _TransientUnknownEntryConfig(
+                lookup_misses=max(0, config.lookup_misses),
+                setup_failures=max(0, config.setup_failures),
+            )
+        if isinstance(config, Mapping):
+            return _TransientUnknownEntryConfig(
+                lookup_misses=max(0, int(config.get("lookup_misses", 0))),
+                setup_failures=max(0, int(config.get("setup_failures", 0))),
+            )
+        if isinstance(config, int):
+            return _TransientUnknownEntryConfig(lookup_misses=max(0, config))
+        return _TransientUnknownEntryConfig()
 
     def async_entries(self, domain: str | None = None) -> list[FakeConfigEntry]:
         """Return entries optionally filtered by domain."""
@@ -73,12 +145,31 @@ class FakeConfigEntriesManager:
             return list(self._entries)
         return [entry for entry in self._entries if entry.domain == domain]
 
-    def async_get_entry(self, entry_id: str) -> FakeConfigEntry | None:
-        """Return the entry matching ``entry_id`` if available."""
+    def async_get_entry(self, entry_id: str) -> Any | None:
+        """Return the entry or subentry matching ``entry_id`` if available."""
 
+        self.lookup_attempts[entry_id] += 1
+        config = self._transient_unknown.get(entry_id)
+        if config is not None and config.lookup_misses > 0:
+            config.lookup_misses -= 1
+            return None
         for entry in self._entries:
             if entry.entry_id == entry_id:
                 return entry
+            runtime_data = getattr(entry, "runtime_data", None)
+            manager = getattr(runtime_data, "subentry_manager", None)
+            if manager is None:
+                continue
+            managed = getattr(manager, "managed_subentries", None)
+            if isinstance(managed, dict):
+                candidate = managed.get(entry_id)
+                if candidate is not None:
+                    return candidate
+                for subentry in managed.values():
+                    if getattr(subentry, "entry_id", None) == entry_id:
+                        return subentry
+                    if getattr(subentry, "subentry_id", None) == entry_id:
+                        return subentry
         return None
 
     def async_get_subentries(self, entry_id: str) -> list[Any]:
@@ -98,6 +189,10 @@ class FakeConfigEntriesManager:
         """Record setup attempts for config subentries."""
 
         self.setup_calls.append(entry_id)
+        config = self._transient_unknown.get(entry_id)
+        if config is not None and config.setup_failures > 0:
+            config.setup_failures -= 1
+            raise UnknownEntry(entry_id)
         return True
 
     def async_update_entry(self, entry: FakeConfigEntry, **kwargs: Any) -> None:
