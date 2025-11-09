@@ -646,13 +646,16 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             dev = dr.async_get(hass).async_get(arg)
             if dev:
                 # Defensive: handle malformed identifiers
-                for identifier in dev.identifiers:
-                    if not isinstance(identifier, (tuple, list)) or len(identifier) != 2:
-                        continue
-                    domain, ident = identifier
-                    if domain == DOMAIN:
-                        name = dev.name_by_user or dev.name or ident
-                        return ident, name
+                try:
+                    for identifier in dev.identifiers:
+                        if not isinstance(identifier, (tuple, list)) or len(identifier) != 2:
+                            continue
+                        domain, ident = identifier
+                        if domain == DOMAIN:
+                            name = dev.name_by_user or dev.name or ident
+                            return ident, name
+                except (ValueError, TypeError) as e:
+                    _LOGGER.debug("Skipping malformed device identifiers for %s: %s", arg, e)
 
             # 2) Treat as entity_id
             if "." in arg:
@@ -661,13 +664,16 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                     dev = dr.async_get(hass).async_get(ent.device_id)
                     if dev:
                         # Defensive: handle malformed identifiers
-                        for identifier in dev.identifiers:
-                            if not isinstance(identifier, (tuple, list)) or len(identifier) != 2:
-                                continue
-                            domain, ident = identifier
-                            if domain == DOMAIN:
-                                name = dev.name_by_user or dev.name or ident
-                                return ident, name
+                        try:
+                            for identifier in dev.identifiers:
+                                if not isinstance(identifier, (tuple, list)) or len(identifier) != 2:
+                                    continue
+                                domain, ident = identifier
+                                if domain == DOMAIN:
+                                    name = dev.name_by_user or dev.name or ident
+                                    return ident, name
+                        except (ValueError, TypeError) as e:
+                            _LOGGER.debug("Skipping malformed device identifiers for entity %s: %s", arg, e)
 
             # 3) Fallback: assume arg is the canonical Google ID (no coordinator dependency here)
             return arg, arg
