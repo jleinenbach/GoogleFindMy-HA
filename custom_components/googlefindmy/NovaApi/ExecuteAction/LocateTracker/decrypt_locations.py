@@ -99,6 +99,11 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
         is_mcu,
     )
 
+    # Get owner key (with account context logging for multi-account debugging)
+    from custom_components.googlefindmy.Auth.username_provider import async_get_username
+    current_username = await async_get_username()
+    _LOGGER.debug("Decrypting with account: %s", current_username[:3] + "***" if current_username else "None")
+
     owner_key = await async_get_owner_key()
 
     try:
@@ -124,14 +129,31 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
             _LOGGER.warning("Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc)
 
         old_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
-        if current_owner_key_version is not None and old_ver is not None and old_ver < current_owner_key_version:
-            _LOGGER.error(
-                "Owner key version mismatch: tracker=%s, current=%s. "
-                "This typically occurs after resetting E2EE data. "
-                "The tracker cannot be decrypted anymore; remove it in the Find My Device app.",
-                old_ver, current_owner_key_version,
-            )
-            raise StaleOwnerKeyError("Tracker was encrypted with a stale owner key version.") from e
+
+        # Check for version mismatches in both directions
+        if current_owner_key_version is not None and old_ver is not None and old_ver != current_owner_key_version:
+            if old_ver < current_owner_key_version:
+                # Tracker encrypted with older key (E2EE reset scenario)
+                _LOGGER.error(
+                    "Owner key version mismatch: tracker=%s, current=%s. "
+                    "This typically occurs after resetting E2EE data. "
+                    "The tracker cannot be decrypted anymore; remove it in the Find My Device app.",
+                    old_ver, current_owner_key_version,
+                )
+                raise StaleOwnerKeyError("Tracker was encrypted with a stale owner key version.") from e
+            else:
+                # Current owner key is older than tracker's key (wrong account in multi-account mode!)
+                _LOGGER.error(
+                    "Owner key version mismatch: tracker=%s, current=%s. "
+                    "The cached owner key is OLDER than the tracker's encryption key. "
+                    "In multi-account setups, this indicates the wrong account's credentials are being used. "
+                    "Ensure the device belongs to the correct Google account configured in this integration entry.",
+                    old_ver, current_owner_key_version,
+                )
+                raise DecryptionError(
+                    "Wrong account credentials: tracker encrypted with newer owner key version. "
+                    "This device may belong to a different Google account."
+                ) from e
 
         _LOGGER.error(
             "Failed to decrypt identity key (owner key version %s vs. current %s). "

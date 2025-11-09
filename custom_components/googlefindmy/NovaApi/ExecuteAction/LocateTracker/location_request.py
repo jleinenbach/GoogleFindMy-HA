@@ -124,6 +124,7 @@ def _make_location_callback(
     canonic_device_id: str,
     ctx: _CallbackContext,
     loop: asyncio.AbstractEventLoop,
+    cache_provider: any = None,
 ) -> Callable[[str, str], None]:
     """Factory that creates an FCM callback bound to a context object.
 
@@ -141,6 +142,7 @@ def _make_location_callback(
         canonic_device_id: The canonical ID of the device to validate the response.
         ctx: The shared context object for signaling and data transfer.
         loop: The asyncio event loop of the main thread.
+        cache_provider: The cache provider for this account (captured from context).
 
     Returns:
         A callback function suitable for the FCM receiver.
@@ -189,6 +191,11 @@ def _make_location_callback(
 
             async def _decrypt_and_store():
                 """Asynchronous part of the callback to decrypt and store data."""
+                # Restore cache provider context for multi-account support
+                if cache_provider:
+                    from custom_components.googlefindmy.NovaApi import nova_request
+                    nova_request.register_cache_provider(cache_provider)
+
                 try:
                     location_data = await async_decrypt_location_response_locations(device_update)
                 except (StaleOwnerKeyError, DecryptionError, SpotApiEmptyResponseError) as err:
@@ -209,7 +216,7 @@ def _make_location_callback(
                     location_data[0]["canonic_id"] = response_canonic_id
                     ctx.data = location_data
                 else:
-                    _LOGGER.warning("No location data found after decryption for %s", name)
+                    _LOGGER.debug("No location data found after decryption for %s", name)
                     ctx.data = []
                 ctx.event.set()
 
@@ -273,11 +280,23 @@ async def get_location_data_for_device(
         # Generate request UUID
         request_uuid = generate_random_uuid()
 
+        # Capture the current cache provider context for multi-account support
+        cache_provider = None
+        try:
+            from custom_components.googlefindmy.NovaApi import nova_request
+            # Capture the actual cache provider callable (not just the function)
+            cache = nova_request._get_cache_provider()
+            if cache:
+                cache_provider = lambda: cache
+        except Exception:
+            pass
+
         # Register the callback with the shared receiver
         try:
             _LOGGER.debug("Registering FCM location updates for %s...", name)
             callback = _make_location_callback(
-                name=name, canonic_device_id=canonic_device_id, ctx=ctx, loop=loop
+                name=name, canonic_device_id=canonic_device_id, ctx=ctx, loop=loop,
+                cache_provider=cache_provider
             )
             fcm_token = await fcm_receiver.async_register_for_location_updates(
                 canonic_device_id, callback
@@ -336,7 +355,7 @@ async def get_location_data_for_device(
             _LOGGER.info("Successfully received location data for %s", name)
             return data
         if not data:
-            _LOGGER.warning("No location data found for %s after decryption", name)
+            _LOGGER.debug("No location data found for %s after decryption", name)
         else:
             _LOGGER.warning("Received location data for unexpected device in %s flow; ignoring.", name)
         return []
