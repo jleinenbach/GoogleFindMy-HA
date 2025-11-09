@@ -7,6 +7,8 @@ import asyncio
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
+import pytest
+
 import custom_components.googlefindmy as integration
 from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
 from homeassistant.config_entries import ConfigSubentry
@@ -163,6 +165,55 @@ class _EntryStub:
         )
         self.subentries[subentry.subentry_id] = subentry
         return subentry
+
+
+class _SubentryConfigEntriesHelper:
+    """Config entries helper tracking subentry unload requests."""
+
+    def __init__(self) -> None:
+        self.unload_calls: list[tuple[Any, tuple[str, ...]]] = []
+
+    async def async_unload_platforms(
+        self, entry: Any, platforms: list[str]
+    ) -> bool:  # noqa: FBT001 - Home Assistant signature
+        self.unload_calls.append((entry, tuple(platforms)))
+        return True
+
+
+@pytest.mark.asyncio
+async def test_async_unload_subentry_clears_runtime_data_and_preserves_parent_cache() -> None:
+    """Subentry unload should clear runtime data without touching the parent cache."""
+
+    runtime_data = integration.RuntimeData(
+        coordinator=SimpleNamespace(),
+        token_cache=SimpleNamespace(),
+        subentry_manager=SimpleNamespace(),
+        fcm_receiver=None,
+    )
+
+    parent_entry_id = "parent-entry"
+    hass = SimpleNamespace(
+        config_entries=_SubentryConfigEntriesHelper(),
+        data={DOMAIN: {"entries": {parent_entry_id: runtime_data}}},
+    )
+
+    child_entry = SimpleNamespace(
+        entry_id="child-entry",
+        data={"group_key": "tracker"},
+        runtime_data=runtime_data,
+        parent_entry_id=parent_entry_id,
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+
+    result = await integration._async_unload_subentry(  # type: ignore[arg-type]
+        hass, child_entry
+    )
+
+    assert result is True
+    assert child_entry.runtime_data is None
+    entries_bucket = hass.data[DOMAIN]["entries"]
+    assert entries_bucket == {parent_entry_id: runtime_data}
+    assert hass.config_entries.unload_calls == [(child_entry, tuple(integration.PLATFORMS))]
 
 
 def test_async_unload_entry_removes_subentries_and_registries(
