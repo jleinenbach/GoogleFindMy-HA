@@ -543,12 +543,19 @@ class GoogleFindMyAPI:
         from .NovaApi import nova_request
         nova_request.register_cache_provider(lambda: self._cache)
 
+        # Get username from cache for multi-account context
+        username = None
+        try:
+            username = await self._cache.async_get_cached_value(username_string)
+        except Exception:
+            pass
+
         try:
             _LOGGER.info(
                 "API v3.0 Async: Requesting location for %s (%s)", device_name, device_id
             )
             records = await get_location_data_for_device(
-                device_id, device_name, session=self._session
+                device_id, device_name, session=self._session, username=username
             )
             best = self._select_best_location(records)
             if best:
@@ -558,7 +565,7 @@ class GoogleFindMyAPI:
                     len(records),
                 )
                 return best
-            _LOGGER.warning("API v3.0 Async: No location data for %s", device_name)
+            _LOGGER.debug("API v3.0 Async: No location data for %s", device_name)
             return {}
         except ClientError as err:
             _LOGGER.error(

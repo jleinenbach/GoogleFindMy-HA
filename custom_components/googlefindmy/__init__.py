@@ -226,7 +226,11 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         dev_reg = dr.async_get(hass)
         updated = 0
         for device in list(dev_reg.devices.values()):
-            if not any(domain == DOMAIN for domain, _ in device.identifiers):
+            # Defensive: handle malformed identifiers
+            try:
+                if not any(len(ident) == 2 and ident[0] == DOMAIN for ident in device.identifiers):
+                    continue
+            except (TypeError, ValueError):
                 continue
             if device.name_by_user:
                 continue  # user-chosen names stay untouched
@@ -641,7 +645,11 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             # 1) Treat as HA device_id
             dev = dr.async_get(hass).async_get(arg)
             if dev:
-                for domain, ident in dev.identifiers:
+                # Defensive: handle malformed identifiers
+                for identifier in dev.identifiers:
+                    if not isinstance(identifier, (tuple, list)) or len(identifier) != 2:
+                        continue
+                    domain, ident = identifier
                     if domain == DOMAIN:
                         name = dev.name_by_user or dev.name or ident
                         return ident, name
@@ -652,7 +660,11 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 if ent and ent.platform == DOMAIN and ent.device_id:
                     dev = dr.async_get(hass).async_get(ent.device_id)
                     if dev:
-                        for domain, ident in dev.identifiers:
+                        # Defensive: handle malformed identifiers
+                        for identifier in dev.identifiers:
+                            if not isinstance(identifier, (tuple, list)) or len(identifier) != 2:
+                                continue
+                            domain, ident = identifier
                             if domain == DOMAIN:
                                 name = dev.name_by_user or dev.name or ident
                                 return ident, name
@@ -664,13 +676,17 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             """Resolve the owning coordinator for a canonical device id via Device Registry."""
             dev_reg = dr.async_get(hass)
             for dev in dev_reg.devices.values():
-                if any(domain == DOMAIN and ident == canonical_id for domain, ident in dev.identifiers):
-                    for entry_id in dev.config_entries:
-                        entry = hass.config_entries.async_get_entry(entry_id)
-                        if entry and entry.domain == DOMAIN:
-                            coord = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-                            if coord:
-                                return coord
+                # Defensive: handle malformed identifiers
+                try:
+                    if any(len(ident) == 2 and ident[0] == DOMAIN and ident[1] == canonical_id for ident in dev.identifiers):
+                        for entry_id in dev.config_entries:
+                            entry = hass.config_entries.async_get_entry(entry_id)
+                            if entry and entry.domain == DOMAIN:
+                                coord = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                                if coord:
+                                    return coord
+                except (TypeError, ValueError):
+                    continue
             return None
 
         async def async_locate_device_service(call: ServiceCall) -> None:
@@ -792,17 +808,21 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             dev_reg = dr.async_get(hass)
             updated_count = 0
             for device in dev_reg.devices.values():
-                if any(identifier[0] == DOMAIN for identifier in device.identifiers):
-                    dev_id = next((ident for domain, ident in device.identifiers if domain == DOMAIN), None)
-                    if dev_id:
-                        new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
-                        dev_reg.async_update_device(device_id=device.id, configuration_url=new_config_url)
-                        updated_count += 1
-                        _LOGGER.debug(
-                            "Updated URL for device %s: %s",
-                            device.name_by_user or device.name,
-                            _redact_url_token(new_config_url),
-                        )
+                # Defensive: handle malformed identifiers
+                try:
+                    if any(len(identifier) >= 1 and identifier[0] == DOMAIN for identifier in device.identifiers):
+                        dev_id = next((ident[1] for ident in device.identifiers if len(ident) == 2 and ident[0] == DOMAIN), None)
+                        if dev_id:
+                            new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
+                            dev_reg.async_update_device(device_id=device.id, configuration_url=new_config_url)
+                            updated_count += 1
+                            _LOGGER.debug(
+                                "Updated URL for device %s: %s",
+                                device.name_by_user or device.name,
+                                _redact_url_token(new_config_url),
+                            )
+                except (TypeError, ValueError, IndexError):
+                    continue
 
             _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
 
@@ -866,9 +886,13 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
             else:
                 candidate_devices = set()
                 for dev in dev_reg.devices.values():
-                    if any(domain == DOMAIN for domain, _ in dev.identifiers):
-                        candidate_devices.add(dev.id)
-                        affected_entry_ids.update(dev.config_entries)
+                    # Defensive: handle malformed identifiers
+                    try:
+                        if any(len(ident) == 2 and ident[0] == DOMAIN for ident in dev.identifiers):
+                            candidate_devices.add(dev.id)
+                            affected_entry_ids.update(dev.config_entries)
+                    except (TypeError, ValueError):
+                        continue
 
             if not candidate_devices:
                 _LOGGER.info("googlefindmy.rebuild_registry: no matching devices to rebuild.")

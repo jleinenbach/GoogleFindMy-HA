@@ -423,14 +423,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             # Consider only devices linked to *this* config entry.
             if entry_id not in device.config_entries:
                 # If it's our domain but linked to another entry, remember a few as examples.
-                if any(domain == DOMAIN for domain, _ in device.identifiers):
-                    dev_id = next((ident for domain, ident in device.identifiers if domain == DOMAIN), None)
-                    if isinstance(dev_id, str) and dev_id:
-                        other_account.append((dev_id, device.name_by_user or device.name or dev_id))
+                # Defensive: handle malformed identifiers that aren't 2-tuples
+                try:
+                    if any(len(ident) == 2 and ident[0] == DOMAIN for ident in device.identifiers):
+                        dev_id = next((ident[1] for ident in device.identifiers if len(ident) == 2 and ident[0] == DOMAIN), None)
+                        if isinstance(dev_id, str) and dev_id:
+                            other_account.append((dev_id, device.name_by_user or device.name or dev_id))
+                except (TypeError, ValueError, IndexError):
+                    # Malformed identifier, skip this device
+                    _LOGGER.debug("Skipping device with malformed identifiers: %s", device.id)
                 continue
             try:
                 # Find the first identifier of our integration: (DOMAIN, <device_id>).
-                for domain, dev_id in device.identifiers:
+                # Defensive: handle malformed identifiers
+                for ident in device.identifiers:
+                    if not isinstance(ident, (tuple, list)) or len(ident) != 2:
+                        continue
+                    domain, dev_id = ident
                     if domain == DOMAIN and isinstance(dev_id, str) and dev_id:
                         present.add(dev_id)
                         if device.disabled_by is None:
@@ -1019,7 +1028,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         )
 
                         if not location:
-                            _LOGGER.warning("No location data returned for %s", dev_name)
+                            _LOGGER.info("No location data available for %s (device may be out of range or offline)", dev_name)
                             continue
 
                         # --- Apply Google Home filter (keep parity with FCM push path) ---
@@ -1132,6 +1141,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                         # Apply type-aware cooldowns based on internal hint (if any).
                         report_hint = location.get("_report_hint")
                         self._apply_report_type_cooldown(dev_id, report_hint)
+
+                        # Track crowd-sourced updates when hint is present
+                        if report_hint:
+                            self.increment_stat("crowd_sourced_updates")
 
                         # Ensure we don't leak the internal hint into public snapshots/entities.
                         location.pop("_report_hint", None)
@@ -1495,7 +1508,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         # Apply type-aware **poll** cooldowns (if decrypt layer provided a hint),
         # then drop the hint to keep internal-only.
-        self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+        report_hint = slot.get("_report_hint")
+        self._apply_report_type_cooldown(device_id, report_hint)
+
+        # Track crowd-sourced updates when hint is present
+        if report_hint:
+            self.increment_stat("crowd_sourced_updates")
+
         slot.pop("_report_hint", None)
 
         # Normalize coordinates (best-effort) if present; do not spam warnings here.
@@ -2060,7 +2079,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             slot.setdefault("last_updated", time.time())
 
             # Apply type-aware cooldowns based on internal hint (if any), then strip it.
-            self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+            report_hint = slot.get("_report_hint")
+            self._apply_report_type_cooldown(device_id, report_hint)
+
+            # Track crowd-sourced updates when hint is present
+            if report_hint:
+                self.increment_stat("crowd_sourced_updates")
+
             slot.pop("_report_hint", None)
 
             # Significance gate also for manual locate to avoid churn.
