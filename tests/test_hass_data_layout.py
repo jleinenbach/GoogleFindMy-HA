@@ -216,6 +216,8 @@ class _StubConfigEntries:
         return True
 
     def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
+        # Mirror tests.helpers.homeassistant.FakeConfigEntriesManager so
+        # subentry retries observe registered children before exhausting.
         for entry in self._entries:
             if entry.entry_id == entry_id:
                 return entry
