@@ -5268,9 +5268,10 @@ async def _async_unload_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> b
         entry.data.get("group_key"),
     )
     result: Any = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if hasattr(entry, "runtime_data"):
+    unload_success = bool(result)
+    if unload_success and hasattr(entry, "runtime_data"):
         setattr(entry, "runtime_data", None)
-    return bool(result)
+    return unload_success
 
 
 async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
