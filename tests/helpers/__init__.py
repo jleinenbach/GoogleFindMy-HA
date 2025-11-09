@@ -13,6 +13,7 @@ from .homeassistant import (
     FakeServiceRegistry,
     config_entry_with_subentries,
     device_registry_async_entries_for_config_entry,
+    resolve_config_entry_lookup,
 )
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "FakeHass",
     "FakeServiceRegistry",
     "config_entry_with_subentries",
+    "resolve_config_entry_lookup",
 ]

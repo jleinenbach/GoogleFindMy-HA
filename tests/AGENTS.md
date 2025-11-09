@@ -73,15 +73,19 @@ The stub intentionally mirrors the shared helper so subentry registration
 retries in layout tests exercise the same pathways guarded by the reusable
 manager.
 
-### Alignment reminder cross-references
+### Alignment reminder cross-references {#alignment-reminder-cross-references}
 
-The following helpers carry inline notes that reference this section to keep
-Home Assistant config-entry stubs synchronized:
+<!-- snippet: alignment-reminder-references -->
+<details id="alignment-reminder-reference" open>
+<summary><strong>Reusable list</strong> — link to this anchor instead of duplicating the entries</summary>
 
 * `tests/helpers/homeassistant.py` (`FakeConfigEntriesManager` inline
   reminder)
 * `tests/test_hass_data_layout.py` (`_StubConfigEntries` docstring and
   lookup comment)
+
+</details>
+<!-- end snippet: alignment-reminder-references -->
 
 #### Transient `UnknownEntry` simulation helpers
 

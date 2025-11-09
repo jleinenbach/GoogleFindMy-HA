@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tests.helpers import drain_loop
+from tests.helpers.homeassistant import resolve_config_entry_lookup
 
 from custom_components.googlefindmy.const import (
     ATTR_MODE,
@@ -215,22 +216,12 @@ class _StubConfigEntries:
         self._registered_subentry_ids.discard(subentry_id)
         return True
 
-    def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
+    def async_get_entry(
+        self, entry_id: str
+    ) -> _StubConfigEntry | ConfigSubentry | None:
         # Mirror tests.helpers.homeassistant.FakeConfigEntriesManager so
         # subentry retries observe registered children before exhausting.
-        for entry in self._entries:
-            if entry.entry_id == entry_id:
-                return entry
-            subentries = getattr(entry, "subentries", None)
-            if isinstance(subentries, dict):
-                for subentry in subentries.values():
-                    candidate_id = getattr(subentry, "entry_id", None)
-                    if isinstance(candidate_id, str) and candidate_id == entry_id:
-                        return subentry
-                    candidate_id = getattr(subentry, "subentry_id", None)
-                    if isinstance(candidate_id, str) and candidate_id == entry_id:
-                        return subentry
-        return None
+        return resolve_config_entry_lookup(self._entries, entry_id)
 
     def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:
         entry = self.async_get_entry(entry_id)
