@@ -198,7 +198,9 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._stat_key = stat_key
         self.entity_description = description
-        self._attr_unique_id = f"{DOMAIN}_{stat_key}"
+        # Include entry_id for multi-account support
+        entry_id = coordinator.config_entry.entry_id if coordinator.config_entry else "default"
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{stat_key}"
         # Intentionally no `_attr_name` here; translations drive the visible name.
         self._attr_native_unit_of_measurement = "updates"
 
@@ -213,9 +215,16 @@ class GoogleFindMyStatsSensor(CoordinatorEntity, SensorEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Expose a single integration device for diagnostic sensors."""
+        # Include entry_id for multi-account support
+        entry_id = self.coordinator.config_entry.entry_id if self.coordinator.config_entry else "default"
+        # Get account email for better naming
+        google_email = "Unknown"
+        if self.coordinator.config_entry:
+            google_email = self.coordinator.config_entry.data.get("google_email", "Unknown")
+
         return DeviceInfo(
-            identifiers={(DOMAIN, "integration")},
-            name="Google Find My Integration",
+            identifiers={(DOMAIN, f"integration_{entry_id}")},
+            name=f"Google Find My Integration ({google_email})",
             manufacturer="BSkando",
             model="Find My Device Integration",
             configuration_url="https://github.com/BSkando/GoogleFindMy-HA",
@@ -239,8 +248,8 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     # Best practice: let HA compose "<Device Name> <translated entity name>"
     _attr_has_entity_name = True
-    # Default to disabled in the registry for per-device sensors
-    _attr_entity_registry_enabled_default = False
+    # Enable by default - useful for tracking device status
+    _attr_entity_registry_enabled_default = True
     entity_description = LAST_SEEN_DESCRIPTION
 
     def __init__(self, coordinator: GoogleFindMyCoordinator, device: dict[str, Any]) -> None:
@@ -403,8 +412,12 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         raw_name = (self._device.get("name") or "").strip()
         use_name = raw_name if raw_name and raw_name != "Google Find My Device" else None
 
+        # Include config entry ID in identifier for multi-account support
+        entry_id = self.coordinator.config_entry.entry_id if self.coordinator.config_entry else "default"
+        device_identifier = f"{entry_id}_{self._device['id']}"
+
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device["id"])},
+            identifiers={(DOMAIN, device_identifier)},
             name=use_name,  # may be None; that's OK when identifiers are provided
             manufacturer="Google",
             model="Find My Device",

@@ -381,9 +381,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     self._short_retry_cancel = None
 
             def _cb(_now) -> None:
-                # Clear handle and request a refresh (non-blocking)
+                # Clear handle and request a refresh (non-blocking, thread-safe)
                 self._short_retry_cancel = None
-                self.async_request_refresh()
+                # Use call_soon_threadsafe to ensure we're on the event loop
+                self.hass.loop.call_soon_threadsafe(
+                    lambda: self.hass.async_create_task(self.async_request_refresh())
+                )
 
             self._short_retry_cancel = async_call_later(
                 self.hass, max(0.0, float(delay_s)), _cb

@@ -600,17 +600,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
             }
 
+            # Use email in title for multi-account support
+            google_email = self._auth_data.get(CONF_GOOGLE_EMAIL, "Unknown")
+            entry_title = f"Google Find My Device ({google_email})"
+
             # Prefer modern HA that supports options at create time; fallback to data-only.
             try:
                 return self.async_create_entry(
-                    title="Google Find My Device",
+                    title=entry_title,
                     data=data_payload,
                     options=options_payload,  # type: ignore[call-arg]
                 )
             except TypeError:
                 shadow = dict(data_payload)
                 shadow.update(options_payload)
-                return self.async_create_entry(title="Google Find My Device", data=shadow)
+                return self.async_create_entry(title=entry_title, data=shadow)
 
         return self.async_show_form(step_id="device_selection", data_schema=schema)
 
@@ -692,9 +696,13 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
     # ---------- Menu entry ----------
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show a small menu: edit settings vs. update credentials vs. visibility."""
+        # Show which account is being configured to prevent confusion
+        current_email = self.config_entry.data.get(CONF_GOOGLE_EMAIL, "Unknown")
+
         return self.async_show_menu(
             step_id="init",
             menu_options=["settings", "credentials", "visibility"],
+            description_placeholders={"account_email": current_email},
         )
 
     # ---------- Helpers to access live cache/API ----------
@@ -868,6 +876,7 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
             validation with token failover.
         """
         errors: Dict[str, str] = {}
+        current_email = self.config_entry.data.get(CONF_GOOGLE_EMAIL, "Unknown")
 
         if selector is not None:
             schema = vol.Schema(
@@ -926,7 +935,12 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                     _LOGGER.error("Credentials update failed: %s", err2)
                     errors["base"] = "cannot_connect"
 
-        return self.async_show_form(step_id="credentials", data_schema=schema, errors=errors)
+        return self.async_show_form(
+            step_id="credentials",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"account_email": current_email},
+        )
 
 
 # ---------- Custom exceptions ----------

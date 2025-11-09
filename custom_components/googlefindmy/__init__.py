@@ -127,13 +127,17 @@ def _redact_url_token(url: str) -> str:
         return url
 
 
-async def _async_save_secrets_data(secrets_data: dict) -> None:
+async def _async_save_secrets_data(secrets_data: dict, cache: Any) -> None:
     """Persist a legacy secrets.json bundle into the async token cache.
 
     Notes:
         - Only called for the legacy secrets.json path.
         - Store JSON-serializable values *as-is*. TokenCache validates and normalizes.
         - aas_token from secrets.json is actually an ADM token, store as adm_token_{username}
+
+    Args:
+        secrets_data: The parsed secrets.json dictionary.
+        cache: The entry-specific TokenCache instance.
     """
     enhanced_data = dict(secrets_data)
 
@@ -148,19 +152,41 @@ async def _async_save_secrets_data(secrets_data: dict) -> None:
         try:
             # Store primitives and JSON-safe structures directly
             if isinstance(value, (str, int, float, bool)) or isinstance(value, (dict, list)):
-                await async_set_cached_value(key, value)
+                await cache.set(key, value)
             else:
                 # Last-resort: try to JSON-encode unknown objects
-                await async_set_cached_value(key, json.dumps(value))
+                await cache.set(key, json.dumps(value))
         except (OSError, TypeError) as err:
             _LOGGER.warning("Failed to save '%s' to persistent cache: %s", key, err)
 
+    # CRITICAL: Store owner_key and shared_key under per-user keys for E2EE to work correctly
+    # The get_owner_key.py code looks for "owner_key_<username>" first
+    if google_email:
+        if "owner_key" in secrets_data:
+            try:
+                await cache.set(f"owner_key_{google_email}", secrets_data["owner_key"])
+                _LOGGER.debug("Stored owner_key under per-user key for %s", google_email)
+            except Exception as err:
+                _LOGGER.warning("Failed to save per-user owner_key: %s", err)
+        if "shared_key" in secrets_data:
+            try:
+                await cache.set(f"shared_key_{google_email}", secrets_data["shared_key"])
+                _LOGGER.debug("Stored shared_key under per-user key for %s", google_email)
+            except Exception as err:
+                _LOGGER.warning("Failed to save per-user shared_key: %s", err)
 
-async def _async_save_individual_credentials(oauth_token: str, google_email: str) -> None:
-    """Persist individual credentials (oauth_token + email) to the token cache."""
+
+async def _async_save_individual_credentials(oauth_token: str, google_email: str, cache: Any) -> None:
+    """Persist individual credentials (oauth_token + email) to the token cache.
+
+    Args:
+        oauth_token: The OAuth token to store.
+        google_email: The Google account email.
+        cache: The entry-specific TokenCache instance.
+    """
     try:
-        await async_set_cached_value(CONF_OAUTH_TOKEN, oauth_token)
-        await async_set_cached_value(username_string, google_email)
+        await cache.set(CONF_OAUTH_TOKEN, oauth_token)
+        await cache.set(username_string, google_email)
     except OSError as err:
         _LOGGER.warning("Failed to save individual credentials to cache: %s", err)
 
@@ -316,6 +342,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _register_instance(entry.entry_id, cache)
     _set_default_entry_id(entry.entry_id)
 
+    # NOTE: We don't register a global cache provider here anymore because it would
+    # overwrite the previous entry's cache. Instead, the per-user owner_key/shared_key
+    # storage ensures each account uses the correct keys from its own cache.
+
     # Ensure deferred writes are flushed on HA shutdown
     async def _flush_on_stop(event) -> None:
         """Flush deferred saves on Home Assistant stop."""
@@ -369,29 +399,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     token_source = entry.data.get("token_source")
 
     if secrets_data:
-        await _async_save_secrets_data(secrets_data)
+        await _async_save_secrets_data(secrets_data, cache)
         _LOGGER.debug("Persisted secrets.json bundle to token cache")
 
-        # Proactively generate ADM token from aas_token to avoid 401 errors on first poll
+        # NOTE: ADM token pre-generation skipped during setup to avoid multi-entry cache conflicts
+        # The token will be generated on-demand during the first API call
         if secrets_data.get("aas_token") and google_email:
-            try:
-                from .Auth.adm_token_retrieval import async_get_adm_token
-                _LOGGER.info("Pre-generating ADM token from aas_token for user %s", google_email)
-                adm_token = await async_get_adm_token(google_email)
-                _LOGGER.info("ADM token successfully generated and cached")
-            except Exception as err:
-                _LOGGER.error("Failed to pre-generate ADM token: %s", err, exc_info=True)
+            _LOGGER.debug("AAS token present for user %s; ADM token will be generated on first API call", google_email)
     elif oauth_token and google_email:
         # If token_source is "aas_token", store as aas_token instead of oauth_token
         if token_source == "aas_token":
             try:
-                await async_set_cached_value("aas_token", oauth_token)
-                await async_set_cached_value(username_string, google_email)
+                await cache.set("aas_token", oauth_token)
+                await cache.set(username_string, google_email)
                 _LOGGER.debug("Persisted aas_token to token cache")
             except OSError as err:
                 _LOGGER.warning("Failed to save aas_token to cache: %s", err)
         else:
-            await _async_save_individual_credentials(oauth_token, google_email)
+            await _async_save_individual_credentials(oauth_token, google_email, cache)
             _LOGGER.debug("Persisted individual credentials to token cache")
     else:
         _LOGGER.error(
@@ -565,6 +590,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("TokenCache for entry '%s' has been flushed and closed.", entry.entry_id)
         except Exception as err:
             _LOGGER.warning("Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err)
+
+    # Clear any lingering cache provider registration
+    try:
+        from .NovaApi import nova_request
+        nova_request.unregister_cache_provider()
+    except Exception:  # noqa: BLE001
+        pass
 
     if unload_ok:
         # Drop coordinator from hass.data
