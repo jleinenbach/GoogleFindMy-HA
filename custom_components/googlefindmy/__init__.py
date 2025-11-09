@@ -4256,7 +4256,7 @@ async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bo
     return True
 
 
-MAX_SUBENTRY_REGISTRATION_ATTEMPTS = 5
+MAX_SUBENTRY_REGISTRATION_ATTEMPTS = 7
 
 
 async def _async_ensure_subentries_are_setup(
@@ -4428,7 +4428,22 @@ async def _async_ensure_subentries_are_setup(
         if not missing_ids:
             break
 
-        await asyncio.sleep(0)
+        # Exponential backoff: wait before the next polling loop repeats the checks.
+        # Use the attempt counter of the first missing subentry as the baseline.
+        current_attempt = attempt_counts[missing_ids[0]]
+
+        # 0.2 * (2 ** (attempt - 1)) -> 0.2s, 0.4s, 0.8s, 1.6s, 3.2s, 6.4s
+        # (the 7th attempt fails without extra waiting)
+        delay = 0.2 * (2 ** (current_attempt - 1))
+
+        _LOGGER.debug(
+            "[%s] Subentries still missing, waiting %.1f seconds before attempt %d/%d",
+            entry.entry_id,
+            delay,
+            current_attempt + 1,
+            MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
+        )
+        await asyncio.sleep(delay)
 
     if first_exception is not None:
         raise first_exception

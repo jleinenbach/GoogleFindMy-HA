@@ -74,6 +74,9 @@
 * [Communicate uncertainty](#5-communicate-uncertainty)
 * [Type checking (mypy)](#7-type-checking-mypy)
 
+> **Language reminder:** Keep all inline comments, docstrings, and documentation updates in English. When user-provided snippets
+> include other languages, translate or adapt them so the committed code remains English-only.
+
 <a id="language-policy"></a>
 > **Scope & authority**
 >
