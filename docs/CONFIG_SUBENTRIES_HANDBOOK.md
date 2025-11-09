@@ -44,6 +44,8 @@ Lifecycle events cascade through this hierarchy: removing a parent unloads and r
 
 Each subentry declares a **type string** (for example, `ai_agent`). Home Assistant aggregates subentries by type across all integrations. For instance, both the `openai_conversation` and `anthropic` integrations expose subentries of type `ai_agent`, letting the UI render a unified "AI Agents" page regardless of the parent integration.
 
+The subentry architecture was explicitly chosen over storing child configuration inside `ConfigEntry.options`. Options cannot be aggregated across integrations, which would prevent Home Assistant from building feature-centric dashboards (for example, a global "AI Agents" view). Matching the `subentry_type` string in both `config_flow.py` and `strings.json` is therefore essential to keep the cross-integration UI functional.
+
 ## Section II: Data Model and Storage
 
 ### A. `core.config_entries`
@@ -211,7 +213,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 ### C. Parent setup
 
 1. Create the shared client (for example, API session, MQTT connection). Raise `ConfigEntryNotReady` if the connection cannot be established.
-2. Store the client in `hass.data[DOMAIN][entry.entry_id]` so children can retrieve it.
+2. Store the runtime data container in the shared entries bucket: `hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})[entry.entry_id] = RuntimeData(...)`. Keeping every parent under `hass.data[DOMAIN]["entries"]` is mandatory so `_async_setup_subentry` can read the parent's runtime data from the canonical path.
 3. Enumerate children via `list(entry.subentries.values())` and `async_setup` each child. This ensures subentries created while the parent was unloaded are loaded on restart. Allow setup failures to propagate (do **not** pass `return_exceptions=True` to `asyncio.gather`) so Home Assistant correctly reflects parent/subentry health.
    - Log a warning when any child returns `False` so platform owners can spot skipped subentry initializations in production logs. The integration's regression tests assert this behavior; keep the warning intact to preserve visibility into partial setup failures.
 4. Register an update listener that reloads children when the parent options change.
@@ -237,15 +239,15 @@ The `hass.config_entries.async_get_subentries` helper referenced in older drafts
 ### D. Subentry setup
 
 1. Read `parent_entry_id = entry.parent_entry_id`.
-2. Retrieve the shared client from `hass.data[parent_entry_id]`. If the key is missing, raise `ConfigEntryNotReady` to retry later.
-3. Attach any subentry-specific runtime data (for example, `entry.runtime_data = SubentryHandler(client, entry.data)`).
+2. Retrieve the shared runtime data from `hass.data[DOMAIN]["entries"][parent_entry_id]`. If the key is missing, raise `ConfigEntryNotReady` to retry later so the parent can rebuild its shared container.
+3. Attach any subentry-specific runtime data (for example, `_async_setup_subentry` should assign `entry.runtime_data` from the parent's `entries` bucket before platforms load).
 4. Forward setup to the platforms with `await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)`.
 
-Update listeners must also operate exclusively on `entry.subentries`.
-Reload the parent entry before triggering each child so shared resources in
-`hass.data[parent_entry_id]` are recreated before subentry setup resumes. Wait
-for each child reload sequentially to avoid racing a subentry against the
-parent rebuild:
+Avoid the obsolete lookup pattern `hass.data[DOMAIN][parent_entry_id]`. The direct dictionary path predates the shared `"entries"` bucket and will fail once multiple parents coexist under the integration namespace.
+
+### E. Parent update listener and reload sequencing
+
+Update listeners must operate exclusively on `entry.subentries`. When options change, reload the parent entry first so the integration rebuilds `hass.data[DOMAIN]["entries"][entry.entry_id]` before children resume setup. After the parent completes reloading, iterate through `entry.subentries` and reload each child sequentially. Avoid `asyncio.gather` here—the parent rebuild must finish before the subentries read the refreshed runtime data bucket:
 
 ```python
 async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -253,10 +255,7 @@ async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
 
     subentries = list(entry.subentries.values())
 
-    # Reload the parent first so shared state in hass.data is rebuilt before
-    # children execute their setup routines again.
     await hass.config_entries.async_reload(entry.entry_id)
-
     for subentry in subentries:
         await hass.config_entries.async_reload(subentry.entry_id)
 
@@ -264,18 +263,19 @@ async def _parent_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
 
 #### Concurrency pitfalls
 
-* Do not schedule parent and child reloads concurrently—the shared client in
-  `hass.data[parent_entry_id]` must be rebuilt before any child setup runs.
+* Do not schedule parent and child reloads concurrently—the shared runtime data
+  in `hass.data[DOMAIN]["entries"][entry.entry_id]` must be rebuilt before any
+  child setup runs.
 * Avoid reloading subentries in parallel unless every child can safely handle
   a missing client and retry later. Sequential reloads keep the listener simple
   and prevent `KeyError`/`ConfigEntryNotReady` loops when shared data is still
   initializing.
 
-### E. Parent unload
+### F. Parent unload
 
 1. Fetch all subentries via `list(entry.subentries.values())`.
 2. `async_unload` every child and aggregate the boolean results.
-3. When all children unload successfully, remove the shared client from `hass.data` and close connections.
+3. When all children unload successfully, remove the shared client from `hass.data[DOMAIN]["entries"]` and close connections.
 
 ```python
 async def _async_unload_parent_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -293,22 +293,65 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: ConfigEntry) ->
     # ... continue with parent unload logic ...
 ```
 
-### F. Subentry unload
+### G. Subentry unload
 
 1. Call `await hass.config_entries.async_unload_platforms(entry, PLATFORMS)`.
 2. Delete `entry.runtime_data` (if present) after the platforms unload.
 
-### G. Cascading removal
+### H. Cascading removal
 
 Home Assistant enforces cascade deletion: removing a parent entry triggers unload/remove for each child before finalizing the parent removal. Implement `async_remove_entry` only when external cleanups (for example, cloud webhooks) require it.
+
+### I. Robustness (post-2025.10+ lifecycle changes)
+
+- Register platform entity services from the integration-level `async_setup` via `service.async_register_platform_entity_service`. Avoid registering services from platform modules during `async_setup_entry`.
+- For OAuth2-based integrations, wrap parent setup in a `try`/`except ImplementationUnavailableError` block and re-raise as `ConfigEntryNotReady`. This keeps network or provider outages from breaking the config entry permanently.
 
 ## Section V: Platform Files
 
 When Home Assistant forwards a subentry to a platform (`sensor.py`, `conversation.py`, etc.), `config_entry` is the child entry.
 
-- Retrieve per-subentry state from `entry.runtime_data` populated during `_async_setup_subentry`.
+### A. Platform `async_setup_entry`
+
+Platform setup functions must consume the runtime data that `_async_setup_subentry` attached to the child entry:
+
+```python
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    handler = entry.runtime_data
+    async_add_entities([ExampleEntity(handler, entry)])
+```
+
+### B. Device and entity linkage
+
 - Set entity unique IDs relative to the subentry unique ID (for example, `f"{entry.unique_id}_weather"`).
 - Use `DeviceInfo` identifiers that reference the subentry, not the parent, so the device registry associates the device with the correct config entry.
+
+```python
+self._attr_device_info = DeviceInfo(
+    identifiers={(DOMAIN, entry.unique_id)},
+    name=entry.title,
+)
+```
+
+### C. `async_added_to_hass`
+
+Home Assistant Core 2025.8+ invokes `Entity.async_added_to_hass` even for disabled entities. Guard every implementation:
+
+```python
+async def async_added_to_hass(self) -> None:
+    if not self.enabled:
+        return
+    await super().async_added_to_hass()
+    await self._subscribe_to_updates()
+```
+
+### D. First-run logic and registry migrations
+
+`DeviceEntry.is_new` was removed in Core 2025.10. Store "first run" flags on the config entry (for example, inside `entry.data` or `entry.runtime_data`) instead of relying on device registry attributes.
 
 ## Section VI: Translations (`strings.json` and locale files)
 
@@ -386,8 +429,8 @@ Use this list during reviews:
 - Subentry unique IDs are scoped to the parent.
 - Translations define `config_subentries` with keys matching the type strings.
 - `async_setup_entry` routes parents versus children correctly.
-- Parents store shared clients in `hass.data[entry.entry_id]`.
-- Subentries raise `ConfigEntryNotReady` when the parent client is unavailable.
+- Parents store shared runtime data in `hass.data[DOMAIN]["entries"][entry.entry_id]`.
+- Subentries raise `ConfigEntryNotReady` when `hass.data[DOMAIN]["entries"][parent_entry_id]` is unavailable.
 - Subentries forward platform setup with `async_forward_entry_setups`.
 - Parent unload waits for child unload success before cleaning shared clients.
 - Platform entities pull runtime data from `entry.runtime_data` and bind devices to the subentry.
@@ -404,7 +447,7 @@ Use this list during reviews:
 - Avoid synchronous I/O inside `async_setup_entry`; wrap blocking code with `hass.async_add_executor_job`.
 - Always use `async_forward_entry_setups` rather than `async_setup_platforms`.
 - Register Home Assistant services in `async_setup` instead of `async_setup_entry` so automations remain valid when entries reload.
-- Use update listeners to reload children whenever parent options change, preventing stale `hass.data` clients.
+- Use update listeners to reload children whenever parent options change, ensuring `hass.data[DOMAIN]["entries"]` is rebuilt before child setup resumes.
 
 ### D. Device and entity registry troubleshooting playbooks
 
@@ -412,9 +455,9 @@ Subentries succeed or fail based on how well they coordinate device and entity o
 children fail to appear in the UI, refuse to unload, or leave orphaned registry entries:
 
 1. **Creation: verify parent linkage before platform setup.**
-   - Ensure `_async_setup_subentry` loads its shared coordinator from `hass.data[entry.parent_entry_id]` before calling
-     `async_forward_entry_setups`. If the parent client is unavailable, raise `ConfigEntryNotReady`; Home Assistant will retry
-     after the parent finishes restoring its runtime state.
+   - Ensure `_async_setup_subentry` loads its shared coordinator from `hass.data[DOMAIN]["entries"][entry.parent_entry_id]` and
+     assigns it to `entry.runtime_data` before calling `async_forward_entry_setups`. If the parent runtime data is unavailable,
+     raise `ConfigEntryNotReady`; Home Assistant will retry after the parent rebuilds the shared mapping.
    - Confirm `entry.runtime_data` stores any per-subentry helpers that platforms need to bind the correct device identifiers.
    - Add regression tests that instantiate the flow, create the child entry, and assert the coordinator exposes
      `async_update_device_registry` or similar helpers. See `tests/test_coordinator_device_registry.py` for examples that validate

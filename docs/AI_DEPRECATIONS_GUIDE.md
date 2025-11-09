@@ -27,6 +27,27 @@ Use this guide alongside the official release notes and Home Assistant developer
 | Released in 2025.10 | Entity services | Register platform services via `async_register_platform_entity_service` in `async_setup` | [IV.3](#3-registration-of-platform-entity-services-new-api-pattern) |
 | Released in 2025.11 | API translations | `get_services` no longer returns action translations; fetch via `frontend/get_translations` | [IV.5](#5-api-endpoints-removal-of-service-translations-websocketrest) |
 
+### Critical migration tables
+
+#### Table 1: Immediate-breaking changes (Core 2025.10/2025.11)
+
+| File(s) affected | Breaking change | Required action |
+| --- | --- | --- |
+| Platform modules (`*.py`) | `device_entry.is_new` attribute removed | Remove all usages. Persist "first-run" state inside the parent `ConfigEntry` instead. |
+| Platform modules (`*.py`) | `async_added_to_hass` now runs for disabled entities | Guard each implementation with `if not self.enabled: return`. |
+| `cover.py` | `STATE_OPEN`/`STATE_CLOSED` constants removed | Compare using `CoverState` and implement `is_closed`/`is_opening`/`is_closing` instead of overriding `state`. |
+| `custom_components/**/__init__.py` | OAuth2 helpers can raise `ImplementationUnavailableError` | Catch the exception and raise `ConfigEntryNotReady` so setup retries. |
+
+#### Table 2: Deprecations with active grace periods
+
+| File(s) affected | Deprecation | Required action |
+| --- | --- | --- |
+| Service handlers (`__init__.py`, platform modules) | Passing `hass` to helper utilities (for example, `async_extract_entity_ids`) | Drop the explicit `hass` argument; helpers now use `call.hass`. Deadline: 2026.10. |
+| Any module importing `Config` | `homeassistant.core.Config` alias deprecated | Import `Config` from `homeassistant.core_config`. Deadline: 2025.11. |
+| Statistics helpers | `async_update_statistics_metadata` missing `new_unit_class` | Always provide `new_unit_class` (use `None` when no class applies). Deadline: 2025.11. |
+| Platform entity services | Registering services in platform setup | Register via `service.async_register_platform_entity_service` from `async_setup` instead. |
+| Temperature utilities | `TemperatureConverter.convert_interval` | Use `TemperatureDeltaConverter.convert` for deltas. |
+
 ## II. Critical Deprecations with Deadline 2025.11
 
 This section covers API changes that were marked as deprecated in Home Assistant Core 2025.11 (or slightly before) and whose compatibility shims will be removed. Code that is not migrated before this deadline will fail.
