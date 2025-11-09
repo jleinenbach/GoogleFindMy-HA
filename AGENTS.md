@@ -726,6 +726,11 @@ Before proposing a change Codex must:
 3. **Propose only with ≥ 90 % confidence.** Provide a full, executable patch backed by the cited evidence.
 4. **Verify consistency.** Explain how the patch remains backward compatible and why it should pass mypy strict for the modified files.
 
+#### Config flow registration fallbacks
+
+* Prefer the Home Assistant config flow metaclass to register flows. Manual assignments to `HANDLERS` are legacy fallbacks that should only be reintroduced when Home Assistant removes the metaclass hook or when a regression in upstream releases prevents automatic registration.
+* If a fallback becomes necessary, document the affected core version, link to the upstream issue or breaking change notice, and mark the block with a TODO referencing the removal criteria so the workaround is pruned once the regression is resolved.
+
 ### 4. User as data source
 
 When external information is missing (for example, an up-to-date Home Assistant helper signature, a breaking change notice, an upstream commit), Codex must:
