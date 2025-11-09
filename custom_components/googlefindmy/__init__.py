@@ -4186,6 +4186,41 @@ async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bo
         group_key,
     )
 
+    if not parent_entry_id:
+        _LOGGER.debug(
+            "[%s] Aborting subentry setup because parent_entry_id is missing",  # noqa: G004
+            entry.entry_id,
+        )
+        return False
+
+    bucket = _domain_data(hass)
+    entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(bucket)
+
+    try:
+        parent_runtime_data = entries_bucket[parent_entry_id]
+    except KeyError as err:
+        _LOGGER.debug(
+            "[%s] Parent runtime data bucket missing for %s; deferring setup",  # noqa: G004
+            entry.entry_id,
+            parent_entry_id,
+        )
+        raise ConfigEntryNotReady(
+            f"Parent entry {parent_entry_id} not yet initialized"
+        ) from err
+
+    if not isinstance(parent_runtime_data, RuntimeData):
+        _LOGGER.debug(
+            "[%s] Parent runtime data bucket for %s contains unexpected type %s; deferring setup",
+            entry.entry_id,
+            parent_entry_id,
+            type(parent_runtime_data),
+        )
+        raise ConfigEntryNotReady(
+            f"Parent entry {parent_entry_id} runtime data pending rebuild"
+        )
+
+    entry.runtime_data = parent_runtime_data
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
