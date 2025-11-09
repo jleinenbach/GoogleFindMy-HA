@@ -126,7 +126,7 @@ class _StubHttp:
 
 
 class _StubConfigEntries:
-    """Minimal config_entries manager stub."""
+    """Align subentry lookup/registration with FakeConfigEntriesManager for retry coverage."""
 
     def __init__(self, entry: _StubConfigEntry) -> None:
         self._entries: list[_StubConfigEntry] = [entry]
@@ -216,9 +216,20 @@ class _StubConfigEntries:
         return True
 
     def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
+        # Mirror tests.helpers.homeassistant.FakeConfigEntriesManager so
+        # subentry retries observe registered children before exhausting.
         for entry in self._entries:
             if entry.entry_id == entry_id:
                 return entry
+            subentries = getattr(entry, "subentries", None)
+            if isinstance(subentries, dict):
+                for subentry in subentries.values():
+                    candidate_id = getattr(subentry, "entry_id", None)
+                    if isinstance(candidate_id, str) and candidate_id == entry_id:
+                        return subentry
+                    candidate_id = getattr(subentry, "subentry_id", None)
+                    if isinstance(candidate_id, str) and candidate_id == entry_id:
+                        return subentry
         return None
 
     def async_get_subentries(self, entry_id: str) -> list[ConfigSubentry]:

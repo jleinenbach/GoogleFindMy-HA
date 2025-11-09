@@ -1,5 +1,4 @@
 # tests/test_subentry_setup_trigger.py
-
 """Tests for ensuring programmatically created subentries get set up."""
 
 from __future__ import annotations
@@ -11,7 +10,10 @@ import pytest
 
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from custom_components.googlefindmy import _async_ensure_subentries_are_setup
+from custom_components.googlefindmy import (
+    MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
+    _async_ensure_subentries_are_setup,
+)
 from custom_components.googlefindmy.const import DOMAIN
 
 from tests.helpers.homeassistant import (
@@ -124,3 +126,115 @@ async def test_async_ensure_subentries_are_setup_falls_back_to_subentry_id(
     await _async_ensure_subentries_are_setup(hass, parent_entry)
 
     assert manager.setup_calls == [pending_subentry.subentry_id]
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_subentries_are_setup_retries_missing_child() -> None:
+    """Late-registered subentries should be retried until setup succeeds."""
+
+    pending_subentry = SimpleNamespace(
+        entry_id="child-retry",
+        subentry_id="child-retry",
+    )
+
+    parent_entry = config_entry_with_runtime_managed_subentries(
+        entry_id="parent",
+        domain=DOMAIN,
+        subentries=[pending_subentry],
+    )
+
+    manager = FakeConfigEntriesManager([parent_entry])
+    manager.set_transient_unknown_entry(
+        pending_subentry.entry_id,
+        lookup_misses=2,
+        setup_failures=1,
+    )
+    hass = FakeHass(config_entries=manager)
+
+    await _async_ensure_subentries_are_setup(hass, parent_entry)
+
+    assert manager.lookup_attempts[pending_subentry.entry_id] >= 3
+    assert manager.setup_calls == [pending_subentry.entry_id, pending_subentry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_subentries_are_setup_raises_when_child_never_registers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Raise ConfigEntryNotReady when a subentry exhausts registration retries."""
+
+    missing_subentry = SimpleNamespace(
+        entry_id="child-missing",
+        subentry_id="child-missing",
+    )
+
+    parent_entry = config_entry_with_runtime_managed_subentries(
+        entry_id="parent",
+        domain=DOMAIN,
+        subentries=[missing_subentry],
+    )
+
+    manager = FakeConfigEntriesManager([parent_entry])
+    manager.set_transient_unknown_entry(
+        missing_subentry.entry_id,
+        lookup_misses=MAX_SUBENTRY_REGISTRATION_ATTEMPTS + 1,
+    )
+    hass = FakeHass(config_entries=manager)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ConfigEntryNotReady) as exc:
+        await _async_ensure_subentries_are_setup(hass, parent_entry)
+
+    assert missing_subentry.entry_id not in manager.setup_calls
+    assert str(MAX_SUBENTRY_REGISTRATION_ATTEMPTS) in str(exc.value)
+    assert any(
+        "not registered" in record.getMessage()
+        and missing_subentry.entry_id in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_subentries_are_setup_preserves_first_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Propagate the first captured exception even when retries exhaust."""
+
+    failing_subentry = SimpleNamespace(
+        entry_id="child-failure",
+        subentry_id="child-failure",
+    )
+    missing_subentry = SimpleNamespace(
+        entry_id="child-missing",
+        subentry_id="child-missing",
+    )
+
+    parent_entry = config_entry_with_runtime_managed_subentries(
+        entry_id="parent",
+        domain=DOMAIN,
+        subentries=[failing_subentry, missing_subentry],
+    )
+
+    manager = FakeConfigEntriesManager([parent_entry])
+    manager.set_transient_unknown_entry(
+        missing_subentry.entry_id,
+        lookup_misses=MAX_SUBENTRY_REGISTRATION_ATTEMPTS + 1,
+    )
+
+    async def raising_setup(entry_id: str) -> bool:
+        manager.setup_calls.append(entry_id)
+        if entry_id == failing_subentry.entry_id:
+            raise RuntimeError("boom")
+        return True
+
+    manager.async_setup = raising_setup  # type: ignore[assignment]
+    hass = FakeHass(config_entries=manager)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError):
+        await _async_ensure_subentries_are_setup(hass, parent_entry)
+
+    assert manager.setup_calls == [failing_subentry.entry_id]
+    assert any(
+        "not registered" in record.getMessage()
+        and missing_subentry.entry_id in record.getMessage()
+        for record in caplog.records
+    )

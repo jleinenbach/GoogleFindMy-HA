@@ -66,6 +66,42 @@ isolation. The recent additions mirror enough of the `ConfigFlow` contract to
 support discovery update tests and follow the real integration's behavior
 closely enough for regression coverage.
 
+When updating `_StubConfigEntries` in
+`tests/test_hass_data_layout.py`, keep its lookup and registration
+semantics aligned with `tests.helpers.homeassistant.FakeConfigEntriesManager`.
+The stub intentionally mirrors the shared helper so subentry registration
+retries in layout tests exercise the same pathways guarded by the reusable
+manager.
+
+### Alignment reminder cross-references
+
+The following helpers carry inline notes that reference this section to keep
+Home Assistant config-entry stubs synchronized:
+
+* `tests/helpers/homeassistant.py` (`FakeConfigEntriesManager` inline
+  reminder)
+* `tests/test_hass_data_layout.py` (`_StubConfigEntries` docstring and
+  lookup comment)
+
+#### Transient `UnknownEntry` simulation helpers
+
+`tests.helpers.homeassistant.FakeConfigEntriesManager` now ships with
+first-class controls for reproducing transient `UnknownEntry` races during
+tests. Pass a `transient_unknown_entries` mapping when constructing the manager
+or call `set_transient_unknown_entry()` on an existing instance to declare how
+many initial `async_get_entry` lookups (`lookup_misses`) or `async_setup`
+attempts (`setup_failures`) should raise or return `None`. The helper also
+tracks `lookup_attempts` so assertions can confirm the integration retried
+before child entries became visible. Prefer these controls over ad-hoc
+monkeypatching whenever a regression exercises delayed subentry registration or
+setup retries.
+
+> **Reminder:** Because these helpers already model `UnknownEntry` behavior,
+> new tests should avoid importing `custom_components.googlefindmy`'s
+> `UnknownEntry` fallback directly. Use the provided knobs on
+> `FakeConfigEntriesManager` instead so transient lookup coverage stays coupled
+> to the shared stubs.
+
 ## Migration coverage expectations
 
 `tests/test_config_entry_migration.py` exercises the integration's migration
