@@ -1700,13 +1700,21 @@ async def _ingest_discovery_credentials(
 # ---------------------------
 # Config Flow
 # ---------------------------
+class _DomainAwareConfigFlow(config_entries.ConfigFlow):  # type: ignore[misc]
+    """Config flow base that allows metaclass keywords for type checking."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Propagate keyword arguments, including ``domain``, to the parent."""
+
+        super().__init_subclass__(**kwargs)
+
+
 class ConfigFlow(
-    config_entries.ConfigFlow,  # type: ignore[misc]
+    _DomainAwareConfigFlow,
     _ConfigFlowMixin,
+    domain=DOMAIN,
 ):
     """Handle the initial config flow for Google Find My Device."""
-
-    domain = DOMAIN
     VERSION = CONFIG_ENTRY_VERSION
 
     def __init__(self) -> None:
@@ -4916,39 +4924,6 @@ class CannotConnect(HomeAssistantErrorBase):
 class InvalidAuth(HomeAssistantErrorBase):
     """Error to indicate invalid authentication was provided."""
 
-
-# --- Final flow-handler verification & fallback (import-time) -----------------
-try:
-    from homeassistant import config_entries as _ce
-    from .const import DOMAIN as _GFMD
-
-    handlers = getattr(_ce, "HANDLERS", None)
-    if handlers is None:
-        _LOGGER.warning(
-            "ConfigFlow handler registry unavailable; unable to verify registration"
-        )
-    else:
-        _registered = handlers.get(_GFMD)
-        if _registered is not ConfigFlow:
-            _LOGGER.warning(
-                "ConfigFlow metaclass registration not reflected in HANDLERS; "
-                "registering fallback (domain=%s, had=%r)",
-                _GFMD,
-                _registered,
-            )
-            handlers[_GFMD] = ConfigFlow
-
-        handler = handlers.get(_GFMD)
-        _LOGGER.debug(
-            "ConfigFlow handler registry state OK; keys=%s, handler=%r, ids(handler,class)=(%s,%s)",
-            sorted(list(handlers.keys())),
-            handler,
-            id(handler) if handler is not None else None,
-            id(ConfigFlow),
-        )
-except Exception as err:  # noqa: BLE001
-    _LOGGER.exception("Unable to verify/register ConfigFlow handler: %s", err)
-# -----------------------------------------------------------------------------
 
 _LOGGER.debug(
     "ConfigFlow import OK; class=%s, class.domain=%s, const.DOMAIN=%s, class_id=%s",
