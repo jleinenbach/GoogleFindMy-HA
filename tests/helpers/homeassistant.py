@@ -58,6 +58,10 @@ TransientUnknownConfigInput = (
 class FakeConfigEntriesManager:
     """Provide config entry access and capture reload/update attempts."""
 
+    # Keep this manager aligned with `_StubConfigEntries` in
+    # `tests/test_hass_data_layout.py`; see `tests/AGENTS.md` for the shared
+    # synchronization guidance.
+
     def __init__(
         self,
         entries: Iterable[FakeConfigEntry] | None = None,
