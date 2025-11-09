@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from contextlib import suppress
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -24,6 +23,8 @@ from tests.test_coordinator_status import (
     _DummyEntry,
     _DummyHass,
 )
+
+from tests.helpers import drain_loop
 
 
 @pytest.fixture
@@ -65,14 +66,7 @@ def owner_index_coordinator(
     try:
         yield coordinator, api
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 def test_owner_index_updates_with_refresh(
@@ -140,11 +134,4 @@ def test_fcm_owner_index_fallback_routes_entry(
 
         assert seen == [{"entry-target"}]
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)

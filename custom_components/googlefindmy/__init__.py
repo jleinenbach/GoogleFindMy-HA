@@ -4254,9 +4254,11 @@ async def _async_ensure_subentries_are_setup(
         # through the runtime subentry manager, but freshly created subentries
         # may not yet have Home Assistant's ``entry_id`` attribute populated.
         # Fall back to ``subentry_id`` to extract the global ULID when needed,
-        # as both attributes refer to the same global identifier.
+        # as both attributes refer to the same global identifier. Treat empty
+        # strings and non-string types the same as a missing ``entry_id`` so
+        # freshly constructed stubs still resolve their identifier.
         subentry_id: str | None = getattr(subentry, "entry_id", None)
-        if subentry_id is None:
+        if not isinstance(subentry_id, str) or not subentry_id:
             subentry_id = getattr(subentry, "subentry_id", None)
 
         if not isinstance(subentry_id, str) or not subentry_id:
@@ -4810,14 +4812,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         ]
     )
 
-    # --- BEGIN RACE-CONDITION FIX ---
+    # --- BEGIN RACE-CONDITION AND ERROR-HANDLING FIX ---
     # Awaiting _async_ensure_subentries_are_setup immediately after creating
     # the subentries triggers a race condition where Home Assistant Core raises
     # UnknownEntry because it has not finished registering the new subentries.
-    # Yield to the event loop once so HA finalizes registration *before* setup.
-    await asyncio.sleep(0)
-    await _async_ensure_subentries_are_setup(hass, entry)
-    # --- END RACE-CONDITION FIX ---
+    # Schedule the setup in a background task so HA finalizes registration
+    # before the setup runs. Using ConfigEntry.async_create_background_task keeps
+    # the task tied to the entry lifecycle so ConfigEntryNotReady propagates
+    # correctly when setup fails, while still deferring execution until after
+    # the registry has recorded the new child entries. Avoid
+    # hass.async_create_task here; it would detach failure handling from the
+    # config entry lifecycle and reintroduce silent retries.
+    entry.async_create_background_task(
+        _async_ensure_subentries_are_setup(hass, entry),
+        name=f"{DOMAIN}.ensure_subentries_setup.{entry.entry_id}",
+    )
+    # --- END RACE-CONDITION AND ERROR-HANDLING FIX ---
 
     bucket = domain_bucket
 

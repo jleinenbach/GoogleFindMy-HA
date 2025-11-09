@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from contextlib import suppress
 from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
 
 import pytest
+
+from tests.helpers import drain_loop
 
 if "homeassistant.components.sensor" not in sys.modules:
     sensor_module = ModuleType("homeassistant.components.sensor")
@@ -262,14 +263,7 @@ def test_increment_stat_notifies_registered_stats_sensor(
 
         loop.run_until_complete(_exercise())
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 def test_increment_stat_persists_stats(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -303,14 +297,7 @@ def test_increment_stat_persists_stats(monkeypatch: pytest.MonkeyPatch) -> None:
 
         loop.run_until_complete(_exercise())
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 def test_history_fallback_increments_history_stat(
@@ -400,14 +387,7 @@ def test_history_fallback_increments_history_stat(
 
         loop.run_until_complete(_exercise())
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 def test_stats_sensor_device_info_uses_service_identifiers() -> None:
@@ -448,11 +428,4 @@ def test_stats_sensor_device_info_uses_service_identifiers() -> None:
         )
         assert getattr(service_info, "config_entry_id", None) is None
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)

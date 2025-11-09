@@ -11,6 +11,8 @@ import pytest
 from custom_components.googlefindmy import diagnostics
 from custom_components.googlefindmy.const import DOMAIN
 
+from tests.helpers import drain_loop
+
 
 class _StubDiagnosticsBuffer:
     """Diagnostics buffer stub exposing redaction-sensitive payloads."""
@@ -100,8 +102,7 @@ def _run(coro):
         asyncio.set_event_loop(loop)
         return loop.run_until_complete(coro)
     finally:
-        asyncio.set_event_loop(None)
-        loop.close()
+        drain_loop(loop)
 
 
 def test_async_get_config_entry_diagnostics_includes_buffer(

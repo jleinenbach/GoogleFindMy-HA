@@ -18,6 +18,8 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 
+from tests.helpers import drain_loop
+
 
 class _StubConfigEntry:
     """Config entry stub capturing unload callbacks."""
@@ -160,8 +162,8 @@ def test_button_setup_skips_service_registration_when_platform_missing(
         )
     finally:
         loop.run_until_complete(loop.shutdown_asyncgens())
+        drain_loop(loop)
         asyncio.set_event_loop(original_loop)
-        loop.close()
 
     assert [entity.entity_description.translation_key for entity in added_entities] == [
         "play_sound",

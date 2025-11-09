@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import threading
 from typing import Any
 from collections.abc import Callable, Coroutine
@@ -14,6 +13,8 @@ import pytest
 
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.const import DOMAIN
+
+from tests.helpers import drain_loop
 
 
 class _DummyCache:
@@ -71,14 +72,7 @@ def fresh_loop() -> asyncio.AbstractEventLoop:
     try:
         yield loop
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with contextlib.suppress(Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 @pytest.fixture

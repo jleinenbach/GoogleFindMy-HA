@@ -28,6 +28,8 @@ from custom_components.googlefindmy.const import (
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
+from tests.helpers import drain_loop
+
 
 class _DummyBus:
     """Capture fired events for assertions."""
@@ -160,16 +162,7 @@ def coordinator(
     coord._is_fcm_ready_soft = lambda: True
     coord._set_fcm_status(FcmStatus.CONNECTED)
     yield coord
-    pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-    for task in pending:
-        task.cancel()
-        try:
-            loop.run_until_complete(task)
-        except Exception:  # pragma: no cover - best effort cleanup
-            pass
-    loop.run_until_complete(asyncio.sleep(0))
-    loop.close()
-    asyncio.set_event_loop(None)
+    drain_loop(loop)
 
 
 def test_api_auth_error_preserves_fcm_status(

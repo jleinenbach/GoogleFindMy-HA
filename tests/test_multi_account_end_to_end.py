@@ -1,12 +1,11 @@
 # tests/test_multi_account_end_to_end.py
-"""End-to-end multi-account scenario covering services and coordinator hooks."""
+"""End-to-end regression coverage for multi-account setups."""
 
 from __future__ import annotations
 
 import asyncio
 import importlib
 import sys
-from contextlib import suppress
 from dataclasses import dataclass, field
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -23,6 +22,8 @@ from custom_components.googlefindmy.const import (
 )
 from homeassistant.core import ServiceCall
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
+
+from tests.helpers import drain_loop
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy import RuntimeData
@@ -113,9 +114,24 @@ class _StubConfigEntry:
         self.state: ConfigEntryState = ConfigEntryState.LOADED
         self.disabled_by: str | None = None
         self._unload_callbacks: list[Callable[[], None]] = []
+        self._hass: _StubHass | None = None
+        self._background_tasks: list[asyncio.Task[Any]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
         self._unload_callbacks.append(callback)
+
+    def _attach_hass(self, hass: "_StubHass") -> None:
+        self._hass = hass
+
+    def async_create_background_task(
+        self, coro: Awaitable[Any], *, name: str | None = None
+    ) -> asyncio.Task[Any]:
+        if self._hass is None:
+            msg = "ConfigEntry is not attached to a hass instance"
+            raise RuntimeError(msg)
+        task = self._hass.async_create_task(coro, name=name)
+        self._background_tasks.append(task)
+        return task
 
 
 class _StubConfigEntries:
@@ -222,6 +238,8 @@ class _StubHass:
         self.services = _StubServices()
         self.config_entries: _StubConfigEntries = _StubConfigEntries(entries)
         self._tasks: list[asyncio.Task[Any]] = []
+        for entry in entries:
+            entry._attach_hass(self)
 
     def async_create_task(
         self, coro: Awaitable[Any], *, name: str | None = None
@@ -441,6 +459,8 @@ def test_multi_account_end_to_end(
             assert await integration.async_setup(hass, {})
             assert await integration.async_setup_entry(hass, entry_one)
             assert await integration.async_setup_entry(hass, entry_two)
+            assert entry_one._background_tasks, "Subentry setup task was not scheduled"
+            assert entry_two._background_tasks, "Subentry setup task was not scheduled"
 
             if hass._tasks:
                 await asyncio.gather(*hass._tasks)
@@ -499,11 +519,4 @@ def test_multi_account_end_to_end(
         assert len(unregister_calls) == 1
         assert len(session_unreg_calls) == 1
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)

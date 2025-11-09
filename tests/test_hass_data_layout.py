@@ -12,7 +12,6 @@ import json
 import logging
 import sys
 
-from contextlib import suppress
 from pathlib import Path
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -20,6 +19,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from unittest.mock import AsyncMock
 
 import pytest
+
+from tests.helpers import drain_loop
 
 from custom_components.googlefindmy.const import (
     ATTR_MODE,
@@ -38,7 +39,6 @@ from custom_components.googlefindmy.const import (
 )
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.exceptions import ServiceValidationError
-
 if TYPE_CHECKING:
     from custom_components.googlefindmy import RuntimeData
 
@@ -78,9 +78,24 @@ class _StubConfigEntry:
         self._unload_callbacks: list[Callable[[], None]] = []
         self.updated_at = datetime(2024, 1, 1, 0, 0, 0)
         self.created_at = datetime(2024, 1, 1, 0, 0, 0)
+        self._hass: _StubHass | None = None
+        self._background_tasks: list[asyncio.Task[Any]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
         self._unload_callbacks.append(callback)
+
+    def _attach_hass(self, hass: _StubHass) -> None:
+        self._hass = hass
+
+    def async_create_background_task(
+        self, coro: Awaitable[Any], *, name: str | None = None
+    ) -> asyncio.Task[Any]:
+        if self._hass is None:
+            msg = "ConfigEntry is not attached to a hass instance"
+            raise RuntimeError(msg)
+        task = self._hass.async_create_task(coro, name=name)
+        self._background_tasks.append(task)
+        return task
 
 
 class _StubBus:
@@ -116,6 +131,22 @@ class _StubConfigEntries:
         self.unload_calls: list[str] = []
         self.set_disabled_by_calls: list[tuple[str, object | None]] = []
         self.setup_calls: list[str] = []
+        self._registered_subentry_ids: set[str] = set()
+
+    def _known_entry_ids(self) -> set[str]:
+        known_ids = {entry.entry_id for entry in self._entries}
+        known_ids.update(self._registered_subentry_ids)
+        return known_ids
+
+    @staticmethod
+    def _normalize_subentry_id(subentry: ConfigSubentry) -> str | None:
+        subentry_id = getattr(subentry, "entry_id", None)
+        if isinstance(subentry_id, str) and subentry_id:
+            return subentry_id
+        subentry_id = getattr(subentry, "subentry_id", None)
+        if isinstance(subentry_id, str) and subentry_id:
+            return subentry_id
+        return None
 
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
         return list(self._entries)
@@ -135,6 +166,9 @@ class _StubConfigEntries:
     ) -> bool:
         entry.subentries[subentry.subentry_id] = subentry
         self.added_subentries.append((entry, subentry))
+        normalized_id = self._normalize_subentry_id(subentry)
+        if normalized_id is not None:
+            self._registered_subentry_ids.add(normalized_id)
         return True
 
     def async_update_subentry(
@@ -162,11 +196,15 @@ class _StubConfigEntries:
             changed = True
         entry.subentries[subentry.subentry_id] = subentry
         self.updated_subentries.append((entry, subentry))
+        normalized_id = self._normalize_subentry_id(subentry)
+        if normalized_id is not None:
+            self._registered_subentry_ids.add(normalized_id)
         return changed
 
     def async_remove_subentry(self, entry: _StubConfigEntry, subentry_id: str) -> bool:
         entry.subentries.pop(subentry_id, None)
         self.removed_subentries.append((entry, subentry_id))
+        self._registered_subentry_ids.discard(subentry_id)
         return True
 
     def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
@@ -182,6 +220,8 @@ class _StubConfigEntries:
         return list(entry.subentries.values())
 
     async def async_setup(self, entry_id: str) -> bool:
+        if entry_id not in self._known_entry_ids():
+            raise LookupError(f"Config entry '{entry_id}' not registered")
         self.setup_calls.append(entry_id)
         return True
 
@@ -253,6 +293,7 @@ class _StubHass:
         self.config_entries = _StubConfigEntries(entry)
         self._tasks: list[asyncio.Task[Any]] = []
         self.services = _StubServices()
+        entry._attach_hass(self)
 
     def async_create_task(
         self, coro: Awaitable[Any], *, name: str | None = None
@@ -509,14 +550,7 @@ def test_service_stats_unique_id_migration_prefers_service_subentry(
         )
         assert entity_registry.updated == ["sensor.googlefindmy_api_updates"]
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 def test_hass_data_layout(
@@ -811,14 +845,7 @@ def test_hass_data_layout(
 
         loop.run_until_complete(_exercise())
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 def test_setup_entry_reactivates_disabled_button_entities(
@@ -953,14 +980,7 @@ def test_setup_entry_reactivates_disabled_button_entities(
         assert registry_entries[0].disabled_by is None
         assert registry.updated == ["button.googlefindmy_disabled"]
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 @pytest.mark.asyncio
@@ -1129,14 +1149,7 @@ def test_setup_entry_failure_does_not_register_cache(
 
         assert register_calls == []
     finally:
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-        for task in pending:
-            task.cancel()
-            with suppress(Exception):
-                loop.run_until_complete(task)
-        loop.run_until_complete(asyncio.sleep(0))
-        loop.close()
-        asyncio.set_event_loop(None)
+        drain_loop(loop)
 
 
 def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> None:

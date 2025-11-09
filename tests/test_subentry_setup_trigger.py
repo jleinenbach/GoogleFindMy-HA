@@ -1,4 +1,5 @@
 # tests/test_subentry_setup_trigger.py
+
 """Tests for ensuring programmatically created subentries get set up."""
 
 from __future__ import annotations
@@ -100,11 +101,14 @@ async def test_async_ensure_subentries_are_setup_warns_and_raises_on_failure(
 
 
 @pytest.mark.asyncio
-async def test_async_ensure_subentries_are_setup_falls_back_to_subentry_id() -> None:
-    """Freshly created subentries without entry_id should fall back to subentry_id."""
+@pytest.mark.parametrize("entry_id_value", [None, "", object()])
+async def test_async_ensure_subentries_are_setup_falls_back_to_subentry_id(
+    entry_id_value: object,
+) -> None:
+    """Fresh subentries resolve identifiers when entry_id is missing or invalid."""
 
     pending_subentry = SimpleNamespace(
-        entry_id=None,
+        entry_id=entry_id_value,
         subentry_id="child-created",
     )
 
