@@ -28,6 +28,7 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import device_registry as dr, frame
+from tests.helpers.config_flow import prepare_flow_hass_config_entries
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -160,11 +161,12 @@ class _HassStub:
     ) -> None:
         self.entity_registry = entity_registry
         self.device_registry = device_registry
-        self.config_entries = _ManagerWithRegistries(
-            entry, entity_registry, device_registry
+        prepare_flow_hass_config_entries(
+            self,
+            lambda: _ManagerWithRegistries(entry, entity_registry, device_registry),
+            frame_module=frame,
         )
         self.data: dict[str, Any] = {}
-        frame.set_up(self)
 
     def async_create_task(
         self, coro: Any, *, name: str | None = None

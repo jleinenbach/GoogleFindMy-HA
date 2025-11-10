@@ -76,7 +76,9 @@ When fabricating bare `hass` objects outside the shared fixtures, import the
 stubbed `homeassistant.helpers.frame` module from `tests.conftest` and call
 `frame.set_up(hass)` before assigning `config_entry`. The guard mirrors Home
 Assistant's runtime expectations and prevents spurious `ValueError` failures
-during options-flow tests.
+during options-flow tests. Prefer routing new helpers through
+`tests.helpers.config_flow.prepare_flow_hass_config_entries` so the frame setup
+and manager attachment stay consistent across modules.
 
 When updating `_StubConfigEntries` in
 `tests/test_hass_data_layout.py`, keep its lookup and registration

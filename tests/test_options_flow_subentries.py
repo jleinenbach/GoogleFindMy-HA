@@ -18,6 +18,7 @@ from custom_components.googlefindmy.const import (
 )
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import frame
+from tests.helpers.config_flow import prepare_flow_hass_config_entries
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -128,8 +129,11 @@ class _HassStub:
     """Home Assistant stub exposing config entry helpers to the flow."""
 
     def __init__(self, entry: _EntryStub) -> None:
-        self.config_entries = _ManagerStub(entry)
-        frame.set_up(self)
+        prepare_flow_hass_config_entries(
+            self,
+            lambda: _ManagerStub(entry),
+            frame_module=frame,
+        )
 
     def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
         return asyncio.create_task(coro)

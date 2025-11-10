@@ -35,10 +35,12 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from homeassistant import config_entries as ha_config_entries, data_entry_flow
+from homeassistant.helpers import frame
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.config_entries import ConfigSubentry
 from tests.helpers.config_flow import (
     config_entries_flow_stub,
+    prepare_flow_hass_config_entries,
     set_config_flow_unique_id,
     stub_async_entry_for_domain_unique_id,
 )
@@ -309,7 +311,11 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
 
     class _FlowHass:
         def __init__(self) -> None:
-            self.config_entries = _ConfigEntries()
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
             self.data: dict[str, Any] = {config_flow.DOMAIN: {}}
 
     captured: dict[str, Any] = {}
@@ -569,7 +575,11 @@ def test_device_selection_creates_and_updates_subentry() -> None:
 
     class _StubHass:
         def __init__(self, entry: _StubEntry) -> None:
-            self.config_entries = _StubConfigEntries(entry)
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _StubConfigEntries(entry),
+                frame_module=frame,
+            )
             self.data: dict[str, Any] = {DOMAIN: {"entries": {entry.entry_id: {}}}}
 
     entry = _StubEntry()
@@ -765,7 +775,11 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
 
     class _Hass:
         def __init__(self) -> None:
-            self.config_entries = _ConfigEntries()
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
             self.tasks: list[asyncio.Task[Any]] = []
 
         def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
@@ -908,7 +922,11 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
 
     class _Hass:
         def __init__(self) -> None:
-            self.config_entries = _ConfigEntries()
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
             self.tasks: list[asyncio.Task[Any]] = []
 
         def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
