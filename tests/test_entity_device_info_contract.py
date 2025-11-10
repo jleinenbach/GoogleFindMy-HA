@@ -15,15 +15,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-pytest_homeassistant_custom_component = pytest.importorskip(
-    "pytest_homeassistant_custom_component",
-    reason=(
-        "pytest-homeassistant-custom-component is required for the integration "
-        "contract test"
-    ),
-)
-
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+try:
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+except ModuleNotFoundError:  # pragma: no cover - exercised via skipped test
+    pytest.skip(
+        "pytest-homeassistant-custom-component is required for the integration contract test",
+        allow_module_level=True,
+    )
 
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
