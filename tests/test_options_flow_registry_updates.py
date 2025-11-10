@@ -1,5 +1,5 @@
 # tests/test_options_flow_registry_updates.py
-# tests/test_options_flow_registry_updates.py
+
 """Tests asserting subentry repair steps update registry assignments."""
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, frame
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -164,6 +164,7 @@ class _HassStub:
             entry, entity_registry, device_registry
         )
         self.data: dict[str, Any] = {}
+        frame.set_up(self)
 
     def async_create_task(
         self, coro: Any, *, name: str | None = None
