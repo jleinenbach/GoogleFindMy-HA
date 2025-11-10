@@ -49,6 +49,7 @@ from typing import (
     Any,
     Awaitable,
     Callable,
+    ClassVar,
     Iterable,
     Mapping,
     Protocol,
@@ -1715,6 +1716,8 @@ class ConfigFlow(
     domain=DOMAIN,
 ):
     """Handle the initial config flow for Google Find My Device."""
+
+    domain: ClassVar[str] = DOMAIN
     VERSION = CONFIG_ENTRY_VERSION
 
     def __init__(self) -> None:
