@@ -2,7 +2,7 @@
 """Config flow helpers shared across Google Find My tests."""
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import Awaitable, Callable, Iterable, MutableMapping
 import inspect
 from types import SimpleNamespace
 from typing import Any, TypeVar
@@ -10,9 +10,92 @@ from unittest.mock import AsyncMock
 
 from homeassistant.helpers import frame
 
+from .homeassistant import resolve_config_entry_lookup
+
 FlowInitResult = dict[str, Any]
 FlowInitCallable = Callable[..., Awaitable[FlowInitResult] | FlowInitResult]
 _ConfigEntriesManagerT = TypeVar("_ConfigEntriesManagerT")
+
+
+def _collect_manager_entries(manager: Any, domain: str) -> list[Any]:
+    """Return entries and subentries tracked by ``manager``."""
+
+    seen: set[int] = set()
+    queue: list[Any] = []
+
+    def _add(entry: Any) -> None:
+        if entry is None:
+            return
+        identifier = id(entry)
+        if identifier in seen:
+            return
+        seen.add(identifier)
+        queue.append(entry)
+
+    def _extend(container: Any) -> None:
+        if container is None:
+            return
+        if isinstance(container, dict):
+            for value in container.values():
+                _add(value)
+            return
+        if isinstance(container, (list, tuple, set, frozenset)):
+            for value in container:
+                _add(value)
+            return
+        if isinstance(container, Iterable) and not isinstance(container, (str, bytes, bytearray)):
+            for value in container:
+                _add(value)
+            return
+        _add(container)
+
+    lookup = getattr(manager, "async_entries", None)
+    if callable(lookup):
+        try:
+            _extend(lookup(domain))
+        except TypeError:
+            _extend(lookup())  # type: ignore[misc]
+
+    for attribute in ("_entry", "entry", "entries", "_entries", "stored_entries"):
+        _extend(getattr(manager, attribute, None))
+
+    index = 0
+    async_get_subentries = getattr(manager, "async_get_subentries", None)
+    while index < len(queue):
+        entry = queue[index]
+        index += 1
+
+        entry_id = getattr(entry, "entry_id", None)
+        if callable(async_get_subentries) and isinstance(entry_id, str):
+            try:
+                _extend(async_get_subentries(entry_id))
+            except TypeError:
+                _extend(async_get_subentries())  # type: ignore[misc]
+
+        runtime_data = getattr(entry, "runtime_data", None)
+        manager_obj = getattr(runtime_data, "subentry_manager", None)
+        managed = getattr(manager_obj, "managed_subentries", None)
+        if isinstance(managed, dict):
+            for key, value in managed.items():
+                _add(value)
+                resolved = resolve_config_entry_lookup(managed.values(), key)
+                if resolved is not None:
+                    _add(resolved)
+
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, dict):
+            for key, value in subentries.items():
+                _add(value)
+                resolved = resolve_config_entry_lookup(subentries.values(), key)
+                if resolved is not None:
+                    _add(resolved)
+
+        if isinstance(entry_id, str):
+            resolved_entry = resolve_config_entry_lookup(queue, entry_id)
+            if resolved_entry is not None:
+                _add(resolved_entry)
+
+    return queue
 
 
 def prepare_flow_hass_config_entries(
@@ -69,49 +152,15 @@ def stub_async_entry_for_domain_unique_id(
     The Home Assistant core exposes :meth:`ConfigEntries.async_entry_for_domain_unique_id`
     to locate entries that already claimed a specific unique ID. The config-flow tests
     ship lightweight manager stubs instead of the production implementation, so this
-    helper normalizes their storage patterns (single entry attributes, dictionaries,
-    or ``async_entries`` lists) before attempting to match the provided unique ID.
+    helper collects the available entries via :func:`resolve_config_entry_lookup` before
+    attempting to match the provided unique ID across the common storage layouts used
+    by the suite.
     """
 
     if not isinstance(unique_id, str):
         return None
 
-    candidates: list[Any] = []
-    seen: set[int] = set()
-
-    def _add(entry: Any) -> None:
-        if entry is None:
-            return
-        identifier = id(entry)
-        if identifier in seen:
-            return
-        seen.add(identifier)
-        candidates.append(entry)
-
-    def _extend(container: Any) -> None:
-        if container is None:
-            return
-        if isinstance(container, dict):
-            for value in container.values():
-                _add(value)
-            return
-        if isinstance(container, (list, tuple, set, frozenset)):
-            for value in container:
-                _add(value)
-            return
-        _add(container)
-
-    lookup = getattr(manager, "async_entries", None)
-    if callable(lookup):
-        try:
-            _extend(lookup(domain))
-        except TypeError:
-            _extend(lookup())  # type: ignore[misc]
-
-    for attribute in ("_entry", "entry", "entries", "_entries", "stored_entries"):
-        _extend(getattr(manager, attribute, None))
-
-    for entry in candidates:
+    for entry in _collect_manager_entries(manager, domain):
         entry_domain = getattr(entry, "domain", None)
         if entry_domain is not None and entry_domain != domain:
             continue
@@ -125,6 +174,19 @@ def stub_async_entry_for_domain_unique_id(
             return entry
 
     return None
+
+
+class ConfigEntriesDomainUniqueIdLookupMixin:
+    """Provide ``async_entry_for_domain_unique_id`` for config entry stubs."""
+
+    # See ``tests/AGENTS.md`` ("Config entries unique ID lookup helper") for
+    # guidance on reusing this mixin across new stubs instead of duplicating the
+    # lookup wiring.
+    
+    def async_entry_for_domain_unique_id(
+        self, domain: str, unique_id: str
+    ) -> Any | None:
+        return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
 
 def set_config_flow_unique_id(flow: Any, unique_id: str | None) -> None:

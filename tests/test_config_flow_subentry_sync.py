@@ -41,9 +41,9 @@ from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.exceptions import HomeAssistantError
 from tests.helpers.config_flow import (
+    ConfigEntriesDomainUniqueIdLookupMixin,
     config_entries_flow_stub,
     set_config_flow_unique_id,
-    stub_async_entry_for_domain_unique_id,
 )
 
 
@@ -53,7 +53,7 @@ def _stable_subentry_id(entry_id: str, key: str) -> str:
     return f"{entry_id}-{key}-subentry"
 
 
-class _ConfigEntriesManagerStub:
+class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
     """Stub mimicking Home Assistant's config entries manager."""
 
     def __init__(self, entry: _EntryStub) -> None:
@@ -75,7 +75,7 @@ class _ConfigEntriesManagerStub:
     ) -> _EntryStub | None:
         return cast(
             _EntryStub | None,
-            stub_async_entry_for_domain_unique_id(self, domain, unique_id),
+            super().async_entry_for_domain_unique_id(domain, unique_id),
         )
 
     def async_get_entry(self, entry_id: str) -> _EntryStub | None:

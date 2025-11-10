@@ -1,7 +1,7 @@
 # tests/test_config_flow_hub_entry.py
-from __future__ import annotations
+"""Tests covering hub subentry registration, delegation, and legacy-core fallbacks."""
 
-# Tests covering hub subentry registration, delegation, and legacy-core fallbacks.
+from __future__ import annotations
 
 import inspect
 import logging
@@ -18,8 +18,8 @@ from custom_components.googlefindmy.const import (
 )
 from homeassistant.config_entries import ConfigEntry
 from tests.helpers.config_flow import (
+    ConfigEntriesDomainUniqueIdLookupMixin,
     config_entries_flow_stub,
-    stub_async_entry_for_domain_unique_id,
 )
 
 
@@ -68,7 +68,7 @@ async def test_hub_flow_aborts_when_manual_addition_requested(
 
     entry = SimpleNamespace(entry_id="entry-123", data={}, options={}, subentries={})
 
-    class _ConfigEntriesManager:
+    class _ConfigEntriesManager(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.lookups: list[str] = []
             self.entry = entry
@@ -79,11 +79,6 @@ async def test_hub_flow_aborts_when_manual_addition_requested(
             if entry_id == entry.entry_id:
                 return entry
             return None
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
     hass = SimpleNamespace(config_entries=_ConfigEntriesManager())
 
@@ -140,7 +135,7 @@ async def test_hub_flow_aborts_when_hub_unsupported(
 
     entry = SimpleNamespace(entry_id="entry-legacy", data={}, options={}, subentries={})
 
-    class _ConfigEntriesManager:
+    class _ConfigEntriesManager(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.entry = entry
             self.flow = config_entries_flow_stub()
@@ -149,11 +144,6 @@ async def test_hub_flow_aborts_when_hub_unsupported(
             if entry_id == entry.entry_id:
                 return self.entry
             return None
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
     hass = SimpleNamespace(config_entries=_ConfigEntriesManager())
 

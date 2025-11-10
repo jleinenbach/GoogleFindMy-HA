@@ -23,10 +23,10 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.email import unique_account_id
 from homeassistant.helpers import frame
 from tests.helpers.config_flow import (
+    ConfigEntriesDomainUniqueIdLookupMixin,
     config_entries_flow_stub,
     prepare_flow_hass_config_entries,
     set_config_flow_unique_id,
-    stub_async_entry_for_domain_unique_id,
 )
 
 
@@ -70,7 +70,7 @@ def test_async_step_discovery_new_entry(
 
     monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.setup_calls: list[str] = []
             self.flow = config_entries_flow_stub()
@@ -78,11 +78,6 @@ def test_async_step_discovery_new_entry(
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return []
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
         def async_get_subentries(self, _entry_id: str) -> list[Any]:
             return []
@@ -192,18 +187,13 @@ def test_async_step_discovery_existing_entry_updates(
 
     entry = _Entry()
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.setup_calls: list[str] = []
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return [entry]
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
         def async_get_entry(self, entry_id: str) -> _Entry | None:
             if entry_id == entry.entry_id:
@@ -317,7 +307,7 @@ def test_async_step_discovery_update_info_existing_entry(
 
     entry = _Entry()
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.updated: list[tuple[Any, dict[str, Any]]] = []
             self.reloaded: list[str] = []
@@ -329,11 +319,6 @@ def test_async_step_discovery_update_info_existing_entry(
             self.lookups.append(domain)
             assert domain == config_flow.DOMAIN
             return [entry]
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
         def async_update_entry(self, target: Any, **updates: Any) -> None:
             self.updated.append((target, updates))
@@ -473,17 +458,12 @@ def test_async_step_discovery_update_info_existing_entry(
 def test_async_step_discovery_update_info_invalid_payload() -> None:
     """Invalid discovery-update payloads should abort early."""
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.setup_calls: list[str] = []
 
         def async_entries(self, domain: str) -> list[Any]:
             return []
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
         def async_get_subentries(self, _entry_id: str) -> list[Any]:
             return []
@@ -599,18 +579,13 @@ def test_async_step_discovery_update_info_ingest_invalid_auth(
 
     entry = _Entry()
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.setup_calls: list[str] = []
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return [entry]
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
         def async_get_entry(self, entry_id: str) -> Any | None:
             if entry_id == entry.entry_id:
@@ -793,17 +768,12 @@ def test_async_step_user_confirm_only_submission() -> None:
 def test_async_step_discovery_invalid_payload() -> None:
     """Invalid payloads should abort with the documented reason."""
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.setup_calls: list[str] = []
 
         def async_entries(self, domain: str) -> list[Any]:
             return []
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
         def async_get_subentries(self, _entry_id: str) -> list[Any]:
             return []

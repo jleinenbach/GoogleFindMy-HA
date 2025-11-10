@@ -284,6 +284,11 @@ of storage layouts used across the test suite, so reusing it keeps new stubs
 aligned with Home Assistant's matching semantics without reimplementing the
 logic in each test module.
 
+For convenience, ``tests.helpers.config_flow.ConfigEntriesDomainUniqueIdLookupMixin``
+wraps the helper above and can be inherited by stubbed manager classes. Reuse
+the mixin whenever possible so flow stubs across the suite converge on the same
+lookup behavior without duplicating the glue code.
+
 ### Config subentry factory contract
 
 ``ConfigFlow.async_get_supported_subentry_types`` **must** expose zero-argument
