@@ -801,6 +801,41 @@ def _stub_homeassistant() -> None:
     issue_registry_module.async_create_issue = _async_create_issue
     issue_registry_module.async_delete_issue = _async_delete_issue
 
+    frame_module = ModuleType("homeassistant.helpers.frame")
+
+    class _FrameHelper:
+        """Trivial frame helper compatible with pytest-homeassistant expectations."""
+
+        def __init__(self) -> None:
+            self._is_setup = False
+
+        def set_up(self) -> None:
+            self._is_setup = True
+
+        async def async_set_up(self) -> None:
+            self.set_up()
+
+        def report(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover - no-op
+            return None
+
+    frame_helper = _FrameHelper()
+
+    def frame_set_up(*args: Any, **kwargs: Any) -> None:
+        frame_helper.set_up()
+
+    async def frame_async_set_up(*args: Any, **kwargs: Any) -> None:
+        await frame_helper.async_set_up()
+
+    def frame_report(*args: Any, **kwargs: Any) -> None:
+        frame_helper.report(*args, **kwargs)
+
+    frame_module.frame_helper = frame_helper
+    frame_module.set_up = frame_set_up
+    frame_module.async_set_up = frame_async_set_up
+    frame_module.report = frame_report
+    sys.modules["homeassistant.helpers.frame"] = frame_module
+    setattr(helpers_pkg, "frame", frame_module)
+
     device_registry_module = sys.modules["homeassistant.helpers.device_registry"]
     device_registry_module.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
 
