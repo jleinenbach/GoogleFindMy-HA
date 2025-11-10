@@ -26,6 +26,7 @@ from custom_components.googlefindmy.const import (
 )
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import frame
+from tests.helpers.config_flow import prepare_flow_hass_config_entries
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -163,12 +164,15 @@ class _DummyHass:
     """Small Home Assistant stub collecting scheduled tasks for inspection."""
 
     def __init__(self, entry: _DummyEntry, cache: _MemoryCache) -> None:
-        self.config_entries = _DummyConfigEntries(entry)
+        prepare_flow_hass_config_entries(
+            self,
+            lambda: _DummyConfigEntries(entry),
+            frame_module=frame,
+        )
         self.data: dict[str, Any] = {
             DOMAIN: {"entries": {entry.entry_id: _RuntimeData(cache)}}
         }
         self._tasks: list[asyncio.Task[Any]] = []
-        frame.set_up(self)
 
     def async_create_task(self, coro: Awaitable[Any]) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)

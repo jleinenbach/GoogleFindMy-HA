@@ -21,8 +21,10 @@ from custom_components.googlefindmy.const import (
     DATA_SECRET_BUNDLE,
 )
 from custom_components.googlefindmy.email import unique_account_id
+from homeassistant.helpers import frame
 from tests.helpers.config_flow import (
     config_entries_flow_stub,
+    prepare_flow_hass_config_entries,
     set_config_flow_unique_id,
     stub_async_entry_for_domain_unique_id,
 )
@@ -91,7 +93,11 @@ def test_async_step_discovery_new_entry(
 
     class _FlowHass:
         def __init__(self) -> None:
-            self.config_entries = _ConfigEntries()
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
 
     async def _exercise() -> tuple[dict[str, Any], dict[str, Any], list[str | None]]:
         hass = _FlowHass()
@@ -219,7 +225,11 @@ def test_async_step_discovery_existing_entry_updates(
 
     class _FlowHass:
         def __init__(self) -> None:
-            self.config_entries = _ConfigEntries()
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
 
     async def _exercise() -> tuple[
         dict[str, Any],
@@ -351,7 +361,11 @@ def test_async_step_discovery_update_info_existing_entry(
 
     class _Hass:
         def __init__(self) -> None:
-            self.config_entries = _ConfigEntries()
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
 
     called_ingest: list[tuple[config_flow.ConfigFlow, Any]] = []
 
@@ -480,7 +494,11 @@ def test_async_step_discovery_update_info_invalid_payload() -> None:
 
     class _Hass:
         def __init__(self) -> None:
-            self.config_entries = _ConfigEntries()
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
 
     async def _exercise() -> dict[str, Any]:
         hass = _Hass()
@@ -614,7 +632,11 @@ def test_async_step_discovery_update_info_ingest_invalid_auth(
 
     class _Hass:
         def __init__(self) -> None:
-            self.config_entries = _ConfigEntries()
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
 
     async def _raise_ingest(*_: Any, **__: Any) -> tuple[dict[str, Any], None]:
         raise config_flow.DiscoveryFlowError("invalid_auth")
@@ -792,7 +814,11 @@ def test_async_step_discovery_invalid_payload() -> None:
 
     class _FlowHass:
         def __init__(self) -> None:
-            self.config_entries = _ConfigEntries()
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
 
     async def _exercise() -> dict[str, Any]:
         hass = _FlowHass()

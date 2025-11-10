@@ -1,16 +1,32 @@
 # tests/helpers/config_flow.py
 """Config flow helpers shared across Google Find My tests."""
-
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, MutableMapping
 import inspect
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, TypeVar
 from unittest.mock import AsyncMock
+
+from homeassistant.helpers import frame
 
 FlowInitResult = dict[str, Any]
 FlowInitCallable = Callable[..., Awaitable[FlowInitResult] | FlowInitResult]
+_ConfigEntriesManagerT = TypeVar("_ConfigEntriesManagerT")
+
+
+def prepare_flow_hass_config_entries(
+    hass: Any,
+    manager_factory: Callable[[], _ConfigEntriesManagerT],
+    *,
+    frame_module: Any = frame,
+) -> _ConfigEntriesManagerT:
+    """Initialize Home Assistant flow stubs with a frame-aware manager."""
+
+    frame_module.set_up(hass)
+    manager = manager_factory()
+    hass.config_entries = manager
+    return manager
 
 
 def config_entries_flow_stub(
