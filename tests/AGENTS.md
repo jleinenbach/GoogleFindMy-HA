@@ -243,6 +243,21 @@ not. Request the fixture in a test and call ``toggle.as_modern()`` (the default)
 or ``toggle.as_legacy()`` before invoking the config flow under test to assert
 the correct behavior in each environment.
 
+### Config flow unique_id helper
+
+Use :func:`tests.helpers.config_flow.set_config_flow_unique_id` whenever a test
+needs to assign ``unique_id`` on a ``ConfigFlow`` instance. Home Assistant's
+metaclass exposes ``unique_id`` as a read-only descriptor on recent cores, and
+the helper mirrors the runtime registration path by storing the identifier in
+``flow.context``. Example usage:
+
+```python
+from tests.helpers.config_flow import set_config_flow_unique_id
+
+flow = ConfigFlow()
+set_config_flow_unique_id(flow, "test-id")
+```
+
 ### Config subentry factory contract
 
 ``ConfigFlow.async_get_supported_subentry_types`` **must** expose zero-argument
