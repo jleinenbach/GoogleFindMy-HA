@@ -37,7 +37,10 @@ from custom_components.googlefindmy.Auth.username_provider import username_strin
 from homeassistant import config_entries as ha_config_entries, data_entry_flow
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.config_entries import ConfigSubentry
-from tests.helpers.config_flow import set_config_flow_unique_id
+from tests.helpers.config_flow import (
+    set_config_flow_unique_id,
+    stub_async_entry_for_domain_unique_id,
+)
 
 
 def test_config_flow_import_without_gpsoauth(
@@ -295,6 +298,11 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
             assert domain == config_flow.DOMAIN
             return []
 
+        def async_entry_for_domain_unique_id(
+            self, domain: str, unique_id: str
+        ) -> Any | None:
+            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
+
     class _FlowHass:
         def __init__(self) -> None:
             self.config_entries = _ConfigEntries()
@@ -372,6 +380,11 @@ async def test_manual_tokens_abort_when_dependency_missing(
             assert domain == config_flow.DOMAIN
             return []
 
+        def async_entry_for_domain_unique_id(
+            self, domain: str, unique_id: str
+        ) -> Any | None:
+            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
+
     flow = config_flow.ConfigFlow()
     flow.hass = SimpleNamespace(config_entries=_ConfigEntries())  # type: ignore[assignment]
     flow.context = {}
@@ -426,6 +439,11 @@ async def test_manual_tokens_abort_when_account_exists(
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return list(self.entries)
+
+        def async_entry_for_domain_unique_id(
+            self, domain: str, unique_id: str
+        ) -> Any | None:
+            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
     hass = SimpleNamespace(config_entries=_ConfigEntries())
 
@@ -714,6 +732,11 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
             assert domain == config_flow.DOMAIN
             return [entry]
 
+        def async_entry_for_domain_unique_id(
+            self, domain: str, unique_id: str
+        ) -> Any | None:
+            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
+
         def async_get_entry(self, entry_id: str) -> _Entry | None:
             if entry_id != entry.entry_id:
                 return None
@@ -849,6 +872,11 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return [entry]
+
+        def async_entry_for_domain_unique_id(
+            self, domain: str, unique_id: str
+        ) -> Any | None:
+            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
         def async_get_entry(self, entry_id: str) -> _Entry | None:
             if entry_id != entry.entry_id:

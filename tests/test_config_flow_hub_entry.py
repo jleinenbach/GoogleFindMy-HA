@@ -6,7 +6,7 @@ from __future__ import annotations
 import inspect
 import logging
 from types import SimpleNamespace
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 import pytest
 
@@ -17,6 +17,7 @@ from custom_components.googlefindmy.const import (
     SUBENTRY_TYPE_TRACKER,
 )
 from homeassistant.config_entries import ConfigEntry
+from tests.helpers.config_flow import stub_async_entry_for_domain_unique_id
 
 
 class _SubentrySupportToggle(Protocol):
@@ -67,12 +68,18 @@ async def test_hub_flow_aborts_when_manual_addition_requested(
     class _ConfigEntriesManager:
         def __init__(self) -> None:
             self.lookups: list[str] = []
+            self.entry = entry
 
         def async_get_entry(self, entry_id: str) -> SimpleNamespace | None:
             self.lookups.append(entry_id)
             if entry_id == entry.entry_id:
                 return entry
             return None
+
+        def async_entry_for_domain_unique_id(
+            self, domain: str, unique_id: str
+        ) -> Any | None:
+            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
     hass = SimpleNamespace(config_entries=_ConfigEntriesManager())
 
@@ -132,6 +139,11 @@ async def test_hub_flow_aborts_when_hub_unsupported(
             if entry_id == entry.entry_id:
                 return self.entry
             return None
+
+        def async_entry_for_domain_unique_id(
+            self, domain: str, unique_id: str
+        ) -> Any | None:
+            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
     hass = SimpleNamespace(config_entries=_ConfigEntriesManager())
 

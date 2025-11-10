@@ -264,6 +264,15 @@ flow = ConfigFlow()
 set_config_flow_unique_id(flow, "test-id")
 ```
 
+### Config entries unique ID lookup helper
+
+Stubs that need :meth:`ConfigEntries.async_entry_for_domain_unique_id` behavior
+should import :func:`tests.helpers.config_flow.stub_async_entry_for_domain_unique_id`
+and expose it on their manager shim. The helper already understands the variety
+of storage layouts used across the test suite, so reusing it keeps new stubs
+aligned with Home Assistant's matching semantics without reimplementing the
+logic in each test module.
+
 ### Config subentry factory contract
 
 ``ConfigFlow.async_get_supported_subentry_types`` **must** expose zero-argument
