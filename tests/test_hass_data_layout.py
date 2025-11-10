@@ -51,6 +51,11 @@ class _StubCache:
         self.values: dict[str, Any] = {}
         self.closed = False
 
+    async def async_get_cached_value(self, key: str) -> Any:
+        """Return the cached value for ``key`` if present."""
+
+        return self.values.get(key)
+
     async def async_set_cached_value(self, key: str, value: Any) -> None:
         self.values[key] = value
 
