@@ -18,6 +18,40 @@ import json
 import pytest
 
 
+_PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE = (
+    importlib.util.find_spec("pytest_homeassistant_custom_component") is not None
+)
+
+
+if _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE:
+
+    @pytest.fixture(autouse=True)
+    def enable_event_loop_debug(
+        request: pytest.FixtureRequest,
+    ) -> Iterable[None]:
+        """Ensure the pytest-homeassistant plugin sees an active event loop."""
+
+        loop: asyncio.AbstractEventLoop
+        created_loop = False
+        try:
+            loop = request.getfixturevalue("event_loop")
+        except pytest.FixtureLookupError:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                created_loop = True
+        loop.set_debug(True)
+        try:
+            yield
+        finally:
+            loop.set_debug(False)
+            if created_loop:
+                loop.close()
+                asyncio.set_event_loop(None)
+
+
 class _FakeIssueRegistry:
     """Lightweight repair issue registry used across tests."""
 
