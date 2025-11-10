@@ -1,5 +1,6 @@
 # tests/helpers/config_flow.py
 """Config flow helpers shared across Google Find My tests."""
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
@@ -10,8 +11,6 @@ from unittest.mock import AsyncMock
 
 from homeassistant.helpers import frame
 
-from .homeassistant import resolve_config_entry_lookup
-
 FlowInitResult = dict[str, Any]
 FlowInitCallable = Callable[..., Awaitable[FlowInitResult] | FlowInitResult]
 _ConfigEntriesManagerT = TypeVar("_ConfigEntriesManagerT")
@@ -19,6 +18,8 @@ _ConfigEntriesManagerT = TypeVar("_ConfigEntriesManagerT")
 
 def _collect_manager_entries(manager: Any, domain: str) -> list[Any]:
     """Return entries and subentries tracked by ``manager``."""
+
+    from .homeassistant import resolve_config_entry_lookup
 
     seen: set[int] = set()
     queue: list[Any] = []
