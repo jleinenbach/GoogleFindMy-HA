@@ -168,6 +168,45 @@ Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
 
+#### Deferred subentry identifier assignment helper
+
+Use :func:`tests.helpers.homeassistant.deferred_subentry_entry_id_assignment` to
+model Home Assistant cores that publish a child subentry's global ``entry_id``
+after the parent has already started setup. The helper schedules the
+``entry_id`` update after an optional delay and automatically registers the
+provided :class:`FakeConfigEntry` with the shared
+``FakeConfigEntriesManager``. Reuse it instead of ad-hoc ``asyncio.sleep``
+coroutines so regression tests remain concise and consistent. See
+``tests/test_subentry_manager_registry_resolution.py`` for a concrete example of
+coordinating the helper with provisional runtime objects.
+
+#### Custom config entries manager subclasses
+
+When a regression needs specialized lookup or creation behavior, subclass
+``tests.helpers.homeassistant.FakeConfigEntriesManager`` and hand the custom
+instance to the ``FakeHass`` fixture. The snippet below mirrors
+``DeferredRegistryConfigEntriesManager``, which simulates Home Assistant cores
+that lack ``async_create_subentry`` and delay child visibility until a later
+lookup:
+
+```python
+from types import SimpleNamespace
+
+from tests.helpers.homeassistant import (
+    DeferredRegistryConfigEntriesManager,
+    FakeConfigEntry,
+    FakeHass,
+)
+
+parent_entry = FakeConfigEntry(entry_id="parent")
+child = SimpleNamespace(entry_id="child", subentry_id="child-subentry", data={})
+manager = DeferredRegistryConfigEntriesManager(parent_entry, child)
+hass = FakeHass(config_entries=manager)
+```
+
+Attach the configured ``hass`` to the integration under test so registry
+publication timing and lookup retries match the scenario being exercised.
+
 #### `config_entry_with_subentries` factory
 
 The :func:`config_entry_with_subentries` helper in

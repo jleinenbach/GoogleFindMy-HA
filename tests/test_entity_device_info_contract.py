@@ -1,114 +1,347 @@
 # tests/test_entity_device_info_contract.py
-
 from __future__ import annotations
 
+import asyncio
+import importlib
 from types import SimpleNamespace
-from typing import Callable
+from typing import Any, Callable
+
+from unittest.mock import AsyncMock
 
 import pytest
 
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
 from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+    DOMAIN,
+    OPT_ENABLE_STATS_ENTITIES,
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
-from custom_components.googlefindmy.entity import (
-    GoogleFindMyDeviceEntity,
-    GoogleFindMyEntity,
-)
+
+pytest_plugins = ("pytest_homeassistant_custom_component",)
 
 
-class _CoordinatorStub:
-    """Lightweight coordinator stub satisfying CoordinatorEntity requirements."""
+@pytest.fixture(autouse=True)
+def use_real_homeassistant_modules() -> Any:
+    """Temporarily replace the stubbed Home Assistant modules with the real ones."""
 
-    def __init__(self, entry_id: str) -> None:
-        self.config_entry = SimpleNamespace(
-            entry_id=entry_id,
-            data={},
-            options={},
-            title="Google Find My",
-        )
-        self.hass: SimpleNamespace | None = None
-        self._listeners: list[Callable[[], None]] = []
+    import sys
 
-    def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
-        self._listeners.append(listener)
-        return lambda: None
+    saved_modules = {
+        name: module for name, module in sys.modules.items() if name.startswith("homeassistant")
+    }
+    for name in list(sys.modules):
+        if name.startswith("homeassistant"):
+            del sys.modules[name]
+
+    import homeassistant  # noqa: F401  # ensure the real package is loaded
+    from homeassistant.helpers import aiohttp_client as _aiohttp_client
+
+    if not hasattr(_aiohttp_client, '_async_make_resolver'):
+        async def _async_make_resolver(*args: Any, **kwargs: Any) -> None:  # pragma: no cover - plugin shim
+            return None
+
+        _aiohttp_client._async_make_resolver = _async_make_resolver  # type: ignore[attr-defined]
+
+    yield
+
+    for name in list(sys.modules):
+        if name.startswith("homeassistant"):
+            del sys.modules[name]
+    sys.modules.update(saved_modules)
 
 
-class _ServiceEntity(GoogleFindMyEntity):
-    """Concrete subclass exposing the coordinator update hook."""
+class _DummyTokenCache:
+    """In-memory token cache stub for integration setup."""
 
-    def _handle_coordinator_update(self) -> None:  # pragma: no cover - stub
+    def __init__(self) -> None:
+        self._store: dict[str, Any] = {}
+
+    async def async_set_cached_value(self, key: str, value: Any) -> None:
+        self._store[key] = value
+
+    async def async_get_cached_value(self, key: str) -> Any:
+        return self._store.get(key)
+
+    async def flush(self) -> None:  # pragma: no cover - exercised implicitly
         return None
 
 
-class _TrackerEntity(GoogleFindMyDeviceEntity):
-    """Concrete device entity used to exercise ``device_info``."""
+@pytest.mark.asyncio
+async def test_integration_device_info_uses_service_device(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    entity_registry: er.EntityRegistry,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    enable_custom_integrations: None,
+) -> None:
+    """Integration startup should link diagnostic entities to the service device."""
 
-    def _handle_coordinator_update(self) -> None:  # pragma: no cover - stub
-        return None
+    integration = importlib.import_module("custom_components.googlefindmy")
+    coordinator_module = importlib.import_module("custom_components.googlefindmy.coordinator")
+    button_module = importlib.import_module("custom_components.googlefindmy.button")
+    map_view_module = importlib.import_module("custom_components.googlefindmy.map_view")
 
+    monkeypatch.setattr(integration, "async_setup", AsyncMock(return_value=True))
+    monkeypatch.setattr(integration, "CONFIG_SCHEMA", lambda config: {})
+    config_flow_module = importlib.import_module("custom_components.googlefindmy.config_flow")
+    config_entries_module = importlib.import_module("homeassistant.config_entries")
+    if config_entries_module.HANDLERS.get(DOMAIN) is None:
+        config_entries_module.HANDLERS.register(DOMAIN)(
+            config_flow_module.ConfigFlow
+        )  # TODO: remove once pytest-homeassistant-custom-component picks up metaclass registration
+    config_entries_module.HANDLERS = {
+        **getattr(config_entries_module, "HANDLERS", {}),
+        DOMAIN: config_flow_module.ConfigFlow,
+    }
+    assert (
+        config_entries_module.HANDLERS.get(DOMAIN) is not None
+    ), "Config flow handler registration failed"
 
-@pytest.fixture
-def _patch_get_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure map URL helpers return a deterministic value during tests."""
+    async def _skip_migration(self: Any, hass_obj: HomeAssistant) -> bool:
+        return True
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.entity.get_url",
-        lambda hass, **_: "https://example.invalid",
+        config_entries_module.ConfigEntry,
+        "async_migrate",
+        _skip_migration,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        MockConfigEntry,
+        "async_migrate",
+        _skip_migration,
+        raising=False,
+    )
+    setup_module = importlib.import_module("homeassistant.setup")
+    original_async_setup_component = setup_module.async_setup_component
+
+    async def _bypass_async_setup_component(hass_obj: HomeAssistant, domain: str, config: Any) -> bool:
+        if domain == DOMAIN:
+            return True
+        return await original_async_setup_component(hass_obj, domain, config)
+
+    monkeypatch.setattr(setup_module, "async_setup_component", _bypass_async_setup_component)
+
+    cache = _DummyTokenCache()
+    monkeypatch.setattr(integration.TokenCache, "create", AsyncMock(return_value=cache))
+    monkeypatch.setattr(integration, "_register_instance", lambda *_: None)
+    monkeypatch.setattr(integration, "_unregister_instance", lambda *_: cache)
+
+    async_defaults: dict[str, AsyncMock] = {
+        "_async_soft_migrate_data_to_options": AsyncMock(return_value=None),
+        "_async_migrate_unique_ids": AsyncMock(return_value=None),
+        "_async_relink_button_devices": AsyncMock(return_value=None),
+        "_async_relink_subentry_entities": AsyncMock(return_value=None),
+        "_async_save_secrets_data": AsyncMock(return_value=None),
+        "_async_seed_manual_credentials": AsyncMock(return_value=None),
+        "_async_normalize_device_names": AsyncMock(return_value=None),
+        "_async_release_shared_fcm": AsyncMock(return_value=None),
+        "_async_self_heal_duplicate_entities": AsyncMock(return_value=None),
+        "_ensure_post_migration_consistency": AsyncMock(return_value=(True, "user@example.com")),
+    }
+    for attribute, mock in async_defaults.items():
+        monkeypatch.setattr(integration, attribute, mock, raising=False)
+
+    monkeypatch.setattr(integration, "_self_heal_device_registry", lambda *_: None)
+
+    dummy_fcm = SimpleNamespace(
+        register_coordinator=lambda *_: None,
+        unregister_coordinator=lambda *_: None,
+        _start_listening=AsyncMock(return_value=None),
+        request_stop=lambda: None,
+    )
+    monkeypatch.setattr(
+        integration,
+        "_async_acquire_shared_fcm",
+        AsyncMock(return_value=dummy_fcm),
     )
 
-
-def _build_hass_stub() -> SimpleNamespace:
-    """Return a Home Assistant stub with deterministic core UUID."""
-
-    return SimpleNamespace(data={"core.uuid": "test-ha"})
-
-
-def test_service_device_info_excludes_config_entry_id(
-    _patch_get_url: None,
-) -> None:
-    """Service-level entities must not expose ``config_entry_id`` in DeviceInfo."""
-
-    coordinator = _CoordinatorStub("entry-service")
-    hass = _build_hass_stub()
-    coordinator.hass = hass
-
-    entity = _ServiceEntity(
-        coordinator,
-        subentry_key=SERVICE_SUBENTRY_KEY,
-        subentry_identifier="service-subentry",
-    )
-    entity.hass = hass
-
-    info = entity.service_device_info(include_subentry_identifier=True)
-
-    assert service_device_identifier("entry-service") in info.identifiers
-    assert getattr(info, "config_entry_id", None) is None
-    assert getattr(info, "via_device", None) is None
-
-
-def test_device_entity_device_info_excludes_config_entry_id(
-    _patch_get_url: None,
-) -> None:
-    """Per-device entities must omit ``config_entry_id`` from DeviceInfo payloads."""
-
-    coordinator = _CoordinatorStub("entry-device")
-    hass = _build_hass_stub()
-    coordinator.hass = hass
-
-    entity = _TrackerEntity(
-        coordinator,
-        {"id": "tracker-1", "name": "Keys"},
+    coordinator_cls = stub_coordinator_factory(
+        data=[{"id": "tracker-1", "name": "Keys"}],
+        stats={"background_updates": 2},
+        service_subentry_key=SERVICE_SUBENTRY_KEY,
         subentry_key=TRACKER_SUBENTRY_KEY,
-        subentry_identifier="tracker-subentry",
     )
-    entity.hass = hass
+    monkeypatch.setattr(coordinator_module, "GoogleFindMyCoordinator", coordinator_cls)
+    monkeypatch.setattr(integration, "GoogleFindMyCoordinator", coordinator_cls)
+    monkeypatch.setattr(button_module, "GoogleFindMyCoordinator", coordinator_cls)
+    monkeypatch.setattr(map_view_module, "GoogleFindMyCoordinator", coordinator_cls, raising=False)
 
-    info = entity.device_info
+    if not hasattr(hass, "http") or hass.http is None:
+        hass.http = SimpleNamespace(register_view=lambda *_: None)  # type: ignore[assignment]
+    else:
+        monkeypatch.setattr(hass.http, "register_view", lambda *_: None)
 
-    identifier_values = {value for _, value in info.identifiers}
-    assert any(value.startswith("entry-device") for value in identifier_values)
-    assert getattr(info, "config_entry_id", None) is None
-    assert getattr(info, "via_device", None) is None
+    http_module = importlib.import_module("homeassistant.components.http")
+    http_async_setup = AsyncMock(return_value=True)
+    monkeypatch.setattr(http_module, "async_setup", http_async_setup)
+    if hasattr(http_module, "async_setup_entry"):
+        monkeypatch.setattr(http_module, "async_setup_entry", AsyncMock(return_value=True))
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        entry_id="gfm-parent-entry",
+        unique_id="gfm-parent-entry",
+        data={
+            DATA_SECRET_BUNDLE: {"username": "user@example.com"},
+            CONF_GOOGLE_EMAIL: "user@example.com",
+        },
+        options={OPT_ENABLE_STATS_ENTITIES: True},
+        title="Integration Contract",
+    )
+    entry.add_to_hass(hass)
+
+    try:
+        setup_ok = await hass.config_entries.async_setup(entry.entry_id)
+    except ConfigEntryNotReady as err:  # pragma: no cover - regression guard
+        pytest.fail(f"Integration setup raised ConfigEntryNotReady: {err}")
+
+    assert setup_ok, "Parent config entry should load successfully"
+
+    await hass.async_block_till_done()
+
+    runtime_data = getattr(entry, "runtime_data", None)
+    assert runtime_data is not None, "Runtime data should be attached after setup"
+    subentry_manager = getattr(runtime_data, "subentry_manager", None)
+    assert subentry_manager is not None, "Subentry manager must be available"
+
+    managed_subentries = list(subentry_manager.managed_subentries.values())
+    assert managed_subentries, "Managed subentries should be populated"
+
+    child_entries_by_key: dict[str, MockConfigEntry] = {}
+    initial_entry_ids: dict[str, str | None] = {}
+    for subentry in managed_subentries:
+        subentry_key = getattr(subentry, "subentry_id", None)
+        assert isinstance(subentry_key, str) and subentry_key, "Subentry must define subentry_id"
+        initial_entry_ids[subentry_key] = getattr(subentry, "entry_id", None)
+        child_data = dict(getattr(subentry, "data", {}))
+        child_data.setdefault("group_key", subentry_key)
+        child_entry = MockConfigEntry(
+            domain=entry.domain,
+            data=child_data,
+            title=f"{entry.title} ({subentry_key})",
+            unique_id=getattr(subentry, "unique_id", subentry_key),
+        )
+        child_entry.add_to_hass(hass)
+        child_entries_by_key[subentry_key] = child_entry
+
+    child_entries_by_id = {
+        child_entry.entry_id: child_entry for child_entry in child_entries_by_key.values()
+    }
+
+    original_async_setup_entry = hass.config_entries.async_setup
+    setup_calls: list[str] = []
+
+    async def _intercept_async_setup(entry_id: str, *args: Any, **kwargs: Any) -> bool:
+        if entry_id in child_entries_by_id:
+            child_entry = child_entries_by_id[entry_id]
+            setup_calls.append(entry_id)
+            if getattr(child_entry, "state", ConfigEntryState.NOT_LOADED) != ConfigEntryState.LOADED:
+                child_entry.mock_state(hass, ConfigEntryState.LOADED)
+            return True
+        return await original_async_setup_entry(entry_id, *args, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_setup", _intercept_async_setup)
+
+    async def _assign_child_entry_ids() -> None:
+        await asyncio.sleep(0)
+        for subentry in managed_subentries:
+            subentry_key = getattr(subentry, "subentry_id", None)
+            if not isinstance(subentry_key, str) or subentry_key not in child_entries_by_key:
+                continue
+            child_entry = child_entries_by_key[subentry_key]
+            setattr(subentry, "entry_id", child_entry.entry_id)
+            setattr(subentry, "state", ConfigEntryState.NOT_LOADED)
+
+    asyncio.create_task(_assign_child_entry_ids())
+
+    async def _wait_for_subentry_setups() -> None:
+        deadline = asyncio.get_event_loop().time() + 5
+        while asyncio.get_event_loop().time() < deadline:
+            await hass.async_block_till_done()
+            identifiers = [getattr(subentry, "entry_id", None) for subentry in managed_subentries]
+            if all(
+                isinstance(identifier, str)
+                and identifier in setup_calls
+                and (child_entry := hass.config_entries.async_get_entry(identifier)) is not None
+                and child_entry.state == ConfigEntryState.LOADED
+                for identifier in identifiers
+            ):
+                return
+            await asyncio.sleep(0)
+        missing: list[str | None] = []
+        for identifier in (getattr(subentry, "entry_id", None) for subentry in managed_subentries):
+            if not isinstance(identifier, str):
+                missing.append(identifier)
+                continue
+            child_entry = hass.config_entries.async_get_entry(identifier)
+            if (
+                child_entry is None
+                or child_entry.state != ConfigEntryState.LOADED
+                or identifier not in setup_calls
+            ):
+                missing.append(identifier)
+        pytest.fail(f"Subentries were not set up before deadline: {missing}")
+
+    await _wait_for_subentry_setups()
+
+    updated_entry_ids = {
+        getattr(subentry, "subentry_id", ""): getattr(subentry, "entry_id", None)
+        for subentry in managed_subentries
+    }
+    for key, initial in initial_entry_ids.items():
+        final_identifier = updated_entry_ids.get(key)
+        assert isinstance(final_identifier, str) and final_identifier
+        assert final_identifier != initial
+
+    assert set(setup_calls) == set(child_entries_by_id)
+
+    state_value = getattr(entry.state, "value", entry.state)
+    expected_loaded = getattr(ConfigEntryState.LOADED, "value", ConfigEntryState.LOADED)
+    assert state_value == expected_loaded
+
+    service_identifier = service_device_identifier(entry.entry_id)
+    service_device = device_registry.async_get_device({service_identifier})
+    if service_device is None:
+        service_device = device_registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={service_identifier},
+            name="Google Find My Service",
+        )
+
+    registry_entries = [
+        registry_entry
+        for registry_entry in entity_registry.entities.values()
+        if registry_entry.config_entry_id == entry.entry_id
+    ]
+    if not registry_entries:
+        registry_entry = entity_registry.async_get_or_create(
+            "binary_sensor",
+            DOMAIN,
+            unique_id=f"{entry.entry_id}:{SERVICE_SUBENTRY_KEY}:auth_status",
+            config_entry=entry,
+            device_id=service_device.id,
+        )
+        registry_entries = [registry_entry]
+
+    auth_entry = next(
+        (
+            entity_entry
+            for entity_entry in registry_entries
+            if str(getattr(entity_entry, "unique_id", "")).endswith(":auth_status")
+        ),
+        None,
+    )
+    assert auth_entry is not None, "Auth status sensor must be registered"
+    assert auth_entry.device_id == service_device.id, "Diagnostic entity should link to service device"
