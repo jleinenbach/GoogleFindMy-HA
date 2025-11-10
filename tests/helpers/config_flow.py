@@ -1,5 +1,13 @@
 # tests/helpers/config_flow.py
-"""Config flow helpers shared across Google Find My tests."""
+"""Config flow helpers mirroring Home Assistant's manager contracts.
+
+The utilities are shared across Google Find My tests and now include
+:class:`ConfigEntriesFlowManagerStub`, a lightweight replacement for Home
+Assistant's config-entry flow manager. The stub records each invocation of
+``flow.async_init`` and exposes the recorded progress snapshots via
+:meth:`async_progress` and ``async_progress_by_handler`` so tests can assert on
+discovery abort reasons without reimplementing Home Assistant's bookkeeping.
+"""
 
 from __future__ import annotations
 
@@ -116,35 +124,99 @@ def prepare_flow_hass_config_entries(
 def config_entries_flow_stub(
     *,
     result: FlowInitResult | FlowInitCallable | None = None,
-) -> SimpleNamespace:
+) -> ConfigEntriesFlowManagerStub:
     """Return a config-entry manager stub exposing ``flow.async_init``.
 
-    The helper mirrors Home Assistant's ``ConfigEntries`` flow attribute well
-    enough for tests that only need to verify invocation ordering. Each call to
-    :func:`config_entries_flow_stub` returns a fresh object exposing a
-    ``flow`` attribute whose :meth:`async_init` coroutine records the provided
-    positional and keyword arguments. When ``result`` is omitted, the stub
-    returns a minimal form dictionary so callers can await the coroutine without
-    additional scaffolding. The top-level object also proxies ``async_init`` and
-    ``calls`` to the same flow helper to simplify gradual migrations.
+    The helper now instantiates :class:`ConfigEntriesFlowManagerStub`, which
+    records invocation order alongside Home Assistant-style progress snapshots.
+    The returned stub exposes ``flow``, ``async_init``, ``calls``, and the
+    :meth:`ConfigEntriesFlowManagerStub.async_progress` helpers so existing
+    callers continue to work while tests migrate to the richer API.
     """
 
-    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    return ConfigEntriesFlowManagerStub(result=result)
 
-    async def _async_init(*args: Any, **kwargs: Any) -> FlowInitResult:
-        calls.append((args, dict(kwargs)))
-        resolved: FlowInitResult | FlowInitCallable | None = result
+
+class ConfigEntriesFlowManagerStub:
+    """Track ``flow.async_init`` calls with Home Assistant style progress."""
+
+    _FLOW_ID_PREFIX = "flow"
+
+    def __init__(
+        self,
+        *,
+        result: FlowInitResult | FlowInitCallable | None = None,
+    ) -> None:
+        self._result = result
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self._progress: list[dict[str, Any]] = []
+        self._flow_counter = 0
+        self.flow = SimpleNamespace(
+            async_init=AsyncMock(side_effect=self._async_init),
+            async_progress=self.async_progress,
+            async_progress_by_handler=self.async_progress_by_handler,
+        )
+
+    @property
+    def async_init(self) -> AsyncMock:
+        """Return the ``flow.async_init`` coroutine for compatibility."""
+
+        return self.flow.async_init
+
+    def async_progress(self) -> list[dict[str, Any]]:
+        """Return the recorded flow progress snapshots."""
+
+        return [dict(record) for record in self._progress]
+
+    def async_progress_by_handler(self, handler: Any) -> list[dict[str, Any]]:
+        """Return progress entries filtered by ``handler``."""
+
+        return [
+            dict(record)
+            for record in self._progress
+            if record.get("handler") == handler
+        ]
+
+    async def _async_init(self, *args: Any, **kwargs: Any) -> FlowInitResult:
+        self.calls.append((args, dict(kwargs)))
+
+        handler = kwargs.get("handler")
+        if args:
+            handler = args[0]
+
+        context = kwargs.get("context")
+        if isinstance(context, MutableMapping):
+            context_snapshot: Any = dict(context)
+        elif context is None:
+            context_snapshot = {}
+        else:
+            context_snapshot = context
+
+        self._flow_counter += 1
+        flow_id = f"{self._FLOW_ID_PREFIX}_{self._flow_counter}"
+        progress = {
+            "flow_id": flow_id,
+            "handler": handler,
+            "context": context_snapshot,
+            "step_id": None,
+        }
+        self._progress.append(progress)
+
+        resolved: FlowInitResult | FlowInitCallable | None = self._result
         if callable(resolved):
             candidate = resolved(*args, **kwargs)
             if inspect.isawaitable(candidate):
                 candidate = await candidate
-            return candidate
-        if resolved is not None:
-            return resolved
-        return {"type": "form", "step_id": None, "errors": {}}
+            result: FlowInitResult = candidate
+        elif resolved is not None:
+            result = resolved
+        else:
+            result = {"type": "form", "step_id": None, "errors": {}}
 
-    flow = SimpleNamespace(async_init=AsyncMock(side_effect=_async_init), calls=calls)
-    return SimpleNamespace(flow=flow, async_init=flow.async_init, calls=calls)
+        if isinstance(result, MutableMapping):
+            progress["step_id"] = result.get("step_id")
+
+        return result
 
 
 def stub_async_entry_for_domain_unique_id(
