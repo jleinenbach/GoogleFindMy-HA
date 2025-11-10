@@ -1,13 +1,12 @@
-# tests/conftest.py
-"""Test configuration and environment stubs for integration tests."""
+"""tests/conftest.py: Common fixtures and Home Assistant stubs for tests."""
 
 from __future__ import annotations
 
-import sys
 import asyncio
 import importlib
 import inspect
 import json
+import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
