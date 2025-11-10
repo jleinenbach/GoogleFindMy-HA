@@ -10,6 +10,7 @@ from typing import Any, Mapping
 import pytest
 
 from custom_components.googlefindmy.const import DOMAIN
+from tests.helpers.config_flow import config_entries_flow_stub
 
 
 def test_flow_module_import_and_handler_registry() -> None:
@@ -89,27 +90,22 @@ def hass_fixture() -> SimpleNamespace:
 
     hass = SimpleNamespace(data={})
 
-    class _FlowManager:
-        def __init__(self, hass_obj: SimpleNamespace) -> None:
-            self._hass = hass_obj
+    async def _async_init(
+        domain: str,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        assert domain == DOMAIN
 
-        async def async_init(
-            self,
-            domain: str,
-            *,
-            context: Mapping[str, Any] | None = None,
-        ) -> Mapping[str, Any]:
-            assert domain == DOMAIN
+        flow = config_flow.ConfigFlow()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.context = dict(context or {})
+        result = await flow.async_step_user(None)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
-            flow = config_flow.ConfigFlow()
-            flow.hass = self._hass  # type: ignore[assignment]
-            flow.context = dict(context or {})
-            result = await flow.async_step_user(None)
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-
-    hass.config_entries = SimpleNamespace(flow=_FlowManager(hass))
+    hass.config_entries = config_entries_flow_stub(result=_async_init)
     return hass
 
 

@@ -63,7 +63,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
         self.entry_updates: list[dict[str, Any]] = []
         self.removed: list[str] = []
         self.setup_calls: list[str] = []
-        self.flow = config_entries_flow_stub()
+        self.flow = config_entries_flow_stub().flow
 
     def async_entries(self, domain: str | None = None) -> list[Any]:
         if domain and domain != DOMAIN:

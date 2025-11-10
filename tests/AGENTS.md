@@ -274,6 +274,9 @@ flow manager to the stub. The shared helper records flow initialization calls
 so discovery-trigger tests (for example,
 ``tests/test_cloud_discovery_trigger.py``) continue to receive consistent
 call-tracking behavior without recreating ad-hoc ``SimpleNamespace`` objects.
+The helper returns a manager object exposing ``.flow`` for parity with Home
+Assistant's runtime contract—reuse that attribute instead of constructing
+inline wrappers in individual tests.
 
 #### Cloud discovery discovery-key fallback coverage
 
