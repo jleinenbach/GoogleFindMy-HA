@@ -655,6 +655,20 @@ def _stub_homeassistant() -> None:
         sys.modules[module_name] = module
         setattr(helpers_pkg, sub, module)
 
+    frame_module = ModuleType("homeassistant.helpers.frame")
+    frame_module._configured_instances: list[Any] = []
+
+    def frame_set_up(hass: Any) -> None:
+        frame_module._configured_instances.append(hass)
+
+    def frame_report(*args: Any, **kwargs: Any) -> None:  # pragma: no cover - optional stub
+        return None
+
+    frame_module.set_up = frame_set_up
+    frame_module.report = frame_report
+    sys.modules["homeassistant.helpers.frame"] = frame_module
+    setattr(helpers_pkg, "frame", frame_module)
+
     entity_module = ModuleType("homeassistant.helpers.entity")
 
     class DeviceInfo:

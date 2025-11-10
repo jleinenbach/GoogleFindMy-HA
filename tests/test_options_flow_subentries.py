@@ -17,6 +17,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers import frame
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -128,6 +129,7 @@ class _HassStub:
 
     def __init__(self, entry: _EntryStub) -> None:
         self.config_entries = _ManagerStub(entry)
+        frame.set_up(self)
 
     def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
         return asyncio.create_task(coro)

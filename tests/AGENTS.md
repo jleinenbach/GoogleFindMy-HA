@@ -66,6 +66,12 @@ isolation. The recent additions mirror enough of the `ConfigFlow` contract to
 support discovery update tests and follow the real integration's behavior
 closely enough for regression coverage.
 
+When fabricating bare `hass` objects outside the shared fixtures, import the
+stubbed `homeassistant.helpers.frame` module from `tests.conftest` and call
+`frame.set_up(hass)` before assigning `config_entry`. The guard mirrors Home
+Assistant's runtime expectations and prevents spurious `ValueError` failures
+during options-flow tests.
+
 When updating `_StubConfigEntries` in
 `tests/test_hass_data_layout.py`, keep its lookup and registration
 semantics aligned with `tests.helpers.homeassistant.FakeConfigEntriesManager`.
