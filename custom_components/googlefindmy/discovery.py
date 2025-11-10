@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -334,12 +334,12 @@ class _DiscoveryKeyCandidate:
     namespace: str
     stable_key: str
     version: int = 1
+    key: tuple[str, str] = field(init=False)
 
-    @property
-    def key(self) -> tuple[str, str]:
-        """Return the namespace/stable-key pair for compatibility checks."""
+    def __post_init__(self) -> None:
+        """Populate the combined key tuple for helper compatibility."""
 
-        return (self.namespace, self.stable_key)
+        object.__setattr__(self, "key", (self.namespace, self.stable_key))
 
 
 async def _trigger_cloud_discovery(
