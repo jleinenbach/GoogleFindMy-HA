@@ -24,6 +24,12 @@ package-relative imports (for example, `from tests.helpers import foo`)
 when sharing utilities across modules so mypy resolves the canonical
 module paths consistently.
 
+When a test module depends on optional plugins such as
+`pytest-homeassistant-custom-component`, wrap the import in
+`pytest.skip(..., allow_module_level=True)` to keep import ordering
+intact. The skip guard avoids littering files with inline import
+fallbacks and ensures `ruff` continues to enforce top-level grouping.
+
 ## Async tests
 
 `pytest-asyncio` ships with the repository and `pytest` manages the event
