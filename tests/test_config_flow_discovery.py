@@ -22,6 +22,7 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.email import unique_account_id
 from tests.helpers.config_flow import (
+    config_entries_flow_stub,
     set_config_flow_unique_id,
     stub_async_entry_for_domain_unique_id,
 )
@@ -70,6 +71,7 @@ def test_async_step_discovery_new_entry(
     class _ConfigEntries:
         def __init__(self) -> None:
             self.setup_calls: list[str] = []
+            self.flow = config_entries_flow_stub()
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
@@ -311,6 +313,7 @@ def test_async_step_discovery_update_info_existing_entry(
             self.reloaded: list[str] = []
             self.lookups: list[str] = []
             self.setup_calls: list[str] = []
+            self.flow = config_entries_flow_stub()
 
         def async_entries(self, domain: str) -> list[Any]:
             self.lookups.append(domain)

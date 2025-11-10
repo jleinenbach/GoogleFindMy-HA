@@ -3,8 +3,46 @@
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Awaitable, Callable, MutableMapping
+import inspect
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
+
+FlowInitResult = dict[str, Any]
+FlowInitCallable = Callable[..., Awaitable[FlowInitResult] | FlowInitResult]
+
+
+def config_entries_flow_stub(
+    *,
+    result: FlowInitResult | FlowInitCallable | None = None,
+) -> SimpleNamespace:
+    """Return a flow manager stub recording ``async_init`` invocations.
+
+    The helper mirrors Home Assistant's ``ConfigEntries.flow`` contract well
+    enough for tests that only need to verify invocation ordering. Each call to
+    :func:`config_entries_flow_stub` returns a fresh object whose
+    :meth:`async_init` method is an :class:`AsyncMock` storing the recorded
+    positional and keyword arguments. When ``result`` is omitted, the stub
+    returns a minimal form dictionary so callers can await the coroutine without
+    additional scaffolding.
+    """
+
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def _async_init(*args: Any, **kwargs: Any) -> FlowInitResult:
+        calls.append((args, dict(kwargs)))
+        resolved: FlowInitResult | FlowInitCallable | None = result
+        if callable(resolved):
+            candidate = resolved(*args, **kwargs)
+            if inspect.isawaitable(candidate):
+                candidate = await candidate
+            return candidate
+        if resolved is not None:
+            return resolved
+        return {"type": "form", "step_id": None, "errors": {}}
+
+    return SimpleNamespace(async_init=AsyncMock(side_effect=_async_init), calls=calls)
 
 
 def stub_async_entry_for_domain_unique_id(

@@ -41,6 +41,7 @@ from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.exceptions import HomeAssistantError
 from tests.helpers.config_flow import (
+    config_entries_flow_stub,
     set_config_flow_unique_id,
     stub_async_entry_for_domain_unique_id,
 )
@@ -62,6 +63,7 @@ class _ConfigEntriesManagerStub:
         self.entry_updates: list[dict[str, Any]] = []
         self.removed: list[str] = []
         self.setup_calls: list[str] = []
+        self.flow = config_entries_flow_stub()
 
     def async_entries(self, domain: str | None = None) -> list[Any]:
         if domain and domain != DOMAIN:

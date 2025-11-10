@@ -19,6 +19,7 @@ from custom_components.googlefindmy.const import (
     DATA_AUTH_METHOD,
     DOMAIN,
 )
+from tests.helpers.config_flow import config_entries_flow_stub
 
 
 _ValueT = TypeVar("_ValueT")
@@ -89,6 +90,7 @@ class _DummyConfigEntries:
     def __init__(self, entry: _DummyEntry) -> None:
         self._entry = entry
         self.setup_calls: list[str] = []
+        self.flow = config_entries_flow_stub()
 
     def async_get_entry(self, entry_id: str) -> _DummyEntry | None:
         return self._entry if entry_id == self._entry.entry_id else None

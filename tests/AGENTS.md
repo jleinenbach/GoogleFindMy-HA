@@ -264,6 +264,15 @@ flow = ConfigFlow()
 set_config_flow_unique_id(flow, "test-id")
 ```
 
+#### Config entries flow stub reminder
+
+When fabricating config-entry manager stubs for tests, import
+``tests.helpers.config_flow.config_entries_flow_stub`` and attach the returned
+flow manager to the stub. The shared helper records flow initialization calls
+so discovery-trigger tests (for example,
+``tests/test_cloud_discovery_trigger.py``) continue to receive consistent
+call-tracking behavior without recreating ad-hoc ``SimpleNamespace`` objects.
+
 ### Config entries unique ID lookup helper
 
 Stubs that need :meth:`ConfigEntries.async_entry_for_domain_unique_id` behavior

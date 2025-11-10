@@ -17,7 +17,10 @@ from custom_components.googlefindmy.const import (
     SUBENTRY_TYPE_TRACKER,
 )
 from homeassistant.config_entries import ConfigEntry
-from tests.helpers.config_flow import stub_async_entry_for_domain_unique_id
+from tests.helpers.config_flow import (
+    config_entries_flow_stub,
+    stub_async_entry_for_domain_unique_id,
+)
 
 
 class _SubentrySupportToggle(Protocol):
@@ -69,6 +72,7 @@ async def test_hub_flow_aborts_when_manual_addition_requested(
         def __init__(self) -> None:
             self.lookups: list[str] = []
             self.entry = entry
+            self.flow = config_entries_flow_stub()
 
         def async_get_entry(self, entry_id: str) -> SimpleNamespace | None:
             self.lookups.append(entry_id)
@@ -106,7 +110,12 @@ async def test_hub_flow_aborts_without_entry_context(
 ) -> None:
     """Add Hub flows without entry context should abort."""
 
-    hass = SimpleNamespace(config_entries=SimpleNamespace(async_get_entry=lambda _: None))
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(
+            async_get_entry=lambda _: None,
+            flow=config_entries_flow_stub(),
+        )
+    )
 
     flow = config_flow.ConfigFlow()
     flow.hass = hass  # type: ignore[assignment]
@@ -134,6 +143,7 @@ async def test_hub_flow_aborts_when_hub_unsupported(
     class _ConfigEntriesManager:
         def __init__(self) -> None:
             self.entry = entry
+            self.flow = config_entries_flow_stub()
 
         def async_get_entry(self, entry_id: str) -> SimpleNamespace | None:
             if entry_id == entry.entry_id:
