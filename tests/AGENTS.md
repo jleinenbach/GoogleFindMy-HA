@@ -30,6 +30,12 @@ When a test module depends on optional plugins such as
 intact. The skip guard avoids littering files with inline import
 fallbacks and ensures `ruff` continues to enforce top-level grouping.
 
+Contract tests under `tests/test_entity_device_info_contract.py` expect
+`pytest-homeassistant-custom-component`'s bundled `homeassistant`
+stubs to be installed. Without that optional dependency, pytest will
+skip the module-level guard and report a missing `homeassistant`
+package error when the test collection runs.
+
 ## Async tests
 
 `pytest-asyncio` ships with the repository and `pytest` manages the event

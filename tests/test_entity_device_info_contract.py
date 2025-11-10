@@ -24,8 +24,6 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via skipped test
     )
 
 from custom_components.googlefindmy.const import (
-    CONF_GOOGLE_EMAIL,
-    DATA_SECRET_BUNDLE,
     DOMAIN,
     OPT_ENABLE_STATS_ENTITIES,
     SERVICE_SUBENTRY_KEY,
@@ -34,6 +32,7 @@ from custom_components.googlefindmy.const import (
 )
 
 pytest_plugins = ("pytest_homeassistant_custom_component",)
+
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +87,7 @@ async def test_integration_device_info_uses_service_device(
     device_registry: dr.DeviceRegistry,
     entity_registry: er.EntityRegistry,
     stub_coordinator_factory: Callable[..., type[Any]],
+    credentialed_config_entry_data: Callable[..., dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
     enable_custom_integrations: None,
 ) -> None:
@@ -102,6 +102,41 @@ async def test_integration_device_info_uses_service_device(
     monkeypatch.setattr(integration, "CONFIG_SCHEMA", lambda config: {})
     config_flow_module = importlib.import_module("custom_components.googlefindmy.config_flow")
     config_entries_module = importlib.import_module("homeassistant.config_entries")
+    config_subentry_cls = getattr(config_entries_module, "ConfigSubentry", None)
+    if config_subentry_cls is not None and not hasattr(config_subentry_cls, "entry_id"):
+        setattr(config_subentry_cls, "entry_id", None)
+    if config_subentry_cls is not None:
+        assert hasattr(config_subentry_cls, "entry_id")
+    if config_subentry_cls is not None:
+        original_resolve = integration.ConfigEntrySubEntryManager._resolve_registered_subentry
+
+        def _resolve_registered_subentry_with_fallback(
+            self: Any,
+            *,
+            key: str,
+            unique_id: str,
+            candidate: Any,
+            fallback_subentry_id: str | None,
+        ) -> Any:
+            candidate_entry_id = None
+            if isinstance(candidate, config_subentry_cls):
+                candidate_entry_id = getattr(candidate, "entry_id", None)
+            if isinstance(candidate_entry_id, str):
+                return candidate
+            return original_resolve(
+                self,
+                key=key,
+                unique_id=unique_id,
+                candidate=None,
+                fallback_subentry_id=fallback_subentry_id,
+            )
+
+        monkeypatch.setattr(
+            integration.ConfigEntrySubEntryManager,
+            "_resolve_registered_subentry",
+            _resolve_registered_subentry_with_fallback,
+        )
+
     if config_entries_module.HANDLERS.get(DOMAIN) is None:
         config_entries_module.HANDLERS.register(DOMAIN)(
             config_flow_module.ConfigFlow
@@ -173,6 +208,58 @@ async def test_integration_device_info_uses_service_device(
         AsyncMock(return_value=dummy_fcm),
     )
 
+    child_entries_by_key: dict[str, MockConfigEntry] = {}
+    child_entries_by_id: dict[str, MockConfigEntry] = {}
+    initial_entry_ids: dict[str, str | None] = {}
+    managed_subentries_ref: list[Any] = []
+    seeded_subentries = asyncio.Event()
+
+    original_async_ensure = integration._async_ensure_subentries_are_setup
+
+    async def _seed_subentries(hass_obj: HomeAssistant, parent_entry: Any) -> None:
+        """Populate child config entries before ensuring setup."""
+
+        runtime_data = getattr(parent_entry, "runtime_data", None)
+        subentry_manager = getattr(runtime_data, "subentry_manager", None)
+        managed_mapping = getattr(subentry_manager, "managed_subentries", None)
+        if isinstance(managed_mapping, dict) and managed_mapping:
+            managed_subentries_ref[:] = list(managed_mapping.values())
+            for subentry in managed_mapping.values():
+                subentry_key = getattr(subentry, "subentry_id", None)
+                if not isinstance(subentry_key, str) or not subentry_key:
+                    continue
+                if subentry_key not in initial_entry_ids:
+                    initial_entry_ids[subentry_key] = getattr(subentry, "entry_id", None)
+                child_entry = child_entries_by_key.get(subentry_key)
+                if child_entry is None:
+                    child_data = dict(getattr(subentry, "data", {}))
+                    child_data.setdefault("group_key", subentry_key)
+                    child_entry = MockConfigEntry(
+                        domain=parent_entry.domain,
+                        data=child_data,
+                        title=f"{parent_entry.title} ({subentry_key})",
+                        unique_id=getattr(subentry, "unique_id", subentry_key),
+                    )
+                    child_entry.add_to_hass(hass_obj)
+                    child_entries_by_key[subentry_key] = child_entry
+                    child_entries_by_id[child_entry.entry_id] = child_entry
+                object.__setattr__(subentry, "entry_id", child_entry.entry_id)
+                object.__setattr__(
+                    subentry,
+                    "state",
+                    getattr(child_entry, "state", ConfigEntryState.NOT_LOADED),
+                )
+        try:
+            await original_async_ensure(hass_obj, parent_entry)
+        finally:
+            seeded_subentries.set()
+
+    monkeypatch.setattr(
+        integration,
+        "_async_ensure_subentries_are_setup",
+        _seed_subentries,
+    )
+
     coordinator_cls = stub_coordinator_factory(
         data=[{"id": "tracker-1", "name": "Keys"}],
         stats={"background_updates": 2},
@@ -195,14 +282,39 @@ async def test_integration_device_info_uses_service_device(
     if hasattr(http_module, "async_setup_entry"):
         monkeypatch.setattr(http_module, "async_setup_entry", AsyncMock(return_value=True))
 
+    def _sync_child_entry_mapping() -> None:
+        child_entries_by_id.clear()
+        for subentry in managed_subentries_ref:
+            subentry_key = getattr(subentry, "subentry_id", None)
+            if not isinstance(subentry_key, str) or not subentry_key:
+                continue
+            child_entry = child_entries_by_key.get(subentry_key)
+            if child_entry is None:
+                continue
+            entry_id_value = getattr(subentry, "entry_id", None)
+            if isinstance(entry_id_value, str) and entry_id_value:
+                child_entries_by_id[entry_id_value] = child_entry
+
+    setup_calls: list[str] = []
+    original_async_setup_entry = hass.config_entries.async_setup
+
+    async def _intercept_async_setup(entry_id: str, *args: Any, **kwargs: Any) -> bool:
+        _sync_child_entry_mapping()
+        if entry_id in child_entries_by_id:
+            child_entry = child_entries_by_id[entry_id]
+            setup_calls.append(entry_id)
+            if getattr(child_entry, "state", ConfigEntryState.NOT_LOADED) != ConfigEntryState.LOADED:
+                child_entry.mock_state(hass, ConfigEntryState.LOADED)
+            return True
+        return await original_async_setup_entry(entry_id, *args, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_setup", _intercept_async_setup)
+
     entry = MockConfigEntry(
         domain=DOMAIN,
         entry_id="gfm-parent-entry",
         unique_id="gfm-parent-entry",
-        data={
-            DATA_SECRET_BUNDLE: {"username": "user@example.com"},
-            CONF_GOOGLE_EMAIL: "user@example.com",
-        },
+        data=credentialed_config_entry_data(),
         options={OPT_ENABLE_STATS_ENTITIES: True},
         title="Integration Contract",
     )
@@ -224,58 +336,26 @@ async def test_integration_device_info_uses_service_device(
 
     managed_subentries = list(subentry_manager.managed_subentries.values())
     assert managed_subentries, "Managed subentries should be populated"
+    managed_subentries_ref[:] = managed_subentries
 
-    child_entries_by_key: dict[str, MockConfigEntry] = {}
-    initial_entry_ids: dict[str, str | None] = {}
+    await seeded_subentries.wait()
+
+    assert child_entries_by_key, "Child entries should be registered"
+
+    _sync_child_entry_mapping()
+    assert child_entries_by_id, "Child entries must expose entry identifiers"
+
     for subentry in managed_subentries:
         subentry_key = getattr(subentry, "subentry_id", None)
         assert isinstance(subentry_key, str) and subentry_key, "Subentry must define subentry_id"
-        initial_entry_ids[subentry_key] = getattr(subentry, "entry_id", None)
-        child_data = dict(getattr(subentry, "data", {}))
-        child_data.setdefault("group_key", subentry_key)
-        child_entry = MockConfigEntry(
-            domain=entry.domain,
-            data=child_data,
-            title=f"{entry.title} ({subentry_key})",
-            unique_id=getattr(subentry, "unique_id", subentry_key),
-        )
-        child_entry.add_to_hass(hass)
-        child_entries_by_key[subentry_key] = child_entry
-
-    child_entries_by_id = {
-        child_entry.entry_id: child_entry for child_entry in child_entries_by_key.values()
-    }
-
-    original_async_setup_entry = hass.config_entries.async_setup
-    setup_calls: list[str] = []
-
-    async def _intercept_async_setup(entry_id: str, *args: Any, **kwargs: Any) -> bool:
-        if entry_id in child_entries_by_id:
-            child_entry = child_entries_by_id[entry_id]
-            setup_calls.append(entry_id)
-            if getattr(child_entry, "state", ConfigEntryState.NOT_LOADED) != ConfigEntryState.LOADED:
-                child_entry.mock_state(hass, ConfigEntryState.LOADED)
-            return True
-        return await original_async_setup_entry(entry_id, *args, **kwargs)
-
-    monkeypatch.setattr(hass.config_entries, "async_setup", _intercept_async_setup)
-
-    async def _assign_child_entry_ids() -> None:
-        await asyncio.sleep(0)
-        for subentry in managed_subentries:
-            subentry_key = getattr(subentry, "subentry_id", None)
-            if not isinstance(subentry_key, str) or subentry_key not in child_entries_by_key:
-                continue
-            child_entry = child_entries_by_key[subentry_key]
-            setattr(subentry, "entry_id", child_entry.entry_id)
-            setattr(subentry, "state", ConfigEntryState.NOT_LOADED)
-
-    asyncio.create_task(_assign_child_entry_ids())
+        if subentry_key not in initial_entry_ids:
+            initial_entry_ids[subentry_key] = getattr(subentry, "entry_id", None)
 
     async def _wait_for_subentry_setups() -> None:
         deadline = asyncio.get_event_loop().time() + 5
         while asyncio.get_event_loop().time() < deadline:
             await hass.async_block_till_done()
+            _sync_child_entry_mapping()
             identifiers = [getattr(subentry, "entry_id", None) for subentry in managed_subentries]
             if all(
                 isinstance(identifier, str)

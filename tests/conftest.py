@@ -1,21 +1,22 @@
-# tests/conftest.py
-"""Test configuration and environment stubs for integration tests."""
+"""tests/conftest.py: Common fixtures and Home Assistant stubs for tests."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 import asyncio
 import importlib
 import inspect
+import json
+import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, cast
-from types import MappingProxyType, ModuleType, SimpleNamespace
 from datetime import datetime, timezone
-import json
+from pathlib import Path
+from types import MappingProxyType, ModuleType, SimpleNamespace
+from typing import Any, cast
 
 import pytest
+
+from tests.helpers.constants import load_googlefindmy_const_module
 
 
 _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE = (
@@ -72,6 +73,57 @@ class IssueRegistryCapture:
     created: list[dict[str, Any]] = field(default_factory=list)
     deleted: list[tuple[str, str]] = field(default_factory=list)
     registry: _FakeIssueRegistry = field(default_factory=_FakeIssueRegistry)
+
+
+@pytest.fixture
+def credentialed_config_entry_data() -> Callable[..., dict[str, Any]]:
+    """Return pre-populated config entry data that satisfies credential guards."""
+
+    def _factory(
+        *,
+        email: str = "user@example.com",
+        oauth_token: str = "oauth-token",
+        aas_token: str | None = "aas-token",
+        android_id: str = "0xC0FFEE",
+        security_token: str = "0xFACEFEED",
+        fcm_token: str = "fcm-token",
+        extra_bundle_fields: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        bundle: dict[str, Any] = {
+            "username": email,
+            "Email": email,
+            "oauth_token": oauth_token,
+            "aas_token": aas_token,
+            "fcm_credentials": {
+                "gcm": {
+                    "android_id": android_id,
+                    "security_token": security_token,
+                },
+                "fcm": {"token": fcm_token},
+            },
+        }
+        if extra_bundle_fields:
+            bundle.update(extra_bundle_fields)
+
+        sanitized_bundle = {
+            key: value for key, value in bundle.items() if value is not None
+        }
+
+        const = load_googlefindmy_const_module()
+
+        entry_data: dict[str, Any] = {
+            getattr(const, "DATA_SECRET_BUNDLE"): sanitized_bundle,
+            getattr(const, "CONF_GOOGLE_EMAIL"): email,
+        }
+
+        if oauth_token:
+            entry_data[getattr(const, "CONF_OAUTH_TOKEN")] = oauth_token
+        if aas_token:
+            entry_data[getattr(const, "DATA_AAS_TOKEN")] = aas_token
+
+        return entry_data
+
+    return _factory
 
 
 @pytest.fixture
