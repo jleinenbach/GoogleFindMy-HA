@@ -676,13 +676,36 @@ def _stub_homeassistant() -> None:
         pass
 
     class ServiceValidationError(HomeAssistantError):
-        """Stubbed ServiceValidationError carrying translation context."""
+        """Stubbed ServiceValidationError carrying translation metadata."""
 
-        def __init__(self, *args, **kwargs) -> None:
+        def __init__(
+            self,
+            *args: Any,
+            translation_domain: str | None = None,
+            translation_key: str | None = None,
+            translation_placeholders: Mapping[str, Any] | None = None,
+            **kwargs: Any,
+        ) -> None:
             super().__init__(*args)
-            self.translation_domain = kwargs.get("translation_domain")
-            self.translation_key = kwargs.get("translation_key")
-            self.translation_placeholders = kwargs.get("translation_placeholders")
+            self.translation_domain = translation_domain
+            self.translation_key = translation_key
+            self.translation_placeholders = (
+                None
+                if translation_placeholders is None
+                else dict(translation_placeholders)
+            )
+            self._str = (
+                "ServiceValidationError("
+                f"domain={self.translation_domain!r}, "
+                f"key={self.translation_key!r}"
+                ")"
+            )
+
+        def __str__(self) -> str:  # pragma: no cover - deterministic for asserts
+            return self._str
+
+        def __repr__(self) -> str:  # pragma: no cover - mirrors __str__
+            return self._str
 
     exceptions_module.HomeAssistantError = HomeAssistantError
     exceptions_module.ConfigEntryNotReady = ConfigEntryNotReady
