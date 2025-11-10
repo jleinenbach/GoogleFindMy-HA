@@ -7,15 +7,17 @@ import sys
 import asyncio
 import importlib
 import inspect
+import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, cast
-from types import MappingProxyType, ModuleType, SimpleNamespace
 from datetime import datetime, timezone
-import json
 from pathlib import Path
+from types import MappingProxyType, ModuleType, SimpleNamespace
+from typing import Any, cast
 
 import pytest
+
+from tests.helpers.constants import load_googlefindmy_const_module
 
 
 _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE = (
@@ -72,9 +74,6 @@ class IssueRegistryCapture:
     created: list[dict[str, Any]] = field(default_factory=list)
     deleted: list[tuple[str, str]] = field(default_factory=list)
     registry: _FakeIssueRegistry = field(default_factory=_FakeIssueRegistry)
-
-
-from tests.helpers.constants import load_googlefindmy_const_module
 
 
 @pytest.fixture
