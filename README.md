@@ -21,6 +21,11 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, `mypy --strict`, and `pytest -q --cov` on Python 3.13 to protect code quality before merges.
 
+### Available Make targets
+
+- `make lint`: Run `ruff check .` across the entire repository to ensure lint compliance before sending a pull request.
+- `make clean`: Remove Python bytecode caches via `script/clean_pycache.py` to keep local environments tidy during development.
+
 ---
 ## Features
 
