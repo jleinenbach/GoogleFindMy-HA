@@ -298,7 +298,7 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
 
     class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
-            self.flow = config_entries_flow_stub()
+            self.flow = config_entries_flow_stub().flow
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
@@ -382,7 +382,7 @@ async def test_manual_tokens_abort_when_dependency_missing(
 
     class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
-            self.flow = config_entries_flow_stub()
+            self.flow = config_entries_flow_stub().flow
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
@@ -438,7 +438,7 @@ async def test_manual_tokens_abort_when_account_exists(
     class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.entries = [existing_entry]
-            self.flow = config_entries_flow_stub()
+            self.flow = config_entries_flow_stub().flow
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
@@ -502,7 +502,7 @@ def test_device_selection_creates_and_updates_subentry() -> None:
             self._entry = entry
             self.created: list[ConfigSubentry] = []
             self.updated: list[ConfigSubentry] = []
-            self.flow = config_entries_flow_stub()
+            self.flow = config_entries_flow_stub().flow
 
         def async_entries(self, domain: str) -> list[_StubEntry]:
             if domain != DOMAIN:
@@ -731,7 +731,7 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
         def __init__(self) -> None:
             self.updated: list[tuple[Any, dict[str, Any]]] = []
             self.reloaded: list[str] = []
-            self.flow = config_entries_flow_stub()
+            self.flow = config_entries_flow_stub().flow
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
@@ -872,7 +872,7 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
         def __init__(self) -> None:
             self.updated: list[tuple[Any, dict[str, Any]]] = []
             self.reloaded: list[str] = []
-            self.flow = config_entries_flow_stub()
+            self.flow = config_entries_flow_stub().flow
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN

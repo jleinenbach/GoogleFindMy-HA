@@ -125,7 +125,7 @@ class FakeConfigEntriesManager:
         self.update_calls: list[tuple[FakeConfigEntry, dict[str, Any]]] = []
         self.migrate_calls: list[str] = []
         self.migration_success = migration_success
-        self.flow = config_entries_flow_stub()
+        self.flow = config_entries_flow_stub().flow
         if not supports_migrate:
             # Mirror Home Assistant instances that omit async_migrate helpers.
             self.async_migrate_entry = None  # type: ignore[assignment]

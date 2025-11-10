@@ -27,13 +27,12 @@ if TYPE_CHECKING:
 def _make_hass() -> SimpleNamespace:
     """Return a minimal hass stub suitable for discovery tests."""
 
-    flow = config_entries_flow_stub(
+    config_entries = config_entries_flow_stub(
         result={
             "type": config_flow.data_entry_flow.FlowResultType.ABORT,
             "reason": "unknown",
         }
     )
-    config_entries = SimpleNamespace(flow=flow)
     return SimpleNamespace(data={}, config_entries=config_entries)
 
 

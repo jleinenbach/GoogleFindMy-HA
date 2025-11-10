@@ -90,7 +90,7 @@ class _DummyConfigEntries:
     def __init__(self, entry: _DummyEntry) -> None:
         self._entry = entry
         self.setup_calls: list[str] = []
-        self.flow = config_entries_flow_stub()
+        self.flow = config_entries_flow_stub().flow
 
     def async_get_entry(self, entry_id: str) -> _DummyEntry | None:
         return self._entry if entry_id == self._entry.entry_id else None
