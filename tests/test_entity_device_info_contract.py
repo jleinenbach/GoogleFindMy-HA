@@ -15,6 +15,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
+pytest_homeassistant_custom_component = pytest.importorskip(
+    "pytest_homeassistant_custom_component",
+    reason=(
+        "pytest-homeassistant-custom-component is required for the integration "
+        "contract test"
+    ),
+)
+
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.googlefindmy.const import (
