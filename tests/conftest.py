@@ -18,6 +18,40 @@ import json
 import pytest
 
 
+_PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE = (
+    importlib.util.find_spec("pytest_homeassistant_custom_component") is not None
+)
+
+
+if _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE:
+
+    @pytest.fixture(autouse=True)
+    def enable_event_loop_debug(
+        request: pytest.FixtureRequest,
+    ) -> Iterable[None]:
+        """Ensure the pytest-homeassistant plugin sees an active event loop."""
+
+        loop: asyncio.AbstractEventLoop
+        created_loop = False
+        try:
+            loop = request.getfixturevalue("event_loop")
+        except pytest.FixtureLookupError:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                created_loop = True
+        loop.set_debug(True)
+        try:
+            yield
+        finally:
+            loop.set_debug(False)
+            if created_loop:
+                loop.close()
+                asyncio.set_event_loop(None)
+
+
 class _FakeIssueRegistry:
     """Lightweight repair issue registry used across tests."""
 
@@ -499,48 +533,65 @@ def _stub_homeassistant() -> None:
     config_entries.UNDEFINED = UNDEFINED
     sys.modules["homeassistant.config_entries"] = config_entries
 
-    vol_module = ModuleType("voluptuous")
+    try:
+        import voluptuous as vol_module  # type: ignore[import]
+    except ImportError:
+        vol_module = ModuleType("voluptuous")
 
-    class _Schema:
-        def __init__(self, schema):
-            self.schema = schema
+        class _Schema:
+            def __init__(self, schema, *args, **kwargs):
+                self.schema = schema
 
-        def __call__(self, value):  # pragma: no cover - defensive
+            def __call__(self, value):  # pragma: no cover - defensive
+                return value
+
+        class _Marker:
+            def __init__(self, key):
+                self.key = key
+                self.schema = {key}
+
+            def __hash__(self) -> int:  # pragma: no cover - defensive
+                return hash(self.key)
+
+            def __eq__(self, other: object) -> bool:  # pragma: no cover - defensive
+                if isinstance(other, _Marker):
+                    return self.key == other.key
+                return self.key == other
+
+        class _Invalid(Exception):
+            pass
+
+        class _MultipleInvalid(_Invalid):
+            pass
+
+        def _identity(value):
             return value
 
-    class _Marker:
-        def __init__(self, key):
-            self.key = key
-            self.schema = {key}
+        vol_module.Schema = _Schema  # type: ignore[attr-defined]
+        vol_module.Invalid = _Invalid  # type: ignore[attr-defined]
+        vol_module.MultipleInvalid = _MultipleInvalid  # type: ignore[attr-defined]
+        vol_module.ALLOW_EXTRA = object()  # type: ignore[attr-defined]
+        vol_module.PREVENT_EXTRA = object()  # type: ignore[attr-defined]
 
-        def __hash__(self) -> int:  # pragma: no cover - defensive
-            return hash(self.key)
+        def _optional(key, default=None, **_: object) -> _Marker:
+            return _Marker(key)
 
-        def __eq__(self, other: object) -> bool:  # pragma: no cover - defensive
-            if isinstance(other, _Marker):
-                return self.key == other.key
-            return self.key == other
+        def _required(key, description=None, default=None, **_: object) -> _Marker:
+            return _Marker(key)
 
-    def _identity(value):
-        return value
-
-    vol_module.Schema = _Schema
-
-    def _optional(key, default=None, **_: object) -> _Marker:
-        return _Marker(key)
-
-    def _required(key, description=None, default=None, **_: object) -> _Marker:
-        return _Marker(key)
-
-    vol_module.Optional = _optional
-    vol_module.Required = _required
-    vol_module.Any = lambda *items, **kwargs: _identity
-    vol_module.All = lambda *validators, **kwargs: _identity
-    vol_module.In = lambda items: _identity
-    vol_module.Range = lambda **kwargs: _identity
-    vol_module.Coerce = lambda typ: _identity
-
-    sys.modules["voluptuous"] = vol_module
+        vol_module.Optional = _optional  # type: ignore[attr-defined]
+        vol_module.Required = _required  # type: ignore[attr-defined]
+        vol_module.Any = lambda *items, **kwargs: _identity  # type: ignore[attr-defined]
+        vol_module.All = lambda *validators, **kwargs: _identity  # type: ignore[attr-defined]
+        vol_module.In = lambda items: _identity  # type: ignore[attr-defined]
+        vol_module.Range = lambda **kwargs: _identity  # type: ignore[attr-defined]
+        vol_module.Coerce = lambda typ: _identity  # type: ignore[attr-defined]
+        vol_module.Match = lambda pattern, msg=None: _identity  # type: ignore[attr-defined]
+        vol_module.ExactSequence = lambda seq: _identity  # type: ignore[attr-defined]
+        vol_module.Clamp = lambda **kwargs: _identity  # type: ignore[attr-defined]
+        sys.modules["voluptuous"] = vol_module
+    else:
+        sys.modules["voluptuous"] = vol_module
 
     data_entry_flow = ModuleType("homeassistant.data_entry_flow")
 
@@ -749,6 +800,41 @@ def _stub_homeassistant() -> None:
 
     issue_registry_module.async_create_issue = _async_create_issue
     issue_registry_module.async_delete_issue = _async_delete_issue
+
+    frame_module = ModuleType("homeassistant.helpers.frame")
+
+    class _FrameHelper:
+        """Trivial frame helper compatible with pytest-homeassistant expectations."""
+
+        def __init__(self) -> None:
+            self._is_setup = False
+
+        def set_up(self) -> None:
+            self._is_setup = True
+
+        async def async_set_up(self) -> None:
+            self.set_up()
+
+        def report(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover - no-op
+            return None
+
+    frame_helper = _FrameHelper()
+
+    def frame_set_up(*args: Any, **kwargs: Any) -> None:
+        frame_helper.set_up()
+
+    async def frame_async_set_up(*args: Any, **kwargs: Any) -> None:
+        await frame_helper.async_set_up()
+
+    def frame_report(*args: Any, **kwargs: Any) -> None:
+        frame_helper.report(*args, **kwargs)
+
+    frame_module.frame_helper = frame_helper
+    frame_module.set_up = frame_set_up
+    frame_module.async_set_up = frame_async_set_up
+    frame_module.report = frame_report
+    sys.modules["homeassistant.helpers.frame"] = frame_module
+    setattr(helpers_pkg, "frame", frame_module)
 
     device_registry_module = sys.modules["homeassistant.helpers.device_registry"]
     device_registry_module.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
@@ -1004,6 +1090,10 @@ def _stub_homeassistant() -> None:
 
     aiohttp_client_module = ModuleType("homeassistant.helpers.aiohttp_client")
     aiohttp_client_module.async_get_clientsession = lambda hass: None
+    async def _stub_async_make_resolver(*_args, **_kwargs):
+        return None
+
+    aiohttp_client_module._async_make_resolver = _stub_async_make_resolver
     sys.modules["homeassistant.helpers.aiohttp_client"] = aiohttp_client_module
     setattr(helpers_pkg, "aiohttp_client", aiohttp_client_module)
 

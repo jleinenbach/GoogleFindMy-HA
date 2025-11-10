@@ -950,6 +950,79 @@ class ConfigEntrySubEntryManager:
             return awaited_value
         return result
 
+    def _resolve_registered_subentry(
+        self,
+        *,
+        key: str,
+        unique_id: str,
+        candidate: ConfigSubentry | None,
+        fallback_subentry_id: str | None,
+    ) -> ConfigSubentry:
+        """Return the registry-backed subentry for ``key``."""
+
+        if isinstance(candidate, ConfigSubentry) and isinstance(
+            candidate.entry_id, str
+        ):
+            return candidate
+
+        manager = getattr(self._hass, "config_entries", None)
+        refreshed_entry: ConfigEntry | None = None
+        if manager is not None:
+            get_entry = getattr(manager, "async_get_entry", None)
+            if callable(get_entry):
+                try:
+                    refreshed_entry = get_entry(self._entry.entry_id)
+                except Exception as err:  # pragma: no cover - defensive logging
+                    _LOGGER.debug(
+                        "[%s] async_sync: Failed to refresh parent entry during subentry"
+                        " lookup: %s",
+                        self._entry.entry_id,
+                        err,
+                    )
+
+        if isinstance(refreshed_entry, ConfigEntry) and refreshed_entry is not self._entry:
+            self._entry = refreshed_entry
+
+        def _scan(entry: ConfigEntry) -> ConfigSubentry | None:
+            subentries = getattr(entry, "subentries", None)
+            if not isinstance(subentries, Mapping):
+                return None
+            for subentry in subentries.values():
+                if isinstance(subentry.unique_id, str) and subentry.unique_id == unique_id:
+                    return subentry
+                group_key = subentry.data.get(self._key_field)
+                if isinstance(group_key, str) and group_key == key:
+                    return subentry
+                if (
+                    isinstance(fallback_subentry_id, str)
+                    and subentry.subentry_id == fallback_subentry_id
+                ):
+                    return subentry
+            return None
+
+        resolved = None
+        if isinstance(refreshed_entry, ConfigEntry):
+            resolved = _scan(refreshed_entry)
+        if resolved is None:
+            resolved = _scan(self._entry)
+
+        if resolved is None:
+            context = (
+                f"unique_id={unique_id!r}, key={key!r}, fallback_id={fallback_subentry_id!r}"
+            )
+            _LOGGER.error(
+                "[%s] async_sync: Unable to locate registered subentry for %s after"
+                " async_add_subentry",
+                self._entry.entry_id,
+                context,
+            )
+            raise HomeAssistantError(
+                "Failed to locate registered subentry after creation; see logs for"
+                f" context ({context})"
+            )
+
+        return resolved
+
     def _refresh_from_entry(self) -> None:
         """Populate managed mapping from the config entry."""
 
@@ -1339,27 +1412,22 @@ class ConfigEntrySubEntryManager:
                         )
                         break
 
+                    fallback_subentry_id: str | None = None
+                    stored: ConfigSubentry | None
                     if isinstance(resolved_add, ConfigSubentry):
                         stored = resolved_add
+                        fallback_subentry_id = getattr(resolved_add, "subentry_id", None)
                     else:
+                        stored = new_subentry
                         if new_subentry is not None:
-                            stored = self._entry.subentries.get(
-                                new_subentry.subentry_id, new_subentry
-                            )
-                        else:
-                            stored = next(
-                                (
-                                    sub
-                                    for sub in self._entry.subentries.values()
-                                    if sub.unique_id == unique_id
-                                ),
-                                None,
-                            )
-                        if stored is None:
-                            raise HomeAssistantError(
-                                "Failed to locate created subentry for key "
-                                f"'{key}' (unique_id={unique_id!r})"
-                            )
+                            fallback_subentry_id = getattr(new_subentry, "subentry_id", None)
+
+                    stored = self._resolve_registered_subentry(
+                        key=key,
+                        unique_id=unique_id,
+                        candidate=stored,
+                        fallback_subentry_id=fallback_subentry_id,
+                    )
 
                     self._managed[key] = stored
                     break
@@ -4298,21 +4366,20 @@ async def _async_ensure_subentries_are_setup(
     if setup_in_progress is not None:
         setup_ready_states.add(setup_in_progress)
 
-    pending_ids: list[str] = []
+    pending_subentries: list[Any] = []
     for subentry in subentries:
         # --- BEGIN ID fallback guard ---
-        # ConfigEntry/ConfigSubentry both expose ``entry_id`` when managed
-        # through the runtime subentry manager, but freshly created subentries
-        # may not yet have Home Assistant's ``entry_id`` attribute populated.
-        # Fall back to ``subentry_id`` to extract the global ULID when needed,
-        # as both attributes refer to the same global identifier. Treat empty
-        # strings and non-string types the same as a missing ``entry_id`` so
-        # freshly constructed stubs still resolve their identifier.
-        subentry_id: str | None = getattr(subentry, "entry_id", None)
-        if not isinstance(subentry_id, str) or not subentry_id:
-            subentry_id = getattr(subentry, "subentry_id", None)
+        # ``subentry_id`` reflects the parent's bookkeeping key while
+        # Home Assistant assigns the global ULID to ``entry_id`` once the
+        # registry finalizes the child entry. Mirror the guidance in
+        # ``_async_unload_child_subentry`` by logging with whichever value is
+        # available but deferring lifecycle calls until the true global
+        # identifier (``entry_id``) is populated.
+        subentry_identifier: str | None = getattr(subentry, "entry_id", None)
+        if not isinstance(subentry_identifier, str) or not subentry_identifier:
+            subentry_identifier = getattr(subentry, "subentry_id", None)
 
-        if not isinstance(subentry_id, str) or not subentry_id:
+        if not isinstance(subentry_identifier, str) or not subentry_identifier:
             _LOGGER.debug(
                 "[%s] Skipping setup for subentry without identifier: %s",
                 entry.entry_id,
@@ -4326,7 +4393,7 @@ async def _async_ensure_subentries_are_setup(
             _LOGGER.debug(
                 "[%s] Skipping setup for disabled subentry '%s'",  # noqa: G004
                 entry.entry_id,
-                subentry_id,
+                subentry_identifier,
             )
             continue
         state: ConfigEntryState | None = getattr(subentry, "state", None)
@@ -4334,103 +4401,126 @@ async def _async_ensure_subentries_are_setup(
             _LOGGER.debug(
                 "[%s] Subentry '%s' already in active state %s",  # noqa: G004
                 entry.entry_id,
-                subentry_id,
+                subentry_identifier,
                 state,
             )
             continue
-        pending_ids.append(subentry_id)
+        pending_subentries.append(subentry)
 
-    if not pending_ids:
+    if not pending_subentries:
         return
 
     _LOGGER.debug(
         "[%s] Triggering setup for %d subentries",
         entry.entry_id,
-        len(pending_ids),
+        len(pending_subentries),
     )
-    pending_order = pending_ids[:]
-    active_pending: set[str] = set(pending_ids)
-    attempt_counts: dict[str, int] = {subentry_id: 0 for subentry_id in active_pending}
+    pending_order = pending_subentries[:]
+    active_pending: set[int] = {id(subentry) for subentry in pending_order}
+    attempt_counts: dict[int, int] = {subentry_key: 0 for subentry_key in active_pending}
     first_exception: BaseException | None = None
     false_failures: list[str] = []
     exhausted_missing: list[str] = []
     while active_pending:
-        missing_ids: list[str] = []
-        to_setup: list[str] = []
-        for subentry_id in [sid for sid in pending_order if sid in active_pending]:
-            attempts = attempt_counts[subentry_id]
+        missing_entries: list[tuple[int, str]] = []
+        to_setup: list[tuple[int, str, str]] = []
+        for subentry in pending_order:
+            subentry_key = id(subentry)
+            if subentry_key not in active_pending:
+                continue
+            attempts = attempt_counts[subentry_key]
+            entry_id = getattr(subentry, "entry_id", None)
+            display_id = entry_id
+            if not isinstance(display_id, str) or not display_id:
+                display_id = getattr(subentry, "subentry_id", None)
+            if not isinstance(display_id, str) or not display_id:
+                display_id = f"<unidentified:{subentry_key}>"
             if attempts >= MAX_SUBENTRY_REGISTRATION_ATTEMPTS:
                 _LOGGER.warning(
                     "[%s] Subentry '%s' not registered after %d attempts; skipping setup",  # noqa: G004
                     entry.entry_id,
-                    subentry_id,
+                    display_id,
                     MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
                 )
-                exhausted_missing.append(subentry_id)
-                active_pending.remove(subentry_id)
+                exhausted_missing.append(display_id)
+                active_pending.remove(subentry_key)
                 continue
-            if hass.config_entries.async_get_entry(subentry_id) is None:
-                attempt_counts[subentry_id] = attempts + 1
-                missing_ids.append(subentry_id)
+            if not isinstance(entry_id, str) or not entry_id:
+                attempt_counts[subentry_key] = attempts + 1
+                missing_entries.append((subentry_key, display_id))
+                _LOGGER.debug(
+                    "[%s] Subentry '%s' has no global entry_id yet (attempt %d/%d); waiting",  # noqa: G004
+                    entry.entry_id,
+                    display_id,
+                    attempt_counts[subentry_key],
+                    MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
+                )
+                continue
+            if hass.config_entries.async_get_entry(entry_id) is None:
+                attempt_counts[subentry_key] = attempts + 1
+                missing_entries.append((subentry_key, display_id))
                 _LOGGER.debug(
                     "[%s] Subentry '%s' not yet registered (attempt %d/%d); waiting",  # noqa: G004
                     entry.entry_id,
-                    subentry_id,
-                    attempt_counts[subentry_id],
+                    display_id,
+                    attempt_counts[subentry_key],
                     MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
                 )
                 continue
-            to_setup.append(subentry_id)
+            to_setup.append((subentry_key, entry_id, display_id))
 
         if to_setup:
             results = await asyncio.gather(
-                *(hass.config_entries.async_setup(subentry_id) for subentry_id in to_setup),
+                *(
+                    hass.config_entries.async_setup(entry_id)
+                    for _, entry_id, _ in to_setup
+                ),
                 return_exceptions=True,
             )
-            for subentry_id, result in zip(to_setup, results):
+            for (subentry_key, entry_id, display_id), result in zip(to_setup, results):
                 if isinstance(result, BaseException):
                     if isinstance(result, asyncio.CancelledError):
                         raise result
                     if isinstance(result, UnknownEntry):
-                        attempt_counts[subentry_id] = attempt_counts[subentry_id] + 1
-                        missing_ids.append(subentry_id)
+                        attempt_counts[subentry_key] = attempt_counts[subentry_key] + 1
+                        missing_entries.append((subentry_key, display_id))
                         _LOGGER.debug(
                             "[%s] Subentry '%s' not ready in registry (attempt %d/%d); retrying",  # noqa: G004
                             entry.entry_id,
-                            subentry_id,
-                            attempt_counts[subentry_id],
+                            display_id,
+                            attempt_counts[subentry_key],
                             MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
                         )
                         continue
                     _LOGGER.warning(
                         "[%s] Subentry '%s' setup raised %s: %s",  # noqa: G004
                         entry.entry_id,
-                        subentry_id,
+                        display_id,
                         type(result).__name__,
                         result,
                         exc_info=(type(result), result, result.__traceback__),
                     )
                     if first_exception is None:
                         first_exception = result
-                    active_pending.remove(subentry_id)
+                    active_pending.remove(subentry_key)
                     continue
                 if result is False:
                     _LOGGER.warning(
                         "[%s] Subentry '%s' setup returned False",  # noqa: G004
                         entry.entry_id,
-                        subentry_id,
+                        display_id,
                     )
-                    false_failures.append(subentry_id)
-                    active_pending.remove(subentry_id)
+                    false_failures.append(display_id)
+                    active_pending.remove(subentry_key)
                     continue
-                active_pending.remove(subentry_id)
+                active_pending.remove(subentry_key)
 
-        if not missing_ids:
+        if not missing_entries:
             break
 
         # Exponential backoff: wait before the next polling loop repeats the checks.
         # Use the attempt counter of the first missing subentry as the baseline.
-        current_attempt = attempt_counts[missing_ids[0]]
+        current_attempt = attempt_counts[missing_entries[0][0]]
 
         # 0.2 * (2 ** (attempt - 1)) -> 0.2s, 0.4s, 0.8s, 1.6s, 3.2s, 6.4s
         # (the 7th attempt fails without extra waiting)

@@ -40,6 +40,7 @@ from custom_components.googlefindmy.const import (
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.exceptions import HomeAssistantError
+from tests.helpers.config_flow import set_config_flow_unique_id
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -217,11 +218,10 @@ def _build_flow(entry: _EntryStub) -> config_flow.ConfigFlow:
         CONF_GOOGLE_EMAIL: "owner@example.com",
     }
     flow._available_devices = [("Device", "dev-1")]
-    flow.unique_id = None  # type: ignore[attribute-defined-outside-init]
-    flow._unique_id = None  # type: ignore[attr-defined]
+    set_config_flow_unique_id(flow, None)
 
     async def _set_unique_id(value: str | None) -> None:
-        flow._unique_id = value  # type: ignore[attr-defined]
+        set_config_flow_unique_id(flow, value)
 
     flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
     flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
@@ -734,8 +734,7 @@ async def test_async_step_migrate_creates_subentries_and_moves_options() -> None
     hass = _HassStub(entry)
     flow.hass = hass  # type: ignore[assignment]
     flow.context = {}
-    flow.unique_id = None  # type: ignore[attribute-defined-outside-init]
-    flow._unique_id = None  # type: ignore[attr-defined]
+    set_config_flow_unique_id(flow, None)
     flow._available_devices = []  # type: ignore[attr-defined]
     flow.config_entry = entry  # type: ignore[assignment]
 

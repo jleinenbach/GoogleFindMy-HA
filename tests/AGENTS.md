@@ -24,6 +24,12 @@ package-relative imports (for example, `from tests.helpers import foo`)
 when sharing utilities across modules so mypy resolves the canonical
 module paths consistently.
 
+When a test module depends on optional plugins such as
+`pytest-homeassistant-custom-component`, wrap the import in
+`pytest.skip(..., allow_module_level=True)` to keep import ordering
+intact. The skip guard avoids littering files with inline import
+fallbacks and ensures `ruff` continues to enforce top-level grouping.
+
 ## Async tests
 
 `pytest-asyncio` ships with the repository and `pytest` manages the event
@@ -168,6 +174,45 @@ Extend the stubs only when a test requires additional Home Assistant behavior,
 and document any new helpers or contract nuances here so future contributors can
 quickly understand the supported surface area.
 
+#### Deferred subentry identifier assignment helper
+
+Use :func:`tests.helpers.homeassistant.deferred_subentry_entry_id_assignment` to
+model Home Assistant cores that publish a child subentry's global ``entry_id``
+after the parent has already started setup. The helper schedules the
+``entry_id`` update after an optional delay and automatically registers the
+provided :class:`FakeConfigEntry` with the shared
+``FakeConfigEntriesManager``. Reuse it instead of ad-hoc ``asyncio.sleep``
+coroutines so regression tests remain concise and consistent. See
+``tests/test_subentry_manager_registry_resolution.py`` for a concrete example of
+coordinating the helper with provisional runtime objects.
+
+#### Custom config entries manager subclasses
+
+When a regression needs specialized lookup or creation behavior, subclass
+``tests.helpers.homeassistant.FakeConfigEntriesManager`` and hand the custom
+instance to the ``FakeHass`` fixture. The snippet below mirrors
+``DeferredRegistryConfigEntriesManager``, which simulates Home Assistant cores
+that lack ``async_create_subentry`` and delay child visibility until a later
+lookup:
+
+```python
+from types import SimpleNamespace
+
+from tests.helpers.homeassistant import (
+    DeferredRegistryConfigEntriesManager,
+    FakeConfigEntry,
+    FakeHass,
+)
+
+parent_entry = FakeConfigEntry(entry_id="parent")
+child = SimpleNamespace(entry_id="child", subentry_id="child-subentry", data={})
+manager = DeferredRegistryConfigEntriesManager(parent_entry, child)
+hass = FakeHass(config_entries=manager)
+```
+
+Attach the configured ``hass`` to the integration under test so registry
+publication timing and lookup retries match the scenario being exercised.
+
 #### `config_entry_with_subentries` factory
 
 The :func:`config_entry_with_subentries` helper in
@@ -197,6 +242,21 @@ that provide ``ConfigSubentry``/``ConfigSubentryFlow`` and legacy builds that do
 not. Request the fixture in a test and call ``toggle.as_modern()`` (the default)
 or ``toggle.as_legacy()`` before invoking the config flow under test to assert
 the correct behavior in each environment.
+
+### Config flow unique_id helper
+
+Use :func:`tests.helpers.config_flow.set_config_flow_unique_id` whenever a test
+needs to assign ``unique_id`` on a ``ConfigFlow`` instance. Home Assistant's
+metaclass exposes ``unique_id`` as a read-only descriptor on recent cores, and
+the helper mirrors the runtime registration path by storing the identifier in
+``flow.context``. Example usage:
+
+```python
+from tests.helpers.config_flow import set_config_flow_unique_id
+
+flow = ConfigFlow()
+set_config_flow_unique_id(flow, "test-id")
+```
 
 ### Config subentry factory contract
 

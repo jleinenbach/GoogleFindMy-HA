@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from homeassistant.core import ServiceCall
 __all__ = [
     "FakeConfigEntry",
     "FakeConfigEntriesManager",
+    "DeferredRegistryConfigEntriesManager",
     "FakeServiceRegistry",
     "FakeDeviceEntry",
     "FakeDeviceRegistry",
@@ -28,6 +30,7 @@ __all__ = [
     "config_entry_with_subentries",
     "config_entry_with_runtime_managed_subentries",
     "resolve_config_entry_lookup",
+    "deferred_subentry_entry_id_assignment",
 ]
 
 
@@ -169,6 +172,7 @@ class FakeConfigEntriesManager:
             resolved.setup_failures = setup_failures
         self._transient_unknown[entry_id] = resolved
 
+
     @staticmethod
     def _coerce_transient_unknown_config(
         config: TransientUnknownConfigInput | None,
@@ -252,6 +256,75 @@ class FakeConfigEntriesManager:
         if entry is None:
             return False
         return await self.async_migrate_entry(entry)
+
+
+class DeferredRegistryConfigEntriesManager(FakeConfigEntriesManager):
+    """Simulate delayed registry publication when ``async_create_subentry`` is absent."""
+
+    def __init__(
+        self, parent_entry: FakeConfigEntry, resolved_child: Any
+    ) -> None:
+        super().__init__([parent_entry])
+        self._resolved_child = resolved_child
+        self.provisional_subentry: Any | None = None
+        self._defer_publication = False
+        # Mirror Home Assistant cores that do not expose async_create_subentry.
+        self.async_create_subentry = None  # type: ignore[assignment]
+
+    def async_add_subentry(
+        self, entry: FakeConfigEntry, subentry: Any
+    ) -> None:
+        """Stage a provisional subentry and defer registry visibility."""
+
+        self.provisional_subentry = subentry
+        setattr(subentry, "entry_id", None)
+        setattr(subentry, "subentry_id", getattr(self._resolved_child, "subentry_id", None))
+        entry.subentries[self._resolved_child.subentry_id] = self._resolved_child
+        self._defer_publication = True
+        return None
+
+    def async_get_entry(self, entry_id: str) -> Any | None:
+        """Delay lookups until the resolved child becomes visible."""
+
+        provisional = self.provisional_subentry
+        provisional_id = (
+            getattr(provisional, "entry_id", None)
+            if provisional is not None
+            else None
+        )
+        resolved_id = getattr(self._resolved_child, "entry_id", None)
+        if (
+            self._defer_publication
+            and isinstance(provisional_id, str)
+            and provisional_id
+            and provisional_id != resolved_id
+            and entry_id == provisional_id
+        ):
+            self.lookup_attempts[entry_id] += 1
+            return None
+
+        if self._defer_publication and entry_id == resolved_id:
+            self.lookup_attempts[entry_id] += 1
+            self._defer_publication = False
+            return None
+
+        return super().async_get_entry(entry_id)
+
+
+async def deferred_subentry_entry_id_assignment(
+    subentry: Any,
+    *,
+    entry_id: str,
+    manager: FakeConfigEntriesManager,
+    delay: float = 0.0,
+    registered_entry: FakeConfigEntry | None = None,
+) -> None:
+    """Assign ``entry_id`` after ``delay`` seconds and register the child entry."""
+
+    await asyncio.sleep(delay)
+    setattr(subentry, "entry_id", entry_id)
+    if registered_entry is not None:
+        manager.add_entry(registered_entry)
 
 
 class FakeServiceRegistry:

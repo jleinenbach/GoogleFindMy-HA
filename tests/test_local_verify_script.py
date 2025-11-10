@@ -41,7 +41,11 @@ def test_default_commands_include_ruff_and_pytest(
     assert "--check" in ruff_command
     assert not any(arg.startswith("--exclude=") for arg in ruff_command)
     pytest_command = list(_capture_run[1])
-    assert pytest_command[0] == "pytest"
+    assert pytest_command[:3] == [
+        local_verify.sys.executable,
+        "-m",
+        "pytest_homeassistant_custom_component",
+    ]
 
 
 def test_pytest_still_runs_when_ruff_fails(
@@ -63,4 +67,8 @@ def test_pytest_still_runs_when_ruff_fails(
 
     assert exit_code == 1
     assert len(recorded) == 2
-    assert list(recorded[1])[0] == "pytest"
+    assert list(recorded[1])[:3] == [
+        local_verify.sys.executable,
+        "-m",
+        "pytest_homeassistant_custom_component",
+    ]

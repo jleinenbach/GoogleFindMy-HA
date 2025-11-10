@@ -2,9 +2,10 @@
 # script/local_verify.py
 """Run the canonical local verification commands for Google Find My.
 
-If command-line shims such as ``pytest`` are unavailable, use the module
-invocation fallbacks described in ``AGENTS.md`` (for example, ``python -m
-pytest``) to mirror the expected checks.
+If command-line shims such as ``pytest-homeassistant-custom-component`` are
+unavailable, use the module invocation fallbacks described in ``AGENTS.md``
+(for example, ``python -m pytest_homeassistant_custom_component``) to mirror the
+expected checks.
 """
 
 from __future__ import annotations
@@ -47,20 +48,25 @@ def _build_ruff_command() -> list[str]:
 
 
 def _build_pytest_command(pytest_args: Sequence[str] | None) -> list[str]:
-    """Return the pytest command respecting optional overrides."""
+    """Return the HA-pytest command respecting optional overrides."""
 
-    command = ["pytest"]
+    command = [
+        sys.executable,
+        "-m",
+        "pytest_homeassistant_custom_component",
+    ]
     if pytest_args:
         command.extend(pytest_args)
     return command
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run Ruff format --check and pytest, returning the combined status."""
+    """Run Ruff format --check and HA-pytest, returning the combined status."""
 
     parser = argparse.ArgumentParser(
         description=(
-            "Run Ruff format --check followed by pytest using the repository\n"
+            "Run Ruff format --check followed by pytest-homeassistant-custom-"
+            "component using the repository\n"
             "defaults so contributors can quickly mirror the required local"
             " checks. If the CLI entry points are missing, use the module"
             " invocation fallbacks documented in AGENTS.md."
@@ -74,15 +80,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--skip-pytest",
         action="store_true",
-        help="Skip running pytest.",
+        help="Skip running pytest-homeassistant-custom-component.",
     )
     parser.add_argument(
         "--pytest-args",
         nargs=argparse.REMAINDER,
         help=(
-            "Additional arguments to pass to pytest after the repository "
-            "defaults. Place this flag last and prefix pytest options with "
-            "'--'."
+            "Additional arguments to pass to pytest-homeassistant-custom-component "
+            "after the repository defaults. Place this flag last and prefix "
+            "pytest options with '--'."
         ),
     )
     args = parser.parse_args(list(argv) if argv is not None else None)

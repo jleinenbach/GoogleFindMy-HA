@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 
@@ -22,9 +23,11 @@ from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.entity import resolve_coordinator
 
 from tests.helpers.homeassistant import (
+    FakeConfigEntry,
     FakeConfigEntriesManager,
     FakeHass,
     config_entry_with_runtime_managed_subentries,
+    deferred_subentry_entry_id_assignment,
 )
 
 
@@ -169,8 +172,24 @@ async def test_async_ensure_subentries_are_setup_falls_back_to_subentry_id(
     manager = FakeConfigEntriesManager([parent_entry])
     hass = FakeHass(config_entries=manager)
 
-    await _async_ensure_subentries_are_setup(hass, parent_entry)
+    child_entry = FakeConfigEntry(entry_id=pending_subentry.subentry_id, domain=DOMAIN)
 
+    assign_task = asyncio.create_task(
+        deferred_subentry_entry_id_assignment(
+            pending_subentry,
+            entry_id=pending_subentry.subentry_id,
+            manager=manager,
+            delay=0.01,
+            registered_entry=child_entry,
+        )
+    )
+
+    try:
+        await _async_ensure_subentries_are_setup(hass, parent_entry)
+    finally:
+        await assign_task
+
+    assert manager.lookup_attempts[pending_subentry.subentry_id] >= 1
     assert manager.setup_calls == [pending_subentry.subentry_id]
 
 
@@ -201,6 +220,48 @@ async def test_async_ensure_subentries_are_setup_retries_missing_child() -> None
 
     assert manager.lookup_attempts[pending_subentry.entry_id] >= 3
     assert manager.setup_calls == [pending_subentry.entry_id, pending_subentry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_subentries_are_setup_refreshes_identifier() -> None:
+    """Retry with the updated entry_id when Home Assistant assigns the ULID late."""
+
+    parent_key = "child-parent-key"
+    pending_subentry = SimpleNamespace(
+        entry_id=None,
+        subentry_id=parent_key,
+    )
+
+    parent_entry = config_entry_with_runtime_managed_subentries(
+        entry_id="parent",
+        domain=DOMAIN,
+        subentries={parent_key: pending_subentry},
+    )
+
+    manager = FakeConfigEntriesManager([parent_entry])
+    hass = FakeHass(config_entries=manager)
+
+    global_entry_id = "child-global-ulid"
+    child_entry = FakeConfigEntry(entry_id=global_entry_id, domain=DOMAIN)
+
+    assign_task = asyncio.create_task(
+        deferred_subentry_entry_id_assignment(
+            pending_subentry,
+            entry_id=global_entry_id,
+            manager=manager,
+            delay=0.01,
+            registered_entry=child_entry,
+        )
+    )
+
+    try:
+        await _async_ensure_subentries_are_setup(hass, parent_entry)
+    finally:
+        await assign_task
+
+    assert manager.lookup_attempts.get(parent_key, 0) == 0
+    assert manager.lookup_attempts[global_entry_id] >= 1
+    assert manager.setup_calls == [global_entry_id]
 
 
 @pytest.mark.asyncio
