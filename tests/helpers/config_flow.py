@@ -152,7 +152,9 @@ class ConfigEntriesFlowManagerStub:
         self._progress: list[dict[str, Any]] = []
         self._flow_counter = 0
         self.flow = SimpleNamespace(
-            async_init=AsyncMock(side_effect=self._async_init)
+            async_init=AsyncMock(side_effect=self._async_init),
+            async_progress=self.async_progress,
+            async_progress_by_handler=self.async_progress_by_handler,
         )
 
     @property
