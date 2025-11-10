@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tests.helpers import drain_loop
+from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 from tests.helpers.homeassistant import resolve_config_entry_lookup
 
 from custom_components.googlefindmy.const import (
@@ -2056,7 +2057,7 @@ def test_service_no_active_entry_placeholders() -> None:
             SimpleNamespace(title="Account Two", entry_id="entry-2", active=False),
         ]
 
-        class _ConfigEntriesStub:
+        class _ConfigEntriesStub(ConfigEntriesDomainUniqueIdLookupMixin):
             def async_entries(self, domain: str) -> list[Any]:
                 assert domain == DOMAIN
                 return list(entries)

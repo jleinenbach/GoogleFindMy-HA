@@ -21,14 +21,16 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from homeassistant.config_entries import ConfigSubentry
+from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 
 
-class _ConfigEntriesStub:
+class _ConfigEntriesStub(ConfigEntriesDomainUniqueIdLookupMixin):
     """Minimal config_entries manager capturing updates."""
 
     def __init__(self) -> None:
         self.updated_entries: list[dict[str, object] | None] = []
         self.updated_subentries: list[tuple[str, dict[str, object] | None]] = []
+        self.stored_entries: list[SimpleNamespace] = []
 
     def async_update_entry(
         self,
@@ -85,6 +87,8 @@ def test_async_remove_config_entry_device_normalizes_identifier(monkeypatch) -> 
         title="Test Entry",
         runtime_data=coordinator,
     )
+
+    config_entries.stored_entries.append(entry)
 
     hass = SimpleNamespace(
         config_entries=config_entries,
@@ -149,6 +153,8 @@ def test_migrate_entry_identifier_namespaces_updates_subentries() -> None:
         subentries={},
         title="Entry 2",
     )
+
+    config_entries.stored_entries.append(entry)
 
     subentry = ConfigSubentry(
         data={

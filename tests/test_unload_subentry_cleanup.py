@@ -12,6 +12,7 @@ import pytest
 import custom_components.googlefindmy as integration
 from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
 from homeassistant.config_entries import ConfigSubentry
+from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 
 
 class _RegistryTracker:
@@ -61,7 +62,7 @@ class _AsyncLock:
         return None
 
 
-class _ConfigEntriesHelper:
+class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
     """Subset of hass.config_entries used during unload."""
 
     def __init__(self, entry: _EntryStub) -> None:
@@ -69,6 +70,11 @@ class _ConfigEntriesHelper:
         self.removed_subentries: list[str] = []
         self.unloaded_subentries: list[str] = []
         self.setup_calls: list[str] = []
+
+    def async_entries(self, domain: str | None = None) -> list[_EntryStub]:
+        if domain is not None and domain != DOMAIN:
+            return []
+        return [self._entry]
 
     async def async_unload(self, entry_id: str) -> bool:
         self.unloaded_subentries.append(entry_id)

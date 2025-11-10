@@ -39,10 +39,10 @@ from homeassistant.helpers import frame
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.config_entries import ConfigSubentry
 from tests.helpers.config_flow import (
+    ConfigEntriesDomainUniqueIdLookupMixin,
     config_entries_flow_stub,
     prepare_flow_hass_config_entries,
     set_config_flow_unique_id,
-    stub_async_entry_for_domain_unique_id,
 )
 
 
@@ -296,18 +296,13 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
     monkeypatch.setattr(config_flow, "_try_probe_devices", _fake_probe)
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.flow = config_entries_flow_stub()
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return []
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
     class _FlowHass:
         def __init__(self) -> None:
@@ -385,18 +380,13 @@ async def test_manual_tokens_abort_when_dependency_missing(
 ) -> None:
     """Manual token entry aborts with a clear error if dependencies are missing."""
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.flow = config_entries_flow_stub()
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return []
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
     flow = config_flow.ConfigFlow()
     flow.hass = SimpleNamespace(config_entries=_ConfigEntries())  # type: ignore[assignment]
@@ -445,7 +435,7 @@ async def test_manual_tokens_abort_when_account_exists(
         options={},
     )
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.entries = [existing_entry]
             self.flow = config_entries_flow_stub()
@@ -453,11 +443,6 @@ async def test_manual_tokens_abort_when_account_exists(
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return list(self.entries)
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
     hass = SimpleNamespace(config_entries=_ConfigEntries())
 
@@ -512,7 +497,7 @@ def test_device_selection_creates_and_updates_subentry() -> None:
             self.subentries: dict[str, ConfigSubentry] = {}
             self.runtime_data = None
 
-    class _StubConfigEntries:
+    class _StubConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self, entry: _StubEntry) -> None:
             self._entry = entry
             self.created: list[ConfigSubentry] = []
@@ -742,7 +727,7 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
 
     entry = _Entry()
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.updated: list[tuple[Any, dict[str, Any]]] = []
             self.reloaded: list[str] = []
@@ -751,11 +736,6 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return [entry]
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
         def async_get_entry(self, entry_id: str) -> _Entry | None:
             if entry_id != entry.entry_id:
@@ -888,7 +868,7 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
 
     entry = _Entry()
 
-    class _ConfigEntries:
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.updated: list[tuple[Any, dict[str, Any]]] = []
             self.reloaded: list[str] = []
@@ -897,11 +877,6 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
             return [entry]
-
-        def async_entry_for_domain_unique_id(
-            self, domain: str, unique_id: str
-        ) -> Any | None:
-            return stub_async_entry_for_domain_unique_id(self, domain, unique_id)
 
         def async_get_entry(self, entry_id: str) -> _Entry | None:
             if entry_id != entry.entry_id:
