@@ -686,7 +686,20 @@ def _stub_homeassistant() -> None:
             translation_placeholders: Mapping[str, Any] | None = None,
             **kwargs: Any,
         ) -> None:
-            super().__init__(*args)
+            domain_fragment = translation_domain or ""
+            key_fragment = translation_key or ""
+            if domain_fragment and key_fragment:
+                derived_message = f"{domain_fragment}:{key_fragment}"
+            else:
+                derived_message = key_fragment or domain_fragment or "Service validation error"
+
+            if args:
+                super().__init__(*args)
+                message = " ".join(str(arg) for arg in args)
+            else:
+                message = derived_message
+                super().__init__(message)
+
             self.translation_domain = translation_domain
             self.translation_key = translation_key
             self.translation_placeholders = (
@@ -694,18 +707,13 @@ def _stub_homeassistant() -> None:
                 if translation_placeholders is None
                 else dict(translation_placeholders)
             )
-            self._str = (
-                "ServiceValidationError("
-                f"domain={self.translation_domain!r}, "
-                f"key={self.translation_key!r}"
-                ")"
-            )
+            self.message = message
 
         def __str__(self) -> str:  # pragma: no cover - deterministic for asserts
-            return self._str
+            return self.message
 
         def __repr__(self) -> str:  # pragma: no cover - mirrors __str__
-            return self._str
+            return self.message
 
     exceptions_module.HomeAssistantError = HomeAssistantError
     exceptions_module.ConfigEntryNotReady = ConfigEntryNotReady

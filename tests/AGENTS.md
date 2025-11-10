@@ -72,6 +72,16 @@ isolation. The recent additions mirror enough of the `ConfigFlow` contract to
 support discovery update tests and follow the real integration's behavior
 closely enough for regression coverage.
 
+### `ServiceValidationError` string representation contract
+
+The `ServiceValidationError` stub derives a descriptive message from
+`translation_domain`/`translation_key` when positional arguments are absent and
+stores the resolved string on the instance. Both `__str__` and `__repr__`
+return that stored message so assertions see the derived text while
+`translation_placeholders` and the other translation metadata remain intact for
+tests that inspect them directly. When extending the stub, preserve this
+behavior to keep message-focused assertions and translation checks aligned.
+
 When fabricating bare `hass` objects outside the shared fixtures, import the
 stubbed `homeassistant.helpers.frame` module from `tests.conftest` and call
 `frame.set_up(hass)` before assigning `config_entry`. The guard mirrors Home
