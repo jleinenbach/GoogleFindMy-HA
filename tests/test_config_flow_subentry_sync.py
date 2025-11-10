@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from types import MappingProxyType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -40,7 +40,10 @@ from custom_components.googlefindmy.const import (
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.exceptions import HomeAssistantError
-from tests.helpers.config_flow import set_config_flow_unique_id
+from tests.helpers.config_flow import (
+    set_config_flow_unique_id,
+    stub_async_entry_for_domain_unique_id,
+)
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -64,6 +67,14 @@ class _ConfigEntriesManagerStub:
         if domain and domain != DOMAIN:
             return []
         return [self._entry]
+
+    def async_entry_for_domain_unique_id(
+        self, domain: str, unique_id: str
+    ) -> _EntryStub | None:
+        return cast(
+            _EntryStub | None,
+            stub_async_entry_for_domain_unique_id(self, domain, unique_id),
+        )
 
     def async_get_entry(self, entry_id: str) -> _EntryStub | None:
         if entry_id == self._entry.entry_id:

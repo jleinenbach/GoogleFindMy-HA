@@ -7,6 +7,72 @@ from collections.abc import MutableMapping
 from typing import Any
 
 
+def stub_async_entry_for_domain_unique_id(
+    manager: Any, domain: str, unique_id: str
+) -> Any | None:
+    """Return the stored config entry matching ``domain``/``unique_id``.
+
+    The Home Assistant core exposes :meth:`ConfigEntries.async_entry_for_domain_unique_id`
+    to locate entries that already claimed a specific unique ID. The config-flow tests
+    ship lightweight manager stubs instead of the production implementation, so this
+    helper normalizes their storage patterns (single entry attributes, dictionaries,
+    or ``async_entries`` lists) before attempting to match the provided unique ID.
+    """
+
+    if not isinstance(unique_id, str):
+        return None
+
+    candidates: list[Any] = []
+    seen: set[int] = set()
+
+    def _add(entry: Any) -> None:
+        if entry is None:
+            return
+        identifier = id(entry)
+        if identifier in seen:
+            return
+        seen.add(identifier)
+        candidates.append(entry)
+
+    def _extend(container: Any) -> None:
+        if container is None:
+            return
+        if isinstance(container, dict):
+            for value in container.values():
+                _add(value)
+            return
+        if isinstance(container, (list, tuple, set, frozenset)):
+            for value in container:
+                _add(value)
+            return
+        _add(container)
+
+    lookup = getattr(manager, "async_entries", None)
+    if callable(lookup):
+        try:
+            _extend(lookup(domain))
+        except TypeError:
+            _extend(lookup())  # type: ignore[misc]
+
+    for attribute in ("_entry", "entry", "entries", "_entries", "stored_entries"):
+        _extend(getattr(manager, attribute, None))
+
+    for entry in candidates:
+        entry_domain = getattr(entry, "domain", None)
+        if entry_domain is not None and entry_domain != domain:
+            continue
+
+        entry_unique_id = getattr(entry, "unique_id", None)
+        if entry_unique_id == unique_id:
+            return entry
+
+        data = getattr(entry, "data", None)
+        if isinstance(data, MutableMapping) and data.get("unique_id") == unique_id:
+            return entry
+
+    return None
+
+
 def set_config_flow_unique_id(flow: Any, unique_id: str | None) -> None:
     """Assign ``unique_id`` on config flow stubs across HA variants.
 
