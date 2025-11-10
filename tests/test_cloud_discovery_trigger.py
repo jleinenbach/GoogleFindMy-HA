@@ -160,6 +160,44 @@ def test_trigger_cloud_discovery_falls_back(
     ), "fallback trigger log should redact identifiers"
 
 
+def test_trigger_cloud_discovery_injects_fallback_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DiscoveryKey failures should still provide a structured fallback."""
+
+    hass = _make_hass()
+    captured: dict[str, dict[str, object]] = {}
+
+    async def _helper(*_args: object, **kwargs: object) -> None:
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(config_flow, "async_create_discovery_flow", _helper)
+    monkeypatch.delattr(config_flow, "DiscoveryKey", raising=False)
+
+    async def _exercise() -> bool:
+        return await integration._trigger_cloud_discovery(
+            hass,
+            email="fallback-key@example.com",
+            token=None,
+            secrets_bundle=None,
+        )
+
+    assert asyncio.run(_exercise()) is True
+
+    kwargs = captured["kwargs"]
+    discovery_key = kwargs.get("discovery_key")
+    assert discovery_key is not None
+
+    assert getattr(discovery_key, "domain") == DOMAIN
+    assert getattr(discovery_key, "namespace") == f"{DOMAIN}.cloud_scan"
+    assert getattr(discovery_key, "stable_key") == "email:fallback-key@example.com"
+    assert getattr(discovery_key, "key") == (
+        f"{DOMAIN}.cloud_scan",
+        "email:fallback-key@example.com",
+    )
+
+
 @pytest.mark.asyncio
 async def test_async_create_discovery_flow_handles_missing_helper(
     monkeypatch: pytest.MonkeyPatch,

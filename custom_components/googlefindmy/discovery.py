@@ -325,6 +325,23 @@ def _assemble_cloud_discovery_payload(
     return payload
 
 
+
+@dataclass(slots=True)
+class _DiscoveryKeyCandidate:
+    """Fallback discovery-key representation when helpers are unavailable."""
+
+    domain: str
+    namespace: str
+    stable_key: str
+    version: int = 1
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """Return the namespace/stable-key pair for compatibility checks."""
+
+        return (self.namespace, self.stable_key)
+
+
 async def _trigger_cloud_discovery(
     hass: HomeAssistant,
     *,
@@ -380,8 +397,15 @@ async def _trigger_cloud_discovery(
         helper = getattr(cf, "async_create_discovery_flow", None)
         try:
             discovery_key = cf.DiscoveryKey(domain=DOMAIN, key=(ns, stable_key))
-        except Exception:  # noqa: BLE001
-            discovery_key = None
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "DiscoveryKey instantiation failed (%s); using fallback", err
+            )
+            discovery_key = _DiscoveryKeyCandidate(
+                domain=DOMAIN,
+                namespace=ns,
+                stable_key=stable_key,
+            )
 
         supported_sources = _home_assistant_discovery_sources()
         use_candidate = isinstance(source, str) and source in supported_sources

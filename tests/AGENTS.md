@@ -275,6 +275,18 @@ so discovery-trigger tests (for example,
 ``tests/test_cloud_discovery_trigger.py``) continue to receive consistent
 call-tracking behavior without recreating ad-hoc ``SimpleNamespace`` objects.
 
+#### Cloud discovery discovery-key fallback coverage
+
+``tests/test_cloud_discovery_trigger.py`` now asserts that
+``custom_components.googlefindmy.discovery._trigger_cloud_discovery`` always
+passes a structured discovery key to the helper, even when
+``cf.DiscoveryKey`` is unavailable in stripped environments. The regression
+uses the `_DiscoveryKeyCandidate` dataclass as the deterministic fallback and
+asserts that ``namespace`` and ``stable_key`` still match the payload. When
+updating the helper or its tests, keep the fallback object exposing a
+``key`` attribute that returns the ``(namespace, stable_key)`` tuple so the
+assertions remain valid without depending on Home Assistant internals.
+
 ### Config entries unique ID lookup helper
 
 Stubs that need :meth:`ConfigEntries.async_entry_for_domain_unique_id` behavior
