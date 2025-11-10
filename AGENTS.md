@@ -81,7 +81,7 @@
 > **Scope & authority**
 >
 > **Directory scope:** applies to the entire repository (with continued emphasis on `custom_components/googlefindmy/**` and tests under `tests/**`).
-> **File headers:** Every Python file within scope must include a comment containing its repository-relative path (e.g., `# tests/test_example.py`). When a file has a shebang (`#!`), the shebang stays on the first line and the path comment immediately follows it.
+> **File headers:** Every Python file within scope must include a comment containing its repository-relative path (e.g., `# tests/test_example.py`). When a file has a shebang (`#!`), the shebang stays on the first line and the path comment immediately follows it. Some legacy files may still lack this header; reviewers should expect churn as contributors retrofit missing comments during unrelated fixes rather than blocking urgent work solely to add them.
 
 #### Quick reminder — path headers vs. future imports
 
