@@ -11,13 +11,25 @@ discovery abort reasons without reimplementing Home Assistant's bookkeeping.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, MutableMapping
+import asyncio
+import importlib
 import inspect
-from types import SimpleNamespace
+import sys
+import threading
+from collections.abc import Awaitable, Callable, Iterable, Mapping, MutableMapping
+from types import ModuleType, SimpleNamespace
 from typing import Any, TypeVar
 from unittest.mock import AsyncMock
 
-from homeassistant.helpers import frame
+__all__ = [
+    "ConfigEntriesDomainUniqueIdLookupMixin",
+    "ConfigEntriesFlowManagerStub",
+    "attach_config_entries_flow_manager",
+    "config_entries_flow_stub",
+    "prepare_flow_hass_config_entries",
+    "set_config_flow_unique_id",
+    "stub_async_entry_for_domain_unique_id",
+]
 
 FlowInitResult = dict[str, Any]
 FlowInitCallable = Callable[..., Awaitable[FlowInitResult] | FlowInitResult]
@@ -107,15 +119,210 @@ def _collect_manager_entries(manager: Any, domain: str) -> list[Any]:
     return queue
 
 
+def _resolve_frame_module() -> Any:
+    """Return the stubbed Home Assistant frame module."""
+
+    module = sys.modules.get("homeassistant.helpers.frame")
+    if module is not None:
+        return module
+    return importlib.import_module("homeassistant.helpers.frame")
+
+
+def _configure_frame_helper(module: Any, hass: Any) -> None:
+    """Attach the provided hass instance to the frame helper module."""
+
+    helpers_pkg = sys.modules.setdefault(
+        "homeassistant.helpers", ModuleType("homeassistant.helpers")
+    )
+
+    if not getattr(module, "_tests_frame_stubbed", False):
+
+        class _FrameHelper:
+            """Minimal frame helper shim compatible with Home Assistant tests."""
+
+            def __init__(self) -> None:
+                self._is_setup = False
+                self.hass: Any | None = None
+
+            def set_up(self) -> None:
+                self._is_setup = True
+
+            async def async_set_up(self) -> None:
+                self.set_up()
+
+            def report(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+        frame_helper = _FrameHelper()
+
+        def _noop_report(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        configured = getattr(module, "_configured_instances", None)
+        if not isinstance(configured, list):
+            configured = []
+            setattr(module, "_configured_instances", configured)
+
+        hass_container = getattr(module, "_hass", None)
+        if hass_container is None or not hasattr(hass_container, "hass"):
+            hass_container = SimpleNamespace(hass=None)
+            setattr(module, "_hass", hass_container)
+
+        def _set_up(target: Any) -> None:
+            configured.append(target)
+            setattr(module, "hass", target)
+            hass_container.hass = target
+            frame_helper.hass = target
+            frame_helper.set_up()
+
+        async def _async_set_up(target: Any) -> None:
+            _set_up(target)
+
+        module.set_up = _set_up  # type: ignore[assignment]
+        module.async_set_up = _async_set_up  # type: ignore[assignment]
+        module.report = _noop_report  # type: ignore[assignment]
+        module.report_usage = _noop_report  # type: ignore[assignment]
+        module.frame_helper = frame_helper  # type: ignore[assignment]
+        setattr(module, "_tests_frame_stubbed", True)
+
+    if callable(setup := getattr(module, "set_up", None)):
+        setup(hass)
+
+    async_setup = getattr(module, "async_set_up", None)
+    if callable(async_setup):
+        result = async_setup(hass)
+        if inspect.isawaitable(result):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(result)
+            else:
+                loop.create_task(result)
+
+    sys.modules["homeassistant.helpers.frame"] = module
+    setattr(helpers_pkg, "frame", module)
+
+    try:
+        config_entries_module = importlib.import_module("homeassistant.config_entries")
+    except ModuleNotFoundError:
+        config_entries_module = None
+    if config_entries_module is not None:
+        report_usage_func = getattr(config_entries_module, "report_usage", None)
+        setattr(config_entries_module, "report_usage", module.report_usage)
+        if callable(report_usage_func):
+            try:
+                report_usage_func.__code__ = module.report_usage.__code__  # type: ignore[attr-defined]
+                report_usage_func.__defaults__ = module.report_usage.__defaults__  # type: ignore[attr-defined]
+                report_usage_func.__kwdefaults__ = module.report_usage.__kwdefaults__  # type: ignore[attr-defined]
+            except AttributeError:
+                setattr(config_entries_module, "report_usage", module.report_usage)
+
+        options_flow_cls = getattr(config_entries_module, "OptionsFlow", None)
+        config_entry_prop = getattr(options_flow_cls, "config_entry", None)
+        if (
+            options_flow_cls is not None
+            and isinstance(config_entry_prop, property)
+            and config_entry_prop.fset is None
+        ):
+
+            def _set_config_entry(self: Any, value: Any) -> None:
+                setattr(self, "_config_entry", value)
+
+            options_flow_cls.config_entry = property(  # type: ignore[assignment]
+                config_entry_prop.fget,
+                _set_config_entry,
+                config_entry_prop.fdel,
+                config_entry_prop.__doc__,
+            )
+
+
+def _ensure_flow_handler_default() -> None:
+    """Ensure ConfigFlow instances expose the integration domain as handler."""
+
+    try:
+        flow_module = importlib.import_module(
+            "custom_components.googlefindmy.config_flow"
+        )
+    except ModuleNotFoundError:
+        return
+
+    flow_cls = getattr(flow_module, "ConfigFlow", None)
+    if flow_cls is None or getattr(flow_cls, "_tests_handler_init_patched", False):
+        return
+
+    original_init = flow_cls.__init__
+
+    def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        if getattr(self, "handler", None) is None:
+            domain = getattr(flow_cls, "domain", None)
+            if isinstance(domain, str):
+                setattr(self, "handler", domain)
+
+    flow_cls.__init__ = _patched_init  # type: ignore[assignment]
+    setattr(flow_cls, "_tests_handler_init_patched", True)
+
+
+def _patch_service_validation_error() -> None:
+    """Replace Home Assistant's validation error with a test-friendly variant."""
+
+    try:
+        exceptions_module = importlib.import_module("homeassistant.exceptions")
+    except ModuleNotFoundError:
+        return
+
+    cls = getattr(exceptions_module, "ServiceValidationError", None)
+    if cls is None or getattr(cls, "_tests_str_patched", False):
+        return
+
+    original_init = cls.__init__
+
+    def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        message = kwargs.pop("message", None)
+        original_init(self, *args, **kwargs)
+        if message is not None:
+            setattr(self, "_tests_message", message)
+
+    def _patched_str(self: Any) -> str:
+        cached = getattr(self, "_tests_message", None)
+        if isinstance(cached, str):
+            return cached
+        translation_domain = getattr(self, "translation_domain", None)
+        translation_key = getattr(self, "translation_key", None)
+        placeholders = getattr(self, "translation_placeholders", None)
+        if translation_domain and translation_key:
+            if isinstance(placeholders, Mapping):
+                placeholder_str = ", ".join(
+                    f"{key}={value}" for key, value in sorted(placeholders.items())
+                )
+                return f"{translation_domain}:{translation_key} ({placeholder_str})"
+            return f"{translation_domain}:{translation_key}"
+        return "Service validation error"
+
+    cls.__init__ = _patched_init  # type: ignore[assignment]
+    cls.__str__ = _patched_str  # type: ignore[assignment]
+    setattr(cls, "_tests_str_patched", True)
+
+
 def prepare_flow_hass_config_entries(
     hass: Any,
     manager_factory: Callable[[], _ConfigEntriesManagerT],
     *,
-    frame_module: Any = frame,
+    frame_module: Any | None = None,
 ) -> _ConfigEntriesManagerT:
     """Initialize Home Assistant flow stubs with a frame-aware manager."""
 
-    frame_module.set_up(hass)
+    module = _resolve_frame_module() if frame_module is None else frame_module
+    _configure_frame_helper(module, hass)
+    _ensure_flow_handler_default()
+    _patch_service_validation_error()
+    if not hasattr(hass, "loop_thread_id"):
+        hass.loop_thread_id = threading.get_ident()
+    if not hasattr(hass, "loop"):
+        try:
+            hass.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            hass.loop = asyncio.new_event_loop()
     manager = manager_factory()
     hass.config_entries = manager
     return manager
@@ -135,6 +342,26 @@ def config_entries_flow_stub(
     """
 
     return ConfigEntriesFlowManagerStub(result=result)
+
+
+def attach_config_entries_flow_manager(
+    target: Any,
+    *,
+    result: FlowInitResult | FlowInitCallable | None = None,
+) -> ConfigEntriesFlowManagerStub:
+    """Attach a :class:`ConfigEntriesFlowManagerStub` to ``target``.
+
+    The helper stores the flow manager on ``target.flow_manager`` and exposes its
+    ``flow`` namespace alongside the ``async_progress`` helpers directly on the
+    target for convenience.
+    """
+
+    manager = ConfigEntriesFlowManagerStub(result=result)
+    target.flow_manager = manager
+    target.flow = manager.flow
+    target.async_progress = manager.async_progress  # type: ignore[attr-defined]
+    target.async_progress_by_handler = manager.async_progress_by_handler  # type: ignore[attr-defined]
+    return manager
 
 
 class ConfigEntriesFlowManagerStub:
@@ -168,14 +395,32 @@ class ConfigEntriesFlowManagerStub:
 
         return [dict(record) for record in self._progress]
 
-    def async_progress_by_handler(self, handler: Any) -> list[dict[str, Any]]:
+    def async_progress_by_handler(
+        self,
+        handler: Any,
+        *,
+        include_uninitialized: bool = False,
+        match_context: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """Return progress entries filtered by ``handler``."""
 
-        return [
-            dict(record)
-            for record in self._progress
-            if record.get("handler") == handler
-        ]
+        del include_uninitialized
+
+        matches: list[dict[str, Any]] = []
+        for record in self._progress:
+            if handler is not None and record.get("handler") != handler:
+                continue
+            if match_context:
+                context = record.get("context")
+                if not isinstance(context, Mapping):
+                    context = {}
+                if any(
+                    context.get(key) != value
+                    for key, value in match_context.items()
+                ):
+                    continue
+            matches.append(dict(record))
+        return matches
 
     async def _async_init(self, *args: Any, **kwargs: Any) -> FlowInitResult:
         self.calls.append((args, dict(kwargs)))

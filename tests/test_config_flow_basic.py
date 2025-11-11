@@ -10,7 +10,10 @@ from typing import Any, Mapping
 import pytest
 
 from custom_components.googlefindmy.const import DOMAIN
-from tests.helpers.config_flow import config_entries_flow_stub
+from tests.helpers.config_flow import (
+    config_entries_flow_stub,
+    prepare_flow_hass_config_entries,
+)
 
 
 def test_flow_module_import_and_handler_registry() -> None:
@@ -105,7 +108,10 @@ def hass_fixture() -> SimpleNamespace:
             result = await result
         return result
 
-    hass.config_entries = config_entries_flow_stub(result=_async_init)
+    prepare_flow_hass_config_entries(
+        hass,
+        lambda: config_entries_flow_stub(result=_async_init),
+    )
     return hass
 
 
