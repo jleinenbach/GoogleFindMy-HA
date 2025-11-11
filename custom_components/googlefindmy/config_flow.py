@@ -1490,6 +1490,28 @@ async def _async_coalesce_account_entries(
         return None
 
 
+def _ensure_optional_entry_attributes(entry: ConfigEntry) -> None:
+    """Ensure optional ConfigEntry attributes exist before flow helpers access them."""
+
+    if entry is None:
+        return
+
+    sentinel = object()
+    optional_defaults: Mapping[str, Any] = {
+        "source": None,
+    }
+
+    for attribute, default in optional_defaults.items():
+        if getattr(entry, attribute, sentinel) is sentinel:
+            try:
+                setattr(entry, attribute, default)
+            except Exception:  # pragma: no cover - stub compatibility guard
+                # Some stubs may define __slots__ or otherwise block new attributes.
+                # In that case the attribute remains unavailable and the caller must
+                # guard access via getattr(..., None).
+                continue
+
+
 # ---------------------------
 # Discovery helpers
 # ---------------------------
@@ -1857,6 +1879,8 @@ class ConfigFlow(
             if coalesce:
                 await _async_coalesce_account_entries(hass, existing_entry)
             return existing_entry
+
+        _ensure_optional_entry_attributes(existing_entry)
 
         try:
             self._abort_if_unique_id_configured(updates=updates)

@@ -4,6 +4,10 @@
 >
 > Applies to the entire `tests/` tree.
 
+## Cross-reference index
+
+* [`custom_components/googlefindmy/AGENTS.md`](../custom_components/googlefindmy/AGENTS.md) — Config flow guidance describing optional `ConfigEntry` attributes and discovery safeguards that the shared stubs depend on.
+
 ## Flow helper return modes
 
 The bundled Home Assistant stubs intentionally mix synchronous and
