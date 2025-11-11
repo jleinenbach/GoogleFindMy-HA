@@ -738,6 +738,11 @@ Before proposing a change Codex must:
 3. **Propose only with ≥ 90 % confidence.** Provide a full, executable patch backed by the cited evidence.
 4. **Verify consistency.** Explain how the patch remains backward compatible and why it should pass mypy strict for the modified files.
 
+#### Home Assistant regression helper
+
+* Use `make test-ha` to provision the `.venv` environment, install `requirements-dev.txt` (including `homeassistant` and `pytest-homeassistant-custom-component`), and execute the regression suite in one step.
+* The `README.md` section ["Running Home Assistant integration tests locally"](#running-home-assistant-integration-tests-locally) mirrors this workflow so external contributors can follow the same command.
+
 #### Config flow registration fallbacks
 
 * Prefer the Home Assistant config flow metaclass to register flows. Manual assignments to `HANDLERS` are legacy fallbacks that should only be reintroduced when Home Assistant removes the metaclass hook or when a regression in upstream releases prevents automatic registration.

@@ -25,6 +25,15 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 
 - `mypy --strict` — run the full strict type-checker locally to mirror CI expectations before opening a pull request.
 - `make lint` — invoke the Ruff lint target for the entire repository using the same settings enforced in CI.
+- `make test-ha` — provision the `.venv` environment (if needed) and execute the regression suite against Home Assistant test stubs.
+
+#### Running Home Assistant integration tests locally
+
+1. Create a virtual environment for development: `python -m venv .venv`
+2. Activate it for the current shell: `. .venv/bin/activate`
+3. Install the required dependencies (includes `homeassistant` and `pytest-homeassistant-custom-component`): `pip install -r requirements-dev.txt`
+4. Execute the regression suite, for example: `pytest tests/test_entity_recovery_manager.py` or simply `make test-ha`
+5. When finished, leave the environment with `deactivate`
 
 ### Available Make targets
 
