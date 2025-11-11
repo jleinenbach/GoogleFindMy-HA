@@ -47,6 +47,15 @@ should consult that cached instance before calling
 `entity_registry.async_get(...)` so recovery logic inspects the same
 registry object as the fixture.
 
+### Config-entry mutation tracking lists
+
+Config-entry manager doubles (for example, the `_ConfigEntries` stub in
+`tests/test_config_flow_discovery.py`) expose `updated` tracking lists to
+record every `async_update_entry` call. When tests emulate Home Assistant's
+config-entry helpers, normalize those lists before asserting so duplicate
+records introduced by legacy behaviors or task scheduling are collapsed to
+the final update payload.
+
 ### Home Assistant callback decorator stub
 
 Use `tests.helpers.install_homeassistant_core_callback_stub` whenever a
