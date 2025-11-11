@@ -347,8 +347,7 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
                 data,
                 discovery_key=discovery_key,
             )
-            if inspect.isawaitable(result):
-                result = await cast(Awaitable[FlowResult | None], result)
+            result = await _resolve_flow_result(result)
         except Exception:
             _LOGGER.error(
                 "Discovery flow creation failed (domain=%s, context=%s)",
