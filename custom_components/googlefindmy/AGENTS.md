@@ -37,3 +37,7 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 * When adding iterable-type annotations inside `config_flow.py`, reuse the existing `CollIterable` alias to keep type hints consistent with the options-flow helpers and avoid reintroducing stray `typing.Iterable` imports.
 * When iterating config flow schemas, always extract the real key from voluptuous markers (`marker.schema`) before using it. Several markers behave like iterables and will yield characters one-by-one if treated as strings, so unwrap before building dictionaries or merging option payloads. See the helper showcased in [`ConfigFlow.async_step_options` (`_resolve_marker_key`)](./config_flow.py) for the canonical extraction pattern.
 
+## Config entry options persistence reminder
+
+* Treat `ConfigEntry.options` as immutable during reconfigure flows. Build a new dictionary (for example, `existing_options = dict(entry.options or {})`) and pass it directly to `async_update_entry` instead of mutating `entry.options` in place. Home Assistant only persists option changes when it detects a new mapping, so keep the original object untouched until `async_update_entry` returns.
+
