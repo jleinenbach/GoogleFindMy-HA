@@ -45,6 +45,7 @@ from .const import (
     EVENT_AUTH_OK,
     issue_id_for,
 )
+from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator, format_epoch_utc
 from .entity import GoogleFindMyEntity, resolve_coordinator
 from .ha_typing import BinarySensorEntity, callback
@@ -105,6 +106,55 @@ async def async_setup_entry(
         ),
     ]
     async_add_entities(entities, True)
+
+    runtime_data = getattr(entry, "runtime_data", None)
+    recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
+
+    if isinstance(recovery_manager, EntityRecoveryManager):
+        entry_id = getattr(entry, "entry_id", None)
+
+        def _expected_unique_ids() -> set[str]:
+            if not isinstance(entry_id, str) or not entry_id:
+                return set()
+            if not isinstance(service_subentry_identifier, str) or not service_subentry_identifier:
+                return set()
+            return {
+                f"{entry_id}:{service_subentry_identifier}:polling",
+                f"{entry_id}:{service_subentry_identifier}:auth_status",
+            }
+
+        def _build_entities(missing: set[str]) -> list[BinarySensorEntity]:
+            if not missing:
+                return []
+            built: list[BinarySensorEntity] = []
+            if not isinstance(entry_id, str) or not entry_id:
+                return built
+            if not isinstance(service_subentry_identifier, str) or not service_subentry_identifier:
+                return built
+            mapping: dict[str, Callable[[], BinarySensorEntity]] = {
+                f"{entry_id}:{service_subentry_identifier}:polling": lambda: GoogleFindMyPollingSensor(
+                    coordinator,
+                    entry,
+                    subentry_key=service_subentry_key,
+                    subentry_identifier=service_subentry_identifier,
+                ),
+                f"{entry_id}:{service_subentry_identifier}:auth_status": lambda: GoogleFindMyAuthStatusSensor(
+                    coordinator,
+                    entry,
+                    subentry_key=service_subentry_key,
+                    subentry_identifier=service_subentry_identifier,
+                ),
+            }
+            for unique_id, factory in mapping.items():
+                if unique_id in missing:
+                    built.append(factory())
+            return built
+
+        recovery_manager.register_binary_sensor_platform(
+            expected_unique_ids=_expected_unique_ids,
+            entity_factory=_build_entities,
+            add_entities=async_add_entities,
+        )
 
 
 # --------------------------------------------------------------------------------------

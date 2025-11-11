@@ -36,6 +36,7 @@ from .const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
+from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
 from .entity import GoogleFindMyDeviceEntity, GoogleFindMyEntity, resolve_coordinator
 from .ha_typing import RestoreSensor, SensorEntity, callback
@@ -144,8 +145,8 @@ async def async_setup_entry(
     )
     enable_stats = bool(enable_stats_raw)
 
+    created_stats: list[str] = []
     if enable_stats:
-        created_stats: list[str] = []
         for stat_key, desc in STATS_DESCRIPTIONS.items():
             # Only create sensors for counters that actually exist in the coordinator
             if hasattr(coordinator, "stats") and stat_key in coordinator.stats:
@@ -221,6 +222,98 @@ async def async_setup_entry(
 
     unsub = coordinator.async_add_listener(_add_new_sensors_on_update)
     entry.async_on_unload(unsub)
+
+    runtime_data = getattr(entry, "runtime_data", None)
+    recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
+
+    if isinstance(recovery_manager, EntityRecoveryManager):
+        entry_id = getattr(entry, "entry_id", None)
+
+        def _is_visible(device_id: str) -> bool:
+            try:
+                return bool(
+                    coordinator.is_device_visible_in_subentry(
+                        tracker_subentry_key, device_id
+                    )
+                )
+            except Exception:  # pragma: no cover - defensive best effort
+                return True
+
+        def _expected_unique_ids() -> set[str]:
+            if not isinstance(entry_id, str) or not entry_id:
+                return set()
+            expected: set[str] = set()
+            if isinstance(service_subentry_identifier, str) and service_subentry_identifier and created_stats:
+                for stat_key in created_stats:
+                    expected.add(
+                        f"{DOMAIN}_{entry_id}_{service_subentry_identifier}_{stat_key}"
+                    )
+            if isinstance(tracker_subentry_identifier, str) and tracker_subentry_identifier:
+                for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+                    dev_id = device.get("id")
+                    dev_name = device.get("name")
+                    if not isinstance(dev_id, str) or not dev_id or not isinstance(dev_name, str) or not dev_name:
+                        continue
+                    if not _is_visible(dev_id):
+                        continue
+                    expected.add(
+                        f"{DOMAIN}_{entry_id}_{tracker_subentry_identifier}_{dev_id}_last_seen"
+                    )
+            return expected
+
+        def _build_entities(missing: set[str]) -> list[SensorEntity]:
+            if not missing:
+                return []
+            built: list[SensorEntity] = []
+            if not isinstance(entry_id, str) or not entry_id:
+                return built
+            if isinstance(service_subentry_identifier, str) and service_subentry_identifier:
+                for stat_key in created_stats:
+                    unique_id = (
+                        f"{DOMAIN}_{entry_id}_{service_subentry_identifier}_{stat_key}"
+                    )
+                    if unique_id not in missing:
+                        continue
+                    description = STATS_DESCRIPTIONS.get(stat_key)
+                    if description is None:
+                        continue
+                    built.append(
+                        GoogleFindMyStatsSensor(
+                            coordinator,
+                            stat_key,
+                            description,
+                            subentry_key=service_subentry_key,
+                            subentry_identifier=service_subentry_identifier,
+                        )
+                    )
+            if isinstance(tracker_subentry_identifier, str) and tracker_subentry_identifier:
+                for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+                    dev_id = device.get("id")
+                    dev_name = device.get("name")
+                    if not isinstance(dev_id, str) or not dev_id or not isinstance(dev_name, str) or not dev_name:
+                        continue
+                    if not _is_visible(dev_id):
+                        continue
+                    unique_id = (
+                        f"{DOMAIN}_{entry_id}_{tracker_subentry_identifier}_{dev_id}_last_seen"
+                    )
+                    if unique_id not in missing:
+                        continue
+                    built.append(
+                        GoogleFindMyLastSeenSensor(
+                            coordinator,
+                            device,
+                            subentry_key=tracker_subentry_key,
+                            subentry_identifier=tracker_subentry_identifier,
+                        )
+                    )
+            return built
+
+        recovery_manager.register_sensor_platform(
+            expected_unique_ids=_expected_unique_ids,
+            entity_factory=_build_entities,
+            add_entities=async_add_entities,
+        )
 
 
 # ------------------------------- Stats Sensor ---------------------------------

@@ -33,7 +33,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from . import _extract_email_from_entry
+from . import EntityRecoveryManager, _extract_email_from_entry
 from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
@@ -205,6 +205,72 @@ async def async_setup_entry(
     unsub = coordinator.async_add_listener(_scan_available_trackers_from_coordinator)
     config_entry.async_on_unload(unsub)
     _scan_available_trackers_from_coordinator()  # run once after registration to catch races
+
+    runtime_data = getattr(config_entry, "runtime_data", None)
+    recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
+
+    if isinstance(recovery_manager, EntityRecoveryManager):
+        entry_id = getattr(config_entry, "entry_id", None)
+
+        def _is_visible(device_id: str) -> bool:
+            try:
+                return bool(
+                    coordinator.is_device_visible_in_subentry(
+                        tracker_subentry_key, device_id
+                    )
+                )
+            except Exception:  # pragma: no cover - defensive best effort
+                return True
+
+        def _expected_unique_ids() -> set[str]:
+            if not isinstance(entry_id, str) or not entry_id:
+                return set()
+            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
+                return set()
+            expected: set[str] = set()
+            for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+                dev_id = device.get("id")
+                if not isinstance(dev_id, str) or not dev_id:
+                    continue
+                if not _is_visible(dev_id):
+                    continue
+                expected.add(
+                    f"{entry_id}:{tracker_subentry_identifier}:{dev_id}"
+                )
+            return expected
+
+        def _build_entities(missing: set[str]) -> list[GoogleFindMyDeviceTracker]:
+            if not missing:
+                return []
+            built: list[GoogleFindMyDeviceTracker] = []
+            if not isinstance(entry_id, str) or not entry_id:
+                return built
+            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
+                return built
+            for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+                dev_id = device.get("id")
+                if not isinstance(dev_id, str) or not dev_id:
+                    continue
+                if not _is_visible(dev_id):
+                    continue
+                uid = f"{entry_id}:{tracker_subentry_identifier}:{dev_id}"
+                if uid not in missing:
+                    continue
+                built.append(
+                    GoogleFindMyDeviceTracker(
+                        coordinator,
+                        device,
+                        subentry_key=tracker_subentry_key,
+                        subentry_identifier=tracker_subentry_identifier,
+                    )
+                )
+            return built
+
+        recovery_manager.register_device_tracker_platform(
+            expected_unique_ids=_expected_unique_ids,
+            entity_factory=_build_entities,
+            add_entities=async_add_entities,
+        )
 
 
 # ---------------------------------------------------------------------------

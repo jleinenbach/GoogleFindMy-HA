@@ -43,7 +43,14 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Collection,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from types import MappingProxyType, SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -92,6 +99,8 @@ from homeassistant.helpers import (
     entity_registry as er,
     issue_registry as ir,
 )
+from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.storage import Store
 
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
@@ -1564,6 +1573,7 @@ class RuntimeData:
     subentry_manager: ConfigEntrySubEntryManager
     fcm_receiver: FcmReceiverHA | None = None
     google_home_filter: GoogleHomeFilterProtocol | None = None
+    entity_recovery_manager: EntityRecoveryManager | None = None
 
     @property
     def cache(self) -> TokenCache:
@@ -1770,6 +1780,215 @@ def _iter_config_entry_entities(
 
     return tuple(entries_iterable)
 
+
+@dataclass(slots=True)
+class _RecoveryRegistration:
+    """Container describing recovery metadata for a platform."""
+
+    expected_unique_ids: Callable[[], set[str]]
+    entity_factory: Callable[[set[str]], Sequence[Entity]]
+    add_entities: AddEntitiesCallback
+    update_before_add: bool
+
+
+class EntityRecoveryManager:
+    """Coordinate recovery of missing entities for a config entry."""
+
+    __slots__ = ("_hass", "_entry", "_coordinator", "_platforms")
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        coordinator: GoogleFindMyCoordinator,
+    ) -> None:
+        self._hass = hass
+        self._entry = entry
+        self._coordinator = coordinator
+        self._platforms: dict[str, _RecoveryRegistration] = {}
+
+    def _register_platform(
+        self,
+        platform: Platform | str,
+        registration: _RecoveryRegistration,
+    ) -> None:
+        key = platform.value if isinstance(platform, Platform) else str(platform)
+        self._platforms[key] = registration
+
+    def register_device_tracker_platform(
+        self,
+        *,
+        expected_unique_ids: Callable[[], set[str]],
+        entity_factory: Callable[[set[str]], Sequence[Entity]],
+        add_entities: AddEntitiesCallback,
+        update_before_add: bool = True,
+    ) -> None:
+        """Register recovery handlers for the device_tracker platform."""
+
+        self._register_platform(
+            Platform.DEVICE_TRACKER,
+            _RecoveryRegistration(
+                expected_unique_ids=expected_unique_ids,
+                entity_factory=entity_factory,
+                add_entities=add_entities,
+                update_before_add=update_before_add,
+            ),
+        )
+
+    def register_button_platform(
+        self,
+        *,
+        expected_unique_ids: Callable[[], set[str]],
+        entity_factory: Callable[[set[str]], Sequence[Entity]],
+        add_entities: AddEntitiesCallback,
+        update_before_add: bool = True,
+    ) -> None:
+        """Register recovery handlers for the button platform."""
+
+        self._register_platform(
+            Platform.BUTTON,
+            _RecoveryRegistration(
+                expected_unique_ids=expected_unique_ids,
+                entity_factory=entity_factory,
+                add_entities=add_entities,
+                update_before_add=update_before_add,
+            ),
+        )
+
+    def register_sensor_platform(
+        self,
+        *,
+        expected_unique_ids: Callable[[], set[str]],
+        entity_factory: Callable[[set[str]], Sequence[Entity]],
+        add_entities: AddEntitiesCallback,
+        update_before_add: bool = True,
+    ) -> None:
+        """Register recovery handlers for the sensor platform."""
+
+        self._register_platform(
+            Platform.SENSOR,
+            _RecoveryRegistration(
+                expected_unique_ids=expected_unique_ids,
+                entity_factory=entity_factory,
+                add_entities=add_entities,
+                update_before_add=update_before_add,
+            ),
+        )
+
+    def register_binary_sensor_platform(
+        self,
+        *,
+        expected_unique_ids: Callable[[], set[str]],
+        entity_factory: Callable[[set[str]], Sequence[Entity]],
+        add_entities: AddEntitiesCallback,
+        update_before_add: bool = True,
+    ) -> None:
+        """Register recovery handlers for the binary_sensor platform."""
+
+        self._register_platform(
+            Platform.BINARY_SENSOR,
+            _RecoveryRegistration(
+                expected_unique_ids=expected_unique_ids,
+                entity_factory=entity_factory,
+                add_entities=add_entities,
+                update_before_add=update_before_add,
+            ),
+        )
+
+    def expected_unique_ids_for_platform(
+        self, platform: Platform | str
+    ) -> set[str]:
+        """Return the expected unique IDs for ``platform`` if registered."""
+
+        key = platform.value if isinstance(platform, Platform) else str(platform)
+        registration = self._platforms.get(key)
+        if registration is None:
+            return set()
+        return registration.expected_unique_ids()
+
+    async def async_recover_missing_entities(self) -> None:
+        """Inspect the entity registry and recover missing entities."""
+
+        if not self._platforms:
+            return
+
+        entity_registry = er.async_get(self._hass)
+        registry_entries = _iter_config_entry_entities(
+            entity_registry, self._entry.entry_id
+        )
+
+        by_platform: dict[str, set[str]] = {}
+        for entry in registry_entries:
+            platform = getattr(entry, "domain", None)
+            if not isinstance(platform, str):
+                continue
+            owner = getattr(entry, "platform", None)
+            if owner != DOMAIN:
+                continue
+            unique_id = getattr(entry, "unique_id", None)
+            if not isinstance(unique_id, str) or not unique_id:
+                continue
+            by_platform.setdefault(platform, set()).add(unique_id)
+
+        for platform, registration in self._platforms.items():
+            try:
+                expected = registration.expected_unique_ids()
+            except Exception as err:  # pragma: no cover - defensive guard
+                _LOGGER.debug(
+                    "[%s] Failed to build expected unique_id set for %s: %s",
+                    self._entry.entry_id,
+                    platform,
+                    err,
+                )
+                continue
+
+            if not expected:
+                continue
+
+            actual = by_platform.get(platform, set())
+            missing = expected - actual
+            if not missing:
+                continue
+
+            try:
+                entities = registration.entity_factory(missing)
+            except Exception as err:  # pragma: no cover - defensive guard
+                _LOGGER.debug(
+                    "[%s] Failed to build recovery entities for %s: %s",
+                    self._entry.entry_id,
+                    platform,
+                    err,
+                )
+                continue
+
+            to_add: list[Entity] = []
+            for entity in entities:
+                unique_id = getattr(entity, "unique_id", None)
+                if not isinstance(unique_id, str):
+                    continue
+                if unique_id not in missing:
+                    continue
+                to_add.append(entity)
+
+            if not to_add:
+                continue
+
+            _LOGGER.info(
+                "[%s] Recovering %d missing %s entities",
+                self._entry.entry_id,
+                len(to_add),
+                platform,
+            )
+
+            try:
+                registration.add_entities(to_add, registration.update_before_add)
+            except Exception as err:  # pragma: no cover - defensive guard
+                _LOGGER.error(
+                    "[%s] Failed to add recovered %s entities: %s",
+                    self._entry.entry_id,
+                    platform,
+                    err,
+                )
 
 def _default_button_subentry_identifier(subentry_map: Mapping[str, str]) -> str:
     """Return the preferred subentry identifier for button entities."""
@@ -4945,11 +5164,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     coordinator.attach_subentry_manager(runtime_subentry_manager)
 
     # Expose runtime object via the typed container (preferred access pattern)
+    entity_recovery_manager = EntityRecoveryManager(hass, entry, coordinator)
+
     runtime_data = RuntimeData(
         coordinator=coordinator,
         token_cache=cache,
         subentry_manager=runtime_subentry_manager,
         fcm_receiver=fcm,
+        entity_recovery_manager=entity_recovery_manager,
     )
     entry.runtime_data = runtime_data
     entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
@@ -5088,6 +5310,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 coordinator.force_poll_due()
 
             await coordinator.async_request_refresh()
+            if is_reload:
+                manager = getattr(runtime_data, "entity_recovery_manager", None)
+                if isinstance(manager, EntityRecoveryManager):
+                    await manager.async_recover_missing_entities()
             last_update_success = getattr(coordinator, "last_update_success", None)
             if last_update_success is False:
                 _LOGGER.warning(
