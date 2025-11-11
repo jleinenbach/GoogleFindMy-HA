@@ -13,6 +13,7 @@ from custom_components.googlefindmy.const import (
     OPT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
 )
+from tests.helpers import install_homeassistant_core_callback_stub
 
 
 class _FakeState(SimpleNamespace):
@@ -22,18 +23,15 @@ class _FakeState(SimpleNamespace):
         super().__init__(entity_id=entity_id, state=state, attributes=attributes)
 
 
-def _ensure_core_state_module() -> None:
+def _ensure_core_state_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Install a lightweight ``homeassistant.core`` module if missing."""
 
-    core_module = sys.modules.get("homeassistant.core")
-    if core_module is None:
-        core_module = ModuleType("homeassistant.core")
-        sys.modules["homeassistant.core"] = core_module
+    core_module = install_homeassistant_core_callback_stub(monkeypatch)
 
     if not hasattr(core_module, "State"):
-        core_module.State = _FakeState  # type: ignore[attr-defined]
-    if not hasattr(core_module, "callback"):
-        core_module.callback = lambda func: func  # type: ignore[attr-defined]
+        monkeypatch.setattr(core_module, "State", _FakeState, raising=False)
+
+    return core_module
 
 
 def _ensure_zone_module() -> None:
@@ -102,7 +100,7 @@ class _FakeStates:
 def test_should_filter_detection_when_zone_passive(monkeypatch: pytest.MonkeyPatch) -> None:
     """Passive ``zone.home`` prevents substitution for Google Home detections."""
 
-    _ensure_core_state_module()
+    _ensure_core_state_module(monkeypatch)
     _ensure_zone_module()
     registry_module = _ensure_helpers_modules()
     event_module = _ensure_event_helper_module()
@@ -156,7 +154,7 @@ def test_should_filter_detection_substitutes_home_coordinates(
 ) -> None:
     """Active ``zone.home`` coordinates substitute semantic Google Home detections."""
 
-    _ensure_core_state_module()
+    _ensure_core_state_module(monkeypatch)
     _ensure_zone_module()
     registry_module = _ensure_helpers_modules()
     event_module = _ensure_event_helper_module()

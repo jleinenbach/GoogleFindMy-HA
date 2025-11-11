@@ -27,6 +27,7 @@ __all__ = [
     "FakeServiceRegistry",
     "config_entry_with_subentries",
     "resolve_config_entry_lookup",
+    "install_homeassistant_core_callback_stub",
 ]
 
 _EXPORT_MAP = {
@@ -45,6 +46,7 @@ _EXPORT_MAP = {
     "FakeServiceRegistry": ".homeassistant",
     "config_entry_with_subentries": ".homeassistant",
     "resolve_config_entry_lookup": ".homeassistant",
+    "install_homeassistant_core_callback_stub": ".homeassistant_stub",
 }
 
 

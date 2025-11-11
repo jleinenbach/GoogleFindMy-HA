@@ -5329,8 +5329,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     if not isinstance(views_registered, bool):
         views_registered = False
     if not views_registered:
-        hass.http.register_view(GoogleFindMyMapView(hass))
-        hass.http.register_view(GoogleFindMyMapRedirectView(hass))
+        map_view_instance = GoogleFindMyMapView()
+        map_view_instance.hass = hass
+        hass.http.register_view(map_view_instance)
+
+        map_redirect_view_instance = GoogleFindMyMapRedirectView()
+        map_redirect_view_instance.hass = hass
+        hass.http.register_view(map_redirect_view_instance)
         bucket["views_registered"] = True
         _LOGGER.debug("Registered map views")
 
