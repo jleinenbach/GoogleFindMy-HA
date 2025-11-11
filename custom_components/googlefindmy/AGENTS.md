@@ -35,4 +35,20 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 
 * Prefer importing container ABCs (for example, `Iterable`, `Mapping`, `Sequence`) from `collections.abc` rather than `typing` so runtime imports stay lightweight and ruff avoids duplicate definition warnings.
 * When adding iterable-type annotations inside `config_flow.py`, reuse the existing `CollIterable` alias to keep type hints consistent with the options-flow helpers and avoid reintroducing stray `typing.Iterable` imports.
+* When iterating config flow schemas, always extract the real key from voluptuous markers (`marker.schema`) before using it. Several markers behave like iterables and will yield characters one-by-one if treated as strings, so unwrap before building dictionaries or merging option payloads. See the helper showcased in [`ConfigFlow.async_step_options` (`_resolve_marker_key`)](./config_flow.py) for the canonical extraction pattern.
+* When awaiting discovery flow creation results, normalize the outcome through [`_async_resolve_flow_result`](./config_flow.py#L2192-L2211) (the `_resolve_flow_result` helper mentioned in review notes) instead of open-coding `inspect.isawaitable` checks. The helper already mirrors Home Assistant's flow contract and keeps strict mypy runs happy—reuse it so discovery fallbacks stay consistent across handlers.
+
+## Config entry options persistence reminder
+
+* Treat `ConfigEntry.options` as immutable during reconfigure flows. Build a new dictionary (for example, `existing_options = dict(entry.options or {})`) and pass it directly to `async_update_entry` instead of mutating `entry.options` in place. Home Assistant only persists option changes when it detects a new mapping, so keep the original object untouched until `async_update_entry` returns. See the [`async_step_reconfigure` options-copy pattern](./config_flow.py#L2929-L2943) for a concrete implementation:
+
+  ```python
+  existing_options = dict(getattr(entry_for_update, "options", {}) or {})
+  existing_options.update(options_payload)
+  self.hass.config_entries.async_update_entry(
+      entry_for_update,
+      data=merged_data,
+      options=existing_options,
+  )
+  ```
 

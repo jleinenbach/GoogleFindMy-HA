@@ -185,7 +185,8 @@ async def _resolve_flow_result(result: _AwaitableFlowResult) -> _MaybeFlowResult
     """Await helper results when necessary."""
 
     if inspect.isawaitable(result):
-        return await cast(Awaitable[_MaybeFlowResult], result)
+        awaited_result: _MaybeFlowResult = await result
+        return awaited_result
     return result
 
 
@@ -348,8 +349,7 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
                 data,
                 discovery_key=discovery_key,
             )
-            if inspect.isawaitable(result):
-                result = await cast(Awaitable[FlowResult | None], result)
+            result = await _resolve_flow_result(result)
         except Exception:
             _LOGGER.error(
                 "Discovery flow creation failed (domain=%s, context=%s)",
@@ -2158,10 +2158,7 @@ class ConfigFlow(
 
         if user_input is not None:
             return await self._async_resolve_flow_result(
-                cast(
-                    FlowResult | Awaitable[FlowResult],
-                    self.async_abort(reason="migration_successful"),
-                )
+                self.async_abort(reason="migration_successful")
             )
 
         context_obj = getattr(self, "context", None)
@@ -2192,13 +2189,10 @@ class ConfigFlow(
                 placeholders["email"] = email_placeholder
 
         return await self._async_resolve_flow_result(
-            cast(
-                FlowResult | Awaitable[FlowResult],
-                self.async_show_form(
-                    step_id="migrate_complete",
-                    data_schema=vol.Schema({}),
-                    description_placeholders=placeholders,
-                ),
+            self.async_show_form(
+                step_id="migrate_complete",
+                data_schema=vol.Schema({}),
+                description_placeholders=placeholders,
             )
         )
 
@@ -2959,9 +2953,17 @@ class ConfigFlow(
 
             options_payload: dict[str, Any] = {}
             managed_option_keys: set[str] = set()
-            for k in schema_fields.keys():
-                # `k` may be a voluptuous marker; retrieve the underlying key
-                real_key = next(iter(getattr(k, "schema", {k})))
+            for marker in schema_fields.keys():
+                # `marker` may be a voluptuous wrapper; retrieve the underlying key
+                schema_attr = getattr(marker, "schema", marker)
+                if isinstance(schema_attr, str):
+                    real_key = schema_attr
+                elif isinstance(schema_attr, CollIterable) and not isinstance(
+                    schema_attr, (bytes, bytearray)
+                ):
+                    real_key = next(iter(schema_attr))
+                else:
+                    real_key = cast(str, schema_attr)
                 managed_option_keys.add(real_key)
                 options_payload[real_key] = user_input.get(
                     real_key, defaults.get(real_key)
@@ -3020,7 +3022,6 @@ class ConfigFlow(
                             entry_for_update,
                             data=fallback_payload,
                         )
-                        setattr(entry_for_update, "options", existing_options)
 
                     self.hass.async_create_task(
                         self.hass.config_entries.async_reload(entry_for_update.entry_id)
@@ -4082,10 +4083,8 @@ class HubSubentryFlowHandler(_BaseSubentryFlow):
             self._entry_id or "<unknown>",
         )
         result = super().async_step_user(user_input)
-        if inspect.isawaitable(result):
-            awaited = await cast(Awaitable[FlowResult], result)
-            return cast(FlowResult, awaited)
-        return cast(FlowResult, result)
+        resolved = await _resolve_flow_result(result)
+        return cast(FlowResult, resolved)
 
 
 class ServiceSubentryFlowHandler(_BaseSubentryFlow):
