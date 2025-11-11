@@ -2934,8 +2934,6 @@ class ConfigFlow(
                         existing_options.pop(managed, None)
                     existing_options.update(options_payload)
 
-                    entry_for_update.options = existing_options
-
                     try:
                         self.hass.config_entries.async_update_entry(
                             entry_for_update,
