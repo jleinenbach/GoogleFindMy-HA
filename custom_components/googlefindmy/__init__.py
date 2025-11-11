@@ -5273,7 +5273,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # the registry has recorded the new child entries. Avoid
     # hass.async_create_task here; it would detach failure handling from the
     # config entry lifecycle and reintroduce silent retries.
-    entry.async_create_background_task(
+    ensure_subentries_task: asyncio.Task[None] | None = entry.async_create_background_task(
         hass,
         _async_ensure_subentries_are_setup(hass, entry),
         name=f"{DOMAIN}.ensure_subentries_setup.{entry.entry_id}",
@@ -5314,6 +5314,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         nonlocal listener_active
         listener_active = False
         try:
+            subentry_setup_failed = False
+            if ensure_subentries_task is not None:
+                try:
+                    await asyncio.shield(ensure_subentries_task)
+                except asyncio.CancelledError:
+                    raise
+                except ConfigEntryNotReady as err:
+                    subentry_setup_failed = True
+                    _LOGGER.warning(
+                        "Subentry setup did not complete before the first refresh: %s",
+                        err,
+                    )
+                except Exception as err:  # pragma: no cover - defensive
+                    subentry_setup_failed = True
+                    _LOGGER.error(
+                        "Subentry setup task raised %s: %s",
+                        type(err).__name__,
+                        err,
+                        exc_info=True,
+                    )
+
             if is_reload:
                 _LOGGER.info(
                     "Integration reloaded: forcing an immediate device scan window."
@@ -5323,7 +5344,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             await coordinator.async_request_refresh()
             if is_reload:
                 manager = getattr(runtime_data, "entity_recovery_manager", None)
-                if isinstance(manager, EntityRecoveryManager):
+                if isinstance(manager, EntityRecoveryManager) and not subentry_setup_failed:
                     await manager.async_recover_missing_entities()
             last_update_success = getattr(coordinator, "last_update_success", None)
             if last_update_success is False:
