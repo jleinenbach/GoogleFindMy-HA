@@ -17,3 +17,7 @@
 1. Run `pytest tests/test_hass_data_layout.py::test_service_no_active_entry_placeholders -q` to confirm placeholder usage remains stable.
 2. Add new translation-focused tests alongside updates so each fallback path has coverage.
 
+## Typing reminders
+
+* Prefer importing container ABCs (for example, `Iterable`, `Mapping`, `Sequence`) from `collections.abc` rather than `typing` so runtime imports stay lightweight and ruff avoids duplicate definition warnings.
+

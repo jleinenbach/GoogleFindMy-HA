@@ -41,7 +41,7 @@ import time
 from contextlib import suppress
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterable, Literal, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast
 from collections import defaultdict
 from collections.abc import (
     Awaitable,
