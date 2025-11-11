@@ -37,6 +37,13 @@ The plugin ships the canonical Home Assistant stubs that our contract
 tests depend on; skipping this pairing risks exercising stale or
 partial interfaces.
 
+For a quicker bootstrap when you only need the options-flow regression
+suite, run [`script/install_options_flow_test_deps.sh`](../script/install_options_flow_test_deps.sh).
+The helper installs the minimal requirements bundle defined in
+[`requirements-options-flow-tests.txt`](../requirements-options-flow-tests.txt)
+so contributors can verify the targeted tests without recreating the
+full development environment.
+
 > **Note:** `pytest -q` buffers its trailing summary when the suite is
 > quiet. Wait a moment for the command to exit cleanly, or rerun the
 > module without `-q` if you need immediate progress output while

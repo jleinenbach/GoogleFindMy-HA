@@ -31,7 +31,9 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 
 1. Create a virtual environment for development: `python -m venv .venv`
 2. Activate it for the current shell: `. .venv/bin/activate`
-3. Install the required dependencies (includes `homeassistant` and `pytest-homeassistant-custom-component`): `pip install -r requirements-dev.txt`
+3. Install the required dependencies (includes `homeassistant` and `pytest-homeassistant-custom-component`):
+   - Full toolchain (linting, typing, tests): `pip install -r requirements-dev.txt`
+   - Minimal options-flow test stack (`homeassistant`, pytest helpers, and `bcrypt` only): `./script/install_options_flow_test_deps.sh`
 4. Execute the regression suite, for example: `pytest tests/test_entity_recovery_manager.py` or simply `make test-ha`
 5. When finished, leave the environment with `deactivate`
 
