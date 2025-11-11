@@ -144,19 +144,41 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
                 self._is_setup = False
                 self.hass: Any | None = None
 
-            def set_up(self) -> None:
+            def set_up(self, hass: Any | None) -> None:
                 self._is_setup = True
+                if hass is not None:
+                    self.hass = hass
 
-            async def async_set_up(self) -> None:
-                self.set_up()
+            async def async_set_up(self, hass: Any | None) -> None:
+                self.set_up(hass)
 
             def report(self, *args: Any, **kwargs: Any) -> None:
                 return None
 
+            def report_usage(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+            def __getattr__(self, name: str) -> Any:
+                if name.startswith("async_set_up") or name.startswith("async_setup"):
+                    async def _async_proxy(hass: Any | None) -> None:
+                        result = self.async_set_up(hass)
+                        if inspect.isawaitable(result):
+                            await result
+
+                    return _async_proxy
+
+                if name.startswith("set_up") and name != "set_up":
+                    def _setup_proxy(hass: Any | None) -> None:
+                        self.set_up(hass)
+
+                    return _setup_proxy
+
+                raise AttributeError(name)
+
         frame_helper = _FrameHelper()
 
-        def _noop_report(*args: Any, **kwargs: Any) -> None:
-            return None
+        def _report_usage_proxy(*args: Any, **kwargs: Any) -> None:
+            frame_helper.report_usage(*args, **kwargs)
 
         configured = getattr(module, "_configured_instances", None)
         if not isinstance(configured, list):
@@ -173,15 +195,17 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
             setattr(module, "hass", target)
             hass_container.hass = target
             frame_helper.hass = target
-            frame_helper.set_up()
+            frame_helper.set_up(target)
 
         async def _async_set_up(target: Any) -> None:
-            _set_up(target)
+            result = frame_helper.async_set_up(target)
+            if inspect.isawaitable(result):
+                await result
 
         module.set_up = _set_up  # type: ignore[assignment]
         module.async_set_up = _async_set_up  # type: ignore[assignment]
-        module.report = _noop_report  # type: ignore[assignment]
-        module.report_usage = _noop_report  # type: ignore[assignment]
+        module.report = frame_helper.report  # type: ignore[assignment]
+        module.report_usage = _report_usage_proxy  # type: ignore[assignment]
         module.frame_helper = frame_helper  # type: ignore[assignment]
         setattr(module, "_tests_frame_stubbed", True)
 
@@ -207,15 +231,7 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
     except ModuleNotFoundError:
         config_entries_module = None
     if config_entries_module is not None:
-        report_usage_func = getattr(config_entries_module, "report_usage", None)
         setattr(config_entries_module, "report_usage", module.report_usage)
-        if callable(report_usage_func):
-            try:
-                report_usage_func.__code__ = module.report_usage.__code__  # type: ignore[attr-defined]
-                report_usage_func.__defaults__ = module.report_usage.__defaults__  # type: ignore[attr-defined]
-                report_usage_func.__kwdefaults__ = module.report_usage.__kwdefaults__  # type: ignore[attr-defined]
-            except AttributeError:
-                setattr(config_entries_module, "report_usage", module.report_usage)
 
         options_flow_cls = getattr(config_entries_module, "OptionsFlow", None)
         config_entry_prop = getattr(options_flow_cls, "config_entry", None)

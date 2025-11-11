@@ -905,31 +905,62 @@ def _stub_homeassistant() -> None:
 
         def __init__(self) -> None:
             self._is_setup = False
+            self.hass: Any | None = None
 
-        def set_up(self) -> None:
+        def set_up(self, hass: Any | None) -> None:
             self._is_setup = True
+            if hass is not None:
+                self.hass = hass
 
-        async def async_set_up(self) -> None:
-            self.set_up()
+        async def async_set_up(self, hass: Any | None) -> None:
+            self.set_up(hass)
 
         def report(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover - no-op
             return None
 
+        def report_usage(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover - no-op
+            return None
+
+        def __getattr__(self, name: str) -> Any:
+            if name.startswith("async_set_up") or name.startswith("async_setup"):
+                async def _async_proxy(hass: Any | None) -> None:
+                    result = self.async_set_up(hass)
+                    if inspect.isawaitable(result):
+                        await result
+
+                return _async_proxy
+
+            if name.startswith("set_up") and name != "set_up":
+                def _setup_proxy(hass: Any | None) -> None:
+                    self.set_up(hass)
+
+                return _setup_proxy
+
+            raise AttributeError(name)
+
     frame_helper = _FrameHelper()
 
     def frame_set_up(*args: Any, **kwargs: Any) -> None:
-        frame_helper.set_up()
+        frame_helper.set_up(kwargs.get("hass") if "hass" in kwargs else (args[0] if args else None))
 
     async def frame_async_set_up(*args: Any, **kwargs: Any) -> None:
-        await frame_helper.async_set_up()
+        result = frame_helper.async_set_up(
+            kwargs.get("hass") if "hass" in kwargs else (args[0] if args else None)
+        )
+        if inspect.isawaitable(result):
+            await result
 
     def frame_report(*args: Any, **kwargs: Any) -> None:
         frame_helper.report(*args, **kwargs)
+
+    def frame_report_usage(*args: Any, **kwargs: Any) -> None:
+        frame_helper.report_usage(*args, **kwargs)
 
     frame_module.frame_helper = frame_helper
     frame_module.set_up = frame_set_up
     frame_module.async_set_up = frame_async_set_up
     frame_module.report = frame_report
+    frame_module.report_usage = frame_report_usage
     sys.modules["homeassistant.helpers.frame"] = frame_module
     setattr(helpers_pkg, "frame", frame_module)
 
