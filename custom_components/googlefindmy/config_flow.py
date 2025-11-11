@@ -184,7 +184,8 @@ async def _resolve_flow_result(result: _AwaitableFlowResult) -> _MaybeFlowResult
     """Await helper results when necessary."""
 
     if inspect.isawaitable(result):
-        return await cast(Awaitable[_MaybeFlowResult], result)
+        awaited_result: _MaybeFlowResult = await result
+        return awaited_result
     return result
 
 
