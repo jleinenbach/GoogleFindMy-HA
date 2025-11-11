@@ -1760,7 +1760,9 @@ class ConfigFlow(
         entries = [
             entry
             for entry in hass.config_entries.async_entries(DOMAIN)
-            if entry.source != config_entries.SOURCE_IGNORE
+            # Guard source lookup so discovery-update stubs without `.source`
+            # keep the Home Assistant contract intact.
+            if getattr(entry, "source", None) != config_entries.SOURCE_IGNORE
         ]
 
         if not entries:
