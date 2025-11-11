@@ -34,4 +34,5 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 ## Typing reminders
 
 * Prefer importing container ABCs (for example, `Iterable`, `Mapping`, `Sequence`) from `collections.abc` rather than `typing` so runtime imports stay lightweight and ruff avoids duplicate definition warnings.
+* When adding iterable-type annotations inside `config_flow.py`, reuse the existing `CollIterable` alias to keep type hints consistent with the options-flow helpers and avoid reintroducing stray `typing.Iterable` imports.
 

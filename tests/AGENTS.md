@@ -93,7 +93,13 @@ are installed. **Review this checklist on every single change under
    invokes the frame helper setup path and patches
    `homeassistant.helpers.frame` (including `report_usage`) so
    `ConfigFlow` instances and options flows operate without manual
-   monkeypatching.
+   monkeypatching. The helper now registers an `importlib.reload`
+   hook that re-applies the `OptionsFlow`/descriptor overrides after
+   either `homeassistant.config_entries` or
+   `custom_components.googlefindmy.config_flow` reloads; keep that
+   hook intact so reloading modules during tests does not drop the
+   frame helper patches. Refer to the table below for the regression
+   tests that cover each patched helper.
 2. **Handler default patch** — verify
    [`_ensure_flow_handler_default`](helpers/config_flow.py) continues to
    set a default `handler` on
@@ -113,6 +119,12 @@ are installed. **Review this checklist on every single change under
    `config_entry` property on Home Assistant’s `OptionsFlow` stub keeps
    accepting assignment so options flow tests can store the entry
    reference (see [`helpers/config_flow.py`](helpers/config_flow.py)).
+
+| Patched helper | Regression coverage |
+| --- | --- |
+| Frame setup proxy (`module.set_up` / `module.async_setup`) | `pytest tests/test_options_flow_* -q` (invoked via `tests/helpers/config_flow.py::prepare_flow_hass_config_entries` fixtures) |
+| `report_usage` proxy (`module.report_usage`) | `pytest tests/test_options_flow_config_entry.py::test_options_flow_reuses_existing_hass` |
+| Reload hook (`importlib.reload` patch) | `pytest tests/test_options_flow_reload.py::test_frame_helper_patches_survive_reload` |
 6. **Module guards** — validate that tests importing optional Home
    Assistant components continue to wrap those imports in
    `pytest.skip(..., allow_module_level=True)` guards so the suite
