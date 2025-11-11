@@ -39,5 +39,15 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 
 ## Config entry options persistence reminder
 
-* Treat `ConfigEntry.options` as immutable during reconfigure flows. Build a new dictionary (for example, `existing_options = dict(entry.options or {})`) and pass it directly to `async_update_entry` instead of mutating `entry.options` in place. Home Assistant only persists option changes when it detects a new mapping, so keep the original object untouched until `async_update_entry` returns.
+* Treat `ConfigEntry.options` as immutable during reconfigure flows. Build a new dictionary (for example, `existing_options = dict(entry.options or {})`) and pass it directly to `async_update_entry` instead of mutating `entry.options` in place. Home Assistant only persists option changes when it detects a new mapping, so keep the original object untouched until `async_update_entry` returns. See the [`async_step_reconfigure` options-copy pattern](./config_flow.py#L2929-L2943) for a concrete implementation:
+
+  ```python
+  existing_options = dict(getattr(entry_for_update, "options", {}) or {})
+  existing_options.update(options_payload)
+  self.hass.config_entries.async_update_entry(
+      entry_for_update,
+      data=merged_data,
+      options=existing_options,
+  )
+  ```
 
