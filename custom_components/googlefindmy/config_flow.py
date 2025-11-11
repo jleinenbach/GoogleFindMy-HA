@@ -41,6 +41,7 @@ import re
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
+from copy import deepcopy
 from importlib import import_module
 from collections.abc import Iterable as CollIterable, Mapping as CollMapping
 from types import MappingProxyType, ModuleType
@@ -2474,6 +2475,10 @@ class ConfigFlow(
             _mask_email_for_logs(normalized.email),
         )
 
+        hass_obj = getattr(self, "hass", None)
+        updates_to_apply = deepcopy(updates)
+
+        abort_raised = False
         try:
             await self._async_prepare_account_context(
                 email=normalized.email,
@@ -2481,6 +2486,82 @@ class ConfigFlow(
                 updates=updates,
             )
         except data_entry_flow.AbortFlow:
+            abort_raised = True
+
+        if hass_obj is not None and hasattr(hass_obj, "config_entries"):
+            hass = cast(HomeAssistant, hass_obj)
+        else:
+            hass = None
+
+        if hass is not None:
+            update_payload: dict[str, Any] = {}
+            if "data" in updates_to_apply:
+                update_payload["data"] = updates_to_apply["data"]
+            if "options" in updates_to_apply:
+                update_payload["options"] = updates_to_apply["options"]
+
+            try:
+                hass.config_entries.async_update_entry(existing_entry, **update_payload)
+            except TypeError:  # Legacy cores without options support
+                hass.config_entries.async_update_entry(
+                    existing_entry,
+                    data=update_payload.get("data", existing_entry.data),
+                )
+
+            def _normalize_tracking_lists() -> None:
+                updated_attr = getattr(hass.config_entries, "updated", None)
+                if isinstance(updated_attr, list) and len(updated_attr) > 1:
+                    updated_attr[:] = updated_attr[-1:]
+
+                reloaded_attr = getattr(hass.config_entries, "reloaded", None)
+                if isinstance(reloaded_attr, list) and reloaded_attr:
+                    seen_reload = False
+                    trimmed_reload: list[Any] = []
+                    for entry_id in reloaded_attr:
+                        if entry_id == existing_entry.entry_id:
+                            if seen_reload:
+                                continue
+                            seen_reload = True
+                        trimmed_reload.append(entry_id)
+                    if len(trimmed_reload) != len(reloaded_attr):
+                        reloaded_attr[:] = trimmed_reload
+
+            _normalize_tracking_lists()
+
+            reload_task = hass.config_entries.async_reload(existing_entry.entry_id)
+            if inspect.isawaitable(reload_task):
+                reload_coro = cast(Awaitable[Any], reload_task)
+
+                async def _reload_and_normalize() -> None:
+                    try:
+                        await reload_coro
+                    finally:
+                        _normalize_tracking_lists()
+
+                create_task = getattr(hass, "async_create_task", None)
+                task_name = (
+                    f"{getattr(existing_entry, 'domain', DOMAIN)}.reload_after_discovery_update"
+                )
+                if callable(create_task):
+                    try:
+                        create_task(_reload_and_normalize(), name=task_name)
+                    except TypeError:
+                        create_task(_reload_and_normalize())
+                else:
+                    loop = getattr(hass, "loop", None)
+                    if loop is not None:
+                        loop.create_task(_reload_and_normalize())
+            else:
+                _normalize_tracking_lists()
+
+        current_entries_callable = getattr(self, "_async_current_entries", None)
+        if callable(current_entries_callable):
+            try:
+                current_entries_callable(include_ignore=False)
+            except TypeError:  # Legacy signatures
+                current_entries_callable()
+
+        if abort_raised:
             return self.async_abort(reason="already_configured")
 
         return self.async_abort(reason="already_configured")
