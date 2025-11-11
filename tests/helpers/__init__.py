@@ -3,7 +3,11 @@
 
 from .ast_extract import compile_class_method_from_module
 from .asyncio import drain_loop
-from .config_flow import config_entries_flow_stub, set_config_flow_unique_id
+from .config_flow import (
+    ConfigEntriesFlowManagerStub,
+    config_entries_flow_stub,
+    set_config_flow_unique_id,
+)
 from .homeassistant import (
     FakeConfigEntriesManager,
     FakeConfigEntry,
@@ -20,6 +24,7 @@ from .homeassistant import (
 __all__ = [
     "compile_class_method_from_module",
     "drain_loop",
+    "ConfigEntriesFlowManagerStub",
     "config_entries_flow_stub",
     "set_config_flow_unique_id",
     "FakeConfigEntriesManager",

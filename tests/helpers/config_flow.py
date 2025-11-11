@@ -12,6 +12,8 @@ discovery abort reasons without reimplementing Home Assistant's bookkeeping.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
+import asyncio
+import importlib
 import inspect
 from types import SimpleNamespace
 from typing import Any, TypeVar
@@ -19,12 +21,21 @@ from unittest.mock import AsyncMock
 
 from homeassistant.helpers import frame
 
+__all__ = [
+    "ConfigEntriesDomainUniqueIdLookupMixin",
+    "ConfigEntriesFlowManagerStub",
+    "config_entries_flow_stub",
+    "prepare_flow_hass_config_entries",
+    "set_config_flow_unique_id",
+    "stub_async_entry_for_domain_unique_id",
+]
+
 FlowInitResult = dict[str, Any]
 FlowInitCallable = Callable[..., Awaitable[FlowInitResult] | FlowInitResult]
 _ConfigEntriesManagerT = TypeVar("_ConfigEntriesManagerT")
 
 
-def _collect_manager_entries(manager: Any, domain: str) -> list[Any]:
+def _collect_manager_entries(manager: Any, domain: str | None) -> list[Any]:
     """Return entries and subentries tracked by ``manager``."""
 
     from .homeassistant import resolve_config_entry_lookup
@@ -58,10 +69,27 @@ def _collect_manager_entries(manager: Any, domain: str) -> list[Any]:
             return
         _add(container)
 
+    lookup_domain = domain
+    if lookup_domain is None:
+        lookup_domain = getattr(manager, "domain", None)
+        if lookup_domain is None:
+            lookup_domain = getattr(getattr(manager, "flow", None), "domain", None)
+        if lookup_domain is None:
+            try:
+                config_flow = importlib.import_module(
+                    "custom_components.googlefindmy.config_flow"
+                )
+            except ModuleNotFoundError:
+                config_flow = None
+            lookup_domain = getattr(config_flow, "DOMAIN", None)
+
     lookup = getattr(manager, "async_entries", None)
     if callable(lookup):
         try:
-            _extend(lookup(domain))
+            if lookup_domain is None:
+                _extend(lookup())  # type: ignore[misc]
+            else:
+                _extend(lookup(lookup_domain))
         except TypeError:
             _extend(lookup())  # type: ignore[misc]
 
@@ -107,15 +135,49 @@ def _collect_manager_entries(manager: Any, domain: str) -> list[Any]:
     return queue
 
 
+def _resolve_frame_module(frame_module: Any | None) -> Any:
+    """Return the active Home Assistant frame helper module."""
+
+    if frame_module is not None:
+        return frame_module
+
+    try:
+        return importlib.import_module("homeassistant.helpers.frame")
+    except ModuleNotFoundError:
+        return frame
+
+
+def _ensure_frame_setup(frame_module: Any, hass: Any) -> None:
+    """Initialize the Home Assistant frame helper for the provided hass."""
+
+    setup = getattr(frame_module, "set_up", None)
+    if callable(setup):
+        setup(hass)
+        return
+
+    async_setup = getattr(frame_module, "async_setup", None)
+    if callable(async_setup):
+        async_setup(hass)
+        return
+
+    async_set_up = getattr(frame_module, "async_set_up", None)
+    if callable(async_set_up):
+        result = async_set_up(hass)
+        if asyncio.iscoroutine(result):
+            asyncio.get_event_loop().run_until_complete(result)
+        return
+
+
 def prepare_flow_hass_config_entries(
     hass: Any,
     manager_factory: Callable[[], _ConfigEntriesManagerT],
     *,
-    frame_module: Any = frame,
+    frame_module: Any | None = None,
 ) -> _ConfigEntriesManagerT:
     """Initialize Home Assistant flow stubs with a frame-aware manager."""
 
-    frame_module.set_up(hass)
+    active_frame = _resolve_frame_module(frame_module)
+    _ensure_frame_setup(active_frame, hass)
     manager = manager_factory()
     hass.config_entries = manager
     return manager
@@ -168,14 +230,29 @@ class ConfigEntriesFlowManagerStub:
 
         return [dict(record) for record in self._progress]
 
-    def async_progress_by_handler(self, handler: Any) -> list[dict[str, Any]]:
+    def async_progress_by_handler(
+        self,
+        handler: Any,
+        *,
+        include_uninitialized: bool = False,
+        match_context: MutableMapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """Return progress entries filtered by ``handler``."""
 
-        return [
-            dict(record)
-            for record in self._progress
-            if record.get("handler") == handler
-        ]
+        matched: list[dict[str, Any]] = []
+        for record in self._progress:
+            if record.get("handler") != handler:
+                continue
+            if not include_uninitialized and record.get("step_id") is None:
+                continue
+            if match_context is not None:
+                context = record.get("context")
+                if not isinstance(context, MutableMapping):
+                    continue
+                if any(context.get(key) != value for key, value in match_context.items()):
+                    continue
+            matched.append(dict(record))
+        return matched
 
     async def _async_init(self, *args: Any, **kwargs: Any) -> FlowInitResult:
         self.calls.append((args, dict(kwargs)))

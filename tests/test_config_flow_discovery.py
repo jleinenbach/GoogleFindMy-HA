@@ -24,7 +24,7 @@ from custom_components.googlefindmy.email import unique_account_id
 from homeassistant.helpers import frame
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
-    config_entries_flow_stub,
+    ConfigEntriesFlowManagerStub,
     prepare_flow_hass_config_entries,
     set_config_flow_unique_id,
 )
@@ -73,7 +73,8 @@ def test_async_step_discovery_new_entry(
     class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
             self.setup_calls: list[str] = []
-            self.flow = config_entries_flow_stub().flow
+            self.flow_manager = ConfigEntriesFlowManagerStub()
+            self.flow = self.flow_manager.flow
 
         def async_entries(self, domain: str) -> list[Any]:
             assert domain == config_flow.DOMAIN
@@ -313,7 +314,8 @@ def test_async_step_discovery_update_info_existing_entry(
             self.reloaded: list[str] = []
             self.lookups: list[str] = []
             self.setup_calls: list[str] = []
-            self.flow = config_entries_flow_stub().flow
+            self.flow_manager = ConfigEntriesFlowManagerStub()
+            self.flow = self.flow_manager.flow
 
         def async_entries(self, domain: str) -> list[Any]:
             self.lookups.append(domain)
