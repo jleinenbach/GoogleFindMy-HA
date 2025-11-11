@@ -25,7 +25,7 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 
 - `mypy --strict` — run the full strict type-checker locally to mirror CI expectations before opening a pull request.
 - `make lint` — invoke the Ruff lint target for the entire repository using the same settings enforced in CI.
-- `make test-ha` — provision the `.venv` environment (if needed) and execute the regression suite against Home Assistant test stubs.
+- `make test-ha` — provision the `.venv` environment (if needed) and execute the regression suite against Home Assistant test stubs (currently `tests/test_entity_recovery_manager.py` and `tests/test_homeassistant_callback_stub_helper.py`). Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options.
 
 #### Running Home Assistant integration tests locally
 
@@ -34,7 +34,7 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 3. Install the required dependencies (includes `homeassistant` and `pytest-homeassistant-custom-component`):
    - Full toolchain (linting, typing, tests): `pip install -r requirements-dev.txt`
    - Minimal options-flow test stack (`homeassistant`, pytest helpers, and `bcrypt` only): `./script/install_options_flow_test_deps.sh`
-4. Execute the regression suite, for example: `pytest tests/test_entity_recovery_manager.py` or simply `make test-ha`
+4. Execute the regression suite, for example: `pytest tests/test_entity_recovery_manager.py tests/test_homeassistant_callback_stub_helper.py` or simply `make test-ha` (override pytest flags with `make test-ha PYTEST_ARGS="--maxfail=1 -k callback"` as needed)
 5. When finished, leave the environment with `deactivate`
 
 ### Available Make targets

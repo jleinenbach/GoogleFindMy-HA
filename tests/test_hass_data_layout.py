@@ -839,7 +839,8 @@ def test_hass_data_layout(
                 lambda _hass: _StubEntityRegistry(),
             )
 
-            view = map_view_module.GoogleFindMyMapView(hass)
+            view = map_view_module.GoogleFindMyMapView()
+            view.hass = hass
             request = SimpleNamespace(query={"token": "token"})
             response = await view.get(request, "device-1")
             assert response.status == 200

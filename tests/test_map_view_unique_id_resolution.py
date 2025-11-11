@@ -20,6 +20,7 @@ from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
+from tests.helpers import install_homeassistant_core_callback_stub
 
 
 class _StubCoordinator:
@@ -132,13 +133,17 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     http_module.HomeAssistantView = _HttpViewStub
     monkeypatch.setitem(sys.modules, "homeassistant.components.http", http_module)
 
-    core_module = ModuleType("homeassistant.core")
+    core_module = install_homeassistant_core_callback_stub(monkeypatch)
 
     class _HomeAssistantStub:  # pragma: no cover - structural stub
         pass
 
-    core_module.HomeAssistant = _HomeAssistantStub
-    monkeypatch.setitem(sys.modules, "homeassistant.core", core_module)
+    monkeypatch.setattr(
+        core_module,
+        "HomeAssistant",
+        _HomeAssistantStub,
+        raising=False,
+    )
 
     helpers_module = ModuleType("homeassistant.helpers.entity_registry")
     helpers_module.async_get = lambda _hass: None
@@ -286,7 +291,8 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     hass = _StubHass()
-    view = map_view.GoogleFindMyMapView(hass)
+    view = map_view.GoogleFindMyMapView()
+    view.hass = hass
 
     request = SimpleNamespace(query={"token": "valid"})
     response = asyncio.run(view.get(request, device_id))
@@ -402,7 +408,8 @@ def test_map_view_uses_iso_last_seen_for_timeline(
     )
 
     hass = _StubHass()
-    view = map_view.GoogleFindMyMapView(hass)
+    view = map_view.GoogleFindMyMapView()
+    view.hass = hass
 
     request = SimpleNamespace(query={"token": "valid"})
     response = asyncio.run(view.get(request, device_id))
@@ -426,7 +433,8 @@ def test_map_view_html_uses_iso_conversion(monkeypatch: pytest.MonkeyPatch) -> N
 
     map_view = _load_map_view_module(monkeypatch)
     hass = _StubHass()
-    view = map_view.GoogleFindMyMapView(hass)
+    view = map_view.GoogleFindMyMapView()
+    view.hass = hass
 
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     end = datetime(2024, 1, 2, tzinfo=timezone.utc)

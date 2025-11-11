@@ -16,6 +16,7 @@ from typing import Any, cast
 
 import pytest
 
+from tests.helpers import install_homeassistant_core_callback_stub
 from tests.helpers.constants import load_googlefindmy_const_module
 
 
@@ -716,8 +717,7 @@ def _stub_homeassistant() -> None:
     core_module.HomeAssistant = HomeAssistant
     core_module.ServiceCall = ServiceCall
     core_module.Event = Event
-    core_module.callback = lambda func: func
-    sys.modules["homeassistant.core"] = core_module
+    install_homeassistant_core_callback_stub(module=core_module, overwrite=True)
 
     exceptions_module = ModuleType("homeassistant.exceptions")
 

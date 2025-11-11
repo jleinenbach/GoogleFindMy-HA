@@ -2,6 +2,7 @@
 
 VENV ?= .venv
 PYTHON ?= python3
+PYTEST_ARGS ?=
 
 clean:
 	@python script/clean_pycache.py
@@ -15,4 +16,6 @@ $(VENV)/bin/activate: requirements-dev.txt
 	@touch $(VENV)/bin/activate
 
 test-ha: $(VENV)/bin/activate
-	@. $(VENV)/bin/activate && pytest tests/test_entity_recovery_manager.py
+	@. $(VENV)/bin/activate && pytest $(PYTEST_ARGS) \
+		tests/test_entity_recovery_manager.py \
+		tests/test_homeassistant_callback_stub_helper.py

@@ -745,6 +745,7 @@ Before proposing a change Codex must:
 #### Home Assistant regression helper
 
 * Use `make test-ha` to provision the `.venv` environment, install `requirements-dev.txt` (including `homeassistant` and `pytest-homeassistant-custom-component`), and execute the regression suite in one step.
+* Append custom pytest flags with `make test-ha PYTEST_ARGS="…"` when you need markers, selection filters, or verbosity tweaks without editing the recipe.
 * The `README.md` section ["Running Home Assistant integration tests locally"](#running-home-assistant-integration-tests-locally) mirrors this workflow so external contributors can follow the same command.
 
 #### Config flow registration fallbacks

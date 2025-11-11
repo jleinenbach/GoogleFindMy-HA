@@ -13,7 +13,8 @@ def test_generate_map_html_escapes_dynamic_content(monkeypatch) -> None:
     """Ensure map HTML escapes device names and entity data."""
 
     map_view = _load_map_view_module(monkeypatch)
-    view = map_view.GoogleFindMyMapView(SimpleNamespace())
+    view = map_view.GoogleFindMyMapView()
+    view.hass = SimpleNamespace()
 
     now = datetime(2024, 1, 1, tzinfo=timezone.utc)
     html_content = view._generate_map_html(

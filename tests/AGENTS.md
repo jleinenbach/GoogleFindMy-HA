@@ -47,6 +47,26 @@ should consult that cached instance before calling
 `entity_registry.async_get(...)` so recovery logic inspects the same
 registry object as the fixture.
 
+### Home Assistant callback decorator stub
+
+Use `tests.helpers.install_homeassistant_core_callback_stub` whenever a
+test needs to ensure `homeassistant.core.callback` exists. The helper
+returns the resolved module, accepts an optional `monkeypatch` fixture so
+pytest rolls the stub back automatically, and supports attaching to an
+existing module via the `module=` argument (pass `overwrite=True` to
+replace an existing decorator). Sharing the helper keeps the suite aligned
+on the same identity-based implementation instead of scattering inline
+`lambda` definitions across multiple tests.
+
+Refer back to the root [`AGENTS.md`](../AGENTS.md#home-assistant-regression-helper)
+section for the `make test-ha` shortcut and its `PYTEST_ARGS` override when
+you need to install the full Home Assistant regression bundle before invoking
+these tests with additional pytest markers or verbosity flags.
+
+A guard in `tests/test_callback_stub_lint.py` fails if a new
+``lambda func: func`` stub appears under `tests/`. Use the shared helper
+instead of introducing inline decorators so the lint check stays green.
+
 For a quicker bootstrap when you only need the options-flow regression
 suite, run [`script/install_options_flow_test_deps.sh`](../script/install_options_flow_test_deps.sh).
 The helper installs the minimal requirements bundle defined in
