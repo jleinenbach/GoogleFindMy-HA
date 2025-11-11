@@ -135,6 +135,45 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
         "homeassistant.helpers", ModuleType("homeassistant.helpers")
     )
 
+    hass_holder = getattr(module, "_tests_hass_holder", None)
+    if hass_holder is None:
+        hass_holder = SimpleNamespace(hass=getattr(module, "hass", None))
+        setattr(module, "_tests_hass_holder", hass_holder)
+
+    class _HassProxy:
+        __slots__ = ("_holder",)
+
+        def __init__(self, holder: SimpleNamespace) -> None:
+            self._holder = holder
+
+        @property
+        def hass(self) -> Any | None:  # pragma: no cover - simple proxy access
+            return self._holder.hass
+
+        @hass.setter
+        def hass(self, value: Any | None) -> None:  # pragma: no cover - simple proxy access
+            self._holder.hass = value
+
+    hass_container = getattr(module, "_hass", None)
+    if not isinstance(hass_container, _HassProxy):
+        hass_container = _HassProxy(hass_holder)
+        setattr(module, "_hass", hass_container)
+
+    def _set_hass(target: Any | None) -> None:
+        hass_holder.hass = target
+        setattr(module, "hass", target)
+        container = getattr(module, "_hass", None)
+        if container is None or not hasattr(container, "hass"):
+            container = SimpleNamespace(hass=target)
+            setattr(module, "_hass", container)
+        else:
+            try:
+                setattr(container, "hass", target)
+            except AttributeError:
+                container.hass = target
+
+    setattr(module, "_tests_set_hass", _set_hass)
+
     if not getattr(module, "_tests_frame_stubbed", False):
 
         class _FrameHelper:
@@ -178,6 +217,9 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
         frame_helper = _FrameHelper()
 
         def _report_usage_proxy(*args: Any, **kwargs: Any) -> None:
+            stored_hass = hass_holder.hass
+            if stored_hass is not None:
+                _set_hass(stored_hass)
             frame_helper.report_usage(*args, **kwargs)
 
         configured = getattr(module, "_configured_instances", None)
@@ -185,34 +227,41 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
             configured = []
             setattr(module, "_configured_instances", configured)
 
-        hass_container = getattr(module, "_hass", None)
-        if hass_container is None or not hasattr(hass_container, "hass"):
-            hass_container = SimpleNamespace(hass=None)
-            setattr(module, "_hass", hass_container)
+        original_set_up = getattr(module, "set_up", None)
+        original_async_setup = getattr(module, "async_setup", None)
 
         def _set_up(target: Any) -> None:
             configured.append(target)
-            setattr(module, "hass", target)
-            hass_container.hass = target
+            _set_hass(target)
             frame_helper.hass = target
             frame_helper.set_up(target)
+            if callable(original_set_up) and original_set_up is not _set_up:
+                original_set_up(target)
 
         async def _async_set_up(target: Any) -> None:
-            result = frame_helper.async_set_up(target)
-            if inspect.isawaitable(result):
-                await result
+            _set_up(target)
+            if callable(original_async_setup) and original_async_setup is not _async_set_up:
+                result = original_async_setup(target)
+                if inspect.isawaitable(result):
+                    await result
 
         module.set_up = _set_up  # type: ignore[assignment]
+        module.setup = _set_up  # type: ignore[assignment]
         module.async_set_up = _async_set_up  # type: ignore[assignment]
+        module.async_setup = _async_set_up  # type: ignore[assignment]
         module.report = frame_helper.report  # type: ignore[assignment]
         module.report_usage = _report_usage_proxy  # type: ignore[assignment]
         module.frame_helper = frame_helper  # type: ignore[assignment]
+        setattr(module, "_tests_report_usage_proxy", _report_usage_proxy)
         setattr(module, "_tests_frame_stubbed", True)
 
-    if callable(setup := getattr(module, "set_up", None)):
+    setup = getattr(module, "set_up", None) or getattr(module, "setup", None)
+    if callable(setup):
         setup(hass)
 
-    async_setup = getattr(module, "async_set_up", None)
+    async_setup = getattr(module, "async_set_up", None) or getattr(
+        module, "async_setup", None
+    )
     if callable(async_setup):
         result = async_setup(hass)
         if inspect.isawaitable(result):
@@ -225,31 +274,123 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
 
     sys.modules["homeassistant.helpers.frame"] = module
     setattr(helpers_pkg, "frame", module)
+    _set_hass(hass)
 
-    try:
-        config_entries_module = importlib.import_module("homeassistant.config_entries")
-    except ModuleNotFoundError:
-        config_entries_module = None
-    if config_entries_module is not None:
-        setattr(config_entries_module, "report_usage", module.report_usage)
+    def _apply_config_entry_patches() -> None:
+        try:
+            config_entries_module = importlib.import_module(
+                "homeassistant.config_entries"
+            )
+        except ModuleNotFoundError:
+            return
+
+        def _noop_report_usage(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        config_entries_module.report_usage = _noop_report_usage  # type: ignore[assignment]
+        config_entries_module.__dict__["report_usage"] = _noop_report_usage
 
         options_flow_cls = getattr(config_entries_module, "OptionsFlow", None)
-        config_entry_prop = getattr(options_flow_cls, "config_entry", None)
-        if (
-            options_flow_cls is not None
-            and isinstance(config_entry_prop, property)
-            and config_entry_prop.fset is None
-        ):
+        options_flow_with_reload = getattr(
+            config_entries_module, "OptionsFlowWithReload", None
+        )
 
-            def _set_config_entry(self: Any, value: Any) -> None:
-                setattr(self, "_config_entry", value)
+        def _assign_config_entry(target: Any, value: Any) -> None:
+            hass_obj = getattr(target, "hass", None)
+            if hass_obj is not None:
+                set_hass = getattr(module, "_tests_set_hass", None)
+                if callable(set_hass):
+                    set_hass(hass_obj)
+                else:
+                    container = getattr(module, "_hass", None)
+                    if hasattr(container, "hass"):
+                        try:
+                            setattr(container, "hass", hass_obj)
+                        except AttributeError:
+                            container.hass = hass_obj
+                    else:
+                        setattr(module, "_hass", SimpleNamespace(hass=hass_obj))
+                    setattr(module, "hass", hass_obj)
+            setattr(target, "_config_entry", value)
 
-            options_flow_cls.config_entry = property(  # type: ignore[assignment]
-                config_entry_prop.fget,
-                _set_config_entry,
-                config_entry_prop.fdel,
-                config_entry_prop.__doc__,
+        def _wrap_options_flow_property(cls: Any) -> None:
+            if cls is None:
+                return
+            current_prop = getattr(cls, "config_entry", None)
+            if isinstance(current_prop, property):
+                original_set_config_entry = current_prop.fset
+
+                def _set_config_entry(self: Any, value: Any) -> None:
+                    try:
+                        if callable(original_set_config_entry):
+                            original_set_config_entry(self, value)
+                            return
+                    except RuntimeError as err:
+                        if str(err) != "Frame helper not set up":
+                            raise
+                    _assign_config_entry(self, value)
+
+                patched = property(
+                    current_prop.fget,
+                    _set_config_entry,
+                    current_prop.fdel,
+                    current_prop.__doc__,
+                )
+            else:
+
+                def _get_config_entry(self: Any) -> Any:
+                    return getattr(self, "_config_entry", None)
+
+                def _set_config_entry(self: Any, value: Any) -> None:
+                    _assign_config_entry(self, value)
+
+                patched = property(_get_config_entry, _set_config_entry, None, None)
+
+            cls.config_entry = patched  # type: ignore[assignment]
+
+        _wrap_options_flow_property(options_flow_cls)
+        _wrap_options_flow_property(options_flow_with_reload)
+
+        try:
+            integration_flow_module = importlib.import_module(
+                "custom_components.googlefindmy.config_flow"
             )
+        except ModuleNotFoundError:
+            integration_flow_module = None
+        if integration_flow_module is not None:
+            handler_cls = getattr(
+                integration_flow_module, "OptionsFlowHandler", None
+            )
+            if handler_cls is not None:
+
+                class _ConfigEntryDescriptor:
+                    def __get__(self, instance: Any, owner: Any) -> Any:
+                        if instance is None:
+                            return self
+                        return getattr(instance, "_config_entry", None)
+
+                    def __set__(self, instance: Any, value: Any) -> None:
+                        _assign_config_entry(instance, value)
+
+                handler_cls.config_entry = _ConfigEntryDescriptor()  # type: ignore[assignment]
+
+    _apply_config_entry_patches()
+
+    if not getattr(module, "_tests_import_reload_hook", False):
+        original_reload = importlib.reload
+
+        def _patched_reload(target: ModuleType, *args: Any, **kwargs: Any) -> ModuleType:
+            result = original_reload(target, *args, **kwargs)
+            if target.__name__ in {
+                "homeassistant.config_entries",
+                "custom_components.googlefindmy.config_flow",
+            }:
+                _apply_config_entry_patches()
+            return result
+
+        importlib.reload = _patched_reload  # type: ignore[assignment]
+        setattr(module, "_tests_import_reload_hook", True)
+        setattr(module, "_tests_original_reload", original_reload)
 
 
 def _ensure_flow_handler_default() -> None:

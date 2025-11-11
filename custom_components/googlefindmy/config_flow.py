@@ -42,7 +42,7 @@ import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import import_module
-from collections.abc import Mapping as CollMapping
+from collections.abc import Iterable as CollIterable, Mapping as CollMapping
 from types import MappingProxyType, ModuleType
 from typing import (
     TYPE_CHECKING,
@@ -50,7 +50,6 @@ from typing import (
     Awaitable,
     Callable,
     ClassVar,
-    Iterable,
     Mapping,
     Protocol,
     TypeAlias,
@@ -921,7 +920,7 @@ _TRACKER_FEATURE_PLATFORMS: tuple[str, ...] = TRACKER_FEATURE_PLATFORMS
 _SERVICE_FEATURE_PLATFORMS: tuple[str, ...] = SERVICE_FEATURE_PLATFORMS
 
 
-def _normalize_feature_list(features: Iterable[str]) -> list[str]:
+def _normalize_feature_list(features: CollIterable[str]) -> list[str]:
     """Return a sorted list of unique, lower-cased feature identifiers."""
 
     normalized: list[str] = []
@@ -935,7 +934,7 @@ def _normalize_feature_list(features: Iterable[str]) -> list[str]:
     return sorted(ordered)
 
 
-def _normalize_visible_ids(visible_ids: Iterable[str]) -> list[str]:
+def _normalize_visible_ids(visible_ids: CollIterable[str]) -> list[str]:
     """Return a sorted list of unique device identifiers suitable for storage."""
 
     candidates: list[str] = []
@@ -1000,11 +999,11 @@ def _derive_feature_settings(
 def _build_subentry_payload(
     *,
     group_key: str,
-    features: Iterable[str],
+    features: CollIterable[str],
     entry_title: str,
     has_google_home_filter: bool,
     feature_flags: Mapping[str, Any],
-    visible_device_ids: Iterable[str] | None = None,
+    visible_device_ids: CollIterable[str] | None = None,
 ) -> dict[str, Any]:
     """Construct the payload stored on a config subentry."""
 
@@ -1608,7 +1607,7 @@ def _normalize_and_validate_discovery_payload(
         elif isinstance(value, Mapping):
             for label, token in value.items():
                 _add_candidate(str(label), token)
-        elif isinstance(value, Iterable):
+        elif isinstance(value, CollIterable):
             for idx, token in enumerate(value):
                 if isinstance(token, Mapping):
                     label = str(token.get("label") or token.get("source") or key)
@@ -4115,7 +4114,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     or key.replace("_", " ").title()
                 )
                 raw_visible = data.get("visible_device_ids")
-                if isinstance(raw_visible, Iterable) and not isinstance(
+                if isinstance(raw_visible, CollIterable) and not isinstance(
                     raw_visible, (str, bytes)
                 ):
                     visible = tuple(
@@ -4282,7 +4281,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
 
             data = dict(getattr(subentry, "data", {}) or {})
             raw_visible = data.get("visible_device_ids")
-            if isinstance(raw_visible, Iterable) and not isinstance(
+            if isinstance(raw_visible, CollIterable) and not isinstance(
                 raw_visible, (str, bytes)
             ):
                 visible = [
@@ -4354,10 +4353,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         if coordinator is None:
             coordinator = getattr(entry, "runtime_data", None)
 
-        datasets: list[Iterable[Any]] = []
+        datasets: list[CollIterable[Any]] = []
         if coordinator is not None:
             data_attr = getattr(coordinator, "data", None)
-            if isinstance(data_attr, Iterable):
+            if isinstance(data_attr, CollIterable):
                 datasets.append(data_attr)
 
         for dataset in datasets:
@@ -4449,11 +4448,58 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         fields: dict[Any, Any] = {
             vol.Required(_FIELD_SUBENTRY, default=default_subentry): vol.In(choices)
         }
-        option_markers: list[Any] = []
+        option_markers: list[str] = []
+
+        def _resolve_marker_key(marker: Any) -> str:
+            obj: Any = marker
+            seen: set[int] = set()
+            while True:
+                if isinstance(obj, str):
+                    return obj
+                obj_id = id(obj)
+                if obj_id in seen:
+                    break
+                seen.add(obj_id)
+                candidate = getattr(obj, "schema", None)
+                if isinstance(candidate, Mapping):
+                    try:
+                        obj = next(iter(candidate))
+                        continue
+                    except StopIteration:
+                        break
+                if isinstance(candidate, CollIterable) and not isinstance(
+                    candidate, (str, bytes, bytearray)
+                ):
+                    iterator = iter(candidate)
+                    try:
+                        obj = next(iterator)
+                        continue
+                    except StopIteration:
+                        break
+                if candidate is not None:
+                    obj = candidate
+                    continue
+                if isinstance(obj, Mapping):
+                    try:
+                        obj = next(iter(obj))
+                        continue
+                    except StopIteration:
+                        break
+                if isinstance(obj, CollIterable) and not isinstance(
+                    obj, (str, bytes, bytearray)
+                ):
+                    iterator = iter(obj)
+                    try:
+                        obj = next(iterator)
+                        continue
+                    except StopIteration:
+                        break
+                break
+            return str(obj)
 
         def _register(marker: Any, validator: Any) -> None:
             fields[marker] = validator
-            option_markers.append(marker)
+            option_markers.append(_resolve_marker_key(marker))
 
         _register(
             vol.Optional(OPT_LOCATION_POLL_INTERVAL),
@@ -4494,8 +4540,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                 errors[_FIELD_SUBENTRY] = "invalid_subentry"
             else:
                 new_options = dict(entry.options)
-                for marker in option_markers:
-                    real_key = next(iter(getattr(marker, "schema", {marker})))
+                for real_key in option_markers:
                     if real_key in user_input:
                         new_options[real_key] = user_input[real_key]
                     else:
