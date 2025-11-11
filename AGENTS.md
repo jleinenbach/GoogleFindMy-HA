@@ -97,6 +97,7 @@ Always keep any `from __future__` imports immediately after the module docstring
 * [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Full Home Assistant 2025.7+ handbook covering the architecture, config flow factories, lifecycle routing, discovery patterns, translation rules, and peer-review checklist for configuration subentries. Keep code and tests aligned with this contract. When adding concise checklists or reminders beneath an existing subsection, anchor the new block with a `####` heading so the handbook's navigation keeps the guidance grouped with its parent topic. Mirror this heading-level rule in other documentation unless a directory-specific `AGENTS.md` states otherwise.
 * [`docs/AI_DEPRECATIONS_GUIDE.md`](docs/AI_DEPRECATIONS_GUIDE.md) — Core 2025.10/2025.11 technical migration playbook for deprecations, breaking changes, and behavioral shifts. Treat its critical checklist as mandatory when touching affected APIs.
   * Section VIII.D contains the new device/entity registry troubleshooting playbooks. Reference them whenever you touch `_async_setup_subentry`, registry rebuild services, or device cleanup helpers, and summarize the relevant diagnostics in your PR description.
+* **Self-healing helpers:** `_async_self_heal_duplicate_entities()` in `custom_components/googlefindmy/__init__.py` documents the existing duplicate-entity cleanup flow; review it alongside the new `EntityRecoveryManager` when designing additional recovery logic.
 
 ### Home Assistant helper signature changelog
 

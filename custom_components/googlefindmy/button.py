@@ -35,6 +35,7 @@ from .const import (
     SERVICE_LOCATE_DEVICE,
     TRACKER_SUBENTRY_KEY,
 )
+from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator
 from .entity import GoogleFindMyDeviceEntity, resolve_coordinator
 from .ha_typing import ButtonEntity, callback
@@ -206,6 +207,85 @@ async def async_setup_entry(
 
     unsub = coordinator.async_add_listener(_add_new_devices)
     config_entry.async_on_unload(unsub)
+
+    runtime_data = getattr(config_entry, "runtime_data", None)
+    recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
+
+    if isinstance(recovery_manager, EntityRecoveryManager):
+        entry_id = getattr(config_entry, "entry_id", None)
+
+        def _is_visible(device_id: str) -> bool:
+            try:
+                return bool(
+                    coordinator.is_device_visible_in_subentry(
+                        tracker_subentry_key, device_id
+                    )
+                )
+            except Exception:  # pragma: no cover - defensive best effort
+                return True
+
+        actions: dict[str, type[GoogleFindMyButtonEntity]] = {
+            "play_sound": GoogleFindMyPlaySoundButton,
+            "stop_sound": GoogleFindMyStopSoundButton,
+            "locate_device": GoogleFindMyLocateButton,
+        }
+
+        def _expected_unique_ids() -> set[str]:
+            if not isinstance(entry_id, str) or not entry_id:
+                return set()
+            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
+                return set()
+            expected: set[str] = set()
+            for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+                dev_id = device.get("id")
+                if not isinstance(dev_id, str) or not dev_id:
+                    continue
+                if not _is_visible(dev_id):
+                    continue
+                for action in actions:
+                    expected.add(
+                        f"{DOMAIN}_{entry_id}_{tracker_subentry_identifier}_{dev_id}_{action}"
+                    )
+            return expected
+
+        def _build_entities(missing: set[str]) -> list[ButtonEntity]:
+            if not missing:
+                return []
+            built: list[ButtonEntity] = []
+            if not isinstance(entry_id, str) or not entry_id:
+                return built
+            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
+                return built
+            snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
+            for device in snapshot:
+                dev_id = device.get("id")
+                if not isinstance(dev_id, str) or not dev_id:
+                    continue
+                if not _is_visible(dev_id):
+                    continue
+                label = _derive_device_label(device)
+                for action, entity_cls in actions.items():
+                    unique_id = (
+                        f"{DOMAIN}_{entry_id}_{tracker_subentry_identifier}_{dev_id}_{action}"
+                    )
+                    if unique_id not in missing:
+                        continue
+                    built.append(
+                        entity_cls(
+                            coordinator,
+                            device,
+                            label,
+                            subentry_key=tracker_subentry_key,
+                            subentry_identifier=tracker_subentry_identifier,
+                        )
+                    )
+            return built
+
+        recovery_manager.register_button_platform(
+            expected_unique_ids=_expected_unique_ids,
+            entity_factory=_build_entities,
+            add_entities=async_add_entities,
+        )
 
 
 # ----------------------------- Base class -----------------------------------
