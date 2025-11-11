@@ -99,7 +99,18 @@ from homeassistant.helpers import (
     entity_registry as er,
     issue_registry as ir,
 )
-from homeassistant.helpers.entity import Entity
+if TYPE_CHECKING:
+    from homeassistant.helpers.entity import Entity
+else:  # pragma: no cover - test environments without full Home Assistant
+    try:
+        from homeassistant.helpers.entity import Entity
+    except (ImportError, AttributeError):
+
+        class Entity:  # type: ignore[too-many-ancestors, override]
+            """Minimal placeholder for Home Assistant's Entity base class."""
+
+            __slots__ = ()
+
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.storage import Store
 
