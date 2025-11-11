@@ -2878,9 +2878,17 @@ class ConfigFlow(
 
             options_payload: dict[str, Any] = {}
             managed_option_keys: set[str] = set()
-            for k in schema_fields.keys():
-                # `k` may be a voluptuous marker; retrieve the underlying key
-                real_key = next(iter(getattr(k, "schema", {k})))
+            for marker in schema_fields.keys():
+                # `marker` may be a voluptuous wrapper; retrieve the underlying key
+                schema_attr = getattr(marker, "schema", marker)
+                if isinstance(schema_attr, str):
+                    real_key = schema_attr
+                elif isinstance(schema_attr, CollIterable) and not isinstance(
+                    schema_attr, (bytes, bytearray)
+                ):
+                    real_key = next(iter(schema_attr))
+                else:
+                    real_key = cast(str, schema_attr)
                 managed_option_keys.add(real_key)
                 options_payload[real_key] = user_input.get(
                     real_key, defaults.get(real_key)
@@ -2926,6 +2934,8 @@ class ConfigFlow(
                         existing_options.pop(managed, None)
                     existing_options.update(options_payload)
 
+                    entry_for_update.options = existing_options
+
                     try:
                         self.hass.config_entries.async_update_entry(
                             entry_for_update,
@@ -2939,7 +2949,6 @@ class ConfigFlow(
                             entry_for_update,
                             data=fallback_payload,
                         )
-                        setattr(entry_for_update, "options", existing_options)
 
                     self.hass.async_create_task(
                         self.hass.config_entries.async_reload(entry_for_update.entry_id)
@@ -4001,10 +4010,8 @@ class HubSubentryFlowHandler(_BaseSubentryFlow):
             self._entry_id or "<unknown>",
         )
         result = super().async_step_user(user_input)
-        if inspect.isawaitable(result):
-            awaited = await cast(Awaitable[FlowResult], result)
-            return cast(FlowResult, awaited)
-        return cast(FlowResult, result)
+        resolved = await _resolve_flow_result(result)
+        return cast(FlowResult, resolved)
 
 
 class ServiceSubentryFlowHandler(_BaseSubentryFlow):
