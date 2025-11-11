@@ -37,6 +37,12 @@ The plugin ships the canonical Home Assistant stubs that our contract
 tests depend on; skipping this pairing risks exercising stale or
 partial interfaces.
 
+When those stubs are active, remember that the entity registry fixture
+populates `hass.data["entity_registry"]`. Integration helpers under test
+should consult that cached instance before calling
+`entity_registry.async_get(...)` so recovery logic inspects the same
+registry object as the fixture.
+
 For a quicker bootstrap when you only need the options-flow regression
 suite, run [`script/install_options_flow_test_deps.sh`](../script/install_options_flow_test_deps.sh).
 The helper installs the minimal requirements bundle defined in

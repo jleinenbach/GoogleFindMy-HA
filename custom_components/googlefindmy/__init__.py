@@ -41,7 +41,7 @@ import time
 from contextlib import suppress
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Iterable, Literal, TypedDict, TypeVar, cast
 from collections import defaultdict
 from collections.abc import (
     Awaitable,
@@ -1789,7 +1789,28 @@ def _iter_config_entry_entities(
                 if getattr(entity_entry, "config_entry_id", None) == entry_id
             ]
 
-    return tuple(entries_iterable)
+    entries = tuple(entries_iterable)
+    if entries:
+        return entries
+
+    fallback_entities = getattr(entity_registry, "entities", None)
+    candidates: Iterable[er.RegistryEntry]
+    if fallback_entities is None:
+        candidates = ()
+    else:
+        values = getattr(fallback_entities, "values", None)
+        if callable(values):
+            candidates = values()
+        elif isinstance(fallback_entities, Mapping):
+            candidates = fallback_entities.values()
+        else:
+            candidates = ()
+
+    return tuple(
+        entity_entry
+        for entity_entry in candidates
+        if getattr(entity_entry, "config_entry_id", None) == entry_id
+    )
 
 
 @dataclass(slots=True)
@@ -1923,7 +1944,10 @@ class EntityRecoveryManager:
         if not self._platforms:
             return
 
-        entity_registry = er.async_get(self._hass)
+        registry_key = getattr(er, "DATA_REGISTRY", "entity_registry")
+        entity_registry = self._hass.data.get(registry_key)
+        if entity_registry is None:
+            entity_registry = er.async_get(self._hass)
         registry_entries = _iter_config_entry_entities(
             entity_registry, self._entry.entry_id
         )
@@ -1933,7 +1957,17 @@ class EntityRecoveryManager:
             platform = getattr(entry, "domain", None)
             if not isinstance(platform, str):
                 continue
-            owner = getattr(entry, "platform", None)
+            owner = getattr(
+                entry,
+                "integration_domain",
+                getattr(entry, "platform", None),
+            )
+            if owner is None:
+                # Home Assistant 2025.10+ exposes ``integration_domain`` on entity
+                # registry entries while older cores only expose ``platform``.
+                # Falling back to ``DOMAIN`` keeps legacy builds compatible and
+                # documents why both attributes remain supported during recovery.
+                owner = DOMAIN
             if owner != DOMAIN:
                 continue
             unique_id = getattr(entry, "unique_id", None)
