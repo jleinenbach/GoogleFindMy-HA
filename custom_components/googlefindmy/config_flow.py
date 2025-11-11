@@ -2157,10 +2157,7 @@ class ConfigFlow(
 
         if user_input is not None:
             return await self._async_resolve_flow_result(
-                cast(
-                    FlowResult | Awaitable[FlowResult],
-                    self.async_abort(reason="migration_successful"),
-                )
+                self.async_abort(reason="migration_successful")
             )
 
         context_obj = getattr(self, "context", None)
@@ -2191,13 +2188,10 @@ class ConfigFlow(
                 placeholders["email"] = email_placeholder
 
         return await self._async_resolve_flow_result(
-            cast(
-                FlowResult | Awaitable[FlowResult],
-                self.async_show_form(
-                    step_id="migrate_complete",
-                    data_schema=vol.Schema({}),
-                    description_placeholders=placeholders,
-                ),
+            self.async_show_form(
+                step_id="migrate_complete",
+                data_schema=vol.Schema({}),
+                description_placeholders=placeholders,
             )
         )
 
