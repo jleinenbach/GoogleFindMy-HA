@@ -42,7 +42,7 @@ from homeassistant.config_entries import ConfigSubentry
 from homeassistant.exceptions import HomeAssistantError
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
-    config_entries_flow_stub,
+    attach_config_entries_flow_manager,
     set_config_flow_unique_id,
 )
 
@@ -63,7 +63,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
         self.entry_updates: list[dict[str, Any]] = []
         self.removed: list[str] = []
         self.setup_calls: list[str] = []
-        self.flow = config_entries_flow_stub().flow
+        attach_config_entries_flow_manager(self)
 
     def async_entries(self, domain: str | None = None) -> list[Any]:
         if domain and domain != DOMAIN:

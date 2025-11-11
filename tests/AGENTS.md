@@ -30,6 +30,61 @@ When a test module depends on optional plugins such as
 intact. The skip guard avoids littering files with inline import
 fallbacks and ensures `ruff` continues to enforce top-level grouping.
 
+Whenever the local environment installs the real `homeassistant`
+package (for example via `pip install -r requirements-dev.txt`), also
+install `pytest-homeassistant-custom-component` and run `pytest -q`.
+The plugin ships the canonical Home Assistant stubs that our contract
+tests depend on; skipping this pairing risks exercising stale or
+partial interfaces.
+
+> **Note:** `pytest -q` buffers its trailing summary when the suite is
+> quiet. Wait a moment for the command to exit cleanly, or rerun the
+> module without `-q` if you need immediate progress output while
+> verifying changes with the real stubs.
+
+### Checklist — real Home Assistant stub pairing
+
+Always review and update this checklist whenever modifying tests,
+helpers, or fixtures. Every change must ensure the list stays current
+and accurate so contributors can rely on it when the genuine
+`homeassistant` package plus `pytest-homeassistant-custom-component`
+are installed. **Review this checklist on every single change under
+`tests/` and update the entries immediately if expectations shift.**
+
+1. **Frame helper bootstrap** — confirm
+   [`prepare_flow_hass_config_entries`](helpers/config_flow.py) still
+   invokes the frame helper setup path and patches
+   `homeassistant.helpers.frame` (including `report_usage`) so
+   `ConfigFlow` instances and options flows operate without manual
+   monkeypatching.
+2. **Handler default patch** — verify
+   [`_ensure_flow_handler_default`](helpers/config_flow.py) continues to
+   set a default `handler` on
+   `custom_components.googlefindmy.config_flow.ConfigFlow` instances
+   when the upstream implementation omits it.
+3. **Service validation shim** — ensure the local
+   [`_patch_service_validation_error`](helpers/config_flow.py)
+   adjustments retain a descriptive `__str__`/`__repr__`
+   implementation compatible with tests that assert translated
+   messages.
+4. **Config entries manager attachment** — double-check that
+   [`prepare_flow_hass_config_entries`](helpers/config_flow.py) still
+   assigns the fake manager to `hass.config_entries`, seeds
+   `loop`/`loop_thread_id`, and works with the
+   [`FakeConfigEntriesManager`](helpers/homeassistant.py).
+5. **Options flow config-entry setter** — confirm the patched
+   `config_entry` property on Home Assistant’s `OptionsFlow` stub keeps
+   accepting assignment so options flow tests can store the entry
+   reference (see [`helpers/config_flow.py`](helpers/config_flow.py)).
+6. **Module guards** — validate that tests importing optional Home
+   Assistant components continue to wrap those imports in
+   `pytest.skip(..., allow_module_level=True)` guards so the suite
+   degrades gracefully when the plugin is absent.
+
+Treat this checklist as a living document: if a new helper or guard
+becomes necessary, add it here and verify each item before completing
+any change under `tests/`.
+
 Contract tests under `tests/test_entity_device_info_contract.py` expect
 `pytest-homeassistant-custom-component`'s bundled `homeassistant`
 stubs to be installed. Without that optional dependency, pytest will

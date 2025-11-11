@@ -16,7 +16,10 @@ import pytest
 
 from custom_components.googlefindmy import config_flow, discovery
 from custom_components.googlefindmy.const import DOMAIN
-from tests.helpers.config_flow import config_entries_flow_stub
+from tests.helpers.config_flow import (
+    config_entries_flow_stub,
+    prepare_flow_hass_config_entries,
+)
 
 integration = importlib.import_module("custom_components.googlefindmy")
 
@@ -27,13 +30,17 @@ if TYPE_CHECKING:
 def _make_hass() -> SimpleNamespace:
     """Return a minimal hass stub suitable for discovery tests."""
 
-    config_entries = config_entries_flow_stub(
-        result={
-            "type": config_flow.data_entry_flow.FlowResultType.ABORT,
-            "reason": "unknown",
-        }
+    hass = SimpleNamespace(data={})
+    prepare_flow_hass_config_entries(
+        hass,
+        lambda: config_entries_flow_stub(
+            result={
+                "type": config_flow.data_entry_flow.FlowResultType.ABORT,
+                "reason": "unknown",
+            }
+        ),
     )
-    return SimpleNamespace(data={}, config_entries=config_entries)
+    return hass
 
 
 def test_trigger_cloud_discovery_uses_helper(
