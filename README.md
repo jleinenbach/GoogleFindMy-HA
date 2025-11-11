@@ -25,6 +25,7 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 
 - `mypy --strict` — run the full strict type-checker locally to mirror CI expectations before opening a pull request.
 - `make lint` — invoke the Ruff lint target for the entire repository using the same settings enforced in CI.
+- `pytest -q` — execute the full integration test suite whenever `homeassistant` and `pytest-homeassistant-custom-component` are installed locally (for example after `pip install -r requirements-dev.txt`) to confirm the bundled Home Assistant stubs remain in sync.
 
 ### Available Make targets
 

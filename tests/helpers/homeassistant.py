@@ -15,7 +15,7 @@ from custom_components.googlefindmy.const import DOMAIN
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import ServiceCall
 
-from .config_flow import config_entries_flow_stub
+from .config_flow import attach_config_entries_flow_manager
 
 __all__ = [
     "FakeConfigEntry",
@@ -125,7 +125,7 @@ class FakeConfigEntriesManager:
         self.update_calls: list[tuple[FakeConfigEntry, dict[str, Any]]] = []
         self.migrate_calls: list[str] = []
         self.migration_success = migration_success
-        self.flow = config_entries_flow_stub().flow
+        attach_config_entries_flow_manager(self)
         if not supports_migrate:
             # Mirror Home Assistant instances that omit async_migrate helpers.
             self.async_migrate_entry = None  # type: ignore[assignment]
