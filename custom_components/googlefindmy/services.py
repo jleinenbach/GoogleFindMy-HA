@@ -467,14 +467,19 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             else:
                 entries_placeholder = "—"
 
+            placeholders = {
+                "entries": entries_placeholder,
+                "active_count": str(active_count),
+                "total_count": str(total_count),
+            }
             raise ServiceValidationError(
+                message=(
+                    "No active Google Find My entries (active {active_count}/{total_count};"
+                    " entries: {entries}).".format(**placeholders)
+                ),
                 translation_domain=DOMAIN,
                 translation_key="no_active_entry",
-                translation_placeholders={
-                    "entries": entries_placeholder,
-                    "active_count": str(active_count),
-                    "total_count": str(total_count),
-                },
+                translation_placeholders=placeholders,
             )
 
         # Resolve canonical id & friendly name via context resolver (device_id/entity_id/canonical_id)
@@ -482,10 +487,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             canonical_id, _friendly = ctx["resolve_canonical"](hass, device_id)
         except HomeAssistantError as err:
             # Pass through as translated validation error
+            placeholders = {"device_id": str(device_id)}
             raise ServiceValidationError(
+                message="Device '{device_id}' was not found.".format(**placeholders),
                 translation_domain=DOMAIN,
                 translation_key="device_not_found",
-                translation_placeholders={"device_id": str(device_id)},
+                translation_placeholders=placeholders,
             ) from err
 
         # 1) Preferred mapping: device registry relation for the passed device_id
@@ -530,10 +537,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                     return runtime, canonical_id
 
         # 3) Not found -> translated error
+        placeholders = {"device_id": str(device_id)}
         raise ServiceValidationError(
+            message="Device '{device_id}' was not found.".format(**placeholders),
             translation_domain=DOMAIN,
             translation_key="device_not_found",
-            translation_placeholders={"device_id": str(device_id)},
+            translation_placeholders=placeholders,
         )
 
     # ---- Service handlers ----------------------------------------------------
@@ -542,10 +551,12 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         """Handle locate device service call (metadata in services.yaml)."""
         raw_device_id = call.data.get("device_id")
         if not isinstance(raw_device_id, str) or not raw_device_id:
+            placeholders = {"device_id": str(raw_device_id)}
             raise ServiceValidationError(
+                message="Device '{device_id}' was not found.".format(**placeholders),
                 translation_domain=DOMAIN,
                 translation_key="device_not_found",
-                translation_placeholders={"device_id": str(raw_device_id)},
+                translation_placeholders=placeholders,
             )
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
@@ -553,23 +564,29 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         except ServiceValidationError:
             raise
         except Exception as err:
+            placeholders = {
+                "device_id": str(raw_device_id),
+                "error": str(err),
+            }
             raise ServiceValidationError(
+                message="Failed to locate device '{device_id}': {error}".format(
+                    **placeholders
+                ),
                 translation_domain=DOMAIN,
                 translation_key="locate_failed",
-                translation_placeholders={
-                    "device_id": str(raw_device_id),
-                    "error": str(err),
-                },
+                translation_placeholders=placeholders,
             ) from err
 
     async def async_play_sound_service(call: ServiceCall) -> None:
         """Handle play sound service call."""
         raw_device_id = call.data.get("device_id")
         if not isinstance(raw_device_id, str) or not raw_device_id:
+            placeholders = {"device_id": str(raw_device_id)}
             raise ServiceValidationError(
+                message="Device '{device_id}' was not found.".format(**placeholders),
                 translation_domain=DOMAIN,
                 translation_key="device_not_found",
-                translation_placeholders={"device_id": str(raw_device_id)},
+                translation_placeholders=placeholders,
             )
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
@@ -577,23 +594,29 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         except ServiceValidationError:
             raise
         except Exception as err:
+            placeholders = {
+                "device_id": str(raw_device_id),
+                "error": str(err),
+            }
             raise ServiceValidationError(
+                message="Failed to play sound on device '{device_id}': {error}".format(
+                    **placeholders
+                ),
                 translation_domain=DOMAIN,
                 translation_key="play_sound_failed",
-                translation_placeholders={
-                    "device_id": str(raw_device_id),
-                    "error": str(err),
-                },
+                translation_placeholders=placeholders,
             ) from err
 
     async def async_stop_sound_service(call: ServiceCall) -> None:
         """Handle stop sound service call."""
         raw_device_id = call.data.get("device_id")
         if not isinstance(raw_device_id, str) or not raw_device_id:
+            placeholders = {"device_id": str(raw_device_id)}
             raise ServiceValidationError(
+                message="Device '{device_id}' was not found.".format(**placeholders),
                 translation_domain=DOMAIN,
                 translation_key="device_not_found",
-                translation_placeholders={"device_id": str(raw_device_id)},
+                translation_placeholders=placeholders,
             )
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
@@ -601,23 +624,29 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         except ServiceValidationError:
             raise
         except Exception as err:
+            placeholders = {
+                "device_id": str(raw_device_id),
+                "error": str(err),
+            }
             raise ServiceValidationError(
+                message="Failed to stop sound on device '{device_id}': {error}".format(
+                    **placeholders
+                ),
                 translation_domain=DOMAIN,
                 translation_key="stop_sound_failed",
-                translation_placeholders={
-                    "device_id": str(raw_device_id),
-                    "error": str(err),
-                },
+                translation_placeholders=placeholders,
             ) from err
 
     async def async_locate_external_service(call: ServiceCall) -> None:
         """External locate device service (delegates to locate)."""
         raw_device_id = call.data.get("device_id")
         if not isinstance(raw_device_id, str) or not raw_device_id:
+            placeholders = {"device_id": str(raw_device_id)}
             raise ServiceValidationError(
+                message="Device '{device_id}' was not found.".format(**placeholders),
                 translation_domain=DOMAIN,
                 translation_key="device_not_found",
-                translation_placeholders={"device_id": str(raw_device_id)},
+                translation_placeholders=placeholders,
             )
         # device_name is optional; currently used only for logging on caller side.
         try:
@@ -626,13 +655,17 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         except ServiceValidationError:
             raise
         except Exception as err:
+            placeholders = {
+                "device_id": str(raw_device_id),
+                "error": str(err),
+            }
             raise ServiceValidationError(
+                message="Failed to locate device '{device_id}': {error}".format(
+                    **placeholders
+                ),
                 translation_domain=DOMAIN,
                 translation_key="locate_failed",
-                translation_placeholders={
-                    "device_id": str(raw_device_id),
-                    "error": str(err),
-                },
+                translation_placeholders=placeholders,
             ) from err
 
     async def async_refresh_device_urls_service(call: ServiceCall) -> None:
