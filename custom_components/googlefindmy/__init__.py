@@ -1599,7 +1599,7 @@ class RuntimeData:
     coordinator: GoogleFindMyCoordinator
     token_cache: TokenCache
     subentry_manager: ConfigEntrySubEntryManager
-    fcm_receiver: FcmReceiverHA | None = None
+    fcm_receiver: FcmReceiverHAType | None = None
     google_home_filter: GoogleHomeFilterProtocol | None = None
     entity_recovery_manager: EntityRecoveryManager | None = None
 
@@ -1618,7 +1618,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     device_owner_index: dict[str, str]
     entries: dict[str, RuntimeData]
     fcm_lock: asyncio.Lock
-    fcm_receiver: FcmReceiverHA
+    fcm_receiver: FcmReceiverHAType
     fcm_refcount: int
     fcm_lock_contention_count: int
     initial_setup_complete: bool
@@ -1675,7 +1675,9 @@ def _ensure_device_owner_index(bucket: GoogleFindMyDomainData) -> dict[str, str]
     return owner_index
 
 
-def _get_fcm_receiver(bucket: GoogleFindMyDomainData) -> FcmReceiverHA | None:
+def _get_fcm_receiver(
+    bucket: GoogleFindMyDomainData,
+) -> FcmReceiverHAType | None:
     """Return the cached shared FCM receiver if present."""
 
     receiver = bucket.get("fcm_receiver")
@@ -1684,13 +1686,17 @@ def _get_fcm_receiver(bucket: GoogleFindMyDomainData) -> FcmReceiverHA | None:
     return None
 
 
-def _set_fcm_receiver(bucket: GoogleFindMyDomainData, receiver: FcmReceiverHA) -> None:
+def _set_fcm_receiver(
+    bucket: GoogleFindMyDomainData, receiver: FcmReceiverHAType
+) -> None:
     """Store the shared FCM receiver."""
 
     bucket["fcm_receiver"] = receiver
 
 
-def _pop_fcm_receiver(bucket: GoogleFindMyDomainData) -> FcmReceiverHA | None:
+def _pop_fcm_receiver(
+    bucket: GoogleFindMyDomainData,
+) -> FcmReceiverHAType | None:
     """Remove and return the cached shared FCM receiver."""
 
     receiver = bucket.pop("fcm_receiver", None)
@@ -1735,7 +1741,7 @@ def _set_nova_refcount(bucket: GoogleFindMyDomainData, value: int) -> None:
     bucket["nova_refcount"] = value
 
 
-def _domain_fcm_provider(hass: HomeAssistant) -> FcmReceiverHA:
+def _domain_fcm_provider(hass: HomeAssistant) -> FcmReceiverHAType:
     """Return the shared FCM receiver for provider callbacks."""
 
     bucket = _domain_data(hass)
@@ -3786,7 +3792,7 @@ async def _async_migrate_device_identifiers_to_entry_scope(
 # --------------------------- Shared FCM provider ---------------------------
 
 
-async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
+async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHAType:
     """Get or create the shared FCM receiver for this HA instance.
 
     Behavior:
@@ -3875,12 +3881,12 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
 
             # Register provider for both consumer modules (exactly once on first acquire)
             # Re-registering ensures downstream modules resolve the refreshed instance.
-            def provider() -> FcmReceiverHA:
+            def provider() -> FcmReceiverHAType:
                 """Return the shared FCM receiver for integration consumers."""
 
                 return _domain_fcm_provider(hass)
 
-            provider_fn: Callable[[], FcmReceiverHA] = provider
+            provider_fn: Callable[[], FcmReceiverHAType] = provider
             if not providers_registered:
                 loc_register_fcm_provider(
                     cast(Callable[[], NovaFcmReceiverProtocol], provider_fn)
