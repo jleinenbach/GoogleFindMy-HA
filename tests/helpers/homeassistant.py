@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import FrozenInstanceError, dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
@@ -34,6 +34,17 @@ __all__ = [
     "resolve_config_entry_lookup",
     "deferred_subentry_entry_id_assignment",
 ]
+
+
+def _assign_if_present(target: Any, attribute: str, value: Any) -> None:
+    """Assign ``value`` to ``attribute`` when the target exposes the field."""
+
+    if not hasattr(target, attribute):
+        return
+    try:
+        setattr(target, attribute, value)
+    except (AttributeError, TypeError, FrozenInstanceError):
+        object.__setattr__(target, attribute, value)
 
 
 @dataclass(slots=True)
@@ -280,8 +291,12 @@ class DeferredRegistryConfigEntriesManager(FakeConfigEntriesManager):
         """Stage a provisional subentry and defer registry visibility."""
 
         self.provisional_subentry = subentry
-        setattr(subentry, "entry_id", None)
-        setattr(subentry, "subentry_id", getattr(self._resolved_child, "subentry_id", None))
+        _assign_if_present(subentry, "entry_id", None)
+        _assign_if_present(
+            subentry,
+            "subentry_id",
+            getattr(self._resolved_child, "subentry_id", None),
+        )
         entry.subentries[self._resolved_child.subentry_id] = self._resolved_child
         self._defer_publication = True
         return None
@@ -325,7 +340,7 @@ async def deferred_subentry_entry_id_assignment(
     """Assign ``entry_id`` after ``delay`` seconds and register the child entry."""
 
     await asyncio.sleep(delay)
-    setattr(subentry, "entry_id", entry_id)
+    _assign_if_present(subentry, "entry_id", entry_id)
     if registered_entry is not None:
         manager.add_entry(registered_entry)
 

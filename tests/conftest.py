@@ -20,9 +20,22 @@ from tests.helpers import install_homeassistant_core_callback_stub
 from tests.helpers.constants import load_googlefindmy_const_module
 
 
+if importlib.util.find_spec("homeassistant") is None:
+    raise RuntimeError(
+        "The real 'homeassistant' package must be installed for the Google Find My Device "
+        "test suite. Run 'pip install homeassistant pytest-homeassistant-custom-component' "
+        "before executing pytest."
+    )
+
 _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE = (
     importlib.util.find_spec("pytest_homeassistant_custom_component") is not None
 )
+
+if not _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE:
+    raise RuntimeError(
+        "Missing dependency: pytest-homeassistant-custom-component. Install it together "
+        "with homeassistant before running the test suite."
+    )
 
 
 if _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE:
