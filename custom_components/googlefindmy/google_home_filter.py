@@ -47,7 +47,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
 from homeassistant.core import Event, HomeAssistant, State, callback as ha_callback
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
     DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
@@ -61,6 +60,26 @@ _LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_registry import EntityRegistry
+    from homeassistant.helpers.event import (
+        CALLBACK_TYPE as _CallbackType,
+        async_track_state_change_event as _AsyncTrackStateChangeEvent,
+    )
+else:
+    _CallbackType = Callable[[], None]
+
+
+def _async_track_state_change_event(*args: Any, **kwargs: Any) -> _CallbackType:
+    """Proxy ``async_track_state_change_event`` with lazy import semantics.
+
+    Tests stub the helper by pre-populating ``homeassistant.helpers.event`` with a
+    lightweight module. Importing inside this function ensures those stubs remain
+    effective and avoids importing Home Assistant's HTTP stack during cold starts.
+    """
+
+    from homeassistant.helpers import event as ha_event
+
+    helper = cast("_AsyncTrackStateChangeEvent", ha_event.async_track_state_change_event)
+    return cast("_CallbackType", helper(*args, **kwargs))
 
 
 def callback(
@@ -134,7 +153,7 @@ class GoogleHomeFilter:
         self._refresh_home_zone()
 
         # Listen specifically for changes to zone.home to refresh cache cheaply.
-        self._unsub_zone_listener = async_track_state_change_event(
+        self._unsub_zone_listener = _async_track_state_change_event(
             self.hass, ["zone.home"], self._on_home_zone_changed
         )
 
