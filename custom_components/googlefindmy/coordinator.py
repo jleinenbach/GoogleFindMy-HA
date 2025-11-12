@@ -260,6 +260,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._locate_inflight: Set[str] = set()                # device_id -> in-flight flag
         self._locate_cooldown_until: Dict[str, float] = {}     # device_id -> mono deadline
 
+        # Play Sound UUID tracking (needed to properly cancel sound requests)
+        self._sound_request_uuids: Dict[str, str] = {}         # device_id -> request_uuid
+
         # Per-device poll cooldowns after owner/crowdsourced reports.
         self._device_poll_cooldown_until: Dict[str, float] = {}
 
@@ -920,7 +923,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                     if now_mono >= self._device_poll_cooldown_until.get(d["id"], 0.0)
                 ]
 
-            due = (now_mono - self._last_poll_mono) >= effective_interval
+            # Cold start detection: force immediate poll on first install when devices have no location data
+            is_cold_start = (
+                self._last_poll_mono == 0.0
+                and all_devices
+                and not any(self._device_location_data.get(d["id"]) for d in all_devices)
+            )
+
+            due = (now_mono - self._last_poll_mono) >= effective_interval or is_cold_start
             if due and not self._is_polling and devices_to_poll:
                 if not self._is_fcm_ready_soft():
                     # No baseline jump; schedule a short retry and escalate politely.
@@ -929,11 +939,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
                 else:
                     if self._fcm_defer_started_mono:
                         self._clear_fcm_deferral()
-                    _LOGGER.debug(
-                        "Scheduling background polling cycle (devices=%d, interval=%ds)",
-                        len(devices_to_poll),
-                        effective_interval,
-                    )
+                    if is_cold_start:
+                        _LOGGER.info(
+                            "Cold start detected: fetching fresh location data for %d devices immediately",
+                            len(devices_to_poll),
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Scheduling background polling cycle (devices=%d, interval=%ds)",
+                            len(devices_to_poll),
+                            effective_interval,
+                        )
                     self.hass.async_create_task(
                         self._async_start_poll_cycle(devices_to_poll),
                         name=f"{DOMAIN}.poll_cycle",
@@ -1699,6 +1715,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
+        self._sound_request_uuids.pop(device_id, None)
         self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
         self._present_last_seen.pop(device_id, None)
@@ -1867,16 +1884,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         Gate conditions:
           - push transport ready,
-          - no sequential polling in progress,
           - no in-flight locate for the device,
           - per-device cooldown (lower-bounded by DEFAULT_MIN_POLL_INTERVAL) not active.
+
+        Note: Manual locate is allowed even during background polling cycles,
+              as it's a user-initiated action and has separate cooldown tracking.
         """
         # Block manual locate for ignored devices.
         if self.is_ignored(device_id):
             return False
         if not self._api_push_ready():
-            return False
-        if self._is_polling:
             return False
         if device_id in self._locate_inflight:
             return False
@@ -2132,6 +2149,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
         Guard with can_play_sound(); on failure, start a short cooldown to avoid repeated errors.
 
+        **IMPORTANT**: This method tracks the request UUID so that Stop Sound can properly
+        cancel the specific Play Sound request. Without UUID tracking, sounds may continue
+        ringing indefinitely even after pressing Stop.
+
         Args:
             device_id: The canonical ID of the device.
 
@@ -2145,8 +2166,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             )
             return False
         try:
-            ok = await self.api.async_play_sound(device_id)
-            if not ok:
+            ok, request_uuid = await self.api.async_play_sound(device_id)
+            if ok and request_uuid:
+                # Store the UUID so Stop Sound can cancel this specific request
+                self._sound_request_uuids[device_id] = request_uuid
+                _LOGGER.debug("Stored Play Sound UUID for %s: %s", device_id, request_uuid[:8])
+            elif ok and not request_uuid:
+                _LOGGER.error(
+                    "Play Sound succeeded but no UUID returned for %s; Stop Sound may not work properly!",
+                    device_id
+                )
+                self._note_push_transport_problem()
+            elif not ok:
                 self._note_push_transport_problem()
             return bool(ok)
         except Exception as err:
@@ -2159,6 +2190,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
 
     async def async_stop_sound(self, device_id: str) -> bool:
         """Stop sound on a device using the native async API (no executor).
+
+        **IMPORTANT**: This method retrieves the UUID from the previous Play Sound request
+        and uses it to cancel that specific request. Without the UUID, Google's API may
+        not properly cancel the sound and the device will continue ringing.
 
         Args:
             device_id: The canonical ID of the device.
@@ -2174,8 +2209,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[List[Dict[str, Any]]]):
             )
             return False
         try:
-            ok = await self.api.async_stop_sound(device_id)
-            if not ok:
+            # Retrieve the UUID from the previous Play Sound request (if any)
+            request_uuid = self._sound_request_uuids.get(device_id)
+            if request_uuid:
+                _LOGGER.debug("Using stored UUID for Stop Sound on %s: %s", device_id, request_uuid[:8])
+            else:
+                _LOGGER.warning(
+                    "No stored UUID for Stop Sound on %s; may not properly cancel the sound. "
+                    "This can happen if Play Sound was triggered before integration restart.",
+                    device_id
+                )
+
+            ok = await self.api.async_stop_sound(device_id, request_uuid)
+            if ok:
+                # Clear the stored UUID after successfully stopping
+                self._sound_request_uuids.pop(device_id, None)
+            else:
                 self._note_push_transport_problem()
             return bool(ok)
         except Exception as err:

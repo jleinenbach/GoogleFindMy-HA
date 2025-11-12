@@ -2,9 +2,7 @@
 """Config flow for Google Find My Device (custom integration).
 
 Invariants (why this looks the way it does):
-- Exactly **one** authentication method must be provided by the user at a time
-  (either full `secrets.json` *or* manual OAuth token + Google email).
-  We enforce this in reauth/options and guide it in initial setup.
+- Authentication requires a full `secrets.json` file from GoogleFindMyTools.
 - We distinguish syntax errors (`invalid_json`) from missing/invalid content
   (`invalid_token`) to give precise feedback.
 - We use a multiline selector for `secrets_json` where available to reduce
@@ -105,21 +103,9 @@ def _token_plausible(value: str) -> bool:
 
 
 # ---------------------------
-# Auth method list
+# Auth method constants
 # ---------------------------
 _AUTH_METHOD_SECRETS = "secrets_json"
-_AUTH_METHOD_INDIVIDUAL = "individual_tokens"
-
-STEP_USER_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required("auth_method"): vol.In(
-            {
-                _AUTH_METHOD_SECRETS: "GoogleFindMyTools secrets.json",
-                _AUTH_METHOD_INDIVIDUAL: "Manual token + email",
-            }
-        )
-    }
-)
 
 # Base schema for secrets.json step (fallback when selector is unavailable)
 STEP_SECRETS_DATA_SCHEMA = vol.Schema(
@@ -128,13 +114,6 @@ STEP_SECRETS_DATA_SCHEMA = vol.Schema(
             "secrets_json",
             description="Paste the complete contents of your secrets.json file",
         ): str
-    }
-)
-
-STEP_INDIVIDUAL_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_OAUTH_TOKEN, description="OAuth token"): str,
-        vol.Required(CONF_GOOGLE_EMAIL, description="Google email address"): str,
     }
 )
 
@@ -383,15 +362,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     # ---------- User entry point ----------
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Entry step: choose auth method."""
-        if user_input is not None:
-            method = user_input.get("auth_method")
-            if method == _AUTH_METHOD_SECRETS:
-                return await self.async_step_secrets_json()
-            if method == _AUTH_METHOD_INDIVIDUAL:
-                return await self.async_step_individual_tokens()
-
-        return self.async_show_form(step_id="user", data_schema=STEP_USER_DATA_SCHEMA)
+        """Entry step: collect secrets.json."""
+        return await self.async_step_secrets_json(user_input)
 
     # ---------- Secrets.json path ----------
     async def async_step_secrets_json(self, user_input: dict[str, Any] | None = None) -> FlowResult:
@@ -442,32 +414,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_device_selection()
 
         return self.async_show_form(step_id="secrets_json", data_schema=schema, errors=errors)
-
-    # ---------- Manual tokens path ----------
-    async def async_step_individual_tokens(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Collect manual OAuth token + email (exactly two fields)."""
-        errors: Dict[str, str] = {}
-        if user_input is not None:
-            method, email, cands, err = _interpret_credentials_choice(
-                user_input,
-                secrets_field="secrets_json",  # not used here
-                token_field=CONF_OAUTH_TOKEN,
-                email_field=CONF_GOOGLE_EMAIL,
-            )
-            if err:
-                errors["base"] = err
-            else:
-                assert method == "manual" and email and cands
-                # For initial setup we defer the online validation to device_selection.
-                token = cands[0][1]
-                self._auth_data = {
-                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                    CONF_OAUTH_TOKEN: token,
-                    CONF_GOOGLE_EMAIL: email,
-                }
-                return await self.async_step_device_selection()
-
-        return self.async_show_form(step_id="individual_tokens", data_schema=STEP_INDIVIDUAL_DATA_SCHEMA, errors=errors)
 
     # ---------- Shared helper to create API from stored auth_data ----------
     async def _async_build_api_and_username(self) -> Tuple[GoogleFindMyAPI, Optional[str]]:
@@ -624,24 +570,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Collect new credentials for reauth and validate them (exactly-one-method + online test)."""
+        """Collect new credentials for reauth and validate them."""
         errors: Dict[str, str] = {}
 
         schema: vol.Schema
         if selector is not None:
             schema = vol.Schema(
                 {
-                    vol.Optional("secrets_json"): selector({"text": {"multiline": True}}),
-                    vol.Optional(CONF_OAUTH_TOKEN): str,
-                    vol.Optional(CONF_GOOGLE_EMAIL): str,
+                    vol.Required("secrets_json"): selector({"text": {"multiline": True}}),
                 }
             )
         else:
             schema = vol.Schema(
                 {
-                    vol.Optional("secrets_json"): str,
-                    vol.Optional(CONF_OAUTH_TOKEN): str,
-                    vol.Optional(CONF_GOOGLE_EMAIL): str,
+                    vol.Required("secrets_json"): str,
                 }
             )
 
@@ -656,17 +598,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = err
             else:
                 try:
-                    assert email and cands
-                    chosen = await async_pick_working_token(email, cands)
-                    if not chosen:
+                    assert method == "secrets" and email and cands
+                    # Parse secrets.json for passing to validation
+                    parsed_secrets = json.loads(user_input.get("secrets_json") or "{}")
+                    result = await async_pick_working_token(email, cands, parsed_secrets)
+                    if not result:
                         errors["base"] = "cannot_connect"
                     else:
+                        token_source, chosen_token = result
                         new_data = {
-                            DATA_AUTH_METHOD: (
-                                _AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL
-                            ),
-                            CONF_OAUTH_TOKEN: chosen,
+                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                            CONF_OAUTH_TOKEN: chosen_token,
                             CONF_GOOGLE_EMAIL: email,
+                            DATA_SECRET_BUNDLE: parsed_secrets,
+                            "token_source": token_source,
                         }
 
                         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
@@ -868,30 +813,20 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
 
     # ---------- Credentials update (always-empty fields) ----------
     async def async_step_credentials(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Allow refreshing credentials without exposing current values.
-
-        Invariant:
-            Exactly one method must be provided; we validate and then update `entry.data`,
-            followed by an immediate reload. For secrets.json, we also apply online
-            validation with token failover.
-        """
+        """Allow refreshing credentials without exposing current values."""
         errors: Dict[str, str] = {}
         current_email = self.config_entry.data.get(CONF_GOOGLE_EMAIL, "Unknown")
 
         if selector is not None:
             schema = vol.Schema(
                 {
-                    vol.Optional("new_secrets_json"): selector({"text": {"multiline": True}}),
-                    vol.Optional("new_oauth_token"): str,
-                    vol.Optional("new_google_email"): str,
+                    vol.Required("new_secrets_json"): selector({"text": {"multiline": True}}),
                 }
             )
         else:
             schema = vol.Schema(
                 {
-                    vol.Optional("new_secrets_json"): str,
-                    vol.Optional("new_oauth_token"): str,
-                    vol.Optional("new_google_email"): str,
+                    vol.Required("new_secrets_json"): str,
                 }
             )
 
@@ -909,17 +844,20 @@ class OptionsFlowHandler(config_entries.OptionsFlowWithReload):
                     errors["base"] = err
             else:
                 try:
-                    assert email and cands
-                    chosen = await async_pick_working_token(email, cands)
-                    if not chosen:
+                    assert method == "secrets" and email and cands
+                    # Parse secrets.json for passing to validation
+                    parsed_secrets = json.loads(user_input.get("new_secrets_json") or "{}")
+                    result = await async_pick_working_token(email, cands, parsed_secrets)
+                    if not result:
                         errors["base"] = "cannot_connect"
                     else:
+                        token_source, chosen_token = result
                         new_data = {
-                            DATA_AUTH_METHOD: (
-                                _AUTH_METHOD_SECRETS if method == "secrets" else _AUTH_METHOD_INDIVIDUAL
-                            ),
-                            CONF_OAUTH_TOKEN: chosen,
+                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                            CONF_OAUTH_TOKEN: chosen_token,
                             CONF_GOOGLE_EMAIL: email,
+                            DATA_SECRET_BUNDLE: parsed_secrets,
+                            "token_source": token_source,
                         }
 
                         entry = self.config_entry

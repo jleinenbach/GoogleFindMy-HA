@@ -155,7 +155,9 @@ class GoogleFindMyDeviceTracker(CoordinatorEntity, TrackerEntity, RestoreEntity)
         """Initialize the tracker entity."""
         super().__init__(coordinator)
         self._device = device
-        self._attr_unique_id = f"{DOMAIN}_{device['id']}"
+        # Include entry_id in unique_id for multi-account support
+        entry_id = coordinator.config_entry.entry_id if coordinator.config_entry else "default"
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{device['id']}"
         # With has_entity_name=False we must set the entity's name ourselves.
         # If name is missing during cold boot, HA will show the entity_id; that's fine.
         self._attr_name = self._display_name(device.get("name"))

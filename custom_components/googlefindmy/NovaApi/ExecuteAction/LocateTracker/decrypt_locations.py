@@ -77,7 +77,7 @@ def is_mcu_tracker(device_registration: DeviceRegistration) -> bool:
     return device_registration.fastPairModelId == mcu_fast_pair_model_id
 
 
-async def async_retrieve_identity_key(device_registration: DeviceRegistration) -> bytes:
+async def async_retrieve_identity_key(device_registration: DeviceRegistration, _retry: bool = True) -> bytes:
     """Retrieve the device Ephemeral Identity Key (EIK) asynchronously.
 
     Flow (async-first, HA-friendly):
@@ -85,6 +85,10 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
     - Obtain owner key (async).
     - Decrypt EIK (CPU-bound → offload to thread).
     - Strictly validate length to avoid silent misuse downstream.
+
+    Args:
+        device_registration: The device registration protobuf containing encryption metadata.
+        _retry: Internal parameter to prevent infinite retry loops.
 
     Raises:
         StaleOwnerKeyError: if tracker is encrypted with an older owner key.
@@ -133,26 +137,56 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration) -
         # Check for version mismatches in both directions
         if current_owner_key_version is not None and old_ver is not None and old_ver != current_owner_key_version:
             if old_ver < current_owner_key_version:
-                # Tracker encrypted with older key (E2EE reset scenario)
-                _LOGGER.error(
+                # Tracker encrypted with older key
+                # This can happen in two scenarios:
+                # 1. E2EE reset (tracker is permanently stale)
+                # 2. Cached device metadata is stale (refresh will fix)
+                _LOGGER.warning(
                     "Owner key version mismatch: tracker=%s, current=%s. "
-                    "This typically occurs after resetting E2EE data. "
-                    "The tracker cannot be decrypted anymore; remove it in the Find My Device app.",
+                    "The device metadata may be stale. Try reloading the integration to fetch fresh device data. "
+                    "If this persists, the tracker may have been encrypted with old E2EE keys and needs to be "
+                    "removed/re-added in the Google Find My Device app.",
                     old_ver, current_owner_key_version,
                 )
-                raise StaleOwnerKeyError("Tracker was encrypted with a stale owner key version.") from e
+                raise StaleOwnerKeyError(
+                    f"Tracker encrypted with older key version (tracker={old_ver}, current={current_owner_key_version}). "
+                    "Reload the integration to refresh device metadata."
+                ) from e
             else:
-                # Current owner key is older than tracker's key (wrong account in multi-account mode!)
-                _LOGGER.error(
-                    "Owner key version mismatch: tracker=%s, current=%s. "
-                    "The cached owner key is OLDER than the tracker's encryption key. "
-                    "In multi-account setups, this indicates the wrong account's credentials are being used. "
-                    "Ensure the device belongs to the correct Google account configured in this integration entry.",
+                # Tracker needs newer owner key version than what API returned
+                # This can happen if: 1) cached owner key is stale, 2) wrong account credentials
+                # Clear cache and retry once if this is the first attempt
+                _LOGGER.warning(
+                    "Owner key version mismatch: tracker=%s, API returned=%s. "
+                    "The API returned an older owner key version than the tracker requires. "
+                    "This may indicate a stale cache or the device belongs to a different account.",
                     old_ver, current_owner_key_version,
                 )
+
+                if _retry:
+                    # Clear the cached owner key and retry once
+                    _LOGGER.info("Clearing cached owner key and retrying decryption with fresh key from API...")
+                    try:
+                        from custom_components.googlefindmy.Auth.token_cache import async_set_cached_value
+                        username = await async_get_username()
+                        if username:
+                            cache_key = f"owner_key_{username}"
+                            await async_set_cached_value(cache_key, None)
+                            _LOGGER.debug("Cleared cached owner key for %s", username[:3] + "***")
+
+                            # Retry with fresh owner key (prevent infinite recursion with _retry=False)
+                            return await async_retrieve_identity_key(device_registration, _retry=False)
+                    except Exception as retry_exc:
+                        _LOGGER.error("Retry after clearing cached owner key failed: %s", retry_exc)
+                        raise DecryptionError(
+                            f"Owner key version mismatch persisted after cache refresh (tracker={old_ver}, API={current_owner_key_version}). "
+                            "This device may belong to a different Google account."
+                        ) from e
+
+                # Second attempt also failed, or retry disabled
                 raise DecryptionError(
-                    "Wrong account credentials: tracker encrypted with newer owner key version. "
-                    "This device may belong to a different Google account."
+                    f"Owner key version mismatch (tracker={old_ver}, API={current_owner_key_version}). "
+                    "The device may belong to a different Google account than the one configured in this integration entry."
                 ) from e
 
         _LOGGER.error(
