@@ -118,6 +118,11 @@ class GoogleFindMyMapView(HomeAssistantView):
     name = "api:googlefindmy:map"
     requires_auth = False
 
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Bind the Home Assistant instance to the view."""
+        super().__init__()
+        self.hass = hass
+
     async def get(self, request: web.Request, device_id: str) -> web.Response:
         """Generate and serve a map for the device.
 
@@ -1056,6 +1061,11 @@ class GoogleFindMyMapRedirectView(HomeAssistantView):
     url = "/api/googlefindmy/redirect_map/{device_id}"
     name = "api:googlefindmy:redirect_map"
     requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Bind the Home Assistant instance to the redirect view."""
+        super().__init__()
+        self.hass = hass
 
     async def get(self, request: web.Request, device_id: str) -> web.Response:
         """Redirect to the map path using a **relative** Location header.

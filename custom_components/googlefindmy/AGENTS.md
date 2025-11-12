@@ -52,3 +52,8 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
   )
   ```
 
+## Runtime integration patterns
+
+* Collect runtime-contract reminders for integration touchpoints in this section so future contributors can find them without scanning unrelated guidance.
+* View classes under `custom_components/googlefindmy/map_view.py` should expose constructors that accept `HomeAssistant` as the first argument. Register new views by instantiating them with the active `hass` instance (for example, `GoogleFindMyMapView(hass)`) instead of assigning `hass` after creation so the runtime contract stays consistent.
+

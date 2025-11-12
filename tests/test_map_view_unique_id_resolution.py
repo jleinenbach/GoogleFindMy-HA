@@ -291,8 +291,7 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     hass = _StubHass()
-    view = map_view.GoogleFindMyMapView()
-    view.hass = hass
+    view = map_view.GoogleFindMyMapView(hass)
 
     request = SimpleNamespace(query={"token": "valid"})
     response = asyncio.run(view.get(request, device_id))
@@ -408,8 +407,7 @@ def test_map_view_uses_iso_last_seen_for_timeline(
     )
 
     hass = _StubHass()
-    view = map_view.GoogleFindMyMapView()
-    view.hass = hass
+    view = map_view.GoogleFindMyMapView(hass)
 
     request = SimpleNamespace(query={"token": "valid"})
     response = asyncio.run(view.get(request, device_id))
@@ -433,8 +431,7 @@ def test_map_view_html_uses_iso_conversion(monkeypatch: pytest.MonkeyPatch) -> N
 
     map_view = _load_map_view_module(monkeypatch)
     hass = _StubHass()
-    view = map_view.GoogleFindMyMapView()
-    view.hass = hass
+    view = map_view.GoogleFindMyMapView(hass)
 
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     end = datetime(2024, 1, 2, tzinfo=timezone.utc)

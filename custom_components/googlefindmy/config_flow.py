@@ -3016,12 +3016,14 @@ class ConfigFlow(
                             options=existing_options,
                         )
                     except TypeError:
+                        fallback_options = dict(existing_options)
                         fallback_payload = dict(merged_data)
-                        fallback_payload.update(existing_options)
+                        fallback_payload.update(fallback_options)
                         self.hass.config_entries.async_update_entry(
                             entry_for_update,
                             data=fallback_payload,
                         )
+                        setattr(entry_for_update, "options", fallback_options)
 
                     self.hass.async_create_task(
                         self.hass.config_entries.async_reload(entry_for_update.entry_id)
