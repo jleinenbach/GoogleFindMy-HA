@@ -997,10 +997,21 @@ class ConfigEntrySubEntryManager:
     ) -> ConfigSubentry:
         """Return the registry-backed subentry for ``key``."""
 
-        if isinstance(candidate, ConfigSubentry) and isinstance(
-            candidate.entry_id, str
-        ):
-            return candidate
+        candidate_entry_id: str | None = None
+        candidate_subentry_id: str | None = None
+        if candidate is not None:
+            entry_id_value = getattr(candidate, "entry_id", None)
+            if isinstance(entry_id_value, str) and entry_id_value:
+                candidate_entry_id = entry_id_value
+            subentry_id_value = getattr(candidate, "subentry_id", None)
+            if isinstance(subentry_id_value, str) and subentry_id_value:
+                candidate_subentry_id = subentry_id_value
+
+        target_subentry_id: str | None
+        if isinstance(fallback_subentry_id, str) and fallback_subentry_id:
+            target_subentry_id = fallback_subentry_id
+        else:
+            target_subentry_id = candidate_subentry_id
 
         manager = getattr(self._hass, "config_entries", None)
         refreshed_entry: ConfigEntry | None = None
@@ -1024,28 +1035,67 @@ class ConfigEntrySubEntryManager:
             subentries = getattr(entry, "subentries", None)
             if not isinstance(subentries, Mapping):
                 return None
+
+            if isinstance(target_subentry_id, str):
+                direct = subentries.get(target_subentry_id)
+                if isinstance(direct, ConfigSubentry):
+                    return direct
+                if direct is not None:
+                    return direct
+
             for subentry in subentries.values():
-                if isinstance(subentry.unique_id, str) and subentry.unique_id == unique_id:
+                subentry_id = getattr(subentry, "subentry_id", None)
+                if isinstance(target_subentry_id, str) and subentry_id == target_subentry_id:
                     return subentry
-                group_key = subentry.data.get(self._key_field)
-                if isinstance(group_key, str) and group_key == key:
+
+                if isinstance(candidate_entry_id, str):
+                    subentry_entry_id = getattr(subentry, "entry_id", None)
+                    if isinstance(subentry_entry_id, str) and subentry_entry_id == candidate_entry_id:
+                        return subentry
+
+                subentry_unique_id = getattr(subentry, "unique_id", None)
+                if isinstance(subentry_unique_id, str) and subentry_unique_id == unique_id:
                     return subentry
+
+                data = getattr(subentry, "data", None)
+                if isinstance(data, Mapping):
+                    group_key = data.get(self._key_field)
+                    if isinstance(group_key, str) and group_key == key:
+                        return subentry
+
                 if (
                     isinstance(fallback_subentry_id, str)
-                    and subentry.subentry_id == fallback_subentry_id
+                    and isinstance(subentry_id, str)
+                    and subentry_id == fallback_subentry_id
                 ):
                     return subentry
+
             return None
 
-        resolved = None
-        if isinstance(refreshed_entry, ConfigEntry):
-            resolved = _scan(refreshed_entry)
-        if resolved is None:
-            resolved = _scan(self._entry)
+        resolved: ConfigSubentry | None = None
+        entries_to_scan: list[ConfigEntry] = []
+        for entry in (refreshed_entry, self._entry):
+            if not isinstance(entry, ConfigEntry):
+                continue
+            if any(candidate is entry for candidate in entries_to_scan):
+                continue
+            entries_to_scan.append(entry)
+
+        for entry in entries_to_scan:
+            resolved = _scan(entry)
+            if resolved is not None:
+                break
+
+        if resolved is None and isinstance(candidate, ConfigSubentry):
+            resolved = candidate
 
         if resolved is None:
             context = (
-                f"unique_id={unique_id!r}, key={key!r}, fallback_id={fallback_subentry_id!r}"
+                "unique_id={unique_id!r}, key={key!r}, fallback_id={fallback!r}"
+            ).format(
+                unique_id=unique_id,
+                key=key,
+                fallback=fallback_subentry_id,
             )
             _LOGGER.error(
                 "[%s] async_sync: Unable to locate registered subentry for %s after"
@@ -1064,8 +1114,24 @@ class ConfigEntrySubEntryManager:
         """Populate managed mapping from the config entry."""
 
         self._managed.clear()
-        for subentry in self._entry.subentries.values():
-            key = subentry.data.get(self._key_field)
+        subentries = getattr(self._entry, "subentries", None)
+        if not isinstance(subentries, Mapping):
+            return
+
+        seen_subentry_ids: set[str] = set()
+        for subentry in subentries.values():
+            subentry_id = getattr(subentry, "subentry_id", None)
+            if isinstance(subentry_id, str) and subentry_id:
+                if subentry_id in seen_subentry_ids:
+                    continue
+                seen_subentry_ids.add(subentry_id)
+
+            data = getattr(subentry, "data", None)
+            if isinstance(data, Mapping):
+                key = data.get(self._key_field)
+            else:
+                key = None
+
             if isinstance(key, str):
                 self._managed[key] = subentry
 
@@ -1126,40 +1192,58 @@ class ConfigEntrySubEntryManager:
             return
 
         raw_subentries = getattr(self._entry, "subentries", None)
+        candidates: Iterable[ConfigSubentry]
         if isinstance(raw_subentries, Mapping):
-            subentries = list(raw_subentries.values())
+            candidates = cast(Iterable[ConfigSubentry], raw_subentries.values())
         elif isinstance(raw_subentries, dict):
-            subentries = list(raw_subentries.values())
+            candidates = cast(Iterable[ConfigSubentry], raw_subentries.values())
         else:
-            subentries = []
+            candidates = ()
+
+        subentries: list[ConfigSubentry] = []
+        seen_subentry_ids: set[str] = set()
+        for subentry in candidates:
+            subentry_id = getattr(subentry, "subentry_id", None)
+            if isinstance(subentry_id, str) and subentry_id:
+                if subentry_id in seen_subentry_ids:
+                    continue
+                seen_subentry_ids.add(subentry_id)
+            subentries.append(subentry)
         if not subentries:
             return
 
         grouped_by_unique: dict[str, list[ConfigSubentry]] = defaultdict(list)
-        grouped_by_group: dict[tuple[str | None, str], list[ConfigSubentry]] = (
+        grouped_by_group: dict[tuple[str | None, str | None], list[ConfigSubentry]] = (
             defaultdict(list)
         )
 
         for subentry in subentries:
-            if isinstance(subentry.unique_id, str):
-                grouped_by_unique[subentry.unique_id].append(subentry)
+            subentry_unique_id = getattr(subentry, "unique_id", None)
+            if isinstance(subentry_unique_id, str):
+                grouped_by_unique[subentry_unique_id].append(subentry)
 
-            group_value = subentry.data.get(self._key_field)
+            data = getattr(subentry, "data", None)
+            if isinstance(data, Mapping):
+                group_value = data.get(self._key_field)
+            else:
+                group_value = None
             key_value = group_value if isinstance(group_value, str) and group_value else None
-            grouped_by_group[(key_value, subentry.subentry_type)].append(subentry)
+            grouped_by_group[(key_value, getattr(subentry, "subentry_type", None))].append(
+                subentry
+            )
 
         def _select_canonical(candidates: list[ConfigSubentry]) -> ConfigSubentry:
-            indexed = list(enumerate(candidates))
-            index, winner = min(
-                indexed,
-                key=lambda item: (
-                    0 if isinstance(item[1].unique_id, str) else 1,
-                    item[1].unique_id or "",
-                    item[0],
-                    item[1].subentry_id or "",
-                ),
-            )
-            return winner
+            def _sort_key(item: tuple[int, ConfigSubentry]) -> tuple[int, str, int, str]:
+                index, candidate = item
+                candidate_unique_id = getattr(candidate, "unique_id", None)
+                unique_part = candidate_unique_id if isinstance(candidate_unique_id, str) else ""
+                candidate_subentry_id = getattr(candidate, "subentry_id", None)
+                subentry_part = (
+                    candidate_subentry_id if isinstance(candidate_subentry_id, str) else ""
+                )
+                return (0 if unique_part else 1, unique_part, index, subentry_part)
+
+            return min(enumerate(candidates), key=_sort_key)[1]
 
         removal_targets: set[str] = set()
         duplicate_descriptors: set[str] = set()
@@ -1172,7 +1256,9 @@ class ConfigEntrySubEntryManager:
             for candidate in candidates:
                 if candidate is canonical:
                     continue
-                removal_targets.add(candidate.subentry_id)
+                candidate_id = getattr(candidate, "subentry_id", None)
+                if isinstance(candidate_id, str):
+                    removal_targets.add(candidate_id)
 
         for (key_value, subentry_type), candidates in grouped_by_group.items():
             if len(candidates) <= 1:
@@ -1183,19 +1269,22 @@ class ConfigEntrySubEntryManager:
             for candidate in candidates:
                 if candidate is canonical:
                     continue
-                removal_targets.add(candidate.subentry_id)
+                candidate_id = getattr(candidate, "subentry_id", None)
+                if isinstance(candidate_id, str):
+                    removal_targets.add(candidate_id)
 
         if not removal_targets:
             return
 
         removed_ids: list[str] = []
         for subentry in subentries:
-            if subentry.subentry_id not in removal_targets:
+            subentry_id = getattr(subentry, "subentry_id", None)
+            if not isinstance(subentry_id, str) or subentry_id not in removal_targets:
                 continue
 
             removal = remove_subentry(
                 self._entry,
-                subentry_id=subentry.subentry_id,
+                subentry_id=subentry_id,
             )
 
             try:
@@ -1203,12 +1292,12 @@ class ConfigEntrySubEntryManager:
             except Exception as err:  # pragma: no cover - defensive logging
                 _LOGGER.error(
                     "Failed to remove duplicate subentry '%s': %s",
-                    subentry.subentry_id,
+                    subentry_id,
                     err,
                 )
                 raise
 
-            removed_ids.append(subentry.subentry_id)
+            removed_ids.append(subentry_id)
 
         if removed_ids:
             _LOGGER.info(
