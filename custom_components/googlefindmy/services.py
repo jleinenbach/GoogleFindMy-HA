@@ -75,10 +75,7 @@ def _service_validation_error(
         "translation_key": translation_key,
         "translation_placeholders": placeholders,
     }
-    try:
-        return ServiceValidationError(message=message, **kwargs)
-    except TypeError:
-        return ServiceValidationError(message, **kwargs)
+    return ServiceValidationError(message, **kwargs)
 
 
 SERVICE_REBUILD_DEVICE_REGISTRY: str = "rebuild_device_registry"
