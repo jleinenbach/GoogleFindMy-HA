@@ -176,3 +176,10 @@ async def test_async_sync_caches_resolved_registry_subentry(
     assert stored is resolved_child
     assert stored is not manager.provisional_subentry
 
+    managed_snapshot = runtime_manager.managed_subentries
+    assert managed_snapshot["child-group"] is stored
+
+    subentry_id = getattr(resolved_child, "subentry_id", None)
+    if isinstance(subentry_id, str) and subentry_id:
+        assert runtime_manager._managed_by_subentry_id.get(subentry_id) == "child-group"
+
