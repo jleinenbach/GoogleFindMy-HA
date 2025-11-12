@@ -21,11 +21,12 @@ import time
 from typing import Any
 from collections.abc import Iterable, Mapping
 
-from homeassistant import exceptions as ha_exceptions
 from homeassistant.components.device_tracker import DOMAIN as DEVICE_TRACKER_DOMAIN
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.network import get_url
+
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
 try:  # Home Assistant 2025.5+: attribute constant exposed
     from homeassistant.const import ATTR_ENTRY_ID
@@ -51,9 +52,10 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-ServiceValidationError = ha_exceptions.ServiceValidationError
-HomeAssistantError = ha_exceptions.HomeAssistantError
-ConfigEntryError = getattr(ha_exceptions, "ConfigEntryError", HomeAssistantError)
+try:
+    from homeassistant.exceptions import ConfigEntryError
+except ImportError:  # pragma: no cover - ConfigEntryError introduced in newer cores
+    ConfigEntryError = HomeAssistantError
 
 
 def _service_validation_error(

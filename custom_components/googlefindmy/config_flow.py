@@ -2524,7 +2524,7 @@ class ConfigFlow(
 
             reload_task = hass.config_entries.async_reload(existing_entry.entry_id)
             if inspect.isawaitable(reload_task):
-                reload_coro = cast(Awaitable[Any], reload_task)
+                reload_coro = reload_task
 
                 async def _reload_and_normalize() -> None:
                     try:
