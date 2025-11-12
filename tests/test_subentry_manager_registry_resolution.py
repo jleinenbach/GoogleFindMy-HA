@@ -18,6 +18,7 @@ from custom_components.googlefindmy import (
 from custom_components.googlefindmy.const import DOMAIN
 from tests.helpers.homeassistant import (
     DeferredRegistryConfigEntriesManager,
+    FakeConfigEntriesManager,
     FakeConfigEntry,
     FakeHass,
     deferred_subentry_entry_id_assignment,
@@ -183,3 +184,78 @@ async def test_async_sync_caches_resolved_registry_subentry(
     if isinstance(subentry_id, str) and subentry_id:
         assert runtime_manager._managed_by_subentry_id.get(subentry_id) == "child-group"
 
+
+def test_update_visible_device_ids_refreshes_dataclass_subentry() -> None:
+    """Ensure visibility updates retain dataclass-backed subentries in cache."""
+
+    key = "child-group"
+    subentry_id = "child-subentry-id"
+
+    @dataclass(frozen=True, kw_only=True)
+    class _FrozenSubentry:
+        data: Mapping[str, Any]
+        subentry_type: str
+        title: str
+        unique_id: str | None
+        subentry_id: str
+        translation_key: str | None = None
+
+        def __post_init__(self) -> None:
+            object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
+
+    entry = FakeConfigEntry(entry_id="parent-entry", domain=DOMAIN)
+    existing = _FrozenSubentry(
+        data={"group_key": key},
+        subentry_type="tracker",
+        title="Child",
+        unique_id="unique-child",
+        subentry_id=subentry_id,
+    )
+    entry.subentries[subentry_id] = existing
+
+    class _ConfigEntriesStub(FakeConfigEntriesManager):
+        def __init__(self, managed_entry: FakeConfigEntry) -> None:
+            super().__init__([managed_entry])
+            self._entry = managed_entry
+            self.payloads: list[dict[str, Any]] = []
+
+        def async_update_subentry(
+            self,
+            entry_arg: FakeConfigEntry,
+            subentry_arg: Any,
+            *,
+            data: dict[str, Any],
+        ) -> _FrozenSubentry:
+            assert entry_arg is self._entry
+            self.payloads.append(dict(data))
+            replacement = _FrozenSubentry(
+                data=data,
+                subentry_type=getattr(subentry_arg, "subentry_type", "tracker"),
+                title=getattr(subentry_arg, "title", "Child"),
+                unique_id=getattr(subentry_arg, "unique_id", None),
+                subentry_id=subentry_id,
+                translation_key=getattr(subentry_arg, "translation_key", None),
+            )
+            self._entry.subentries[subentry_id] = replacement
+            return replacement
+
+    hass = FakeHass(config_entries=_ConfigEntriesStub(entry))
+
+    manager = ConfigEntrySubEntryManager(hass, entry)  # type: ignore[arg-type]
+    managed_before = manager.get(key)
+    assert managed_before is existing
+
+    manager.update_visible_device_ids(key, ["device-2", "device-2", "device-1"])
+
+    stored = manager.get(key)
+    assert stored is not None
+    assert stored is entry.subentries[subentry_id]
+    assert stored is not existing
+    assert getattr(stored, "entry_id", None) is None
+    assert isinstance(stored.data.get("visible_device_ids"), list)
+    assert stored.data["visible_device_ids"] == ["device-2", "device-1"]
+    assert hass.config_entries.payloads[-1]["visible_device_ids"] == [
+        "device-2",
+        "device-1",
+    ]
+    assert manager._managed_by_subentry_id.get(subentry_id) == key

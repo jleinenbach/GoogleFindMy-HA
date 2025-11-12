@@ -41,7 +41,7 @@ import time
 from contextlib import suppress
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, TypeGuard, cast
 from collections import defaultdict
 from collections.abc import (
     Awaitable,
@@ -1011,6 +1011,23 @@ class ConfigEntrySubEntryManager:
 
         return entry_id, subentry_id, unique_id
 
+    @staticmethod
+    def _is_subentry_like(candidate: Any) -> TypeGuard[ConfigSubentry]:
+        """Return ``True`` when ``candidate`` exposes a subentry-like interface."""
+
+        if candidate is None:
+            return False
+
+        _, subentry_id, _ = ConfigEntrySubEntryManager._subentry_identity(candidate)
+        if not isinstance(subentry_id, str) or not subentry_id:
+            return False
+
+        data = getattr(candidate, "data", None)
+        if not isinstance(data, Mapping):
+            return False
+
+        return True
+
     def _managed_key_for_subentry_id(self, subentry_id: str) -> str | None:
         """Return the managed key associated with ``subentry_id`` when present."""
 
@@ -1063,6 +1080,27 @@ class ConfigEntrySubEntryManager:
 
         if isinstance(subentry_id, str) and subentry_id:
             self._managed_by_subentry_id[subentry_id] = key
+
+    def _resolve_updated_subentry(
+        self,
+        *,
+        candidate: ConfigSubentry | Any,
+        original: ConfigSubentry,
+    ) -> ConfigSubentry:
+        """Return the object that should back the managed cache after an update."""
+
+        if self._is_subentry_like(candidate):
+            return candidate
+
+        subentry_id = getattr(original, "subentry_id", None)
+        if isinstance(subentry_id, str) and subentry_id:
+            subentries = getattr(self._entry, "subentries", None)
+            if isinstance(subentries, Mapping):
+                from_registry = subentries.get(subentry_id)
+                if self._is_subentry_like(from_registry):
+                    return from_registry
+
+        return original
 
     def _resolve_registered_subentry(
         self,
@@ -1501,14 +1539,13 @@ class ConfigEntrySubEntryManager:
                         "Subentry visibility update for '%s' raised: %s", key, err
                     )
                 else:
-                    if isinstance(resolved, ConfigSubentry):
+                    if self._is_subentry_like(resolved):
                         resolved_subentry = resolved
                 finally:
-                    refreshed_subentry = resolved_subentry or self._entry.subentries.get(
-                        getattr(subentry, "subentry_id", None), subentry
+                    refreshed_subentry = self._resolve_updated_subentry(
+                        candidate=resolved_subentry,
+                        original=subentry,
                     )
-                    if not isinstance(refreshed_subentry, ConfigSubentry):
-                        refreshed_subentry = subentry
                     self._index_managed_subentry(key, refreshed_subentry)
 
             self._hass.async_create_task(
@@ -1517,13 +1554,10 @@ class ConfigEntrySubEntryManager:
             )
             return
 
-        refreshed = update_result if isinstance(update_result, ConfigSubentry) else None
-        if refreshed is None:
-            refreshed = self._entry.subentries.get(
-                getattr(subentry, "subentry_id", None), subentry
-            )
-        if not isinstance(refreshed, ConfigSubentry):
-            refreshed = subentry
+        refreshed = self._resolve_updated_subentry(
+            candidate=update_result,
+            original=subentry,
+        )
         # Ensure local view reflects Home Assistant's stored subentry.
         self._index_managed_subentry(key, refreshed)
 
