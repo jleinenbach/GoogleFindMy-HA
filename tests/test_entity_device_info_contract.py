@@ -17,10 +17,11 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 try:
     from pytest_homeassistant_custom_component.common import MockConfigEntry
-except ModuleNotFoundError:  # pragma: no cover - exercised via skipped test
-    pytest.skip(
-        "pytest-homeassistant-custom-component is required for the integration contract test",
-        allow_module_level=True,
+except ModuleNotFoundError:  # pragma: no cover - environment guard
+    pytest.fail(
+        "pytest-homeassistant-custom-component must be installed. "
+        "Install it alongside homeassistant before running the integration contract tests.",
+        pytrace=False,
     )
 
 from custom_components.googlefindmy.const import (

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
@@ -114,30 +114,47 @@ async def test_async_sync_caches_resolved_registry_subentry(
             state=None,
         )
     else:
+        real_config_subentry: Any | None
+        try:
+            from homeassistant.config_entries import ConfigSubentry as _RealConfigSubentry
+        except ModuleNotFoundError:
+            real_config_subentry = None
+        else:
+            real_config_subentry = _RealConfigSubentry
 
-        @dataclass(frozen=True, kw_only=True)
-        class _FrozenSubentry:
-            data: Mapping[str, Any]
-            subentry_type: str
-            title: str
-            unique_id: str | None
-            subentry_id: str
-            translation_key: str | None = None
+        if real_config_subentry is not None and is_dataclass(real_config_subentry):
+            resolved_child = real_config_subentry(
+                data=MappingProxyType({"group_key": "child-group"}),
+                subentry_id="child-subentry-id",
+                subentry_type="tracker",
+                title="Child",
+                unique_id="unique-child",
+            )
+        else:
 
-            def __post_init__(self) -> None:
-                object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
+            @dataclass(frozen=True, kw_only=True)
+            class _FrozenSubentry:
+                data: Mapping[str, Any]
+                subentry_type: str
+                title: str
+                unique_id: str | None
+                subentry_id: str
+                translation_key: str | None = None
 
-        monkeypatch.setattr(
-            "custom_components.googlefindmy.ConfigSubentry",
-            _FrozenSubentry,
-        )
-        resolved_child = _FrozenSubentry(
-            data={"group_key": "child-group"},
-            subentry_id="child-subentry-id",
-            subentry_type="tracker",
-            title="Child",
-            unique_id="unique-child",
-        )
+                def __post_init__(self) -> None:
+                    object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
+
+            monkeypatch.setattr(
+                "custom_components.googlefindmy.ConfigSubentry",
+                _FrozenSubentry,
+            )
+            resolved_child = _FrozenSubentry(
+                data={"group_key": "child-group"},
+                subentry_id="child-subentry-id",
+                subentry_type="tracker",
+                title="Child",
+                unique_id="unique-child",
+            )
 
     manager = DeferredRegistryConfigEntriesManager(parent_entry, resolved_child)
     hass = FakeHass(config_entries=manager)

@@ -1,2 +1,4 @@
 .truststore/
 __pycache__/
+pytest_output.log
+.coverage
