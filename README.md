@@ -26,11 +26,11 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 - `mypy --strict` — run the full strict type-checker locally to mirror CI expectations before opening a pull request.
 - `make lint` — invoke the Ruff lint target for the entire repository using the same settings enforced in CI.
 - `make wheelhouse` — pre-download the Home Assistant development dependencies into `.wheelhouse/` so subsequent virtual environment rebuilds reuse cached wheels instead of re-fetching from PyPI.
-- `make test-ha` — provision the `.venv` environment (installing `homeassistant` and `pytest-homeassistant-custom-component` when missing), execute the targeted regression smoke tests, and then run `pytest -q --cov` for the full suite while teeing detailed output to `pytest_output.log`. Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options.
+- `make test-ha` — provision the `.venv` environment (installing `homeassistant` and `pytest-homeassistant-custom-component` when missing), execute the targeted regression smoke tests, and then run `pytest -q --cov` for the full suite while teeing detailed output to `pytest_output.log`. Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options, override the coverage summary with `make test-ha PYTEST_COV_FLAGS="--cov-report=term"` (or `term-summary`, `term-skip-covered`, etc.) for slimmer CI logs, and reuse an existing wheel cache without redownloading by passing `make test-ha SKIP_WHEELHOUSE_REFRESH=1`.
 
 #### Wheelhouse cache management
 
-`make test-ha` depends on the `.wheelhouse/` cache and automatically refreshes it when `requirements-dev.txt` changes. Delete the directory (or run `make wheelhouse` manually) whenever you need to rebuild the cache for a clean-room test of updated dependencies.
+`make test-ha` depends on the `.wheelhouse/` cache and automatically refreshes it when `requirements-dev.txt` changes. Delete the directory (or run `make wheelhouse` manually) whenever you need to rebuild the cache for a clean-room test of updated dependencies. When the existing cache already satisfies the pinned requirements, skip the refresh step by invoking `make test-ha SKIP_WHEELHOUSE_REFRESH=1` (or the equivalent `make wheelhouse SKIP_WHEELHOUSE_REFRESH=1`).
 
 #### Running Home Assistant integration tests locally
 

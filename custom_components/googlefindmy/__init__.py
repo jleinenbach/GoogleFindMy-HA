@@ -41,7 +41,7 @@ import time
 from contextlib import suppress
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, TypeGuard, cast
 from collections import defaultdict
 from collections.abc import (
     Awaitable,
@@ -957,6 +957,7 @@ class ConfigEntrySubEntryManager:
         "_hass",
         "_key_field",
         "_managed",
+        "_managed_by_subentry_id",
     )
 
     def __init__(
@@ -972,6 +973,7 @@ class ConfigEntrySubEntryManager:
         self._key_field = key_field
         self._default_subentry_type = default_subentry_type
         self._managed: dict[str, ConfigSubentry] = {}
+        self._managed_by_subentry_id: dict[str, str] = {}
         self._cleanup: dict[str, CleanupCallback | None] = {}
         self._refresh_from_entry()
 
@@ -987,6 +989,119 @@ class ConfigEntrySubEntryManager:
             return awaited_value
         return result
 
+    @staticmethod
+    def _subentry_identity(
+        candidate: ConfigSubentry | Any,
+    ) -> tuple[str | None, str | None, str | None]:
+        """Return entry, subentry, and unique identifiers for ``candidate``."""
+
+        if candidate is None:
+            return None, None, None
+
+        entry_id_value = getattr(candidate, "entry_id", None)
+        entry_id = entry_id_value if isinstance(entry_id_value, str) and entry_id_value else None
+
+        subentry_id_value = getattr(candidate, "subentry_id", None)
+        subentry_id = (
+            subentry_id_value if isinstance(subentry_id_value, str) and subentry_id_value else None
+        )
+
+        unique_id_value = getattr(candidate, "unique_id", None)
+        unique_id = unique_id_value if isinstance(unique_id_value, str) and unique_id_value else None
+
+        return entry_id, subentry_id, unique_id
+
+    @staticmethod
+    def _is_subentry_like(candidate: Any) -> TypeGuard[ConfigSubentry]:
+        """Return ``True`` when ``candidate`` exposes a subentry-like interface."""
+
+        if candidate is None:
+            return False
+
+        _, subentry_id, _ = ConfigEntrySubEntryManager._subentry_identity(candidate)
+        if not isinstance(subentry_id, str) or not subentry_id:
+            return False
+
+        data = getattr(candidate, "data", None)
+        if not isinstance(data, Mapping):
+            return False
+
+        return True
+
+    def _managed_key_for_subentry_id(self, subentry_id: str) -> str | None:
+        """Return the managed key associated with ``subentry_id`` when present."""
+
+        existing_key = self._managed_by_subentry_id.get(subentry_id)
+        if existing_key is not None:
+            return existing_key
+
+        for managed_key, managed_subentry in self._managed.items():
+            candidate_subentry_id = getattr(managed_subentry, "subentry_id", None)
+            if isinstance(candidate_subentry_id, str) and candidate_subentry_id == subentry_id:
+                self._managed_by_subentry_id[subentry_id] = managed_key
+                return managed_key
+
+        return None
+
+    def _pop_managed(self, key: str) -> ConfigSubentry | None:
+        """Remove ``key`` from the managed cache and return the stored subentry."""
+
+        stored = self._managed.pop(key, None)
+        if stored is None:
+            return None
+
+        stored_subentry_id = getattr(stored, "subentry_id", None)
+        if isinstance(stored_subentry_id, str):
+            mapped_key = self._managed_by_subentry_id.get(stored_subentry_id)
+            if mapped_key == key:
+                self._managed_by_subentry_id.pop(stored_subentry_id, None)
+
+        return stored
+
+    def _index_managed_subentry(self, key: str, subentry: ConfigSubentry) -> None:
+        """Store ``subentry`` under ``key`` and keep the subentry-id index in sync."""
+
+        subentry_id = getattr(subentry, "subentry_id", None)
+        if isinstance(subentry_id, str) and subentry_id:
+            existing_key = self._managed_by_subentry_id.get(subentry_id)
+            if existing_key is None:
+                for managed_key, managed_subentry in list(self._managed.items()):
+                    candidate_subentry_id = getattr(managed_subentry, "subentry_id", None)
+                    if (
+                        isinstance(candidate_subentry_id, str)
+                        and candidate_subentry_id == subentry_id
+                    ):
+                        existing_key = managed_key
+                        break
+            if existing_key is not None and existing_key != key:
+                self._pop_managed(existing_key)
+
+        self._managed[key] = subentry
+
+        if isinstance(subentry_id, str) and subentry_id:
+            self._managed_by_subentry_id[subentry_id] = key
+
+    def _resolve_updated_subentry(
+        self,
+        *,
+        candidate: ConfigSubentry | Any,
+        original: ConfigSubentry,
+    ) -> ConfigSubentry:
+        """Return the object that should back the managed cache after an update."""
+
+        if self._is_subentry_like(candidate):
+            return candidate
+
+        subentry_id = getattr(original, "subentry_id", None)
+        if isinstance(subentry_id, str) and subentry_id:
+            subentries = getattr(self._entry, "subentries", None)
+            if isinstance(subentries, Mapping):
+                from_registry = subentries.get(subentry_id)
+                if self._is_subentry_like(from_registry):
+                    return from_registry
+
+        return original
+
     def _resolve_registered_subentry(
         self,
         *,
@@ -997,15 +1112,9 @@ class ConfigEntrySubEntryManager:
     ) -> ConfigSubentry:
         """Return the registry-backed subentry for ``key``."""
 
-        candidate_entry_id: str | None = None
-        candidate_subentry_id: str | None = None
-        if candidate is not None:
-            entry_id_value = getattr(candidate, "entry_id", None)
-            if isinstance(entry_id_value, str) and entry_id_value:
-                candidate_entry_id = entry_id_value
-            subentry_id_value = getattr(candidate, "subentry_id", None)
-            if isinstance(subentry_id_value, str) and subentry_id_value:
-                candidate_subentry_id = subentry_id_value
+        candidate_entry_id, candidate_subentry_id, candidate_unique_id = (
+            self._subentry_identity(candidate)
+        )
 
         target_subentry_id: str | None
         if isinstance(fallback_subentry_id, str) and fallback_subentry_id:
@@ -1044,17 +1153,29 @@ class ConfigEntrySubEntryManager:
                     return direct
 
             for subentry in subentries.values():
-                subentry_id = getattr(subentry, "subentry_id", None)
+                subentry_entry_id, subentry_id, subentry_unique_id = self._subentry_identity(
+                    subentry
+                )
+
                 if isinstance(target_subentry_id, str) and subentry_id == target_subentry_id:
                     return subentry
 
                 if isinstance(candidate_entry_id, str):
-                    subentry_entry_id = getattr(subentry, "entry_id", None)
                     if isinstance(subentry_entry_id, str) and subentry_entry_id == candidate_entry_id:
                         return subentry
 
-                subentry_unique_id = getattr(subentry, "unique_id", None)
-                if isinstance(subentry_unique_id, str) and subentry_unique_id == unique_id:
+                resolved_candidate_unique_id: str | None
+                if isinstance(candidate_unique_id, str) and candidate_unique_id:
+                    resolved_candidate_unique_id = candidate_unique_id
+                elif isinstance(unique_id, str) and unique_id:
+                    resolved_candidate_unique_id = unique_id
+                else:
+                    resolved_candidate_unique_id = None
+                if (
+                    isinstance(subentry_unique_id, str)
+                    and resolved_candidate_unique_id is not None
+                    and subentry_unique_id == resolved_candidate_unique_id
+                ):
                     return subentry
 
                 data = getattr(subentry, "data", None)
@@ -1092,12 +1213,29 @@ class ConfigEntrySubEntryManager:
             resolved = candidate
 
         if resolved is None:
+            candidate_descriptor: str
+            if isinstance(candidate_entry_id, str) and candidate_entry_id:
+                candidate_descriptor = candidate_entry_id
+            elif isinstance(candidate_subentry_id, str) and candidate_subentry_id:
+                fallback_unique = candidate_unique_id or unique_id
+                if isinstance(fallback_unique, str) and fallback_unique:
+                    candidate_descriptor = f"{candidate_subentry_id}:{fallback_unique}"
+                else:
+                    candidate_descriptor = candidate_subentry_id
+            elif isinstance(candidate_unique_id, str) and candidate_unique_id:
+                candidate_descriptor = candidate_unique_id
+            elif isinstance(unique_id, str) and unique_id:
+                candidate_descriptor = unique_id
+            else:
+                candidate_descriptor = "<unset>"
             context = (
-                "unique_id={unique_id!r}, key={key!r}, fallback_id={fallback!r}"
+                "unique_id={unique_id!r}, key={key!r}, fallback_id={fallback!r},"
+                " candidate_ref={candidate!r}"
             ).format(
                 unique_id=unique_id,
                 key=key,
                 fallback=fallback_subentry_id,
+                candidate=candidate_descriptor,
             )
             _LOGGER.error(
                 "[%s] async_sync: Unable to locate registered subentry for %s after"
@@ -1116,6 +1254,7 @@ class ConfigEntrySubEntryManager:
         """Populate managed mapping from the config entry."""
 
         self._managed.clear()
+        self._managed_by_subentry_id.clear()
         subentries = getattr(self._entry, "subentries", None)
         if not isinstance(subentries, Mapping):
             return
@@ -1135,7 +1274,7 @@ class ConfigEntrySubEntryManager:
                 key = None
 
             if isinstance(key, str):
-                self._managed[key] = subentry
+                self._index_managed_subentry(key, subentry)
 
     async def _async_adopt_existing_unique_id(
         self,
@@ -1148,7 +1287,8 @@ class ConfigEntrySubEntryManager:
 
         owner: ConfigSubentry | None = None
         for subentry in getattr(self._entry, "subentries", {}).values():
-            if subentry.unique_id == unique_id:
+            _, _, candidate_unique_id = self._subentry_identity(subentry)
+            if candidate_unique_id == unique_id:
                 owner = subentry
                 break
 
@@ -1158,12 +1298,36 @@ class ConfigEntrySubEntryManager:
                 f"adopt it for key '{key}' in entry {self._entry.entry_id}"
             )
 
+        _, owner_subentry_id, owner_unique_id = self._subentry_identity(owner)
+
+        removal_keys: set[str] = set()
+
+        if isinstance(owner_subentry_id, str) and owner_subentry_id:
+            previous_key = self._managed_key_for_subentry_id(owner_subentry_id)
+            if previous_key is not None and previous_key != key:
+                removal_keys.add(previous_key)
+
         for old_key, mapped in list(self._managed.items()):
             if old_key == key:
                 continue
-            if mapped.subentry_id == owner.subentry_id:
-                self._managed.pop(old_key, None)
-                self._cleanup.pop(old_key, None)
+            _, mapped_subentry_id, mapped_unique_id = self._subentry_identity(mapped)
+            if (
+                isinstance(owner_subentry_id, str)
+                and owner_subentry_id
+                and mapped_subentry_id == owner_subentry_id
+            ):
+                removal_keys.add(old_key)
+                continue
+            if (
+                isinstance(owner_unique_id, str)
+                and owner_unique_id
+                and mapped_unique_id == owner_unique_id
+            ):
+                removal_keys.add(old_key)
+
+        for old_key in removal_keys:
+            self._pop_managed(old_key)
+            self._cleanup.pop(old_key, None)
 
         update_result = self._hass.config_entries.async_update_subentry(
             self._entry,
@@ -1176,9 +1340,11 @@ class ConfigEntrySubEntryManager:
         if isinstance(resolved, ConfigSubentry):
             stored = resolved
         else:
-            stored = self._entry.subentries.get(owner.subentry_id, owner)
+            stored = self._entry.subentries.get(
+                getattr(owner, "subentry_id", None), owner
+            )
 
-        self._managed[key] = stored
+        self._index_managed_subentry(key, stored)
         return stored
 
     async def _deduplicate_subentries(self) -> None:
@@ -1373,15 +1539,14 @@ class ConfigEntrySubEntryManager:
                         "Subentry visibility update for '%s' raised: %s", key, err
                     )
                 else:
-                    if isinstance(resolved, ConfigSubentry):
+                    if self._is_subentry_like(resolved):
                         resolved_subentry = resolved
                 finally:
-                    refreshed_subentry = resolved_subentry or self._entry.subentries.get(
-                        subentry.subentry_id, subentry
+                    refreshed_subentry = self._resolve_updated_subentry(
+                        candidate=resolved_subentry,
+                        original=subentry,
                     )
-                    if refreshed_subentry is None:
-                        refreshed_subentry = subentry
-                    self._managed[key] = refreshed_subentry
+                    self._index_managed_subentry(key, refreshed_subentry)
 
             self._hass.async_create_task(
                 _await_visibility_update(),
@@ -1389,13 +1554,12 @@ class ConfigEntrySubEntryManager:
             )
             return
 
-        refreshed = update_result if isinstance(update_result, ConfigSubentry) else None
-        if refreshed is None:
-            refreshed = self._entry.subentries.get(subentry.subentry_id, subentry)
-        if refreshed is None:
-            refreshed = subentry
+        refreshed = self._resolve_updated_subentry(
+            candidate=update_result,
+            original=subentry,
+        )
         # Ensure local view reflects Home Assistant's stored subentry.
-        self._managed[key] = refreshed
+        self._index_managed_subentry(key, refreshed)
 
     async def async_sync(
         self, definitions: Iterable[ConfigEntrySubentryDefinition]
@@ -1602,7 +1766,7 @@ class ConfigEntrySubEntryManager:
                         fallback_subentry_id=fallback_subentry_id,
                     )
 
-                    self._managed[key] = stored
+                    self._index_managed_subentry(key, stored)
                     break
 
                 _LOGGER.debug(
@@ -1666,21 +1830,25 @@ class ConfigEntrySubEntryManager:
                     stored_existing = resolved_update
                 elif resolved_update:
                     stored_existing = self._entry.subentries.get(
-                        existing.subentry_id, existing
+                        getattr(existing, "subentry_id", None), existing
                     )
                 else:
                     stored_existing = None
 
                 if stored_existing is not None:
-                    self._managed[key] = stored_existing
+                    self._index_managed_subentry(key, stored_existing)
                 break
 
             self._cleanup[key] = cleanup
 
         desired_ids: set[str] = {
-            subentry.subentry_id
+            subentry_id
             for managed_key, subentry in list(self._managed.items())
-            if managed_key in desired and isinstance(subentry.subentry_id, str)
+            if managed_key in desired
+            and isinstance(
+                (subentry_id := getattr(subentry, "subentry_id", None)),
+                str,
+            )
         }
 
         stale_keys: list[str] = []
@@ -1689,7 +1857,7 @@ class ConfigEntrySubEntryManager:
                 continue
             subentry_id = getattr(subentry, "subentry_id", None)
             if isinstance(subentry_id, str) and subentry_id in desired_ids:
-                self._managed.pop(managed_key, None)
+                self._pop_managed(managed_key)
                 self._cleanup.pop(managed_key, None)
                 continue
             stale_keys.append(managed_key)
@@ -1700,7 +1868,7 @@ class ConfigEntrySubEntryManager:
     async def async_remove(self, key: str) -> None:
         """Remove a managed subentry and run its cleanup callback."""
 
-        subentry = self._managed.pop(key, None)
+        subentry = self._pop_managed(key)
         cleanup = self._cleanup.pop(key, None)
         if cleanup is not None:
             try:
@@ -1713,9 +1881,13 @@ class ConfigEntrySubEntryManager:
         if subentry is None:
             return
 
+        subentry_id = getattr(subentry, "subentry_id", None)
+        if not isinstance(subentry_id, str) or not subentry_id:
+            return
+
         try:
             remove_result = self._hass.config_entries.async_remove_subentry(
-                self._entry, subentry.subentry_id
+                self._entry, subentry_id
             )
             await self._await_subentry_result(remove_result)
         except Exception as err:  # pragma: no cover - defensive logging
