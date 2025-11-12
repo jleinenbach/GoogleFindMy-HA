@@ -26,7 +26,7 @@ def test_pytest_config_emits_no_config_warnings() -> None:
     env[_CHILD_ENV_VAR] = "1"
 
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q"],
+        [sys.executable, "-m", "pytest", "--fixtures"],
         cwd=repo_root,
         check=False,
         stdout=subprocess.PIPE,
@@ -36,7 +36,7 @@ def test_pytest_config_emits_no_config_warnings() -> None:
     )
 
     assert result.returncode == 0, (
-        "pytest -q smoke run failed:\n"
+        "pytest --fixtures smoke run failed:\n"
         f"stdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )

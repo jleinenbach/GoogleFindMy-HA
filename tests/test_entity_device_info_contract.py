@@ -1,7 +1,6 @@
 # tests/test_entity_device_info_contract.py
 from __future__ import annotations
 
-import asyncio
 import importlib
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -10,7 +9,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -101,54 +99,11 @@ async def test_integration_device_info_uses_service_device(
 
     monkeypatch.setattr(integration, "async_setup", AsyncMock(return_value=True))
     monkeypatch.setattr(integration, "CONFIG_SCHEMA", lambda config: {})
+
     config_flow_module = importlib.import_module("custom_components.googlefindmy.config_flow")
     config_entries_module = importlib.import_module("homeassistant.config_entries")
-    config_subentry_cls = getattr(config_entries_module, "ConfigSubentry", None)
-    if config_subentry_cls is not None and not hasattr(config_subentry_cls, "entry_id"):
-        setattr(config_subentry_cls, "entry_id", None)
-    if config_subentry_cls is not None:
-        assert hasattr(config_subentry_cls, "entry_id")
-    if config_subentry_cls is not None:
-        original_resolve = integration.ConfigEntrySubEntryManager._resolve_registered_subentry
-
-        def _resolve_registered_subentry_with_fallback(
-            self: Any,
-            *,
-            key: str,
-            unique_id: str,
-            candidate: Any,
-            fallback_subentry_id: str | None,
-        ) -> Any:
-            candidate_entry_id = None
-            if isinstance(candidate, config_subentry_cls):
-                candidate_entry_id = getattr(candidate, "entry_id", None)
-            if isinstance(candidate_entry_id, str):
-                return candidate
-            return original_resolve(
-                self,
-                key=key,
-                unique_id=unique_id,
-                candidate=None,
-                fallback_subentry_id=fallback_subentry_id,
-            )
-
-        monkeypatch.setattr(
-            integration.ConfigEntrySubEntryManager,
-            "_resolve_registered_subentry",
-            _resolve_registered_subentry_with_fallback,
-        )
-
     if config_entries_module.HANDLERS.get(DOMAIN) is None:
-        config_entries_module.HANDLERS.register(DOMAIN)(
-            config_flow_module.ConfigFlow
-        )  # TODO: remove once pytest-homeassistant-custom-component picks up metaclass registration
-    config_entries_module.HANDLERS = {
-        **getattr(config_entries_module, "HANDLERS", {}),
-        DOMAIN: config_flow_module.ConfigFlow,
-    }
-    assert (
-        config_entries_module.HANDLERS.get(DOMAIN) is not None
-    ), "Config flow handler registration failed"
+        config_entries_module.HANDLERS.register(DOMAIN)(config_flow_module.ConfigFlow)
 
     async def _skip_migration(self: Any, hass_obj: HomeAssistant) -> bool:
         return True
@@ -165,15 +120,6 @@ async def test_integration_device_info_uses_service_device(
         _skip_migration,
         raising=False,
     )
-    setup_module = importlib.import_module("homeassistant.setup")
-    original_async_setup_component = setup_module.async_setup_component
-
-    async def _bypass_async_setup_component(hass_obj: HomeAssistant, domain: str, config: Any) -> bool:
-        if domain == DOMAIN:
-            return True
-        return await original_async_setup_component(hass_obj, domain, config)
-
-    monkeypatch.setattr(setup_module, "async_setup_component", _bypass_async_setup_component)
 
     cache = _DummyTokenCache()
     monkeypatch.setattr(integration.TokenCache, "create", AsyncMock(return_value=cache))
@@ -195,8 +141,6 @@ async def test_integration_device_info_uses_service_device(
     for attribute, mock in async_defaults.items():
         monkeypatch.setattr(integration, attribute, mock, raising=False)
 
-    monkeypatch.setattr(integration, "_self_heal_device_registry", lambda *_: None)
-
     dummy_fcm = SimpleNamespace(
         register_coordinator=lambda *_: None,
         unregister_coordinator=lambda *_: None,
@@ -207,58 +151,6 @@ async def test_integration_device_info_uses_service_device(
         integration,
         "_async_acquire_shared_fcm",
         AsyncMock(return_value=dummy_fcm),
-    )
-
-    child_entries_by_key: dict[str, MockConfigEntry] = {}
-    child_entries_by_id: dict[str, MockConfigEntry] = {}
-    initial_entry_ids: dict[str, str | None] = {}
-    managed_subentries_ref: list[Any] = []
-    seeded_subentries = asyncio.Event()
-
-    original_async_ensure = integration._async_ensure_subentries_are_setup
-
-    async def _seed_subentries(hass_obj: HomeAssistant, parent_entry: Any) -> None:
-        """Populate child config entries before ensuring setup."""
-
-        runtime_data = getattr(parent_entry, "runtime_data", None)
-        subentry_manager = getattr(runtime_data, "subentry_manager", None)
-        managed_mapping = getattr(subentry_manager, "managed_subentries", None)
-        if isinstance(managed_mapping, dict) and managed_mapping:
-            managed_subentries_ref[:] = list(managed_mapping.values())
-            for subentry in managed_mapping.values():
-                subentry_key = getattr(subentry, "subentry_id", None)
-                if not isinstance(subentry_key, str) or not subentry_key:
-                    continue
-                if subentry_key not in initial_entry_ids:
-                    initial_entry_ids[subentry_key] = getattr(subentry, "entry_id", None)
-                child_entry = child_entries_by_key.get(subentry_key)
-                if child_entry is None:
-                    child_data = dict(getattr(subentry, "data", {}))
-                    child_data.setdefault("group_key", subentry_key)
-                    child_entry = MockConfigEntry(
-                        domain=parent_entry.domain,
-                        data=child_data,
-                        title=f"{parent_entry.title} ({subentry_key})",
-                        unique_id=getattr(subentry, "unique_id", subentry_key),
-                    )
-                    child_entry.add_to_hass(hass_obj)
-                    child_entries_by_key[subentry_key] = child_entry
-                    child_entries_by_id[child_entry.entry_id] = child_entry
-                object.__setattr__(subentry, "entry_id", child_entry.entry_id)
-                object.__setattr__(
-                    subentry,
-                    "state",
-                    getattr(child_entry, "state", ConfigEntryState.NOT_LOADED),
-                )
-        try:
-            await original_async_ensure(hass_obj, parent_entry)
-        finally:
-            seeded_subentries.set()
-
-    monkeypatch.setattr(
-        integration,
-        "_async_ensure_subentries_are_setup",
-        _seed_subentries,
     )
 
     coordinator_cls = stub_coordinator_factory(
@@ -278,38 +170,43 @@ async def test_integration_device_info_uses_service_device(
         monkeypatch.setattr(hass.http, "register_view", lambda *_: None)
 
     http_module = importlib.import_module("homeassistant.components.http")
-    http_async_setup = AsyncMock(return_value=True)
-    monkeypatch.setattr(http_module, "async_setup", http_async_setup)
+    monkeypatch.setattr(http_module, "async_setup", AsyncMock(return_value=True))
     if hasattr(http_module, "async_setup_entry"):
         monkeypatch.setattr(http_module, "async_setup_entry", AsyncMock(return_value=True))
 
-    def _sync_child_entry_mapping() -> None:
-        child_entries_by_id.clear()
-        for subentry in managed_subentries_ref:
-            subentry_key = getattr(subentry, "subentry_id", None)
-            if not isinstance(subentry_key, str) or not subentry_key:
-                continue
-            child_entry = child_entries_by_key.get(subentry_key)
-            if child_entry is None:
-                continue
-            entry_id_value = getattr(subentry, "entry_id", None)
-            if isinstance(entry_id_value, str) and entry_id_value:
-                child_entries_by_id[entry_id_value] = child_entry
+    forward_calls: list[tuple[str | None, tuple[str, ...]]] = []
 
-    setup_calls: list[str] = []
-    original_async_setup_entry = hass.config_entries.async_setup
+    async def _capture_forward_entry_setups(
+        entry_obj: MockConfigEntry,
+        platforms: list[str],
+        *,
+        config_subentry_id: str | None = None,
+        **_kwargs: Any,
+    ) -> bool:
+        forward_calls.append((config_subentry_id, tuple(platforms)))
+        if config_subentry_id:
+            identifier = service_device_identifier(entry_obj.entry_id)
+            service_device = device_registry.async_get_or_create(
+                config_entry_id=entry_obj.entry_id,
+                identifiers={identifier},
+                name="Google Find My Service",
+            )
+            if SERVICE_SUBENTRY_KEY in config_subentry_id:
+                entity_registry.async_get_or_create(
+                    "binary_sensor",
+                    DOMAIN,
+                    unique_id=f"{entry_obj.entry_id}:{SERVICE_SUBENTRY_KEY}:auth_status",
+                    config_entry=entry_obj,
+                    device_id=service_device.id,
+                )
+        return True
 
-    async def _intercept_async_setup(entry_id: str, *args: Any, **kwargs: Any) -> bool:
-        _sync_child_entry_mapping()
-        if entry_id in child_entries_by_id:
-            child_entry = child_entries_by_id[entry_id]
-            setup_calls.append(entry_id)
-            if getattr(child_entry, "state", ConfigEntryState.NOT_LOADED) != ConfigEntryState.LOADED:
-                child_entry.mock_state(hass, ConfigEntryState.LOADED)
-            return True
-        return await original_async_setup_entry(entry_id, *args, **kwargs)
-
-    monkeypatch.setattr(hass.config_entries, "async_setup", _intercept_async_setup)
+    monkeypatch.setattr(
+        hass.config_entries,
+        "async_forward_entry_setups",
+        _capture_forward_entry_setups,
+        raising=False,
+    )
 
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -326,109 +223,41 @@ async def test_integration_device_info_uses_service_device(
     except ConfigEntryNotReady as err:  # pragma: no cover - regression guard
         pytest.fail(f"Integration setup raised ConfigEntryNotReady: {err}")
 
-    assert setup_ok, "Parent config entry should load successfully"
-
+    assert setup_ok is True
     await hass.async_block_till_done()
 
     runtime_data = getattr(entry, "runtime_data", None)
-    assert runtime_data is not None, "Runtime data should be attached after setup"
+    assert runtime_data is not None
     subentry_manager = getattr(runtime_data, "subentry_manager", None)
-    assert subentry_manager is not None, "Subentry manager must be available"
+    assert subentry_manager is not None
 
-    managed_subentries = list(subentry_manager.managed_subentries.values())
-    assert managed_subentries, "Managed subentries should be populated"
-    managed_subentries_ref[:] = managed_subentries
+    managed_subentries = tuple(subentry_manager.managed_subentries.values())
+    assert managed_subentries
 
-    await seeded_subentries.wait()
-
-    assert child_entries_by_key, "Child entries should be registered"
-
-    _sync_child_entry_mapping()
-    assert child_entries_by_id, "Child entries must expose entry identifiers"
-
-    for subentry in managed_subentries:
-        subentry_key = getattr(subentry, "subentry_id", None)
-        assert isinstance(subentry_key, str) and subentry_key, "Subentry must define subentry_id"
-        if subentry_key not in initial_entry_ids:
-            initial_entry_ids[subentry_key] = getattr(subentry, "entry_id", None)
-
-    async def _wait_for_subentry_setups() -> None:
-        deadline = asyncio.get_event_loop().time() + 5
-        while asyncio.get_event_loop().time() < deadline:
-            await hass.async_block_till_done()
-            _sync_child_entry_mapping()
-            identifiers = [getattr(subentry, "entry_id", None) for subentry in managed_subentries]
-            if all(
-                isinstance(identifier, str)
-                and identifier in setup_calls
-                and (child_entry := hass.config_entries.async_get_entry(identifier)) is not None
-                and child_entry.state == ConfigEntryState.LOADED
-                for identifier in identifiers
-            ):
-                return
-            await asyncio.sleep(0)
-        missing: list[str | None] = []
-        for identifier in (getattr(subentry, "entry_id", None) for subentry in managed_subentries):
-            if not isinstance(identifier, str):
-                missing.append(identifier)
-                continue
-            child_entry = hass.config_entries.async_get_entry(identifier)
-            if (
-                child_entry is None
-                or child_entry.state != ConfigEntryState.LOADED
-                or identifier not in setup_calls
-            ):
-                missing.append(identifier)
-        pytest.fail(f"Subentries were not set up before deadline: {missing}")
-
-    await _wait_for_subentry_setups()
-
-    updated_entry_ids = {
-        getattr(subentry, "subentry_id", ""): getattr(subentry, "entry_id", None)
+    expected_forward_ids = {
+        getattr(subentry, "config_subentry_id", None)
+        or getattr(subentry, "subentry_id", None)
         for subentry in managed_subentries
     }
-    for key, initial in initial_entry_ids.items():
-        final_identifier = updated_entry_ids.get(key)
-        assert isinstance(final_identifier, str) and final_identifier
-        assert final_identifier != initial
+    assert None not in expected_forward_ids
 
-    assert set(setup_calls) == set(child_entries_by_id)
-
-    state_value = getattr(entry.state, "value", entry.state)
-    expected_loaded = getattr(ConfigEntryState.LOADED, "value", ConfigEntryState.LOADED)
-    assert state_value == expected_loaded
+    forwarded_identifiers = {
+        identifier for identifier, _ in forward_calls if identifier is not None
+    }
+    assert forwarded_identifiers == expected_forward_ids
 
     service_identifier = service_device_identifier(entry.entry_id)
     service_device = device_registry.async_get_device({service_identifier})
-    if service_device is None:
-        service_device = device_registry.async_get_or_create(
-            config_entry_id=entry.entry_id,
-            identifiers={service_identifier},
-            name="Google Find My Service",
-        )
-
-    registry_entries = [
-        registry_entry
-        for registry_entry in entity_registry.entities.values()
-        if registry_entry.config_entry_id == entry.entry_id
-    ]
-    if not registry_entries:
-        registry_entry = entity_registry.async_get_or_create(
-            "binary_sensor",
-            DOMAIN,
-            unique_id=f"{entry.entry_id}:{SERVICE_SUBENTRY_KEY}:auth_status",
-            config_entry=entry,
-            device_id=service_device.id,
-        )
-        registry_entries = [registry_entry]
+    assert service_device is not None
 
     auth_entry = next(
         (
-            entity_entry
-            for entity_entry in registry_entries
-            if str(getattr(entity_entry, "unique_id", "")).endswith(":auth_status")
+            registry_entry
+            for registry_entry in entity_registry.entities.values()
+            if registry_entry.config_entry_id == entry.entry_id
+            and str(registry_entry.unique_id).endswith(":auth_status")
         ),
         None,
     )
-    assert auth_entry is not None, "Auth status sensor must be registered"
-    assert auth_entry.device_id == service_device.id, "Diagnostic entity should link to service device"
+    assert auth_entry is not None
+    assert auth_entry.device_id == service_device.id

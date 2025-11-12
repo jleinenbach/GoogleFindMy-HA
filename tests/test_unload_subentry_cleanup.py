@@ -15,6 +15,22 @@ from homeassistant.config_entries import ConfigSubentry
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 
 
+def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:
+    """Return normalized platform names for recorded calls."""
+
+    names: list[str] = []
+    for platform in platforms:
+        if isinstance(platform, str):
+            names.append(platform)
+        else:
+            value = getattr(platform, "value", None)
+            if isinstance(value, str):
+                names.append(value)
+            else:
+                names.append(str(platform))
+    return tuple(names)
+
+
 class _RegistryTracker:
     """Track registry cleanup operations."""
 
@@ -70,6 +86,7 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self.removed_subentries: list[str] = []
         self.unloaded_subentries: list[str] = []
         self.setup_calls: list[str] = []
+        self.forward_unload_calls: list[tuple[_EntryStub, tuple[object, ...], str | None]] = []
 
     def async_entries(self, domain: str | None = None) -> list[_EntryStub]:
         if domain is not None and domain != DOMAIN:
@@ -84,6 +101,17 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self, entry: _EntryStub, platforms: list[str]
     ) -> bool:
         assert entry is self._entry
+        return True
+
+    async def async_forward_entry_unload(
+        self,
+        entry: _EntryStub,
+        platforms: list[object],
+        *,
+        config_subentry_id: str | None = None,
+    ) -> bool:
+        assert entry is self._entry
+        self.forward_unload_calls.append((entry, tuple(platforms), config_subentry_id))
         return True
 
     def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
@@ -177,12 +205,23 @@ class _SubentryConfigEntriesHelper:
     """Config entries helper tracking subentry unload requests."""
 
     def __init__(self) -> None:
-        self.unload_calls: list[tuple[Any, tuple[str, ...]]] = []
+        self.unload_platform_calls: list[tuple[Any, tuple[object, ...]]] = []
+        self.forward_unload_calls: list[tuple[Any, tuple[object, ...], str | None]] = []
 
     async def async_unload_platforms(
-        self, entry: Any, platforms: list[str]
+        self, entry: Any, platforms: list[object]
     ) -> bool:  # noqa: FBT001 - Home Assistant signature
-        self.unload_calls.append((entry, tuple(platforms)))
+        self.unload_platform_calls.append((entry, tuple(platforms)))
+        return True
+
+    async def async_forward_entry_unload(
+        self,
+        entry: Any,
+        platforms: list[object],
+        *,
+        config_subentry_id: str | None = None,
+    ) -> bool:  # noqa: FBT001 - Home Assistant signature
+        self.forward_unload_calls.append((entry, tuple(platforms), config_subentry_id))
         return True
 
 
@@ -219,7 +258,13 @@ async def test_async_unload_subentry_clears_runtime_data_and_preserves_parent_ca
     assert child_entry.runtime_data is None
     entries_bucket = hass.data[DOMAIN]["entries"]
     assert entries_bucket == {parent_entry_id: runtime_data}
-    assert hass.config_entries.unload_calls == [(child_entry, tuple(integration.PLATFORMS))]
+    assert hass.config_entries.unload_platform_calls
+    recorded_entry, recorded_platforms = hass.config_entries.unload_platform_calls[0]
+    assert recorded_entry == child_entry
+    assert _platform_names(recorded_platforms) == tuple(
+        platform.value if hasattr(platform, "value") else str(platform)
+        for platform in integration.PLATFORMS
+    )
 
 
 def test_async_unload_entry_removes_subentries_and_registries(
@@ -268,8 +313,58 @@ def test_async_unload_entry_removes_subentries_and_registries(
     assert entity_registry.removals == [first.subentry_id, second.subentry_id]
     assert device_registry.removals == [first.subentry_id, second.subentry_id]
     assert not entry.subentries
-    assert hass.config_entries.unloaded_subentries == [
-        first.subentry_id,
-        second.subentry_id,
-    ]
+    calls = hass.config_entries.forward_unload_calls
+    assert calls
+    assert len(calls) == 2
+    assert calls[0][0] is entry and calls[0][2] == first.subentry_id
+    assert calls[1][0] is entry and calls[1][2] == second.subentry_id
+    tracker_platforms = _platform_names(calls[0][1])
+    assert tracker_platforms == integration.TRACKER_FEATURE_PLATFORMS
+    assert _platform_names(calls[1][1]) == tracker_platforms
     assert hass.config_entries.removed_subentries == []
+
+
+def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -> None:
+    """Unload should fall back when Home Assistant lacks config_subentry_id support."""
+
+    entry = _EntryStub()
+    subentry = entry.add_subentry("legacy", ("dev-legacy",))
+
+    entity_registry = _RegistryTracker()
+    device_registry = _RegistryTracker()
+    entity_registry.apply(subentry.subentry_id, subentry.data["visible_device_ids"])
+    device_registry.apply(subentry.subentry_id, subentry.data["visible_device_ids"])
+
+    token_cache = _TokenCacheStub()
+    coordinator = _CoordinatorStub()
+    subentry_manager = _SubentryManagerStub(entry, entity_registry, device_registry)
+    runtime_data = integration.RuntimeData(
+        coordinator=coordinator,
+        token_cache=token_cache,
+        subentry_manager=subentry_manager,
+        fcm_receiver=None,
+    )
+    entry.runtime_data = runtime_data
+
+    hass = _HassStub(entry, runtime_data, entity_registry, device_registry)
+
+    legacy_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
+
+    def legacy_forward(entry_obj: _EntryStub, platforms: list[object]) -> bool:
+        legacy_calls.append((entry_obj, tuple(platforms)))
+        return True
+
+    hass.config_entries.async_forward_entry_unload = legacy_forward  # type: ignore[attr-defined]
+
+    async def _fake_release_fcm(hass_obj: Any) -> None:
+        hass_obj.data[DOMAIN]["fcm_refcount"] = 0
+
+    monkeypatch.setattr(integration, "_async_release_shared_fcm", _fake_release_fcm)
+    monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
+    monkeypatch.setattr(integration, "loc_unregister_fcm_provider", lambda: None)
+    monkeypatch.setattr(integration, "api_unregister_fcm_provider", lambda: None)
+
+    result = asyncio.run(integration.async_unload_entry(hass, entry))
+
+    assert result is True
+    assert legacy_calls == [(entry, tuple(integration.TRACKER_FEATURE_PLATFORMS))]
