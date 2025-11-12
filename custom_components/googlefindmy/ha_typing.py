@@ -110,13 +110,37 @@ if TYPE_CHECKING:
         async def async_get_last_state(self) -> Any: ...
 
 else:
+    import sys
+    from types import ModuleType
+
     from homeassistant.components.button import ButtonEntity  # noqa: F401
     from homeassistant.components.binary_sensor import BinarySensorEntity  # noqa: F401
     from homeassistant.components.device_tracker import TrackerEntity  # noqa: F401
     try:
         from homeassistant.helpers.http import HomeAssistantView  # noqa: F401
     except ImportError:  # pragma: no cover - fallback for older/stub environments
-        from homeassistant.components.http import HomeAssistantView  # type: ignore[assignment]
+        _http_module = sys.modules.get("homeassistant.components.http")
+        if isinstance(_http_module, ModuleType) and hasattr(
+            _http_module, "HomeAssistantView"
+        ):
+            HomeAssistantView = getattr(  # type: ignore[assignment]
+                _http_module, "HomeAssistantView"
+            )
+        else:
+            class _StubHomeAssistantView:  # pragma: no cover - minimal fallback
+                """Stand-in base class for environments without HTTP helpers."""
+
+                requires_auth = False
+                url = ""
+                name = ""
+
+                def __init__(self, hass: Any | None = None) -> None:
+                    self.hass = hass
+
+                async def get(self, *_args: Any, **_kwargs: Any) -> Any:
+                    raise NotImplementedError
+
+            HomeAssistantView = _StubHomeAssistantView  # type: ignore[assignment]
     from homeassistant.components.sensor import (  # noqa: F401
         RestoreSensor,
         SensorEntity,
