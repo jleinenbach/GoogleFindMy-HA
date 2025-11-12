@@ -1031,7 +1031,7 @@ class ConfigEntrySubEntryManager:
         if isinstance(refreshed_entry, ConfigEntry) and refreshed_entry is not self._entry:
             self._entry = refreshed_entry
 
-        def _scan(entry: ConfigEntry) -> ConfigSubentry | None:
+        def _scan(entry: Any) -> ConfigSubentry | None:
             subentries = getattr(entry, "subentries", None)
             if not isinstance(subentries, Mapping):
                 return None
@@ -1073,9 +1073,11 @@ class ConfigEntrySubEntryManager:
             return None
 
         resolved: ConfigSubentry | None = None
-        entries_to_scan: list[ConfigEntry] = []
+        entries_to_scan: list[Any] = []
         for entry in (refreshed_entry, self._entry):
-            if not isinstance(entry, ConfigEntry):
+            if entry is None:
+                continue
+            if getattr(entry, "subentries", None) is None:
                 continue
             if any(candidate is entry for candidate in entries_to_scan):
                 continue
@@ -1487,25 +1489,70 @@ class ConfigEntrySubEntryManager:
                                 "data": MappingProxyType(payload),
                                 "title": definition.title,
                                 "unique_id": unique_id,
+                                "subentry_type": subentry_type,
                             }
                             if translation_key is not None:
                                 constructor_kwargs["translation_key"] = translation_key
-                            constructor_kwargs["subentry_type"] = subentry_type
-                            try:
-                                new_subentry = ConfigSubentry(
-                                    **constructor_kwargs,
+
+                            placeholder_subentry_id = "-".join(
+                                (
+                                    self._entry.entry_id,
+                                    key,
+                                    "provisional",
                                 )
-                            except TypeError:
-                                constructor_kwargs.pop("translation_key", None)
+                            )
+                            constructor_kwargs.setdefault(
+                                "subentry_id",
+                                placeholder_subentry_id,
+                            )
+
+                            new_subentry = None
+                            for drop_translation in (False, True):
                                 try:
                                     new_subentry = ConfigSubentry(
                                         **constructor_kwargs,
                                     )
                                 except TypeError:
-                                    constructor_kwargs.pop("subentry_type", None)
+                                    if (
+                                        not drop_translation
+                                        and "translation_key" in constructor_kwargs
+                                    ):
+                                        constructor_kwargs.pop("translation_key")
+                                        continue
+                                else:
+                                    break
+                            else:
+                                saved_subentry_type = constructor_kwargs.pop(
+                                    "subentry_type", None
+                                )
+                                try:
                                     new_subentry = ConfigSubentry(
                                         **constructor_kwargs,
                                     )
+                                except TypeError as err:
+                                    if saved_subentry_type is not None:
+                                        constructor_kwargs["subentry_type"] = (
+                                            saved_subentry_type
+                                        )
+                                    raise HomeAssistantError(
+                                        "Failed to instantiate ConfigSubentry fallback;"
+                                        " see logs for details"
+                                    ) from err
+                                finally:
+                                    if saved_subentry_type is not None:
+                                        constructor_kwargs["subentry_type"] = (
+                                            saved_subentry_type
+                                        )
+
+                                if not isinstance(new_subentry, ConfigSubentry):
+                                    raise HomeAssistantError(
+                                        "ConfigSubentry fallback returned unexpected instance"
+                                    )
+                            if new_subentry is None:
+                                raise HomeAssistantError(
+                                    "Failed to instantiate ConfigSubentry fallback"
+                                )
+
                             add_result = self._hass.config_entries.async_add_subentry(
                                 self._entry, new_subentry
                             )
