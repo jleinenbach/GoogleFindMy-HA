@@ -153,14 +153,37 @@ class FcmReceiverHA:
 
     # -------------------- Lifecycle --------------------
 
-    async def async_initialize(self) -> bool:
+    async def async_initialize(self, entry_id: Optional[str] = None) -> bool:
         """Initialize receiver and underlying push client (idempotent).
+
+        Args:
+            entry_id: Optional config entry ID to use for cache access in multi-account setups.
+                     If not provided, will attempt to use the first available entry.
 
         Returns:
             True if the receiver is ready to start; False on a non-fatal failure.
         """
         # Load FCM credentials from the async TokenCache (string or dict supported).
-        creds: Any = await async_get_cached_value("fcm_credentials")
+        # In multi-account mode, we need to get the specific TokenCache instance
+        from custom_components.googlefindmy.Auth.token_cache import _INSTANCES
+
+        try:
+            if entry_id and entry_id in _INSTANCES:
+                # Use the specified entry's cache
+                cache = _INSTANCES[entry_id]
+                creds: Any = await cache.get("fcm_credentials")
+            elif _INSTANCES:
+                # Use the first available entry's credentials
+                first_entry_id = next(iter(_INSTANCES.keys()))
+                cache = _INSTANCES[first_entry_id]
+                creds = await cache.get("fcm_credentials")
+                _LOGGER.debug("Multi-account mode: using FCM credentials from entry %s", first_entry_id)
+            else:
+                _LOGGER.error("No config entries available for FCM credentials")
+                return False
+        except Exception as err:
+            _LOGGER.error("Failed to load FCM credentials: %s", err)
+            return False
         if isinstance(creds, str):
             try:
                 creds = json.loads(creds)
@@ -522,9 +545,51 @@ class FcmReceiverHA:
         a debounced flush for the corresponding device id.
         """
         try:
-            location_data = await self._decode_background_location_async(hex_string)
+            # Find all coordinators that track this device
+            # In multi-account mode, multiple coordinators might track devices with similar IDs
+            # We need to try them all until one successfully decrypts
+            tracking_coordinators = [
+                coord for coord in self.coordinators.copy()
+                if self._is_tracked(coord, canonic_id)
+            ]
+
+            if not tracking_coordinators:
+                _LOGGER.debug("No coordinator tracks device %s", canonic_id[:8])
+                return
+
+            location_data = None
+            last_error = None
+
+            # Try each coordinator until one succeeds
+            for coordinator in tracking_coordinators:
+                try:
+                    location_data = await self._decode_background_location_async(hex_string, coordinator)
+                    if location_data:
+                        break  # Success!
+                except Exception as coord_err:
+                    last_error = coord_err
+                    # Log at debug level to avoid spam in multi-account setups
+                    _LOGGER.debug(
+                        "Decrypt attempt failed for %s (trying next coordinator if available): %s",
+                        canonic_id[:8],
+                        str(coord_err)[:100]
+                    )
+                    continue  # Try next coordinator
+
             if not location_data:
-                _LOGGER.debug("No location data in background update for %s", canonic_id)
+                # Only log if we actually tried coordinators
+                if last_error and len(tracking_coordinators) > 1:
+                    _LOGGER.debug(
+                        "Failed to decrypt FCM update for %s with %d coordinator(s)",
+                        canonic_id[:8],
+                        len(tracking_coordinators)
+                    )
+                elif last_error:
+                    _LOGGER.error(
+                        "Failed to decrypt FCM update for %s: %s",
+                        canonic_id[:8],
+                        str(last_error)[:200]
+                    )
                 return
 
             # Enrich with a wall-clock 'last_updated' for UX parity with poll path.
@@ -659,8 +724,12 @@ class FcmReceiverHA:
 
     # -------------------- Decode helper --------------------
 
-    async def _decode_background_location_async(self, hex_string: str) -> dict:
+    async def _decode_background_location_async(self, hex_string: str, coordinator: Any = None) -> dict:
         """Decode background location using async API (maintains cache context).
+
+        Args:
+            hex_string: The hex-encoded protobuf data
+            coordinator: The coordinator instance that owns this device (provides cache context)
 
         Implementation detail:
         - Uses the **async** `async_decrypt_location_response_locations(...)` which
@@ -676,12 +745,25 @@ class FcmReceiverHA:
             from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (  # type: ignore
                 async_decrypt_location_response_locations,
             )
+            from custom_components.googlefindmy.NovaApi import nova_request
 
             # Parse in current thread (lightweight)
             device_update = parse_device_update_protobuf(hex_string)
-            # Decrypt async (maintains cache context, offloads CPU work)
-            locations = await async_decrypt_location_response_locations(device_update) or []
-            return locations[0] if locations else {}
+
+            # Register cache provider for multi-account support
+            if coordinator and hasattr(coordinator, '_cache'):
+                cache = coordinator._cache
+                nova_request.register_cache_provider(lambda: cache)
+                try:
+                    # Decrypt async (maintains cache context, offloads CPU work)
+                    locations = await async_decrypt_location_response_locations(device_update) or []
+                    return locations[0] if locations else {}
+                finally:
+                    nova_request.unregister_cache_provider()
+            else:
+                # Fallback for single-account or if coordinator not available
+                locations = await async_decrypt_location_response_locations(device_update) or []
+                return locations[0] if locations else {}
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to decode background location data: %s", err)
             return {}
@@ -705,9 +787,26 @@ class FcmReceiverHA:
         _LOGGER.info("FCM credentials updated")
 
     async def _async_save_credentials(self) -> None:
-        """Persist current credentials to the async TokenCache."""
+        """Persist current credentials to the async TokenCache.
+
+        In multi-account mode, FCM credentials are device-level (not account-level),
+        so we save them to all entries' caches.
+        """
         try:
-            await async_set_cached_value("fcm_credentials", self.credentials)
+            # Try to save to all entries in multi-account mode
+            from custom_components.googlefindmy.Auth.token_cache import _INSTANCES
+            if len(_INSTANCES) > 1:
+                # Multi-account mode: save to all entries by getting each cache instance
+                for entry_id in _INSTANCES.keys():
+                    try:
+                        cache = _INSTANCES[entry_id]
+                        await cache.set("fcm_credentials", self.credentials)
+                    except Exception as err2:
+                        _LOGGER.debug("Failed to save FCM credentials to entry %s: %s", entry_id, err2)
+                _LOGGER.debug("Saved FCM credentials to %d entries", len(_INSTANCES))
+            else:
+                # Single account mode: use the facade function
+                await async_set_cached_value("fcm_credentials", self.credentials)
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to save FCM credentials: %s", err)
 
