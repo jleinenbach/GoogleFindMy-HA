@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, TypeVar, cast
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.loader import async_get_integration
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -50,6 +50,7 @@ from .const import (
     CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
 )
+from .ha_typing import callback
 # ---------------------------------------------------------------------------
 # Compatibility placeholders
 # ---------------------------------------------------------------------------
@@ -575,7 +576,7 @@ async def async_get_config_entry_diagnostics(
 
     # --- Final safety net: redact known secret-like keys anywhere in the payload ---
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
-    return cast(dict[str, Any], async_redact_data(payload, TO_REDACT))
+    return async_redact_data(payload, TO_REDACT)
 # Consistent placeholder used when redacting fields.
 REDACTED = "**REDACTED**"
 

@@ -320,10 +320,10 @@ else:
     )
 
 _RUNTIME_IMPORTS_LOADED = False
-_FCM_RECEIVER_CLASS: type[Any] | None = None
+_FCM_RECEIVER_CLASS: type[FcmReceiverHAType] | None = None
 
 
-def _resolve_fcm_receiver_class() -> type[Any]:
+def _resolve_fcm_receiver_class() -> type[FcmReceiverHAType]:
     """Import and return the Home Assistant FCM receiver class lazily."""
 
     global _FCM_RECEIVER_CLASS
@@ -1680,8 +1680,9 @@ def _get_fcm_receiver(
 ) -> FcmReceiverHAType | None:
     """Return the cached shared FCM receiver if present."""
 
-    receiver = bucket.get("fcm_receiver")
-    if isinstance(receiver, _resolve_fcm_receiver_class()):
+    receiver: object | None = bucket.get("fcm_receiver")
+    receiver_cls = _resolve_fcm_receiver_class()
+    if isinstance(receiver, receiver_cls):
         return receiver
     return None
 
@@ -1699,8 +1700,9 @@ def _pop_fcm_receiver(
 ) -> FcmReceiverHAType | None:
     """Remove and return the cached shared FCM receiver."""
 
-    receiver = bucket.pop("fcm_receiver", None)
-    if isinstance(receiver, _resolve_fcm_receiver_class()):
+    receiver: object | None = bucket.pop("fcm_receiver", None)
+    receiver_cls = _resolve_fcm_receiver_class()
+    if isinstance(receiver, receiver_cls):
         return receiver
     return None
 
@@ -3814,9 +3816,13 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHAType:
     async with fcm_lock:
         refcount = _get_fcm_refcount(bucket)
         providers_registered = bucket.get("providers_registered", False)
-        raw_receiver = cast(object | None, bucket.get("fcm_receiver"))
+        raw_receiver: object | None = bucket.get("fcm_receiver")
         receiver_cls = _resolve_fcm_receiver_class()
-        fcm = raw_receiver if isinstance(raw_receiver, receiver_cls) else None
+        fcm: FcmReceiverHAType | None
+        if isinstance(raw_receiver, receiver_cls):
+            fcm = raw_receiver
+        else:
+            fcm = None
 
         def _method_is_coroutine(receiver: object, name: str) -> bool:
             """Return True if receiver.name is an async callable."""
