@@ -9,7 +9,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from html import escape
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from aiohttp import web
@@ -19,7 +19,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from .coordinator import GoogleFindMyCoordinator
 from .ha_typing import HomeAssistantView
 
 from .const import (
@@ -33,6 +32,25 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:
+    from .coordinator import GoogleFindMyCoordinator as GoogleFindMyCoordinatorType
+else:
+    from typing import Any as GoogleFindMyCoordinatorType
+
+_COORDINATOR_CLASS: type[Any] | None = None
+
+
+def _resolve_coordinator_class() -> type[Any]:
+    """Import the coordinator lazily to avoid pulling in HTTP at import time."""
+
+    global _COORDINATOR_CLASS
+    if _COORDINATOR_CLASS is None:
+        from .coordinator import GoogleFindMyCoordinator as _GoogleFindMyCoordinator
+
+        _COORDINATOR_CLASS = _GoogleFindMyCoordinator
+    return _COORDINATOR_CLASS
 
 
 # ------------------------------- HTML Helpers -------------------------------
@@ -149,13 +167,14 @@ class GoogleFindMyMapView(HomeAssistantView):
 
         # ---- 2) Coordinator + device membership check (404 if unknown in this entry) ----
         runtime = getattr(entry, "runtime_data", None)
-        coordinator: GoogleFindMyCoordinator | None = None
-        if isinstance(runtime, GoogleFindMyCoordinator):
+        coordinator_cls = _resolve_coordinator_class()
+        coordinator: GoogleFindMyCoordinatorType | None = None
+        if isinstance(runtime, coordinator_cls):
             coordinator = runtime
         elif runtime is not None:
             coordinator = getattr(runtime, "coordinator", None)
 
-        if not isinstance(coordinator, GoogleFindMyCoordinator):
+        if not isinstance(coordinator, coordinator_cls):
             _LOGGER.debug("Coordinator not found for entry_id=%s", entry.entry_id)
             return _html_response("Server Error", "Integration not ready.", status=503)
 

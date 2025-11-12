@@ -133,6 +133,13 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     http_module.HomeAssistantView = _HttpViewStub
     monkeypatch.setitem(sys.modules, "homeassistant.components.http", http_module)
 
+    helpers_http_module = ModuleType("homeassistant.helpers.http")
+    helpers_http_module.HomeAssistantView = _HttpViewStub
+    helpers_http_module.request_handler_factory = lambda hass, view, handler: handler
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.helpers.http", helpers_http_module
+    )
+
     core_module = install_homeassistant_core_callback_stub(monkeypatch)
 
     class _HomeAssistantStub:  # pragma: no cover - structural stub
@@ -154,6 +161,7 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     helpers_pkg = ModuleType("homeassistant.helpers")
     helpers_pkg.__path__ = []
     helpers_pkg.entity_registry = helpers_module
+    helpers_pkg.http = helpers_http_module
     monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers_pkg)
 
     homeassistant_pkg = ModuleType("homeassistant")

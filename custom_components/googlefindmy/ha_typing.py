@@ -113,7 +113,10 @@ else:
     from homeassistant.components.button import ButtonEntity  # noqa: F401
     from homeassistant.components.binary_sensor import BinarySensorEntity  # noqa: F401
     from homeassistant.components.device_tracker import TrackerEntity  # noqa: F401
-    from homeassistant.components.http import HomeAssistantView  # noqa: F401
+    try:
+        from homeassistant.helpers.http import HomeAssistantView  # noqa: F401
+    except ImportError:  # pragma: no cover - fallback for older/stub environments
+        from homeassistant.components.http import HomeAssistantView  # type: ignore[assignment]
     from homeassistant.components.sensor import (  # noqa: F401
         RestoreSensor,
         SensorEntity,

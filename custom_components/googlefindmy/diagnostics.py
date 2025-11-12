@@ -23,11 +23,10 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any, Iterable, Mapping, TypeVar, cast
 
-from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.loader import async_get_integration
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -577,3 +576,34 @@ async def async_get_config_entry_diagnostics(
     # --- Final safety net: redact known secret-like keys anywhere in the payload ---
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
     return cast(dict[str, Any], async_redact_data(payload, TO_REDACT))
+# Consistent placeholder used when redacting fields.
+REDACTED = "**REDACTED**"
+
+_T = TypeVar("_T")
+
+
+@callback
+def async_redact_data(data: _T, to_redact: Iterable[Any]) -> _T:
+    """Redact sensitive keys from mappings or lists without importing HA's HTTP stack."""
+
+    if not isinstance(data, (Mapping, list)):
+        return data
+
+    if isinstance(data, list):
+        return cast(_T, [async_redact_data(item, to_redact) for item in data])
+
+    redacted = dict(data)
+
+    for key, value in list(redacted.items()):
+        if value is None:
+            continue
+        if isinstance(value, str) and not value:
+            continue
+        if key in to_redact:
+            redacted[key] = REDACTED
+        elif isinstance(value, Mapping):
+            redacted[key] = async_redact_data(value, to_redact)
+        elif isinstance(value, list):
+            redacted[key] = [async_redact_data(item, to_redact) for item in value]
+
+    return cast(_T, redacted)
