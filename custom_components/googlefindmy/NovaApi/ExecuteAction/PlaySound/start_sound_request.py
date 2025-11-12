@@ -25,7 +25,7 @@ from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
 
-def start_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
+def start_sound_request(canonic_device_id: str, gcm_registration_id: str) -> tuple[str, str]:
     """Build the hex payload for a 'Play Sound' action (pure builder).
 
     This function performs no network I/O. It exists for backwards
@@ -36,10 +36,13 @@ def start_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str
         gcm_registration_id: The FCM registration token for push notifications.
 
     Returns:
-        Hex-encoded protobuf payload for Nova transport.
+        A tuple of (hex_payload, request_uuid) where:
+        - hex_payload: Hex-encoded protobuf payload for Nova transport
+        - request_uuid: The UUID used for this request (needed to cancel it later)
     """
     request_uuid = generate_random_uuid()
-    return create_sound_request(True, canonic_device_id, gcm_registration_id, request_uuid)
+    hex_payload = create_sound_request(True, canonic_device_id, gcm_registration_id, request_uuid)
+    return (hex_payload, request_uuid)
 
 
 async def async_submit_start_sound_request(
@@ -47,7 +50,7 @@ async def async_submit_start_sound_request(
     gcm_registration_id: str,
     *,
     session: Optional[ClientSession] = None,
-) -> Optional[str]:
+) -> Optional[tuple[str, str]]:
     """Submit a 'Play Sound' action using the shared async Nova client.
 
     This function handles the network request and robustly catches common API
@@ -60,14 +63,15 @@ async def async_submit_start_sound_request(
                  nova client handles session management internally.
 
     Returns:
-        A hex string of the response payload on success (can be empty),
-        or None on any handled error (e.g., auth, rate-limit, server error,
-        or network issues).
+        A tuple of (response_hex, request_uuid) on success, or None on any handled error.
+        The request_uuid should be stored and used when calling Stop Sound to properly
+        cancel this specific Play Sound request.
     """
-    hex_payload = start_sound_request(canonic_device_id, gcm_registration_id)
+    hex_payload, request_uuid = start_sound_request(canonic_device_id, gcm_registration_id)
     try:
         # The async Nova client manages session reuse internally; do not pass session through.
-        return await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+        response_hex = await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
+        return (response_hex, request_uuid) if response_hex is not None else None
     except asyncio.CancelledError:
         raise
     except NovaRateLimitError as e:

@@ -25,7 +25,7 @@ from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
 
-def stop_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
+def stop_sound_request(canonic_device_id: str, gcm_registration_id: str, request_uuid: Optional[str] = None) -> str:
     """Build the hex payload for a 'Stop Sound' action (pure builder).
 
     This function performs no network I/O. It creates the serialized protobuf
@@ -34,17 +34,20 @@ def stop_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
     Args:
         canonic_device_id: The canonical ID of the target device.
         gcm_registration_id: The FCM registration token for push notifications.
+        request_uuid: Optional UUID to cancel a specific Play Sound request.
+                     If not provided, a new UUID is generated (may not properly cancel the sound).
 
     Returns:
         Hex-encoded protobuf payload for Nova transport.
     """
-    return create_sound_request(False, canonic_device_id, gcm_registration_id)
+    return create_sound_request(False, canonic_device_id, gcm_registration_id, request_uuid)
 
 
 async def async_submit_stop_sound_request(
     canonic_device_id: str,
     gcm_registration_id: str,
     *,
+    request_uuid: Optional[str] = None,
     session: Optional[ClientSession] = None,
 ) -> Optional[str]:
     """Submit a 'Stop Sound' action using the shared async Nova client.
@@ -55,6 +58,8 @@ async def async_submit_stop_sound_request(
     Args:
         canonic_device_id: The canonical ID of the target device.
         gcm_registration_id: The FCM registration token for push notifications.
+        request_uuid: Optional UUID to cancel a specific Play Sound request.
+                     If not provided, a new UUID is generated (may not properly cancel the sound).
         session: (Deprecated) The aiohttp ClientSession. No longer used as the
                  nova client handles session management internally.
 
@@ -63,7 +68,7 @@ async def async_submit_stop_sound_request(
         or None on any handled error (e.g., auth, rate-limit, server error,
         or network issues).
     """
-    hex_payload = stop_sound_request(canonic_device_id, gcm_registration_id)
+    hex_payload = stop_sound_request(canonic_device_id, gcm_registration_id, request_uuid)
     try:
         # The async Nova client manages session reuse internally; do not pass session through.
         return await async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
