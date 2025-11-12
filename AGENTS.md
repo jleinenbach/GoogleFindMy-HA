@@ -94,6 +94,7 @@ Always keep any `from __future__` imports immediately after the module docstring
 ## Linting reminders
 
 * Prefer importing container abstract base classes (for example, `Iterable`, `Mapping`, `Sequence`) from `collections.abc` instead of duplicating the names from `typing`. This mirrors the integration guidance under `custom_components/googlefindmy/AGENTS.md` and helps avoid ruff F811 redefinition warnings.
+* Pytest warning filter: `pyproject.toml` configures `filterwarnings = ["ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning:homeassistant.components.http"]` to silence an upstream aiohttp deprecation emitted by the current Home Assistant release. Remove the filter only after Home Assistant stops subclassing `aiohttp.web.Application` (or drops the warning entirely) and a full `pytest` run verifies the warning no longer appears without the suppression.
 
 ## Scoped guidance index
 
