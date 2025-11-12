@@ -839,8 +839,7 @@ def test_hass_data_layout(
                 lambda _hass: _StubEntityRegistry(),
             )
 
-            view = map_view_module.GoogleFindMyMapView()
-            view.hass = hass
+            view = map_view_module.GoogleFindMyMapView(hass)
             request = SimpleNamespace(query={"token": "token"})
             response = await view.get(request, "device-1")
             assert response.status == 200
@@ -2042,7 +2041,9 @@ def test_duplicate_account_issue_log_level_downgrades_when_existing(
         asyncio.set_event_loop(None)
 
 
-def test_service_no_active_entry_placeholders() -> None:
+def test_service_no_active_entry_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Service validation exposes counts/list placeholders for inactive setups."""
 
     loop = asyncio.new_event_loop()
@@ -2051,6 +2052,31 @@ def test_service_no_active_entry_placeholders() -> None:
     try:
         services_module = importlib.import_module(
             "custom_components.googlefindmy.services"
+        )
+
+        class _StrictServiceValidationError(Exception):
+            def __init__(
+                self,
+                *args: Any,
+                translation_domain: str | None = None,
+                translation_key: str | None = None,
+                translation_placeholders: Mapping[str, Any] | None = None,
+            ) -> None:
+                message = args[0] if args else "Service validation error"
+                super().__init__(message)
+                self.translation_domain = translation_domain
+                self.translation_key = translation_key
+                self.translation_placeholders = (
+                    None
+                    if translation_placeholders is None
+                    else dict(translation_placeholders)
+                )
+
+        monkeypatch.setattr(
+            services_module, "ServiceValidationError", _StrictServiceValidationError
+        )
+        monkeypatch.setattr(
+            sys.modules[__name__], "ServiceValidationError", _StrictServiceValidationError
         )
 
         entries = [

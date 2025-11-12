@@ -7,6 +7,7 @@ import asyncio
 import importlib
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -22,7 +23,8 @@ if "custom_components.googlefindmy.map_view" not in sys.modules:
     map_module = ModuleType("custom_components.googlefindmy.map_view")
 
     class _DummyView:  # pragma: no cover - stub for import
-        pass
+        def __init__(self, hass: Any | None = None) -> None:
+            self.hass = hass
 
     map_module.GoogleFindMyMapRedirectView = _DummyView
     map_module.GoogleFindMyMapView = _DummyView

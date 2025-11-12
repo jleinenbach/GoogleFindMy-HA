@@ -125,7 +125,6 @@ from .Auth.token_cache import (
 from .Auth.username_provider import username_string
 
 # Shared FCM provider (HA-managed singleton)
-from .Auth.fcm_receiver_ha import FcmReceiverHA
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
     register_fcm_receiver_provider as loc_register_fcm_provider,
     unregister_fcm_receiver_provider as loc_unregister_fcm_provider,
@@ -227,6 +226,7 @@ if TYPE_CHECKING:
         register_fcm_receiver_provider as ApiRegisterFcmProviderType,
         unregister_fcm_receiver_provider as ApiUnregisterFcmProviderType,
     )
+    from .Auth.fcm_receiver_ha import FcmReceiverHA as FcmReceiverHAType
     from .coordinator import GoogleFindMyCoordinator as GoogleFindMyCoordinatorType
     from .discovery import (
         DiscoveryManager as DiscoveryManagerType,
@@ -260,9 +260,10 @@ if TYPE_CHECKING:
     )
 else:
     from typing import Any as RegistryEntryDisablerType
+    from typing import Any as FcmReceiverHAType
 
-    NovaFcmReceiverProtocol = FcmReceiverHA
-    ApiFcmReceiverProtocol = FcmReceiverHA
+    NovaFcmReceiverProtocol = FcmReceiverHAType
+    ApiFcmReceiverProtocol = FcmReceiverHAType
 
     def _runtime_imports_not_initialized(*_args: Any, **_kwargs: Any) -> Any:
         """Raise when runtime-only imports are used before initialization."""
@@ -319,6 +320,33 @@ else:
     )
 
 _RUNTIME_IMPORTS_LOADED = False
+_FCM_RECEIVER_CLASS: type[FcmReceiverHAType] | None = None
+
+
+def _resolve_fcm_receiver_class() -> type[FcmReceiverHAType]:
+    """Import and return the Home Assistant FCM receiver class lazily."""
+
+    global _FCM_RECEIVER_CLASS
+    if _FCM_RECEIVER_CLASS is None:
+        from .Auth.fcm_receiver_ha import FcmReceiverHA as _FcmReceiverHA
+
+        _FCM_RECEIVER_CLASS = _FcmReceiverHA
+    return _FCM_RECEIVER_CLASS
+
+
+def _resolve_google_home_filter_class() -> type[Any] | None:
+    """Import and cache the optional Google Home filter class lazily."""
+
+    global _GOOGLE_HOME_FILTER_CLASS, _GOOGLE_HOME_FILTER_IMPORT_ATTEMPTED
+    if not _GOOGLE_HOME_FILTER_IMPORT_ATTEMPTED:
+        _GOOGLE_HOME_FILTER_IMPORT_ATTEMPTED = True
+        try:
+            from .google_home_filter import GoogleHomeFilter as _GoogleHomeFilterClass
+        except Exception:  # pragma: no cover - optional module
+            _GOOGLE_HOME_FILTER_CLASS = None
+        else:
+            _GOOGLE_HOME_FILTER_CLASS = _GoogleHomeFilterClass
+    return _GOOGLE_HOME_FILTER_CLASS
 
 
 def _ensure_runtime_imports() -> None:
@@ -412,19 +440,8 @@ if TYPE_CHECKING:
 else:
     from typing import Any as GoogleHomeFilterProtocol
 
-GoogleHomeFilterFactory: Callable[
-    [HomeAssistant, Mapping[str, Any]], GoogleHomeFilterProtocol
-] | None
-
-try:
-    from .google_home_filter import GoogleHomeFilter as _GoogleHomeFilterClass
-except Exception:  # pragma: no cover
-    GoogleHomeFilterFactory = None
-else:
-    GoogleHomeFilterFactory = cast(
-        "Callable[[HomeAssistant, Mapping[str, Any]], GoogleHomeFilterProtocol]",
-        _GoogleHomeFilterClass,
-    )
+_GOOGLE_HOME_FILTER_CLASS: type[Any] | None = None
+_GOOGLE_HOME_FILTER_IMPORT_ATTEMPTED = False
 
 try:
     # Helper name has been `config_entry_only_config_schema` since Core 2023.7
@@ -1582,7 +1599,7 @@ class RuntimeData:
     coordinator: GoogleFindMyCoordinator
     token_cache: TokenCache
     subentry_manager: ConfigEntrySubEntryManager
-    fcm_receiver: FcmReceiverHA | None = None
+    fcm_receiver: FcmReceiverHAType | None = None
     google_home_filter: GoogleHomeFilterProtocol | None = None
     entity_recovery_manager: EntityRecoveryManager | None = None
 
@@ -1601,7 +1618,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     device_owner_index: dict[str, str]
     entries: dict[str, RuntimeData]
     fcm_lock: asyncio.Lock
-    fcm_receiver: FcmReceiverHA
+    fcm_receiver: FcmReceiverHAType
     fcm_refcount: int
     fcm_lock_contention_count: int
     initial_setup_complete: bool
@@ -1658,26 +1675,34 @@ def _ensure_device_owner_index(bucket: GoogleFindMyDomainData) -> dict[str, str]
     return owner_index
 
 
-def _get_fcm_receiver(bucket: GoogleFindMyDomainData) -> FcmReceiverHA | None:
+def _get_fcm_receiver(
+    bucket: GoogleFindMyDomainData,
+) -> FcmReceiverHAType | None:
     """Return the cached shared FCM receiver if present."""
 
-    receiver = bucket.get("fcm_receiver")
-    if isinstance(receiver, FcmReceiverHA):
+    receiver: object | None = bucket.get("fcm_receiver")
+    receiver_cls = _resolve_fcm_receiver_class()
+    if isinstance(receiver, receiver_cls):
         return receiver
     return None
 
 
-def _set_fcm_receiver(bucket: GoogleFindMyDomainData, receiver: FcmReceiverHA) -> None:
+def _set_fcm_receiver(
+    bucket: GoogleFindMyDomainData, receiver: FcmReceiverHAType
+) -> None:
     """Store the shared FCM receiver."""
 
     bucket["fcm_receiver"] = receiver
 
 
-def _pop_fcm_receiver(bucket: GoogleFindMyDomainData) -> FcmReceiverHA | None:
+def _pop_fcm_receiver(
+    bucket: GoogleFindMyDomainData,
+) -> FcmReceiverHAType | None:
     """Remove and return the cached shared FCM receiver."""
 
-    receiver = bucket.pop("fcm_receiver", None)
-    if isinstance(receiver, FcmReceiverHA):
+    receiver: object | None = bucket.pop("fcm_receiver", None)
+    receiver_cls = _resolve_fcm_receiver_class()
+    if isinstance(receiver, receiver_cls):
         return receiver
     return None
 
@@ -1718,7 +1743,7 @@ def _set_nova_refcount(bucket: GoogleFindMyDomainData, value: int) -> None:
     bucket["nova_refcount"] = value
 
 
-def _domain_fcm_provider(hass: HomeAssistant) -> FcmReceiverHA:
+def _domain_fcm_provider(hass: HomeAssistant) -> FcmReceiverHAType:
     """Return the shared FCM receiver for provider callbacks."""
 
     bucket = _domain_data(hass)
@@ -3769,7 +3794,7 @@ async def _async_migrate_device_identifiers_to_entry_scope(
 # --------------------------- Shared FCM provider ---------------------------
 
 
-async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
+async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHAType:
     """Get or create the shared FCM receiver for this HA instance.
 
     Behavior:
@@ -3791,8 +3816,13 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
     async with fcm_lock:
         refcount = _get_fcm_refcount(bucket)
         providers_registered = bucket.get("providers_registered", False)
-        raw_receiver = cast(object | None, bucket.get("fcm_receiver"))
-        fcm = raw_receiver if isinstance(raw_receiver, FcmReceiverHA) else None
+        raw_receiver: object | None = bucket.get("fcm_receiver")
+        receiver_cls = _resolve_fcm_receiver_class()
+        fcm: FcmReceiverHAType | None
+        if isinstance(raw_receiver, receiver_cls):
+            fcm = raw_receiver
+        else:
+            fcm = None
 
         def _method_is_coroutine(receiver: object, name: str) -> bool:
             """Return True if receiver.name is an async callable."""
@@ -3815,7 +3845,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
                 return inspect.iscoroutinefunction(cls_candidate)
             return False
 
-        if raw_receiver is not None and not isinstance(raw_receiver, FcmReceiverHA):
+        if raw_receiver is not None and not isinstance(raw_receiver, receiver_cls):
             _LOGGER.warning(
                 "Discarding cached FCM receiver with unexpected type: %s",
                 type(raw_receiver).__name__,
@@ -3835,7 +3865,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
             fcm = None
 
         if fcm is None:
-            fcm = FcmReceiverHA()
+            fcm = receiver_cls()
             _LOGGER.debug("Initializing shared FCM receiver...")
             ok = await fcm.async_initialize()
             if not ok:
@@ -3857,12 +3887,12 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
 
             # Register provider for both consumer modules (exactly once on first acquire)
             # Re-registering ensures downstream modules resolve the refreshed instance.
-            def provider() -> FcmReceiverHA:
+            def provider() -> FcmReceiverHAType:
                 """Return the shared FCM receiver for integration consumers."""
 
                 return _domain_fcm_provider(hass)
 
-            provider_fn: Callable[[], FcmReceiverHA] = provider
+            provider_fn: Callable[[], FcmReceiverHAType] = provider
             if not providers_registered:
                 loc_register_fcm_provider(
                     cast(Callable[[], NovaFcmReceiverProtocol], provider_fn)
@@ -5248,9 +5278,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     _ensure_device_owner_index(domain_bucket)
 
     # Optional: attach Google Home filter (options-first configuration)
-    if GoogleHomeFilterFactory is not None:
+    filter_cls = _resolve_google_home_filter_class()
+    if filter_cls is not None:
         try:
-            google_home_filter = GoogleHomeFilterFactory(hass, _effective_config(entry))
+            google_home_filter = cast(
+                GoogleHomeFilterProtocol, filter_cls(hass, _effective_config(entry))
+            )
             runtime_data.google_home_filter = google_home_filter
             _LOGGER.debug("Initialized Google Home filter (options-first)")
         except Exception as err:
@@ -5329,12 +5362,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     if not isinstance(views_registered, bool):
         views_registered = False
     if not views_registered:
-        map_view_instance = GoogleFindMyMapView()
-        map_view_instance.hass = hass
+        map_view_instance = GoogleFindMyMapView(hass)
         hass.http.register_view(map_view_instance)
 
-        map_redirect_view_instance = GoogleFindMyMapRedirectView()
-        map_redirect_view_instance.hass = hass
+        map_redirect_view_instance = GoogleFindMyMapRedirectView(hass)
         hass.http.register_view(map_redirect_view_instance)
         bucket["views_registered"] = True
         _LOGGER.debug("Registered map views")

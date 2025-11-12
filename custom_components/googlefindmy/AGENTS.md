@@ -35,6 +35,8 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 
 * Prefer importing container ABCs (for example, `Iterable`, `Mapping`, `Sequence`) from `collections.abc` rather than `typing` so runtime imports stay lightweight and ruff avoids duplicate definition warnings.
 * When adding iterable-type annotations inside `config_flow.py`, reuse the existing `CollIterable` alias to keep type hints consistent with the options-flow helpers and avoid reintroducing stray `typing.Iterable` imports.
+* When annotating Firebase Cloud Messaging helpers, reference the `FcmReceiverHAType` alias exported from `ha_typing`. Guard values retrieved from `hass.data` as `object | None` and validate them with `_resolve_fcm_receiver_class()` before returning them so both ruff (undefined name) **and** mypy strict (no `Any` leakage) keep passing while the HTTP stack stays lazily imported.
+* When listening for Home Assistant state changes (for example, in `google_home_filter.py`), reuse the module's lazy `_async_track_state_change_event` proxy instead of importing `homeassistant.helpers.event.async_track_state_change_event` at module import time. The proxy keeps pytest stubs effective and avoids forcing Home Assistant's HTTP stack (and its deprecation warnings) to load during integration startup.
 * When iterating config flow schemas, always extract the real key from voluptuous markers (`marker.schema`) before using it. Several markers behave like iterables and will yield characters one-by-one if treated as strings, so unwrap before building dictionaries or merging option payloads. See the helper showcased in [`ConfigFlow.async_step_options` (`_resolve_marker_key`)](./config_flow.py) for the canonical extraction pattern.
 * When awaiting discovery flow creation results, normalize the outcome through [`_async_resolve_flow_result`](./config_flow.py#L2192-L2211) (the `_resolve_flow_result` helper mentioned in review notes) instead of open-coding `inspect.isawaitable` checks. The helper already mirrors Home Assistant's flow contract and keeps strict mypy runs happy—reuse it so discovery fallbacks stay consistent across handlers.
 
@@ -51,4 +53,9 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
       options=existing_options,
   )
   ```
+
+## Runtime integration patterns
+
+* Collect runtime-contract reminders for integration touchpoints in this section so future contributors can find them without scanning unrelated guidance.
+* View classes under `custom_components/googlefindmy/map_view.py` should expose constructors that accept `HomeAssistant` as the first argument. Register new views by instantiating them with the active `hass` instance (for example, `GoogleFindMyMapView(hass)`) instead of assigning `hass` after creation so the runtime contract stays consistent.
 
