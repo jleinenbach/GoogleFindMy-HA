@@ -55,6 +55,9 @@ extend-exclude = [
 addopts = ["-q"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+    "ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning:homeassistant.components.http",
+]
 
 [tool.mypy]
 python_version = "3.13"

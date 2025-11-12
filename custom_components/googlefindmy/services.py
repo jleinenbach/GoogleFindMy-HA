@@ -59,8 +59,8 @@ except ImportError:  # pragma: no cover - ConfigEntryError introduced in newer c
 
 
 def _service_validation_error(
-    *,
     message: str,
+    *,
     translation_key: str,
     translation_placeholders: Mapping[str, Any] | None = None,
     translation_domain: str = DOMAIN,
@@ -495,7 +495,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "total_count": str(total_count),
             }
             raise _service_validation_error(
-                message=(
+                (
                     "No active Google Find My entries (active {active_count}/{total_count};"
                     " entries: {entries}).".format(**placeholders)
                 ),
@@ -510,7 +510,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             # Pass through as translated validation error
             placeholders = {"device_id": str(device_id)}
             raise _service_validation_error(
-                message="Device '{device_id}' was not found.".format(**placeholders),
+                "Device '{device_id}' was not found.".format(**placeholders),
                 translation_key="device_not_found",
                 translation_placeholders=placeholders,
             ) from err
@@ -559,7 +559,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         # 3) Not found -> translated error
         placeholders = {"device_id": str(device_id)}
         raise _service_validation_error(
-            message="Device '{device_id}' was not found.".format(**placeholders),
+            "Device '{device_id}' was not found.".format(**placeholders),
             translation_key="device_not_found",
             translation_placeholders=placeholders,
         )
@@ -572,7 +572,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         if not isinstance(raw_device_id, str) or not raw_device_id:
             placeholders = {"device_id": str(raw_device_id)}
             raise _service_validation_error(
-                message="Device '{device_id}' was not found.".format(**placeholders),
+                "Device '{device_id}' was not found.".format(**placeholders),
                 translation_key="device_not_found",
                 translation_placeholders=placeholders,
             )
@@ -587,7 +587,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "error": str(err),
             }
             raise _service_validation_error(
-                message="Failed to locate device '{device_id}': {error}".format(
+                "Failed to locate device '{device_id}': {error}".format(
                     **placeholders
                 ),
                 translation_key="locate_failed",
@@ -600,7 +600,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         if not isinstance(raw_device_id, str) or not raw_device_id:
             placeholders = {"device_id": str(raw_device_id)}
             raise _service_validation_error(
-                message="Device '{device_id}' was not found.".format(**placeholders),
+                "Device '{device_id}' was not found.".format(**placeholders),
                 translation_key="device_not_found",
                 translation_placeholders=placeholders,
             )
@@ -615,7 +615,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "error": str(err),
             }
             raise _service_validation_error(
-                message="Failed to play sound on device '{device_id}': {error}".format(
+                "Failed to play sound on device '{device_id}': {error}".format(
                     **placeholders
                 ),
                 translation_key="play_sound_failed",
@@ -628,7 +628,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         if not isinstance(raw_device_id, str) or not raw_device_id:
             placeholders = {"device_id": str(raw_device_id)}
             raise _service_validation_error(
-                message="Device '{device_id}' was not found.".format(**placeholders),
+                "Device '{device_id}' was not found.".format(**placeholders),
                 translation_key="device_not_found",
                 translation_placeholders=placeholders,
             )
@@ -643,7 +643,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "error": str(err),
             }
             raise _service_validation_error(
-                message="Failed to stop sound on device '{device_id}': {error}".format(
+                "Failed to stop sound on device '{device_id}': {error}".format(
                     **placeholders
                 ),
                 translation_key="stop_sound_failed",
@@ -656,7 +656,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         if not isinstance(raw_device_id, str) or not raw_device_id:
             placeholders = {"device_id": str(raw_device_id)}
             raise _service_validation_error(
-                message="Device '{device_id}' was not found.".format(**placeholders),
+                "Device '{device_id}' was not found.".format(**placeholders),
                 translation_key="device_not_found",
                 translation_placeholders=placeholders,
             )
@@ -672,7 +672,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "error": str(err),
             }
             raise _service_validation_error(
-                message="Failed to locate device '{device_id}': {error}".format(
+                "Failed to locate device '{device_id}': {error}".format(
                     **placeholders
                 ),
                 translation_key="locate_failed",
