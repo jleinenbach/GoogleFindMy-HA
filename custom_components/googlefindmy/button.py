@@ -150,7 +150,9 @@ class GoogleFindMyPlaySoundButton(CoordinatorEntity, ButtonEntity):
         super().__init__(coordinator)
         self._device = device
         dev_id = device["id"]
-        self._attr_unique_id = f"{DOMAIN}_{dev_id}_play_sound"
+        # Include entry_id in unique_id for multi-account support
+        entry_id = coordinator.config_entry.entry_id if coordinator.config_entry else "default"
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{dev_id}_play_sound"
         # Do not set _attr_name: with has_entity_name=True the UI composes the name automatically.
 
     # ---------------- Availability ----------------
@@ -317,7 +319,9 @@ class GoogleFindMyStopSoundButton(CoordinatorEntity, ButtonEntity):
         super().__init__(coordinator)
         self._device = device
         dev_id = device["id"]
-        self._attr_unique_id = f"{DOMAIN}_{dev_id}_stop_sound"
+        # Include entry_id in unique_id for multi-account support
+        entry_id = coordinator.config_entry.entry_id if coordinator.config_entry else "default"
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{dev_id}_stop_sound"
 
     @property
     def available(self) -> bool:
@@ -479,7 +483,9 @@ class GoogleFindMyLocateButton(CoordinatorEntity, ButtonEntity):
         super().__init__(coordinator)
         self._device = device
         dev_id = device["id"]
-        self._attr_unique_id = f"{DOMAIN}_{dev_id}_locate_device"
+        # Include entry_id in unique_id for multi-account support
+        entry_id = coordinator.config_entry.entry_id if coordinator.config_entry else "default"
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{dev_id}_locate_device"
 
     # ---------------- Availability ----------------
     @property

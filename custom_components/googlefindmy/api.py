@@ -746,14 +746,16 @@ class GoogleFindMyAPI:
             return False
 
     # ---------- Play/Stop Sound (async; HA-first) ----------
-    async def async_play_sound(self, device_id: str) -> bool:
+    async def async_play_sound(self, device_id: str) -> tuple[bool, Optional[str]]:
         """Send a 'Play Sound' command to a device (async path for HA).
 
         Args:
             device_id: The canonical ID of the device.
 
         Returns:
-            True if the command was submitted successfully, False otherwise.
+            A tuple of (success, request_uuid) where:
+            - success: True if the command was submitted successfully
+            - request_uuid: The UUID of this request (needed to cancel it), or None on failure
         """
         # Register cache provider for multi-entry support
         from .NovaApi import nova_request
@@ -761,33 +763,36 @@ class GoogleFindMyAPI:
 
         token = self._get_fcm_token_for_action()
         if not token:
-            return False
+            return (False, None)
         try:
             _LOGGER.info("Submitting Play Sound (async) for %s", device_id)
             # Delegate payload build + transport to the submitter; provide HA session.
             # NOTE: If Nova later requires an explicit username for action endpoints,
             # extend submitter signatures to accept and forward it consistently.
-            result_hex = await async_submit_start_sound_request(
+            result = await async_submit_start_sound_request(
                 device_id, token, session=self._session
             )
-            ok = result_hex is not None
-            if ok:
-                _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
+            if result:
+                result_hex, request_uuid = result
+                _LOGGER.info("Play Sound (async) submitted successfully for %s (UUID: %s)", device_id, request_uuid[:8])
+                return (True, request_uuid)
             else:
                 _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
-            return bool(ok)
+                return (False, None)
         except ClientError as err:
             _LOGGER.error("Network error while playing sound on %s: %s", device_id, err)
-            return False
+            return (False, None)
         except Exception as err:
             _LOGGER.error("Failed to play sound (async) on %s: %s", device_id, err)
-            return False
+            return (False, None)
 
-    async def async_stop_sound(self, device_id: str) -> bool:
+    async def async_stop_sound(self, device_id: str, request_uuid: Optional[str] = None) -> bool:
         """Send a 'Stop Sound' command to a device (async path for HA).
 
         Args:
             device_id: The canonical ID of the device.
+            request_uuid: Optional UUID of the Play Sound request to cancel.
+                         If not provided, a new UUID is generated (may not properly cancel).
 
         Returns:
             True if the command was submitted successfully, False otherwise.
@@ -800,9 +805,12 @@ class GoogleFindMyAPI:
         if not token:
             return False
         try:
-            _LOGGER.info("Submitting Stop Sound (async) for %s", device_id)
+            if request_uuid:
+                _LOGGER.info("Submitting Stop Sound (async) for %s (UUID: %s)", device_id, request_uuid[:8])
+            else:
+                _LOGGER.warning("Submitting Stop Sound (async) for %s without UUID (may not cancel properly)", device_id)
             result_hex = await async_submit_stop_sound_request(
-                device_id, token, session=self._session
+                device_id, token, request_uuid=request_uuid, session=self._session
             )
             ok = result_hex is not None
             if ok:

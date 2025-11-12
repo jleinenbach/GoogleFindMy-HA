@@ -258,7 +258,9 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
         self._device = device
         self._device_id: str | None = device.get("id")
         safe_id = self._device_id if self._device_id is not None else "unknown"
-        self._attr_unique_id = f"{DOMAIN}_{safe_id}_last_seen"
+        # Include entry_id in unique_id for multi-account support
+        entry_id = coordinator.config_entry.entry_id if coordinator.config_entry else "default"
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_{safe_id}_last_seen"
         self._attr_native_value: datetime | None = None
 
     @property

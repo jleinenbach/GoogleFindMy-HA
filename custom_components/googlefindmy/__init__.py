@@ -246,6 +246,59 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
 
+async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
+    """Refresh configuration URLs for all Google Find My devices.
+
+    This prevents "device not found" errors when users click map view links.
+    Automatically called on startup and available as a service.
+    """
+    try:
+        base_url = get_url(
+            hass, prefer_external=True, allow_cloud=True, allow_external=True, allow_internal=True
+        )
+    except HomeAssistantError as err:
+        _LOGGER.debug("Could not determine base URL for device refresh: %s", err)
+        return
+
+    # Token mode: options-first
+    ha_uuid = str(hass.data.get("core.uuid", "ha"))
+    config_entries = hass.config_entries.async_entries(DOMAIN)
+    token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+    if config_entries:
+        e0 = config_entries[0]
+        token_expiration_enabled = _opt(
+            e0, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+        )
+
+    if token_expiration_enabled:
+        week = str(int(time.time() // 604800))  # weekly rotation bucket
+        auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
+    else:
+        auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
+
+    dev_reg = dr.async_get(hass)
+    updated_count = 0
+    for device in dev_reg.devices.values():
+        # Defensive: handle malformed identifiers
+        try:
+            if any(len(identifier) >= 1 and identifier[0] == DOMAIN for identifier in device.identifiers):
+                dev_id = next((ident[1] for ident in device.identifiers if len(ident) == 2 and ident[0] == DOMAIN), None)
+                if dev_id:
+                    new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
+                    dev_reg.async_update_device(device_id=device.id, configuration_url=new_config_url)
+                    updated_count += 1
+                    _LOGGER.debug(
+                        "Updated URL for device %s: %s",
+                        device.name_by_user or device.name,
+                        _redact_url_token(new_config_url),
+                    )
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    if updated_count:
+        _LOGGER.debug("Refreshed URLs for %d Google Find My device(s)", updated_count)
+
+
 # --------------------------- Shared FCM provider ---------------------------
 
 async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHA:
@@ -526,6 +579,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not coordinator.last_update_success:
                 _LOGGER.warning("Initial refresh failed; entities will recover on subsequent polls.")
             await _async_normalize_device_names(hass)
+            await _async_refresh_device_urls(hass)
         except Exception as err:
             _LOGGER.error("Initial refresh raised an unexpected error: %s", err, exc_info=True)
 
@@ -786,51 +840,9 @@ async def _async_register_services(hass: HomeAssistant, coordinator: GoogleFindM
                 _LOGGER.error("Failed to execute external locate for '%s': %s", raw, err)
 
         async def async_refresh_device_urls_service(call: ServiceCall) -> None:
-            """Refresh configuration URLs for integration devices (absolute URL)."""
-            try:
-                base_url = get_url(
-                    hass, prefer_external=True, allow_cloud=True, allow_external=True, allow_internal=True
-                )
-            except HomeAssistantError as err:
-                _LOGGER.error("Could not determine base URL for device refresh: %s", err)
-                return
-
-            # Token mode: options-first
-            ha_uuid = str(hass.data.get("core.uuid", "ha"))
-            config_entries = hass.config_entries.async_entries(DOMAIN)
-            token_expiration_enabled = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-            if config_entries:
-                e0 = config_entries[0]
-                token_expiration_enabled = _opt(
-                    e0, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
-                )
-
-            if token_expiration_enabled:
-                week = str(int(time.time() // 604800))  # weekly rotation bucket
-                auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
-            else:
-                auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
-
-            dev_reg = dr.async_get(hass)
-            updated_count = 0
-            for device in dev_reg.devices.values():
-                # Defensive: handle malformed identifiers
-                try:
-                    if any(len(identifier) >= 1 and identifier[0] == DOMAIN for identifier in device.identifiers):
-                        dev_id = next((ident[1] for ident in device.identifiers if len(ident) == 2 and ident[0] == DOMAIN), None)
-                        if dev_id:
-                            new_config_url = f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
-                            dev_reg.async_update_device(device_id=device.id, configuration_url=new_config_url)
-                            updated_count += 1
-                            _LOGGER.debug(
-                                "Updated URL for device %s: %s",
-                                device.name_by_user or device.name,
-                                _redact_url_token(new_config_url),
-                            )
-                except (TypeError, ValueError, IndexError):
-                    continue
-
-            _LOGGER.info("Refreshed URLs for %d Google Find My devices", updated_count)
+            """Refresh configuration URLs for integration devices (service wrapper)."""
+            await _async_refresh_device_urls(hass)
+            _LOGGER.info("Device URL refresh service completed")
 
         async def async_rebuild_registry_service(call: ServiceCall) -> None:
             """Migrate soft settings or rebuild the registry (optionally scoped to device_ids).
