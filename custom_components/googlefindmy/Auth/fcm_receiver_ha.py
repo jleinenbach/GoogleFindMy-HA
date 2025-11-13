@@ -559,12 +559,14 @@ class FcmReceiverHA:
 
             location_data = None
             last_error = None
+            successful_coordinator = None
 
             # Try each coordinator until one succeeds
             for coordinator in tracking_coordinators:
                 try:
                     location_data = await self._decode_background_location_async(hex_string, coordinator)
                     if location_data:
+                        successful_coordinator = coordinator  # Track which coordinator decrypted successfully
                         break  # Success!
                 except Exception as coord_err:
                     last_error = coord_err
@@ -576,7 +578,7 @@ class FcmReceiverHA:
                     )
                     continue  # Try next coordinator
 
-            if not location_data:
+            if not location_data or not successful_coordinator:
                 # Only log if we actually tried coordinators
                 if last_error and len(tracking_coordinators) > 1:
                     _LOGGER.debug(
@@ -597,7 +599,8 @@ class FcmReceiverHA:
             payload.setdefault("last_updated", time.time())
 
             # Replace any older pending payload for this device with the newest one.
-            self._pending[canonic_id] = payload
+            # IMPORTANT: Store which coordinator successfully decrypted this, so _flush only updates that coordinator
+            self._pending[canonic_id] = (successful_coordinator, payload)
             self._schedule_flush(canonic_id)
 
         except Exception as err:  # noqa: BLE001
@@ -630,7 +633,7 @@ class FcmReceiverHA:
         self._flush_tasks[device_id] = task
 
     async def _flush(self, device_id: str) -> None:
-        """Flush the latest pending payload to **all** registered coordinators.
+        """Flush the latest pending payload to the coordinator that successfully decrypted it.
 
         Per-coordinator steps:
           1) Skip if coordinator would ignore the device.
@@ -646,16 +649,29 @@ class FcmReceiverHA:
             * Significance gating and type-aware cooldowns are applied **inside**
               the coordinator (`update_device_cache`), not here.
             * We do not strip internal `_report_hint`; the coordinator will.
+            * IMPORTANT: Only sends to the coordinator that successfully decrypted the update
+              to prevent cross-account contamination in multi-account setups.
         """
-        payload = self._pending.pop(device_id, None)
+        pending_data = self._pending.pop(device_id, None)
         # Remove the stored task (it is this method's responsibility to clear it).
         self._flush_tasks.pop(device_id, None)
 
-        if not payload:
+        if not pending_data:
             return
 
-        # Iterate over a copy to avoid mutation issues if a coordinator unregisters mid-flight.
-        for coordinator in self.coordinators.copy():
+        # Extract coordinator and payload from pending data
+        # New format: (coordinator, payload) tuple for multi-account isolation
+        # Legacy format: just payload dict (backward compatibility)
+        if isinstance(pending_data, tuple) and len(pending_data) == 2:
+            target_coordinator, payload = pending_data
+            coordinators_to_update = [target_coordinator] if target_coordinator in self.coordinators else []
+        else:
+            # Legacy path: update all coordinators (backward compatibility for single-account setups)
+            payload = pending_data
+            coordinators_to_update = self.coordinators.copy()
+
+        # Iterate over coordinators that should receive this update
+        for coordinator in coordinators_to_update:
             try:
                 if not self._is_tracked(coordinator, device_id):
                     continue
@@ -744,6 +760,7 @@ class FcmReceiverHA:
             from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf  # type: ignore
             from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (  # type: ignore
                 async_decrypt_location_response_locations,
+                StaleOwnerKeyError,
             )
             from custom_components.googlefindmy.NovaApi import nova_request
 
@@ -764,6 +781,10 @@ class FcmReceiverHA:
                 # Fallback for single-account or if coordinator not available
                 locations = await async_decrypt_location_response_locations(device_update) or []
                 return locations[0] if locations else {}
+        except StaleOwnerKeyError as err:  # noqa: BLE001
+            # Expected during key rotation - log at info level
+            _LOGGER.info("Background location update skipped (stale key): %s", err)
+            return {}
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to decode background location data: %s", err)
             return {}

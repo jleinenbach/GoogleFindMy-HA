@@ -61,6 +61,7 @@ class TokenCache:
             entry_id: The unique ID of the ConfigEntry.
         """
         self._hass = hass
+        self._entry_id = entry_id
         # Each entry gets its own storage file: f"{STORAGE_KEY}_{entry_id}"
         self._store: Store[CacheData] = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry_id}")
         self._data: CacheData = {}
@@ -225,6 +226,15 @@ class TokenCache:
             return
         self._closed = True
         await self.flush()
+
+    async def delete(self) -> None:
+        """Delete the storage file for this cache (used when removing integration entry)."""
+        if self._store:
+            try:
+                await self._store.async_remove()
+                _LOGGER.debug("Deleted cache storage file for entry '%s'", self._entry_id)
+            except Exception as err:
+                _LOGGER.warning("Failed to delete cache storage file: %s", err)
 
     # ------------------------------ Utilities --------------------------------
 
