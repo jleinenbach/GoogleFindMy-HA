@@ -27,7 +27,7 @@ clean-wheelhouse:
 
 install-ha-stubs:
 	@echo "[make install-ha-stubs] Installing Home Assistant pytest dependencies"
-	@$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
+	@$(PYTHON) -m pip install --upgrade -r requirements-ha-stubs.txt
 
 $(WHEELHOUSE_SENTINEL): requirements-dev.txt
 	@mkdir -p $(WHEELHOUSE)
