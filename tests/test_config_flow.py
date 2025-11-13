@@ -28,10 +28,7 @@ class _CoordinatorStub:
         self.refresh_invocations: list[bool] = []
         self.ensure_entries: list[Any] = []
 
-    def attach_subentry_manager(
-        self, manager: Any, *, is_reload: bool = False
-    ) -> None:
-        del is_reload
+    def attach_subentry_manager(self, manager: Any) -> None:
         self.attached_managers.append(manager)
 
     def _build_core_subentry_definitions(self) -> list[Any]:

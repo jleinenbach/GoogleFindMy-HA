@@ -82,8 +82,8 @@ class _ManagerStub:
 
 
 @pytest.mark.asyncio
-async def test_coordinator_recreates_missing_core_subentries() -> None:
-    """Coordinator should repair missing core subentries and rebuild metadata."""
+async def test_coordinator_defers_missing_core_subentry_repairs() -> None:
+    """Coordinator should no longer auto-repair missing core subentries."""
 
     loop = asyncio.get_running_loop()
     hass = HomeAssistant()
@@ -165,48 +165,25 @@ async def test_coordinator_recreates_missing_core_subentries() -> None:
 
     coordinator._refresh_subentry_index()
 
+    registry = dr.async_get(hass)
+    baseline_created = list(getattr(registry, "created", []))
+
     entry.subentries.pop(service_subentry.subentry_id)
 
     before_tasks = len(created_tasks)
     coordinator._refresh_subentry_index()
-    assert len(created_tasks) == before_tasks + 1, "repair task should be scheduled"
+    assert len(created_tasks) == before_tasks, "repair task should no longer be scheduled"
 
-    await asyncio.gather(*created_tasks)
-
-    assert manager.calls, "repair manager should receive sync definitions"
-    repaired_features = {key: features for key, features in manager.calls[-1]}
-    assert sorted(repaired_features[SERVICE_SUBENTRY_KEY]) == sorted(
-        SERVICE_FEATURE_PLATFORMS
-    )
-    assert sorted(repaired_features[TRACKER_SUBENTRY_KEY]) == sorted(
-        TRACKER_FEATURE_PLATFORMS
-    )
-
-    rebuilt_service = None
-    rebuilt_tracker = None
-    for subentry in entry.subentries.values():
-        group_key = subentry.data.get("group_key")
-        if group_key == SERVICE_SUBENTRY_KEY:
-            rebuilt_service = subentry
-        if group_key == TRACKER_SUBENTRY_KEY:
-            rebuilt_tracker = subentry
-    assert rebuilt_service is not None, "service subentry should be recreated"
-    assert rebuilt_tracker is not None, "tracker subentry should persist"
+    assert not manager.calls, "repair manager should not be invoked proactively"
+    assert coordinator._pending_subentry_repair is None
 
     service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
     tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
-    assert service_meta is not None
-    assert tracker_meta is not None
-    assert service_meta.config_subentry_id == rebuilt_service.subentry_id
-    assert tracker_meta.config_subentry_id == rebuilt_tracker.subentry_id
+    assert service_meta is not None, "service metadata should fall back to placeholder"
+    assert service_meta.config_subentry_id == "entry-repair-service-subentry"
+    assert tracker_meta is not None, "tracker metadata should persist"
 
     registry = dr.async_get(hass)
-    assert getattr(registry, "created", []), "service device entry should be created"
-    service_entry = registry.created[-1]
-    assert service_entry["config_subentry_id"] == rebuilt_service.subentry_id
-    assert any(
-        identifier[1] == f"{entry.entry_id}:{rebuilt_service.subentry_id}:service"
-        for identifier in service_entry["identifiers"]
-    )
-    assert getattr(coordinator, "_service_device_ready", False)
-    assert coordinator._pending_subentry_repair is None
+    current_created = getattr(registry, "created", [])
+    assert len(current_created) == len(baseline_created), "no additional repair device should be created"
+    assert current_created == baseline_created, "service device entry should be unchanged"

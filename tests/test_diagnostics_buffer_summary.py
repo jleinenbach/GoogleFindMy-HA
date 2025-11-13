@@ -57,10 +57,7 @@ class _StubCoordinator:
         self._present_device_ids: set[str] = set()
         self._is_polling = True
 
-    def attach_subentry_manager(
-        self, manager: object, *, is_reload: bool = False
-    ) -> None:
-        del is_reload
+    def attach_subentry_manager(self, manager: object) -> None:
         self.subentry_manager = manager
 
 
