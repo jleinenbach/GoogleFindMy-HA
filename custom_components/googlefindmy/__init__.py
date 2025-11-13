@@ -5625,7 +5625,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     if isinstance(entry_state, ConfigEntryState):
         is_reload = entry_state in reload_states
     elif isinstance(entry_state, str):
-        reload_values = tuple(state.value for state in reload_states)
+        reload_values = tuple(
+            state.value if hasattr(state, "value") else str(state)
+            for state in reload_states
+        )
         is_reload = entry_state in reload_values
 
     runtime_subentry_manager = ConfigEntrySubEntryManager(hass, entry)

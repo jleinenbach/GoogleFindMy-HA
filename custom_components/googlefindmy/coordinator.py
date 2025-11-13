@@ -741,6 +741,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._auth_error_since: float = 0.0
         self._auth_error_message: str | None = None
 
+        # Reload guard: defer core subentry repairs once after reload-driven attach
+        self._skip_repair_during_reload_refresh: bool = False
+        self._reload_repair_skip_pending_release: bool = False
+
         super().__init__(
             hass,
             _LOGGER,
@@ -760,6 +764,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Attach the config entry subentry manager to the coordinator."""
 
         self._subentry_manager = manager
+        self._skip_repair_during_reload_refresh = bool(is_reload)
+        self._reload_repair_skip_pending_release = False
         if manager is None:
             return
 
@@ -921,6 +927,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         skip_repair: bool = False,
     ) -> None:
         """Refresh internal subentry metadata caches."""
+
+        reload_skip_active = bool(
+            getattr(self, "_skip_repair_during_reload_refresh", False)
+        )
+        reload_skip_consumed = False
+        if reload_skip_active and not skip_repair:
+            skip_repair = True
+            reload_skip_consumed = True
+            self._reload_repair_skip_pending_release = True
 
         entry = self.config_entry
 
@@ -1260,6 +1275,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._default_subentry_key_value = default_key
 
         manager = self._subentry_manager
+        if reload_skip_consumed:
+            if visible_devices is not None or missing_core_keys:
+                self._skip_repair_during_reload_refresh = False
+                self._reload_repair_skip_pending_release = False
+        elif (
+            reload_skip_active
+            and self._reload_repair_skip_pending_release
+            and (visible_devices is not None or missing_core_keys)
+        ):
+            self._skip_repair_during_reload_refresh = False
+            self._reload_repair_skip_pending_release = False
+
         if not skip_repair and missing_core_keys:
             self._schedule_core_subentry_repair(missing_core_keys)
 

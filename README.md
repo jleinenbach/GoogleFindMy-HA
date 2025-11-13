@@ -32,6 +32,21 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 - `python script/list_wheelhouse.py` — print a grouped index of cached wheels (optionally against `--manifest script/ssot_wheel_manifest.txt`) before running lengthy installs so you can confirm the cache satisfies the manifest without scrolling through pip logs. Pass `--allow-missing` to preview the formatter when `.wheelhouse/ssot` has not been generated yet.
 - `make test-ha` — provision the `.venv` environment (installing `homeassistant` and `pytest-homeassistant-custom-component` when missing), execute the targeted regression smoke tests, and then run `pytest -q --cov` for the full suite while teeing detailed output to `pytest_output.log`. Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options, override the coverage summary with `make test-ha PYTEST_COV_FLAGS="--cov-report=term"` (or `term-summary`, `term-skip-covered`, etc.) for slimmer CI logs, and reuse an existing wheel cache without redownloading by passing `make test-ha SKIP_WHEELHOUSE_REFRESH=1`.
 
+### Installing Home Assistant test dependencies on demand
+
+The repository already ships a lightweight bootstrap for the real Home Assistant
+test stack. Run `make install-ha-stubs` from the project root to install
+`homeassistant` and `pytest-homeassistant-custom-component` into your current
+Python environment without creating the `.venv` managed by other helpers. This
+is the quickest way to unblock `pytest` after cloning the repository or when a
+CI run reports missing Home Assistant packages.
+
+If you prefer an isolated environment, `make test-ha` provisions `.venv/` using
+the cached wheels under `.wheelhouse/`, installs the same stub dependencies, and
+then executes the regression suite. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse an
+existing cache or adjust `PYTEST_ARGS`/`PYTEST_COV_FLAGS` to narrow the test
+selection while still benefiting from the automated dependency install.
+
 #### Wheelhouse cache management
 
 `make test-ha` depends on the `.wheelhouse/` cache and automatically refreshes it when `requirements-dev.txt` changes. Delete the directory (or run `make wheelhouse` manually) whenever you need to rebuild the cache for a clean-room test of updated dependencies. When the existing cache already satisfies the pinned requirements, skip the refresh step by invoking `make test-ha SKIP_WHEELHOUSE_REFRESH=1` (or the equivalent `make wheelhouse SKIP_WHEELHOUSE_REFRESH=1`).
