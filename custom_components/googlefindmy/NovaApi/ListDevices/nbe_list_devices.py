@@ -52,6 +52,7 @@ async def async_request_device_list(
     username: Optional[str] = None,
     *,
     session: Optional[ClientSession] = None,
+    cache: Optional[any] = None,
 ) -> str:
     """Asynchronously request the device list via Nova.
 
@@ -68,6 +69,7 @@ async def async_request_device_list(
                   from the cache.
         session: (Deprecated) The aiohttp ClientSession. This is no longer
                  forwarded as nova_request handles session management.
+        cache: Optional TokenCache instance for multi-account isolation.
 
     Returns:
         Hex-encoded Nova response payload.
@@ -81,6 +83,7 @@ async def async_request_device_list(
         NOVA_LIST_DEVICES_API_SCOPE,
         hex_payload,
         username=username,
+        cache=cache,
         # session intentionally not forwarded anymore; nova_request manages reuse/fallback
     )
 
