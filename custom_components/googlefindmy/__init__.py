@@ -6120,7 +6120,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         if isinstance(identifier, str) and identifier and callable(forward_unload):
             result = _invoke_with_optional_keyword(
                 forward_unload,
-                (entry, list(platforms)),
+                (entry, tuple(platforms)),
                 "config_subentry_id",
                 identifier,
             )
