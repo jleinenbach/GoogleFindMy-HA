@@ -741,6 +741,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._auth_error_since: float = 0.0
         self._auth_error_message: str | None = None
 
+        # Reload guard: defer core subentry repairs once after reload-driven attach
+        self._skip_repair_during_reload_refresh: bool = False
+
         super().__init__(
             hass,
             _LOGGER,
@@ -760,6 +763,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Attach the config entry subentry manager to the coordinator."""
 
         self._subentry_manager = manager
+        self._skip_repair_during_reload_refresh = bool(is_reload)
         if manager is None:
             return
 
@@ -921,6 +925,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         skip_repair: bool = False,
     ) -> None:
         """Refresh internal subentry metadata caches."""
+
+        if (
+            not skip_repair
+            and getattr(self, "_skip_repair_during_reload_refresh", False)
+        ):
+            skip_repair = True
+            self._skip_repair_during_reload_refresh = False
 
         entry = self.config_entry
 
