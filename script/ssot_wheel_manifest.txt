@@ -1,0 +1,6 @@
+# Minimal manifest of primary wheels cached by script/bootstrap_ssot_cached.sh
+# Lines use shell glob syntax relative to the wheelhouse directory.
+homeassistant-*-py3-none-any.whl
+pytest_homeassistant_custom_component-*-py3-none-any.whl
+setuptools-*-py3-none-any.whl
+wheel-*-py3-none-any.whl
