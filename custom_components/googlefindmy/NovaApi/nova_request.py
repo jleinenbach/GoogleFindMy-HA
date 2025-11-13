@@ -433,17 +433,18 @@ def _get_initial_token_sync(username: str, _logger) -> str:
     return token
 
 
-async def _get_initial_token_async(username: str, _logger) -> str:
+async def _get_initial_token_async(username: str, _logger, cache: Optional[any] = None) -> str:
     """Get or create the initial ADM token in async path and ensure TTL metadata is recorded."""
-    # Try to use entry-specific cache if registered (multi-entry support)
-    cache = _get_cache_provider()
+    # Use explicitly passed cache for multi-account isolation, or fall back to provider
+    if not cache:
+        cache = _get_cache_provider()
 
     # Safe cache access - handle multi-entry scenarios during validation
     token = None
     try:
         if cache:
-            # Use entry-specific cache
-            token = await cache.get(f"adm_token_{username}") or await cache.get("adm_token")
+            # Use entry-specific cache with correct method names
+            token = await cache.async_get_cached_value(f"adm_token_{username}") or await cache.async_get_cached_value("adm_token")
         else:
             # Fall back to global facade
             token = await async_get_cached_value(f"adm_token_{username}") or await async_get_cached_value("adm_token")
@@ -453,14 +454,14 @@ async def _get_initial_token_async(username: str, _logger) -> str:
 
     if not token:
         _logger.info("Attempting to generate new ADM token (async)...")
-        token = await async_get_adm_token_api(username)
+        token = await async_get_adm_token_api(username, cache=cache)
         if token:
             try:
                 if cache:
-                    await cache.set(f"adm_token_issued_at_{username}", time.time())
-                    probe_left = await cache.get(f"adm_probe_startup_left_{username}")
+                    await cache.async_set_cached_value(f"adm_token_issued_at_{username}", time.time())
+                    probe_left = await cache.async_get_cached_value(f"adm_probe_startup_left_{username}")
                     if not probe_left:
-                        await cache.set(f"adm_probe_startup_left_{username}", 3)
+                        await cache.async_set_cached_value(f"adm_probe_startup_left_{username}", 3)
                 else:
                     await async_set_cached_value(f"adm_token_issued_at_{username}", time.time())
                     probe_left = await async_get_cached_value(f"adm_probe_startup_left_{username}")
@@ -647,6 +648,7 @@ async def async_nova_request(
     hex_payload: str,
     username: Optional[str] = None,
     session: Optional[aiohttp.ClientSession] = None,
+    cache: Optional[any] = None,
 ) -> str:
     """
     Asynchronous Nova API request for Home Assistant.
@@ -654,12 +656,14 @@ async def async_nova_request(
     This is the preferred method for all communication with the Nova API from
     within Home Assistant, as it is non-blocking and integrates with HA's
     shared aiohttp session.
-    
+
     Args:
         api_scope: Nova API scope suffix (appended to the base URL).
         hex_payload: Hex string body.
         username: Optional username. If omitted, read from async cache.
         session: Optional aiohttp session to reuse.
+        cache: Optional TokenCache instance for multi-account isolation. If provided,
+               this cache will be used directly instead of the global cache resolution.
 
     Returns:
         Hex-encoded response body.
@@ -677,7 +681,12 @@ async def async_nova_request(
         user = username
     else:
         try:
-            user = await async_get_username()
+            if cache:
+                # Use explicitly passed cache for multi-account isolation
+                user = await cache.async_get_cached_value("username")
+                user = str(user) if isinstance(user, str) else None
+            else:
+                user = await async_get_username()
         except Exception:  # noqa: BLE001
             # Cache not available during validation or multi-entry scenario
             user = None
@@ -685,7 +694,7 @@ async def async_nova_request(
     if not user:
         raise ValueError("Username is not available for async_nova_request.")
 
-    token = await _get_initial_token_async(user, _LOGGER)
+    token = await _get_initial_token_async(user, _LOGGER, cache=cache)
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Authorization": f"Bearer {token}",
@@ -702,14 +711,20 @@ async def async_nova_request(
     # Wrap cache functions to handle multi-entry scenarios gracefully during config flow validation
     async def safe_get_cached_value(key: str):
         try:
-            return await async_get_cached_value(key)
+            if cache:
+                return await cache.async_get_cached_value(key)
+            else:
+                return await async_get_cached_value(key)
         except Exception:  # noqa: BLE001
             # Cache unavailable (multi-entry validation) - return None to skip TTL logic
             return None
 
     async def safe_set_cached_value(key: str, value):
         try:
-            await async_set_cached_value(key, value)
+            if cache:
+                await cache.async_set_cached_value(key, value)
+            else:
+                await async_set_cached_value(key, value)
         except Exception:  # noqa: BLE001
             # Cache unavailable (multi-entry validation) - skip caching
             pass
@@ -717,7 +732,7 @@ async def async_nova_request(
     policy = AsyncTTLPolicy(
         username=user, logger=_LOGGER,
         get_value=safe_get_cached_value, set_value=safe_set_cached_value,
-        refresh_fn=lambda: async_get_adm_token_api(user),
+        refresh_fn=lambda: async_get_adm_token_api(user, cache=cache),
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
     )
     await policy.pre_request()
