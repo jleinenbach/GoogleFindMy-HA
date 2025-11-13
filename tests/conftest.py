@@ -1719,8 +1719,11 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
             ) -> bool:
                 return True
 
-            def attach_subentry_manager(self, manager: Any) -> None:
+            def attach_subentry_manager(
+                self, manager: Any, *, is_reload: bool = False
+            ) -> None:
                 self.subentry_manager = manager
+                self._manager_is_reload = is_reload
 
         if methods:
             for name, method in methods.items():

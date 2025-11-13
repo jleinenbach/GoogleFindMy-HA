@@ -755,7 +755,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return self._cache
 
     def attach_subentry_manager(
-        self, manager: ConfigEntrySubEntryManager
+        self, manager: ConfigEntrySubEntryManager, *, is_reload: bool = False
     ) -> None:
         """Attach the config entry subentry manager to the coordinator."""
 
@@ -764,7 +764,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         try:
-            self._refresh_subentry_index(skip_manager_update=True)
+            self._refresh_subentry_index(
+                skip_manager_update=True, skip_repair=is_reload
+            )
         except Exception as err:  # noqa: BLE001 - defensive guard
             _LOGGER.debug(
                 "Initial subentry refresh failed during setup: %s",
@@ -916,6 +918,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         visible_devices: Sequence[Mapping[str, Any]] | None = None,
         *,
         skip_manager_update: bool = False,
+        skip_repair: bool = False,
     ) -> None:
         """Refresh internal subentry metadata caches."""
 
@@ -924,6 +927,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         entry_id = getattr(entry, "entry_id", None)
 
         raw_entries: list[tuple[str, str | None, dict[str, Any], str | None]] = []
+        core_group_keys_present: set[str] = set()
         if entry and getattr(entry, "subentries", None):
             for subentry in entry.subentries.values():
                 data = dict(getattr(subentry, "data", {}) or {})
@@ -932,6 +936,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     or getattr(subentry, "subentry_id", None)
                     or "core_tracking"
                 )
+                if group_key in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY):
+                    core_group_keys_present.add(group_key)
                 raw_entries.append(
                     (
                         group_key,
@@ -940,6 +946,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         getattr(subentry, "title", None),
                     )
                 )
+
+        if entry is not None:
+            missing_core_keys = {
+                SERVICE_SUBENTRY_KEY,
+                TRACKER_SUBENTRY_KEY,
+            } - core_group_keys_present
+        else:
+            missing_core_keys = set()
 
         if not raw_entries:
             raw_entries.append(
@@ -1246,6 +1260,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._default_subentry_key_value = default_key
 
         manager = self._subentry_manager
+        if not skip_repair and missing_core_keys:
+            self._schedule_core_subentry_repair(missing_core_keys)
+
         if manager and manager_visible and not skip_manager_update:
             for group_key, visible_ids in manager_visible.items():
                 if group_key == SERVICE_SUBENTRY_KEY:
@@ -1681,7 +1698,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         # Refresh subentry metadata to obtain the current service subentry context.
         try:
-            self._refresh_subentry_index(skip_manager_update=True)
+            self._refresh_subentry_index(
+                skip_manager_update=True, skip_repair=True
+            )
         except Exception:  # pragma: no cover - defensive guard
             pass
 

@@ -81,15 +81,24 @@ class _ManagerStub:
         return None
 
 
-@pytest.mark.asyncio
-async def test_coordinator_defers_missing_core_subentry_repairs() -> None:
-    """Coordinator should no longer auto-repair missing core subentries."""
+def _initialize_repair_coordinator(
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[
+    HomeAssistant,
+    Any,
+    GoogleFindMyCoordinator,
+    _ManagerStub,
+    list[asyncio.Task[Any]],
+    ConfigSubentry,
+    ConfigSubentry,
+]:
+    """Prepare a coordinator instance and capture repair scheduling tasks."""
 
-    loop = asyncio.get_running_loop()
     hass = HomeAssistant()
     hass.loop = loop
     hass.bus = SimpleNamespace(async_listen=lambda *_args, **_kwargs: (lambda: None))
     hass.data = {DOMAIN: {}}
+
     created_tasks: list[asyncio.Task[Any]] = []
 
     def _track_task(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
@@ -161,7 +170,34 @@ async def test_coordinator_defers_missing_core_subentry_repairs() -> None:
     coordinator._service_device_ready = False
     coordinator._service_device_id = None
     runtime_data.coordinator = coordinator
-    coordinator.attach_subentry_manager(manager)
+
+    return (
+        hass,
+        entry,
+        coordinator,
+        manager,
+        created_tasks,
+        tracker_subentry,
+        service_subentry,
+    )
+
+
+@pytest.mark.asyncio
+async def test_coordinator_repairs_missing_core_subentries_on_cold_start() -> None:
+    """Cold-start refresh should schedule and execute core subentry repairs."""
+
+    loop = asyncio.get_running_loop()
+    (
+        hass,
+        entry,
+        coordinator,
+        manager,
+        created_tasks,
+        tracker_subentry,
+        service_subentry,
+    ) = _initialize_repair_coordinator(loop)
+
+    coordinator.attach_subentry_manager(manager, is_reload=False)
 
     coordinator._refresh_subentry_index()
 
@@ -172,18 +208,73 @@ async def test_coordinator_defers_missing_core_subentry_repairs() -> None:
 
     before_tasks = len(created_tasks)
     coordinator._refresh_subentry_index()
-    assert len(created_tasks) == before_tasks, "repair task should no longer be scheduled"
+    assert (
+        len(created_tasks) == before_tasks + 1
+    ), "missing core subentries should trigger a repair task"
 
-    assert not manager.calls, "repair manager should not be invoked proactively"
+    new_tasks = created_tasks[before_tasks:]
+    if new_tasks:
+        await asyncio.gather(*new_tasks)
+
+    assert manager.calls, "core subentries should be rebuilt during repair"
     assert coordinator._pending_subentry_repair is None
+    assert service_subentry.subentry_id in entry.subentries
+    assert tracker_subentry.subentry_id in entry.subentries
 
+    expected_service_id = f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}-subentry"
+    expected_tracker_id = f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}-subentry"
     service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
     tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
-    assert service_meta is not None, "service metadata should fall back to placeholder"
-    assert service_meta.config_subentry_id == "entry-repair-service-subentry"
-    assert tracker_meta is not None, "tracker metadata should persist"
+    assert service_meta is not None
+    assert tracker_meta is not None
+    assert service_meta.config_subentry_id == expected_service_id
+    assert tracker_meta.config_subentry_id == expected_tracker_id
 
     registry = dr.async_get(hass)
     current_created = getattr(registry, "created", [])
-    assert len(current_created) == len(baseline_created), "no additional repair device should be created"
-    assert current_created == baseline_created, "service device entry should be unchanged"
+    assert list(current_created) == baseline_created
+
+
+@pytest.mark.asyncio
+async def test_coordinator_skips_repair_during_reload_refresh() -> None:
+    """Reload-driven refresh should skip scheduling core subentry repairs."""
+
+    loop = asyncio.get_running_loop()
+    (
+        hass,
+        entry,
+        coordinator,
+        manager,
+        created_tasks,
+        _tracker_subentry,
+        service_subentry,
+    ) = _initialize_repair_coordinator(loop)
+
+    coordinator.attach_subentry_manager(manager, is_reload=True)
+
+    coordinator._refresh_subentry_index()
+
+    registry = dr.async_get(hass)
+    baseline_created = list(getattr(registry, "created", []))
+
+    entry.subentries.pop(service_subentry.subentry_id)
+
+    before_tasks = len(created_tasks)
+    coordinator._refresh_subentry_index()
+    assert (
+        len(created_tasks) == before_tasks
+    ), "reload refresh should not schedule core subentry repairs"
+
+    assert not manager.calls, "repair should be skipped during reload refresh"
+    assert coordinator._pending_subentry_repair is None
+    assert service_subentry.subentry_id not in entry.subentries
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert tracker_meta is not None
+    assert service_meta.visible_device_ids == ()
+
+    registry = dr.async_get(hass)
+    current_created = getattr(registry, "created", [])
+    assert list(current_created) == baseline_created

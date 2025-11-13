@@ -5616,8 +5616,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
         )
 
+    entry_state = getattr(entry, "state", None)
+    reload_states: tuple[ConfigEntryState, ...] = (
+        ConfigEntryState.SETUP_IN_PROGRESS,
+        ConfigEntryState.SETUP_RETRY,
+    )
+    is_reload = False
+    if isinstance(entry_state, ConfigEntryState):
+        is_reload = entry_state in reload_states
+    elif isinstance(entry_state, str):
+        reload_values = tuple(state.value for state in reload_states)
+        is_reload = entry_state in reload_values
+
     runtime_subentry_manager = ConfigEntrySubEntryManager(hass, entry)
-    coordinator.attach_subentry_manager(runtime_subentry_manager)
+    coordinator.attach_subentry_manager(
+        runtime_subentry_manager, is_reload=is_reload
+    )
 
     # Expose runtime object via the typed container (preferred access pattern)
     entity_recovery_manager = EntityRecoveryManager(hass, entry, coordinator)
