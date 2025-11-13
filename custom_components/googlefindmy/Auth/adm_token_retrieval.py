@@ -53,13 +53,19 @@ _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 _APP_ID: str = "com.google.android.apps.adm"
 
 
-async def _seed_username_in_cache(username: str) -> None:
+async def _seed_username_in_cache(username: str, cache: Optional[any] = None) -> None:
     """Ensure the canonical username cache key is populated (idempotent)."""
     try:
-        cached = await async_get_cached_value(username_string)
-        if cached != username and isinstance(username, str) and username:
-            await async_set_cached_value(username_string, username)
-            _LOGGER.debug("Seeded username cache key '%s' with '%s'.", username_string, username)
+        if cache:
+            cached = await cache.async_get_cached_value(username_string)
+            if cached != username and isinstance(username, str) and username:
+                await cache.async_set_cached_value(username_string, username)
+                _LOGGER.debug("Seeded username cache key '%s' with '%s'.", username_string, username)
+        else:
+            cached = await async_get_cached_value(username_string)
+            if cached != username and isinstance(username, str) and username:
+                await async_set_cached_value(username_string, username)
+                _LOGGER.debug("Seeded username cache key '%s' with '%s'.", username_string, username)
     except Exception as exc:  # defensive: never fail token flow on seeding
         _LOGGER.debug("Username cache seeding skipped: %s", exc)
 
@@ -167,6 +173,7 @@ async def async_get_adm_token(
     *,
     retries: int = 2,
     backoff: float = 1.0,
+    cache: Optional[any] = None,
 ) -> str:
     """
     Return a cached ADM token or generate a new one (async-first API).
@@ -175,6 +182,7 @@ async def async_get_adm_token(
         username: Optional explicit username. If None, it's resolved from cache.
         retries: Number of retry attempts on failure.
         backoff: Initial backoff delay in seconds for retries.
+        cache: Optional TokenCache instance for multi-account isolation.
 
     Returns:
         The ADM token string.
@@ -200,7 +208,10 @@ async def async_get_adm_token(
     # Cache fast-path - handle cache errors during validation
     token = None
     try:
-        token = await async_get_cached_value(cache_key)
+        if cache:
+            token = await cache.async_get_cached_value(cache_key)
+        else:
+            token = await async_get_cached_value(cache_key)
     except Exception:  # noqa: BLE001
         # Cache not available during validation
         pass
@@ -212,20 +223,28 @@ async def async_get_adm_token(
     attempts = retries + 1
     for attempt in range(attempts):
         try:
-            await _seed_username_in_cache(user)
+            await _seed_username_in_cache(user, cache=cache)
 
-            # Get unique Android ID for this user
-            android_id = await _get_or_generate_android_id(user)
+            # Get unique Android ID for this user (pass cache for multi-account isolation)
+            from custom_components.googlefindmy.Auth.aas_token_retrieval import _get_or_generate_android_id
+            android_id = await _get_or_generate_android_id(user, cache=cache)
 
             tok = await _perform_oauth_with_aas(user, android_id)
 
             # Persist token & issued-at metadata (safe during validation)
             try:
-                await async_set_cached_value(cache_key, tok)
-                await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
-                probe_left = await async_get_cached_value(f"adm_probe_startup_left_{user}")
-                if not probe_left:
-                    await async_set_cached_value(f"adm_probe_startup_left_{user}", 3)
+                if cache:
+                    await cache.async_set_cached_value(cache_key, tok)
+                    await cache.async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
+                    probe_left = await cache.async_get_cached_value(f"adm_probe_startup_left_{user}")
+                    if not probe_left:
+                        await cache.async_set_cached_value(f"adm_probe_startup_left_{user}", 3)
+                else:
+                    await async_set_cached_value(cache_key, tok)
+                    await async_set_cached_value(f"adm_token_issued_at_{user}", time.time())
+                    probe_left = await async_get_cached_value(f"adm_probe_startup_left_{user}")
+                    if not probe_left:
+                        await async_set_cached_value(f"adm_probe_startup_left_{user}", 3)
             except Exception:  # noqa: BLE001
                 # Cache not available during validation - skip metadata persistence
                 _LOGGER.debug("Cannot persist token metadata during validation; will persist after entry creation.")
