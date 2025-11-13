@@ -241,6 +241,7 @@ async def get_location_data_for_device(
     session: Optional[aiohttp.ClientSession] = None,
     *,
     username: Optional[str] = None,
+    cache: Optional[any] = None,
 ) -> list:
     """Get location data for a device (async, HA-compatible).
 
@@ -282,14 +283,18 @@ async def get_location_data_for_device(
 
         # Capture the current cache provider context for multi-account support
         cache_provider = None
-        try:
-            from custom_components.googlefindmy.NovaApi import nova_request
-            # Capture the actual cache provider callable (not just the function)
-            cache = nova_request._get_cache_provider()
-            if cache:
-                cache_provider = lambda: cache
-        except Exception:
-            pass
+        if cache:
+            # Use explicitly passed cache (preferred for multi-account isolation)
+            cache_provider = lambda: cache
+        else:
+            # Fallback to ContextVar for backward compatibility
+            try:
+                from custom_components.googlefindmy.NovaApi import nova_request
+                cache_obj = nova_request._get_cache_provider()
+                if cache_obj:
+                    cache_provider = lambda: cache_obj
+            except Exception:
+                pass
 
         # Register the callback with the shared receiver
         try:
@@ -318,7 +323,7 @@ async def get_location_data_for_device(
         _LOGGER.info("Sending location request to Google API for %s...", name)
         try:
             _ = await async_nova_request(
-                NOVA_ACTION_API_SCOPE, hex_payload, username=username
+                NOVA_ACTION_API_SCOPE, hex_payload, username=username, cache=cache
             )
         except asyncio.CancelledError:
             raise
