@@ -369,6 +369,41 @@ async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
                 _LOGGER.warning("Stopping FCM receiver failed: %s", err)
 
 
+async def _async_cleanup_orphaned_cache_files(hass: HomeAssistant) -> None:
+    """Delete cache files that don't correspond to any active integration entry."""
+    try:
+        # Get all active googlefindmy entry IDs
+        active_entry_ids = set()
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            active_entry_ids.add(entry.entry_id)
+
+        # Scan for googlefindmy cache files in .storage
+        storage_path = hass.config.path(".storage")
+        if not await hass.async_add_executor_job(os.path.isdir, storage_path):
+            return
+
+        deleted_count = 0
+        filenames = await hass.async_add_executor_job(os.listdir, storage_path)
+        for filename in filenames:
+            if filename.startswith("googlefindmy_secrets_"):
+                # Extract entry_id from filename (format: googlefindmy_secrets_{entry_id})
+                entry_id = filename.replace("googlefindmy_secrets_", "")
+                if entry_id not in active_entry_ids:
+                    # This is an orphaned cache file - delete it
+                    file_path = os.path.join(storage_path, filename)
+                    try:
+                        await hass.async_add_executor_job(os.remove, file_path)
+                        deleted_count += 1
+                        _LOGGER.debug("Deleted orphaned cache file: %s", filename)
+                    except Exception as err:
+                        _LOGGER.warning("Failed to delete orphaned cache file %s: %s", filename, err)
+
+        if deleted_count > 0:
+            _LOGGER.info("Cleaned up %d orphaned cache file(s)", deleted_count)
+    except Exception as err:
+        _LOGGER.debug("Orphaned cache cleanup failed: %s", err)
+
+
 # ------------------------------ Setup / Unload -----------------------------
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -398,6 +433,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     cache = await TokenCache.create(hass, entry.entry_id, legacy_path=legacy_path)
     _register_instance(entry.entry_id, cache)
     _set_default_entry_id(entry.entry_id)
+
+    # Clean up orphaned cache files on first setup (not on reloads)
+    if not is_reload:
+        await _async_cleanup_orphaned_cache_files(hass)
 
     # NOTE: We don't register a global cache provider here anymore because it would
     # overwrite the previous entry's cache. Instead, the per-user owner_key/shared_key
@@ -640,14 +679,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.debug("FCM release during async_unload_entry raised: %s", err)
 
-    # Unregister and close the TokenCache instance
+    # Unregister, close, and DELETE the TokenCache instance and its storage file
     cache = _unregister_instance(entry.entry_id)
     if cache:
         try:
             await cache.close()
-            _LOGGER.debug("TokenCache for entry '%s' has been flushed and closed.", entry.entry_id)
+            await cache.delete()  # Delete the storage file to prevent orphaned cache files
+            _LOGGER.debug("TokenCache for entry '%s' has been flushed, closed, and deleted.", entry.entry_id)
         except Exception as err:
-            _LOGGER.warning("Closing TokenCache for entry '%s' failed: %s", entry.entry_id, err)
+            _LOGGER.warning("Closing/deleting TokenCache for entry '%s' failed: %s", entry.entry_id, err)
 
     # Clear any lingering cache provider registration
     try:

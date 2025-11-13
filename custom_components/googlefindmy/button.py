@@ -28,7 +28,7 @@ from homeassistant.components.button import ButtonEntity, ButtonEntityDescriptio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -44,6 +44,7 @@ PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
     key="play_sound",
     translation_key="play_sound",
     icon="mdi:volume-high",
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 # New entity description for stopping a sound manually
@@ -51,6 +52,7 @@ STOP_SOUND_DESCRIPTION = ButtonEntityDescription(
     key="stop_sound",
     translation_key="stop_sound",
     icon="mdi:volume-off",
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 # New entity description for the manual "Locate now" action
@@ -58,6 +60,7 @@ LOCATE_DEVICE_DESCRIPTION = ButtonEntityDescription(
     key="locate_device",
     translation_key="locate_device",
     icon="mdi:radar",
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 
