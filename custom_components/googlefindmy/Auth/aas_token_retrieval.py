@@ -198,7 +198,14 @@ async def _generate_aas_token(cache: Optional[any] = None) -> str:
         # Cache not available during validation
         pass
 
-    # Fallback: scan ADM tokens if no explicit OAuth token exists.
+    # Fallback 1: Try global cache if entry-specific cache had no token (validation scenario)
+    if not oauth_token and cache:
+        try:
+            oauth_token = await async_get_cached_value(CONF_OAUTH_TOKEN)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Fallback 2: scan ADM tokens if no explicit OAuth token exists.
     if not oauth_token:
         try:
             if cache:
@@ -217,6 +224,21 @@ async def _generate_aas_token(cache: Optional[any] = None) -> str:
                     username = extracted_username
                 _LOGGER.info("Using existing ADM token from cache for OAuth exchange (user: %s).", username or "unknown")
                 break
+
+        # Fallback 3: Try global cache for ADM tokens if entry cache had none (validation scenario)
+        if not oauth_token and cache:
+            try:
+                all_cached_global = await async_get_all_cached_values()
+                for key, value in all_cached_global.items():
+                    if isinstance(key, str) and key.startswith("adm_token_") and isinstance(value, str) and value:
+                        oauth_token = value
+                        extracted_username = key.replace("adm_token_", "", 1)
+                        if extracted_username and "@" in extracted_username:
+                            username = extracted_username
+                        _LOGGER.info("Using existing ADM token from global cache for OAuth exchange (user: %s).", username or "unknown")
+                        break
+            except Exception:  # noqa: BLE001
+                pass
 
     if not oauth_token:
         raise ValueError("No OAuth token available; please configure the integration with a valid token.")
