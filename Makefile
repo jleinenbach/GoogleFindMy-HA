@@ -1,4 +1,4 @@
-.PHONY: clean lint test-ha wheelhouse
+.PHONY: clean clean-wheelhouse lint test-ha wheelhouse
 
 VENV ?= .venv
 PYTHON ?= python3
@@ -16,6 +16,14 @@ lint:
 
 wheelhouse: $(WHEELHOUSE_SENTINEL)
 	@echo "[make wheelhouse] Wheel cache is ready at $(WHEELHOUSE)"
+
+clean-wheelhouse:
+	@if [ -d "$(WHEELHOUSE)" ]; then \
+		echo "[make clean-wheelhouse] Removing cached wheels in $(WHEELHOUSE)"; \
+		rm -rf "$(WHEELHOUSE)"; \
+	else \
+		echo "[make clean-wheelhouse] No wheel cache present"; \
+	fi
 
 $(WHEELHOUSE_SENTINEL): requirements-dev.txt
 	@mkdir -p $(WHEELHOUSE)
