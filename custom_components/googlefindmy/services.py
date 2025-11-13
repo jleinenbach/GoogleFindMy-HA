@@ -41,6 +41,7 @@ from .const import (
     SERVICE_STOP_SOUND,
     SERVICE_REFRESH_DEVICE_URLS,
     SERVICE_REBUILD_REGISTRY,
+    TRACKER_SUBENTRY_KEY,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,  # ctx provides the key but we keep a local fallback constant
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     LEGACY_SERVICE_IDENTIFIER,
@@ -82,252 +83,156 @@ SERVICE_REBUILD_DEVICE_REGISTRY: str = "rebuild_device_registry"
 
 
 async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) -> None:
-    """Synchronize and clean Device Registry entries for Google Find My hubs."""
+    """Synchronize and clean Device Registry entries for Google Find My hubs.
+
+    This service iterates over all googlefindmy config entries, identifies
+    the correct service device and tracker subentry, and removes any
+    orphaned devices (trackers) that are incorrectly linked to the parent
+    config entry instead of the tracker subentry.
+    """
 
     _LOGGER.info(
-        "Service '%s' called: rebuilding device registry.",
+        "Service '%s' called: rebuilding and cleaning device registry.",
         SERVICE_REBUILD_DEVICE_REGISTRY,
     )
 
+    dev_reg = dr.async_get(hass)
     domain_bucket = hass.data.get(DOMAIN, {})
     if not isinstance(domain_bucket, Mapping):
-        domain_bucket = {}
+        _LOGGER.warning("Device registry cleanup skipped: Domain data not found.")
+        return
 
-    def _extract_hub_details(
-        candidate: Any,
-    ) -> tuple[str, Mapping[Any, Any]] | None:
-        """Return the hub entry_id and coordinators mapping if available."""
+    entries_bucket = domain_bucket.get("entries")
+    if not isinstance(entries_bucket, Mapping):
+        _LOGGER.warning("Device registry cleanup skipped: No entries bucket found.")
+        return
 
-        entry_id: str | None
-        coordinators: Any
+    cleaned_devices_total = 0
 
-        if isinstance(candidate, Mapping):
-            raw_entry_id = candidate.get("entry_id")
-            if isinstance(raw_entry_id, str) and raw_entry_id:
-                entry_id = raw_entry_id
-            elif raw_entry_id is not None:
-                entry_id = str(raw_entry_id)
-            else:
-                entry_id = None
-            coordinators = candidate.get("coordinators")
-        else:
-            raw_entry_id = getattr(candidate, "entry_id", None)
-            if isinstance(raw_entry_id, str) and raw_entry_id:
-                entry_id = raw_entry_id
-            elif raw_entry_id is not None:
-                entry_id = str(raw_entry_id)
-            else:
-                entry_id = None
-            coordinators = getattr(candidate, "coordinators", None)
-
-        if not entry_id:
-            return None
-
-        if isinstance(coordinators, Mapping):
-            return entry_id, coordinators
-
-        return None
-
-    def _iter_hubs() -> list[tuple[str, Mapping[Any, Any]]]:
-        """Yield hub entry_id and coordinator mapping tuples."""
-
-        hubs: list[tuple[str, Mapping[Any, Any]]] = []
-        seen: set[int] = set()
-
-        hub_bucket = (
-            domain_bucket.get("hubs") if isinstance(domain_bucket, Mapping) else None
-        )
-        if isinstance(hub_bucket, Mapping):
-            for item in hub_bucket.values():
-                if item is None or id(item) in seen:
-                    continue
-                seen.add(id(item))
-                details = _extract_hub_details(item)
-                if details is not None:
-                    hubs.append(details)
-
-        for value in domain_bucket.values():
-            if value is None or id(value) in seen:
-                continue
-            details = _extract_hub_details(value)
-            if details is not None:
-                hubs.append(details)
-
-        return hubs
-
-    processed_coordinators = 0
-    seen_coordinators: set[int] = set()
-
-    for _hub_entry_id, coordinators in _iter_hubs():
-        for coordinator in coordinators.values():
-            if coordinator is None or id(coordinator) in seen_coordinators:
-                continue
-            update_registry = getattr(coordinator, "async_update_device_registry", None)
-            if not callable(update_registry):
-                continue
-            try:
-                await update_registry()
-            except Exception as err:  # noqa: BLE001 - defensive logging
-                _LOGGER.warning(
-                    "Coordinator %s failed during registry rebuild: %s",
-                    getattr(coordinator, "name", "<unknown>"),
-                    err,
-                )
-                continue
-            processed_coordinators += 1
-            seen_coordinators.add(id(coordinator))
-
-    entries_bucket = (
-        domain_bucket.get("entries") if isinstance(domain_bucket, Mapping) else None
-    )
-    if isinstance(entries_bucket, Mapping):
-        for runtime in entries_bucket.values():
-            coordinator = getattr(runtime, "coordinator", None)
-            if coordinator is None or id(coordinator) in seen_coordinators:
-                continue
-            update_registry = getattr(coordinator, "async_update_device_registry", None)
-            if not callable(update_registry):
-                continue
-            try:
-                await update_registry()
-            except Exception as err:  # noqa: BLE001 - defensive logging
-                _LOGGER.warning(
-                    "Runtime coordinator %s failed during registry rebuild: %s",
-                    getattr(coordinator, "name", "<unknown>"),
-                    err,
-                )
-                continue
-            processed_coordinators += 1
-            seen_coordinators.add(id(coordinator))
-
-    _LOGGER.info(
-        "Completed device registry ensure phase; processed %d coordinators.",
-        processed_coordinators,
-    )
-
-    # --- Phase 2: Cleanup Orphaned Devices ---
-    _LOGGER.info("Starting device registry cleanup phase...")
-    dev_reg = dr.async_get(hass)
-
-    processed_hubs = 0
-    cleaned_devices = 0
-
-    for hub_entry_id, coordinators in _iter_hubs():
-        if not hub_entry_id:
+    # Iterate over all active googlefindmy RuntimeData instances
+    for runtime in entries_bucket.values():
+        coordinator = getattr(runtime, "coordinator", None)
+        if coordinator is None:
             continue
 
-        processed_hubs += 1
+        entry = getattr(coordinator, "config_entry", None)
+        if entry is None or not hasattr(entry, "entry_id"):
+            continue
 
-        service_device_ident = service_device_identifier(hub_entry_id)
-        try:
-            service_device = dev_reg.async_get_device(
-                identifiers={service_device_ident}
-            )
-        except TypeError:  # pragma: no cover - defensive best effort
-            service_device = None
-        service_device_id = (
-            getattr(service_device, "id", None) if service_device else None
+        entry_id = entry.entry_id
+        _LOGGER.info(
+            "[%s] Hub Cleanup: Processing entry '%s'", entry_id, entry.title
         )
 
-        active_sub_entry_ids: set[str] = set()
-        for coordinator in coordinators.values():
-            config_entry = getattr(coordinator, "config_entry", None)
-            entry_id = getattr(config_entry, "entry_id", None)
-            if isinstance(entry_id, str):
-                active_sub_entry_ids.add(entry_id)
+        # 1. Find the correct Service Device ID
+        service_device_ident = service_device_identifier(entry_id)
+        service_device = dev_reg.async_get_device(
+            identifiers={service_device_ident}
+        )
+        service_device_id = getattr(service_device, "id", None)
+        if not service_device_id:
+            _LOGGER.debug("[%s] Hub Cleanup: Service device not found.", entry_id)
+            # Try to ensure it exists before continuing
+            try:
+                coordinator._ensure_service_device_exists()
+                service_device = dev_reg.async_get_device(
+                    identifiers={service_device_ident}
+                )
+                service_device_id = getattr(service_device, "id", None)
+                if not service_device_id:
+                    _LOGGER.warning(
+                        "[%s] Hub Cleanup: Could not find or create service device. Skipping entry.",
+                        entry_id,
+                    )
+                    continue
+            except Exception as e:
+                _LOGGER.error(
+                    "[%s] Hub Cleanup: Error ensuring service device: %s", entry_id, e
+                )
+                continue
 
-        active_sub_entry_ids.discard(hub_entry_id)
+        # 2. Find the correct Tracker Subentry ID
+        # We access the coordinator's metadata which was refreshed during setup
+        tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+        if not tracker_meta or not tracker_meta.config_subentry_id:
+            _LOGGER.warning(
+                "[%s] Hub Cleanup: Tracker subentry metadata not found. "
+                "Reloading integration may be required. Skipping entry.",
+                entry_id,
+            )
+            continue
 
+        correct_tracker_subentry_id = tracker_meta.config_subentry_id
         _LOGGER.debug(
-            "[%s] Hub Cleanup: Found %d active sub-entries. (Service Device ID: %s)",
-            hub_entry_id,
-            len(active_sub_entry_ids),
+            "[%s] Hub Cleanup: Found Service Device ID: %s",
+            entry_id,
             service_device_id,
         )
+        _LOGGER.debug(
+            "[%s] Hub Cleanup: Found Tracker Subentry ID: %s",
+            entry_id,
+            correct_tracker_subentry_id,
+        )
 
-        try:
-            get_devices_for_entry = getattr(
-                dr, "async_get_devices_for_config_entry", None
+        # 3. Find and remove orphaned devices
+        devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
+        cleaned_devices_entry = 0
+
+        for device in devices_for_entry:
+            if device is None or not hasattr(device, "id"):
+                continue
+
+            # Skip the Service Device itself
+            if device.id == service_device_id:
+                continue
+
+            # Check if the device is correctly linked to the tracker subentry
+            is_correctly_linked_tracker = (
+                device.config_subentry_id == correct_tracker_subentry_id
             )
-            if callable(get_devices_for_entry):
-                all_hub_linked_devices = get_devices_for_entry(dev_reg, hub_entry_id)
-            else:
-                all_hub_linked_devices = dr.async_entries_for_config_entry(
-                    dev_reg, hub_entry_id
-                )
-        except Exception as err:  # noqa: BLE001 - defensive logging
-            _LOGGER.warning(
-                "[%s] Hub Cleanup: Failed to get devices for config entry: %s",
-                hub_entry_id,
-                err,
-            )
-            continue
 
-        for device in all_hub_linked_devices:
-            if device is None:
+            if is_correctly_linked_tracker:
                 continue
 
-            device_id = getattr(device, "id", None)
-            if not isinstance(device_id, str) or not device_id:
-                continue
-
-            raw_links = getattr(device, "config_entries", set()) or set()
-            device_links = {
-                str(entry_id)
-                for entry_id in raw_links
-                if isinstance(entry_id, str) and entry_id
-            }
-
-            active_overlap = device_links & active_sub_entry_ids
-            if not active_overlap:
-                continue
-
+            # If we are here, the device is not the service device AND
+            # it is not linked to the correct tracker subentry. It's an orphan.
             _LOGGER.info(
-                "[%s] Hub Cleanup: Detaching hub entry from device '%s' (ID: %s). Active sub-entry links: %s",
-                hub_entry_id,
-                getattr(device, "name", None),
-                device_id,
-                active_overlap,
+                "[%s] Hub Cleanup: Removing orphaned device '%s' (ID: %s). "
+                "It was not linked to subentry %s.",
+                entry_id,
+                device.name or "<unknown>",
+                device.id,
+                correct_tracker_subentry_id,
             )
             try:
-                dev_reg.async_update_device(
-                    device_id,
-                    remove_config_entry_id=hub_entry_id,
-                )
-                cleaned_devices += 1
-            except Exception as err:  # noqa: BLE001 - defensive logging
+                dev_reg.async_remove_device(device.id)
+                cleaned_devices_entry += 1
+            except Exception as err:
                 _LOGGER.error(
-                    "[%s] Hub Cleanup: Failed to remove config entry from device %s: %s",
-                    hub_entry_id,
-                    device_id,
+                    "[%s] Hub Cleanup: Failed to remove device %s: %s",
+                    entry_id,
+                    device.id,
                     err,
                 )
 
+        if cleaned_devices_entry > 0:
+            _LOGGER.info(
+                "[%s] Hub Cleanup: Removed %d orphaned device links.",
+                entry_id,
+                cleaned_devices_entry,
+            )
+            cleaned_devices_total += cleaned_devices_entry
+
     _LOGGER.info(
-        "Device registry cleanup phase complete. Processed %d hubs and removed %d orphaned device links.",
-        processed_hubs,
-        cleaned_devices,
+        "Device registry cleanup phase complete. Removed %d total orphaned device links.",
+        cleaned_devices_total,
     )
 
-    # --- Phase 3: remove legacy tracker entities from the Entity Registry -----
+    # --- Phase 3 (from the original code): clean up legacy tracker entities ---
+    # This logic is independent and should be preserved.
     ent_reg = er.async_get(hass)
 
-    managed_entry_ids: set[str] = set()
-    entries_bucket = domain_bucket.get("entries") if isinstance(domain_bucket, Mapping) else None
-    if isinstance(entries_bucket, Mapping):
-        for raw_entry_id in entries_bucket.keys():
-            if isinstance(raw_entry_id, str) and raw_entry_id:
-                managed_entry_ids.add(raw_entry_id)
-
-    hub_bucket = domain_bucket.get("hubs") if isinstance(domain_bucket, Mapping) else None
-    if isinstance(hub_bucket, Mapping):
-        for raw_hub_id in hub_bucket.keys():
-            if isinstance(raw_hub_id, str) and raw_hub_id:
-                managed_entry_ids.add(raw_hub_id)
-
-    for hub_entry_id, _coordinators in _iter_hubs():
-        if isinstance(hub_entry_id, str) and hub_entry_id:
-            managed_entry_ids.add(hub_entry_id)
+    managed_entry_ids: set[str] = set(entries_bucket.keys())
 
     removed_entities = 0
     entities_container = getattr(ent_reg, "entities", None)

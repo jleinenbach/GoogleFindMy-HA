@@ -527,6 +527,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * **Prohibited:** Never suppress `G004` for `_LOGGER.info()`, `_LOGGER.warning()`, `_LOGGER.error()`, or `_LOGGER.critical()`; these levels must always use lazy formatting.
 
 * **PEP 8/PEP 257 mandatory.** Consistent formatting, clear docstrings; meaningful names.
+* **Historic phase markers stay English.** When preserving multi-phase progress notes (for example, `Phase 1`, `Phase 2`, legacy cleanup steps), keep both the marker and its description in English so maintenance cycles do not reintroduce untranslated fragments.
 * **Typing is strict.** Use Python typing everywhere; prefer **PEP 695** generics where helpful.
 * **Exceptions.** Raise precise types; use **`raise … from …`** to preserve causal chains; avoid broad `except:`; never swallow errors silently.
 * **Docstrings.** Every public function/class has an English docstring (purpose first, then Args/Returns/Raises, short example) and follows **Rule §9.DOC**.
