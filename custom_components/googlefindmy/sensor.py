@@ -265,17 +265,13 @@ class GoogleFindMyLastSeenSensor(CoordinatorEntity, RestoreSensor):
 
     @property
     def available(self) -> bool:
-        """Mirror device presence in availability."""
-        dev_id = self._device_id
-        if not dev_id:
-            return False
-        try:
-            if hasattr(self.coordinator, "is_device_present"):
-                return self.coordinator.is_device_present(dev_id)
-        except Exception:
-            # Be tolerant if a different coordinator build is used.
-            pass
-        # Fallback: consider available if we have any known last_seen value
+        """Return True if we have a last_seen value.
+
+        Since this sensor persists its value across restarts (RestoreSensor),
+        it remains available once it has data, even if the device goes offline.
+        This prevents availability flapping and spam in the Activity panel.
+        """
+        # Always available if we have a value - don't tie to device presence
         return self._attr_native_value is not None
 
     @callback

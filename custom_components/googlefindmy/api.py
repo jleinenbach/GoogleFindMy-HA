@@ -456,10 +456,7 @@ class GoogleFindMyAPI:
             ConfigEntryAuthFailed: If authentication fails.
             UpdateFailed: If the API is rate-limited, returns a server error, or a network/other error occurs.
         """
-        # Register cache provider for multi-entry support
-        from .NovaApi import nova_request
-        nova_request.register_cache_provider(lambda: self._cache)
-
+        # Pass cache explicitly for multi-account isolation (no global registration)
         try:
             if not username:
                 try:
@@ -467,7 +464,7 @@ class GoogleFindMyAPI:
                 except Exception:
                     username = None
 
-            result_hex = await async_request_device_list(username)
+            result_hex = await async_request_device_list(username, cache=self._cache)
 
             return self._process_device_list_response(result_hex)
         except asyncio.CancelledError:
@@ -554,8 +551,9 @@ class GoogleFindMyAPI:
             _LOGGER.info(
                 "API v3.0 Async: Requesting location for %s (%s)", device_name, device_id
             )
+            # Explicitly pass cache to prevent cross-account contamination
             records = await get_location_data_for_device(
-                device_id, device_name, session=self._session, username=username
+                device_id, device_name, session=self._session, username=username, cache=self._cache
             )
             best = self._select_best_location(records)
             if best:
@@ -757,10 +755,7 @@ class GoogleFindMyAPI:
             - success: True if the command was submitted successfully
             - request_uuid: The UUID of this request (needed to cancel it), or None on failure
         """
-        # Register cache provider for multi-entry support
-        from .NovaApi import nova_request
-        nova_request.register_cache_provider(lambda: self._cache)
-
+        # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
         if not token:
             return (False, None)
@@ -770,7 +765,7 @@ class GoogleFindMyAPI:
             # NOTE: If Nova later requires an explicit username for action endpoints,
             # extend submitter signatures to accept and forward it consistently.
             result = await async_submit_start_sound_request(
-                device_id, token, session=self._session
+                device_id, token, session=self._session, cache=self._cache
             )
             if result:
                 result_hex, request_uuid = result
@@ -797,10 +792,7 @@ class GoogleFindMyAPI:
         Returns:
             True if the command was submitted successfully, False otherwise.
         """
-        # Register cache provider for multi-entry support
-        from .NovaApi import nova_request
-        nova_request.register_cache_provider(lambda: self._cache)
-
+        # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
         if not token:
             return False
@@ -810,7 +802,7 @@ class GoogleFindMyAPI:
             else:
                 _LOGGER.warning("Submitting Stop Sound (async) for %s without UUID (may not cancel properly)", device_id)
             result_hex = await async_submit_stop_sound_request(
-                device_id, token, request_uuid=request_uuid, session=self._session
+                device_id, token, request_uuid=request_uuid, session=self._session, cache=self._cache
             )
             ok = result_hex is not None
             if ok:

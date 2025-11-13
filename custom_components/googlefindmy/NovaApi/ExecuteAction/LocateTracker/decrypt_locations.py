@@ -141,7 +141,7 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration, _
                 # This can happen in two scenarios:
                 # 1. E2EE reset (tracker is permanently stale)
                 # 2. Cached device metadata is stale (refresh will fix)
-                _LOGGER.warning(
+                _LOGGER.info(
                     "Owner key version mismatch: tracker=%s, current=%s. "
                     "The device metadata may be stale. Try reloading the integration to fetch fresh device data. "
                     "If this persists, the tracker may have been encrypted with old E2EE keys and needs to be "
@@ -156,7 +156,7 @@ async def async_retrieve_identity_key(device_registration: DeviceRegistration, _
                 # Tracker needs newer owner key version than what API returned
                 # This can happen if: 1) cached owner key is stale, 2) wrong account credentials
                 # Clear cache and retry once if this is the first attempt
-                _LOGGER.warning(
+                _LOGGER.info(
                     "Owner key version mismatch: tracker=%s, API returned=%s. "
                     "The API returned an older owner key version than the tracker requires. "
                     "This may indicate a stale cache or the device belongs to a different account.",
