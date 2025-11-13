@@ -443,7 +443,7 @@ def test_coordinator_default_features_map_to_core_group() -> None:
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     _prepare_coordinator_baseline(coordinator, hass, entry)
 
-    coordinator._refresh_subentry_index(None)
+    coordinator._refresh_subentry_index(None, skip_repair=True)
 
     tracker_metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
     assert tracker_metadata is not None

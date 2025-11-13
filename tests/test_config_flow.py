@@ -28,14 +28,18 @@ class _CoordinatorStub:
         self.refresh_invocations: list[bool] = []
         self.ensure_entries: list[Any] = []
 
-    def attach_subentry_manager(self, manager: Any) -> None:
-        self.attached_managers.append(manager)
+    def attach_subentry_manager(
+        self, manager: Any, *, is_reload: bool = False
+    ) -> None:
+        self.attached_managers.append((manager, is_reload))
 
     def _build_core_subentry_definitions(self) -> list[Any]:
         return [object()]
 
-    def _refresh_subentry_index(self, *, skip_manager_update: bool = False) -> None:
-        self.refresh_invocations.append(skip_manager_update)
+    def _refresh_subentry_index(
+        self, *, skip_manager_update: bool = False, skip_repair: bool = False
+    ) -> None:
+        self.refresh_invocations.append((skip_manager_update, skip_repair))
 
     def _ensure_service_device_exists(self, entry: Any | None = None) -> None:
         self.ensure_entries.append(entry)

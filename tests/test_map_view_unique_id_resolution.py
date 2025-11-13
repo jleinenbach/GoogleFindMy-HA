@@ -56,8 +56,11 @@ class _StubCoordinator:
     def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
         return True
 
-    def attach_subentry_manager(self, manager: Any) -> None:
+    def attach_subentry_manager(
+        self, manager: Any, *, is_reload: bool = False
+    ) -> None:
         self.subentry_manager = manager
+        self._is_reload = is_reload
 
 
 class _StubEntry:
