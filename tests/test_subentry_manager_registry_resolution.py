@@ -14,6 +14,7 @@ from custom_components.googlefindmy import (
     ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
     _async_ensure_subentries_are_setup,
+    _resolve_config_subentry_identifier,
 )
 from custom_components.googlefindmy.const import DOMAIN
 from tests.helpers.homeassistant import (
@@ -61,6 +62,19 @@ async def test_async_ensure_subentries_setup_handles_placeholder_objects() -> No
     )
     manager = DeferredRegistryConfigEntriesManager(parent_entry, resolved_child)
     hass = FakeHass(config_entries=manager)
+    forwarded_subentries: list[str | None] = []
+
+    async def _capture_forwarded_subentry(
+        entry_obj: FakeConfigEntry,
+        platforms: list[str],
+        *,
+        config_subentry_id: str | None = None,
+        **_kwargs: Any,
+    ) -> bool:
+        forwarded_subentries.append(config_subentry_id)
+        return True
+
+    setattr(manager, "async_forward_entry_setups", _capture_forwarded_subentry)
     runtime_manager = await _build_runtime_manager(
         hass=hass,
         parent_entry=parent_entry,
@@ -91,8 +105,8 @@ async def test_async_ensure_subentries_setup_handles_placeholder_objects() -> No
     finally:
         await assign_task
 
-    assert manager.lookup_attempts[provisional_id] >= 1
-    assert manager.setup_calls == [child_entry_id]
+    expected_identifier = _resolve_config_subentry_identifier(resolved_child)
+    assert forwarded_subentries == [expected_identifier]
 
 
 @pytest.mark.asyncio

@@ -66,6 +66,7 @@ async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
+    config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device tracker entities.
 
@@ -73,6 +74,7 @@ async def async_setup_entry(
     - On setup, create entities for all devices in the coordinator snapshot (if any).
     - Listen for coordinator updates and add entities for newly discovered devices.
     """
+    _ = config_subentry_id
     coordinator = resolve_coordinator(config_entry)
 
     tracker_meta = coordinator.get_subentry_metadata(feature="device_tracker")

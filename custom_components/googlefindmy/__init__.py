@@ -4862,8 +4862,207 @@ def _self_heal_device_registry(hass: HomeAssistant, entry: MyConfigEntry) -> Non
         )
 
 
-async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
-    """Forward setup for a config subentry to the integration platforms."""
+def _resolve_config_subentry_identifier(subentry: Any) -> str | None:
+    """Return the unique identifier for ``subentry`` when available."""
+
+    if isinstance(subentry, Mapping):
+        candidate = subentry.get("config_subentry_id") or subentry.get("subentry_id")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+
+    for attribute in (
+        "config_subentry_id",
+        "subentry_id",
+        "stable_identifier",
+        "key",
+        "entry_id",
+    ):
+        value = getattr(subentry, attribute, None)
+        if isinstance(value, str) and value:
+            return value
+
+    return None
+
+
+def _normalize_feature_iterable(candidate: Any) -> tuple[Any, ...]:
+    """Return a tuple of feature markers extracted from ``candidate``."""
+
+    if isinstance(candidate, Mapping):
+        candidate = candidate.values()
+
+    if isinstance(candidate, str) or candidate is None:
+        return ()
+
+    if isinstance(candidate, Iterable):
+        values: list[Any] = []
+        for item in candidate:
+            if isinstance(item, (str, Platform)):
+                values.append(item)
+        return tuple(values)
+
+    return ()
+
+
+def _normalize_platforms_from_features(features: Iterable[Any]) -> tuple[Platform, ...]:
+    """Convert an iterable of feature markers to Home Assistant platforms."""
+
+    resolved: list[Platform] = []
+    for feature in features:
+        platform: Platform | None = None
+        if isinstance(feature, Platform):
+            platform = feature
+        elif isinstance(feature, str):
+            attr = getattr(Platform, feature.upper(), None)
+            if attr is not None:
+                platform = cast(Platform | str, attr)
+            else:
+                try:
+                    platform = next(
+                        candidate
+                        for candidate in Platform
+                        if getattr(candidate, "value", None) == feature
+                    )
+                except (StopIteration, TypeError):
+                    platform = None
+        if platform is not None:
+            resolved.append(platform)
+
+    if not resolved:
+        return tuple(PLATFORMS)
+
+    return tuple(dict.fromkeys(resolved))
+
+
+def _determine_subentry_platforms(subentry: Any) -> tuple[Platform, ...]:
+    """Return the platforms that should load for ``subentry``."""
+
+    data = getattr(subentry, "data", None)
+    features = _normalize_feature_iterable(getattr(subentry, "features", None))
+
+    if not features and isinstance(data, Mapping):
+        features = _normalize_feature_iterable(data.get("features"))
+
+    if not features:
+        subentry_type = getattr(subentry, "subentry_type", None)
+        key = getattr(subentry, "key", None)
+        if subentry_type == SUBENTRY_TYPE_SERVICE or key == SERVICE_SUBENTRY_KEY:
+            features = tuple(SERVICE_FEATURE_PLATFORMS)
+        elif subentry_type == SUBENTRY_TYPE_TRACKER or key == TRACKER_SUBENTRY_KEY:
+            features = tuple(TRACKER_FEATURE_PLATFORMS)
+        else:
+            features = tuple(_feature_name_from_platform(platform) for platform in PLATFORMS)
+
+    return _normalize_platforms_from_features(features)
+
+
+def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> bool:
+    """Return ``True`` if ``callback`` accepts ``keyword`` as a kwarg."""
+
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):  # pragma: no cover - CPython limitation for some callables
+        return True
+
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.kind in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ) and parameter.name == keyword:
+            return True
+
+    return False
+
+
+def _invoke_with_optional_keyword(
+    callback: Callable[..., Any],
+    args: tuple[Any, ...],
+    keyword: str,
+    value: Any,
+) -> Any:
+    """Invoke ``callback`` while gracefully handling a legacy signature.
+
+    When ``callback`` does not accept ``keyword`` the value is ignored and the
+    callable is executed without it. This mirrors the Home Assistant 2025.10+
+    helpers that accept ``config_subentry_id`` while remaining compatible with
+    earlier releases.
+    """
+
+    if value is None:
+        return callback(*args)
+
+    if _callable_accepts_keyword(callback, keyword):
+        try:
+            return callback(*args, **{keyword: value})
+        except TypeError as err:
+            if keyword not in str(err):
+                raise
+            _LOGGER.debug(
+                "Callable %s rejected keyword '%s'; retrying without it",  # noqa: G004
+                getattr(callback, "__qualname__", repr(callback)),
+                keyword,
+            )
+            return callback(*args)
+
+    _LOGGER.debug(
+        "Callable %s does not accept keyword '%s'; falling back to legacy signature",  # noqa: G004
+        getattr(callback, "__qualname__", repr(callback)),
+        keyword,
+    )
+    return callback(*args)
+
+
+def _collect_entry_subentries(entry: ConfigEntry) -> tuple[Any, ...]:
+    """Return all known subentries associated with ``entry``."""
+
+    runtime_data = getattr(entry, "runtime_data", None)
+    containers: list[Iterable[Any]] = []
+
+    if runtime_data is not None:
+        manager = getattr(runtime_data, "subentry_manager", None)
+        managed = getattr(manager, "managed_subentries", None)
+        if isinstance(managed, Mapping):
+            containers.append(managed.values())
+
+        coordinator = getattr(runtime_data, "coordinator", None)
+    else:
+        coordinator = getattr(entry, "coordinator", None)
+
+    entry_subentries = getattr(entry, "subentries", None)
+    if isinstance(entry_subentries, Mapping):
+        containers.append(entry_subentries.values())
+    else:
+        managed = getattr(entry_subentries, "managed_subentries", None)
+        if isinstance(managed, Mapping):
+            containers.append(managed.values())
+
+    metadata = getattr(coordinator, "_subentry_metadata", None)
+    if isinstance(metadata, Mapping):
+        containers.append(metadata.values())
+
+    collected: dict[str, Any] = {}
+    unidentified: list[Any] = []
+    for container in containers:
+        for subentry in container:
+            identifier = _resolve_config_subentry_identifier(subentry)
+            if identifier is None:
+                unidentified.append(subentry)
+                continue
+            collected.setdefault(identifier, subentry)
+
+    ordered: list[Any] = list(collected.values())
+    for subentry in unidentified:
+        if subentry not in ordered:
+            ordered.append(subentry)
+
+    return tuple(ordered)
+
+
+async def _async_setup_legacy_child_subentry(
+    hass: HomeAssistant, entry: MyConfigEntry
+) -> bool:
+    """Legacy setup path for child config entries."""
 
     subentry_type = getattr(entry, "subentry_type", None)
     group_key = entry.data.get("group_key")
@@ -4926,7 +5125,56 @@ async def _async_setup_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bo
     return True
 
 
-MAX_SUBENTRY_REGISTRATION_ATTEMPTS = 7
+async def _async_setup_subentry(
+    hass: HomeAssistant,
+    entry: MyConfigEntry,
+    subentry: Any | None = None,
+) -> bool:
+    """Forward setup for a config subentry to the integration platforms."""
+
+    if subentry is None:
+        return await _async_setup_legacy_child_subentry(hass, entry)
+
+    identifier = _resolve_config_subentry_identifier(subentry)
+    if not isinstance(identifier, str) or not identifier:
+        _LOGGER.debug(
+            "[%s] Skipping setup for subentry lacking identifier: %s",
+            entry.entry_id,
+            subentry,
+        )
+        return False
+
+    disabled_by = getattr(subentry, "disabled_by", None)
+    if disabled_by is not None:
+        _LOGGER.debug(
+            "[%s] Skipping setup for disabled subentry '%s'",  # noqa: G004
+            entry.entry_id,
+            identifier,
+        )
+        return False
+
+    platforms = _determine_subentry_platforms(subentry)
+    forward = getattr(hass.config_entries, "async_forward_entry_setups", None)
+    if not callable(forward):
+        _LOGGER.debug(
+            "[%s] Home Assistant instance does not expose async_forward_entry_setups",
+            entry.entry_id,
+        )
+        return False
+
+    result = _invoke_with_optional_keyword(
+        forward,
+        (entry, list(platforms)),
+        "config_subentry_id",
+        identifier,
+    )
+    if isinstance(result, Awaitable):
+        result = await result
+
+    if isinstance(result, bool):
+        return result
+
+    return True
 
 
 async def _async_ensure_subentries_are_setup(
@@ -4946,212 +5194,43 @@ async def _async_ensure_subentries_are_setup(
     # before we request their setup; otherwise ``async_setup`` can raise UnknownEntry.
     await asyncio.sleep(0)
 
-    runtime_data: RuntimeData | None = getattr(entry, "runtime_data", None)
-    if runtime_data is None:
-        return
-
-    subentry_manager = getattr(runtime_data, "subentry_manager", None)
-    if subentry_manager is None:
-        return
-
-    managed = subentry_manager.managed_subentries
-    if not managed:
-        return
-
-    # Iterate the authoritative runtime-managed subentries, not entry.subentries.
-    subentries = list(managed.values())
+    subentries = _collect_entry_subentries(entry)
     if not subentries:
         return
 
-    setup_ready_states: set[object] = {ConfigEntryState.LOADED}
-    setup_in_progress = getattr(ConfigEntryState, "SETUP_IN_PROGRESS", None)
-    if setup_in_progress is not None:
-        setup_ready_states.add(setup_in_progress)
+    _LOGGER.debug(
+        "[%s] Triggering setup for %d subentries",
+        entry.entry_id,
+        len(subentries),
+    )
 
-    pending_subentries: list[Any] = []
     for subentry in subentries:
-        # --- BEGIN ID fallback guard ---
-        # ``subentry_id`` reflects the parent's bookkeeping key while
-        # Home Assistant assigns the global ULID to ``entry_id`` once the
-        # registry finalizes the child entry. Mirror the guidance in
-        # ``_async_unload_child_subentry`` by logging with whichever value is
-        # available but deferring lifecycle calls until the true global
-        # identifier (``entry_id``) is populated.
-        subentry_identifier: str | None = getattr(subentry, "entry_id", None)
-        if not isinstance(subentry_identifier, str) or not subentry_identifier:
-            subentry_identifier = getattr(subentry, "subentry_id", None)
-
-        if not isinstance(subentry_identifier, str) or not subentry_identifier:
+        identifier = _resolve_config_subentry_identifier(subentry)
+        if not isinstance(identifier, str) or not identifier:
             _LOGGER.debug(
                 "[%s] Skipping setup for subentry without identifier: %s",
                 entry.entry_id,
                 subentry,
             )
             continue
-        # --- END ID fallback guard ---
-
-        disabled_by = getattr(subentry, "disabled_by", None)
-        if disabled_by is not None:
-            _LOGGER.debug(
-                "[%s] Skipping setup for disabled subentry '%s'",  # noqa: G004
+        try:
+            await _async_setup_subentry(hass, entry, subentry)
+        except asyncio.CancelledError:
+            raise
+        except ConfigEntryNotReady as err:
+            _LOGGER.warning(
+                "[%s] Subentry '%s' deferred during setup: %s",  # noqa: G004
                 entry.entry_id,
-                subentry_identifier,
+                identifier,
+                err,
             )
-            continue
-        state: ConfigEntryState | None = getattr(subentry, "state", None)
-        if state in setup_ready_states:
-            _LOGGER.debug(
-                "[%s] Subentry '%s' already in active state %s",  # noqa: G004
+        except Exception as err:  # noqa: BLE001 - defensive logging
+            _LOGGER.exception(
+                "[%s] Subentry '%s' setup raised %s",  # noqa: G004
                 entry.entry_id,
-                subentry_identifier,
-                state,
+                identifier,
+                type(err).__name__,
             )
-            continue
-        pending_subentries.append(subentry)
-
-    if not pending_subentries:
-        return
-
-    _LOGGER.debug(
-        "[%s] Triggering setup for %d subentries",
-        entry.entry_id,
-        len(pending_subentries),
-    )
-    pending_order = pending_subentries[:]
-    active_pending: set[int] = {id(subentry) for subentry in pending_order}
-    attempt_counts: dict[int, int] = {subentry_key: 0 for subentry_key in active_pending}
-    first_exception: BaseException | None = None
-    false_failures: list[str] = []
-    exhausted_missing: list[str] = []
-    while active_pending:
-        missing_entries: list[tuple[int, str]] = []
-        to_setup: list[tuple[int, str, str]] = []
-        for subentry in pending_order:
-            subentry_key = id(subentry)
-            if subentry_key not in active_pending:
-                continue
-            attempts = attempt_counts[subentry_key]
-            entry_id = getattr(subentry, "entry_id", None)
-            display_id = entry_id
-            if not isinstance(display_id, str) or not display_id:
-                display_id = getattr(subentry, "subentry_id", None)
-            if not isinstance(display_id, str) or not display_id:
-                display_id = f"<unidentified:{subentry_key}>"
-            if attempts >= MAX_SUBENTRY_REGISTRATION_ATTEMPTS:
-                _LOGGER.warning(
-                    "[%s] Subentry '%s' not registered after %d attempts; skipping setup",  # noqa: G004
-                    entry.entry_id,
-                    display_id,
-                    MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
-                )
-                exhausted_missing.append(display_id)
-                active_pending.remove(subentry_key)
-                continue
-            if not isinstance(entry_id, str) or not entry_id:
-                attempt_counts[subentry_key] = attempts + 1
-                missing_entries.append((subentry_key, display_id))
-                _LOGGER.debug(
-                    "[%s] Subentry '%s' has no global entry_id yet (attempt %d/%d); waiting",  # noqa: G004
-                    entry.entry_id,
-                    display_id,
-                    attempt_counts[subentry_key],
-                    MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
-                )
-                continue
-            if hass.config_entries.async_get_entry(entry_id) is None:
-                attempt_counts[subentry_key] = attempts + 1
-                missing_entries.append((subentry_key, display_id))
-                _LOGGER.debug(
-                    "[%s] Subentry '%s' not yet registered (attempt %d/%d); waiting",  # noqa: G004
-                    entry.entry_id,
-                    display_id,
-                    attempt_counts[subentry_key],
-                    MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
-                )
-                continue
-            to_setup.append((subentry_key, entry_id, display_id))
-
-        if to_setup:
-            results = await asyncio.gather(
-                *(
-                    hass.config_entries.async_setup(entry_id)
-                    for _, entry_id, _ in to_setup
-                ),
-                return_exceptions=True,
-            )
-            for (subentry_key, entry_id, display_id), result in zip(to_setup, results):
-                if isinstance(result, BaseException):
-                    if isinstance(result, asyncio.CancelledError):
-                        raise result
-                    if isinstance(result, UnknownEntry):
-                        attempt_counts[subentry_key] = attempt_counts[subentry_key] + 1
-                        missing_entries.append((subentry_key, display_id))
-                        _LOGGER.debug(
-                            "[%s] Subentry '%s' not ready in registry (attempt %d/%d); retrying",  # noqa: G004
-                            entry.entry_id,
-                            display_id,
-                            attempt_counts[subentry_key],
-                            MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
-                        )
-                        continue
-                    _LOGGER.warning(
-                        "[%s] Subentry '%s' setup raised %s: %s",  # noqa: G004
-                        entry.entry_id,
-                        display_id,
-                        type(result).__name__,
-                        result,
-                        exc_info=(type(result), result, result.__traceback__),
-                    )
-                    if first_exception is None:
-                        first_exception = result
-                    active_pending.remove(subentry_key)
-                    continue
-                if result is False:
-                    _LOGGER.warning(
-                        "[%s] Subentry '%s' setup returned False",  # noqa: G004
-                        entry.entry_id,
-                        display_id,
-                    )
-                    false_failures.append(display_id)
-                    active_pending.remove(subentry_key)
-                    continue
-                active_pending.remove(subentry_key)
-
-        if not missing_entries:
-            break
-
-        # Exponential backoff: wait before the next polling loop repeats the checks.
-        # Use the attempt counter of the first missing subentry as the baseline.
-        current_attempt = attempt_counts[missing_entries[0][0]]
-
-        # 0.2 * (2 ** (attempt - 1)) -> 0.2s, 0.4s, 0.8s, 1.6s, 3.2s, 6.4s
-        # (the 7th attempt fails without extra waiting)
-        delay = 0.2 * (2 ** (current_attempt - 1))
-
-        _LOGGER.debug(
-            "[%s] Subentries still missing, waiting %.1f seconds before attempt %d/%d",
-            entry.entry_id,
-            delay,
-            current_attempt + 1,
-            MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
-        )
-        await asyncio.sleep(delay)
-
-    if first_exception is not None:
-        raise first_exception
-    if exhausted_missing:
-        raise ConfigEntryNotReady(
-            "One or more subentries were not registered after %d attempts: %s"
-            % (
-                MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
-                ", ".join(exhausted_missing),
-            )
-        )
-    if false_failures:
-        raise ConfigEntryNotReady(
-            "One or more subentries returned False during setup: %s"
-            % ", ".join(false_failures)
-        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
@@ -6031,58 +6110,43 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         if isinstance(runtime_data_raw, RuntimeData):
             runtime_data = runtime_data_raw
 
-    has_managed_subentries = bool(
-        runtime_data is not None and runtime_data.subentry_manager is not None
-    )
+    subentries = _collect_entry_subentries(entry)
 
-    subentries = list(getattr(entry, "subentries", {}).items())
-    target_subentries: list[tuple[str, Any]] = [
-        (subentry_id, sub)
-        for subentry_id, sub in subentries
-        if isinstance(getattr(sub, "entry_id", None), str)
-    ]
+    async def _unload_config_subentry(subentry: Any) -> bool:
+        identifier = _resolve_config_subentry_identifier(subentry)
+        platforms = _determine_subentry_platforms(subentry)
 
-    async def _unload_child_subentry(subentry_id: str, subentry: Any) -> bool:
-        # Home Assistant's config entry manager always uses the global
-        # entry_id for lifecycle operations (setup/reload/unload). The
-        # subentry_id is only the parent's local mapping key and must not
-        # be passed to hass.config_entries helpers.
+        forward_unload = getattr(hass.config_entries, "async_forward_entry_unload", None)
+        if isinstance(identifier, str) and identifier and callable(forward_unload):
+            result = _invoke_with_optional_keyword(
+                forward_unload,
+                (entry, list(platforms)),
+                "config_subentry_id",
+                identifier,
+            )
+            if isinstance(result, Awaitable):
+                result = await result
+            return bool(result) if result is not None else True
+
         entry_id = getattr(subentry, "entry_id", None)
-        if not isinstance(entry_id, str):
-            return True
+        unload_callable = getattr(hass.config_entries, "async_unload", None)
+        if isinstance(entry_id, str) and entry_id and callable(unload_callable):
+            result = unload_callable(entry_id)
+            if isinstance(result, Awaitable):
+                result = await result
+            return bool(result)
 
-        helper = getattr(hass, "config_entries", None)
-        if helper is None:
-            return True
-
-        unload_callable = getattr(helper, "async_unload", None)
-        if callable(unload_callable):
-            maybe_awaitable: Any = unload_callable(entry_id)
-            if isinstance(maybe_awaitable, Awaitable):
-                resolved_result = await maybe_awaitable
-            else:
-                resolved_result = maybe_awaitable
-            return bool(resolved_result)
-
-        remove_callable = getattr(helper, "async_remove_subentry", None)
-        if callable(remove_callable) and not has_managed_subentries:
-            try:
-                maybe_awaitable = remove_callable(entry, entry_id)
-            except TypeError:
-                maybe_awaitable = remove_callable(entry_id)
-            if isinstance(maybe_awaitable, Awaitable):
-                resolved_result = await maybe_awaitable
-            else:
-                resolved_result = maybe_awaitable
-            return bool(resolved_result)
+        remove_callable = getattr(hass.config_entries, "async_remove_subentry", None)
+        if isinstance(identifier, str) and identifier and callable(remove_callable):
+            result = remove_callable(entry, identifier)
+            if isinstance(result, Awaitable):
+                result = await result
+            return bool(result)
 
         return True
 
     unload_results = await asyncio.gather(
-        *(
-            _unload_child_subentry(subentry_id, sub)
-            for subentry_id, sub in target_subentries
-        ),
+        *(_unload_config_subentry(subentry) for subentry in subentries),
         return_exceptions=True,
     )
 
@@ -6096,8 +6160,10 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         )
         for index, result in enumerate(unload_results):
             if isinstance(result, Exception):
-                sub_obj = target_subentries[index][1]
-                sub_id = getattr(sub_obj, "entry_id", f"index {index}")
+                sub_obj = subentries[index]
+                sub_id = _resolve_config_subentry_identifier(sub_obj) or getattr(
+                    sub_obj, "entry_id", f"index {index}"
+                )
                 _LOGGER.debug(
                     "[%s] Subentry %s unload failed: %s",
                     entry.entry_id,

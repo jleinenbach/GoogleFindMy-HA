@@ -88,8 +88,10 @@ async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
+    config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device button entities."""
+    _ = config_subentry_id
     coordinator = resolve_coordinator(config_entry)
 
     platform_getter = getattr(entity_platform, "async_get_current_platform", None)

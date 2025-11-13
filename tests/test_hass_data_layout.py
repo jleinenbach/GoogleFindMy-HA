@@ -137,7 +137,9 @@ class _StubConfigEntries:
 
     def __init__(self, entry: _StubConfigEntry) -> None:
         self._entries: list[_StubConfigEntry] = [entry]
-        self.forward_calls: list[tuple[_StubConfigEntry, tuple[str, ...]]] = []
+        self.forward_calls: list[
+            tuple[_StubConfigEntry, tuple[str, ...], str | None]
+        ] = []
         self.reload_calls: list[str] = []
         self.added_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
         self.updated_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
@@ -167,9 +169,16 @@ class _StubConfigEntries:
         return list(self._entries)
 
     async def async_forward_entry_setups(
-        self, entry: _StubConfigEntry, platforms: list[str]
+        self,
+        entry: _StubConfigEntry,
+        platforms: list[str],
+        *,
+        config_subentry_id: str | None = None,
+        **_kwargs: Any,
     ) -> None:
-        self.forward_calls.append((entry, tuple(platforms)))
+        self.forward_calls.append((entry, tuple(platforms), config_subentry_id))
+        if config_subentry_id is not None:
+            self.setup_calls.append(config_subentry_id)
 
     async def async_unload_platforms(
         self, entry: _StubConfigEntry, _platforms: list[str]
@@ -1038,18 +1047,19 @@ async def test_async_setup_entry_propagates_subentry_registration(
     entry.unique_id = entry.entry_id
     hass = _StubHass(entry, loop)
 
-    registered_subentries: set[str] = set()
-    setup_attempts: list[tuple[str, bool]] = []
+    forward_calls: list[tuple[str | None, tuple[object, ...]]] = []
 
-    async def _guarded_setup(entry_id: str) -> bool:
-        is_registered = entry_id in registered_subentries
-        setup_attempts.append((entry_id, is_registered))
-        if not is_registered:
-            raise LookupError(f"Subentry {entry_id} not registered")
-        hass.config_entries.setup_calls.append(entry_id)
-        return True
+    async def _forward_entry_setups(
+        entry_obj: _StubConfigEntry,
+        platforms: list[object],
+        *,
+        config_subentry_id: str | None = None,
+    ) -> None:
+        forward_calls.append((config_subentry_id, tuple(platforms)))
 
-    hass.config_entries.async_setup = _guarded_setup  # type: ignore[assignment]
+    hass.config_entries.async_forward_entry_setups = (  # type: ignore[assignment]
+        _forward_entry_setups
+    )
 
     ConfigSubentry = importlib.import_module(
         "homeassistant.config_entries"
@@ -1072,11 +1082,8 @@ async def test_async_setup_entry_propagates_subentry_registration(
                 unique_id=unique_id,
             )
             entry_obj.subentries[subentry.subentry_id] = subentry
-
-            def _mark_registered() -> None:
-                registered_subentries.add(subentry.subentry_id)
-
-            loop.call_soon(_mark_registered)
+            if not getattr(subentry, "config_subentry_id", None):
+                setattr(subentry, "config_subentry_id", subentry.subentry_id)
             return subentry
 
     hass.config_entries.subentries = _SubentryManagerStub()  # type: ignore[attr-defined]
@@ -1089,12 +1096,26 @@ async def test_async_setup_entry_propagates_subentry_registration(
         await asyncio.gather(*hass._tasks)
 
     created_subentries = {subentry.subentry_id for subentry in entry.subentries.values()}
-    assert registered_subentries == created_subentries
-    assert set(hass.config_entries.setup_calls) == created_subentries
-    assert setup_attempts
-    assert all(
-        is_registered for (_subentry_id, is_registered) in setup_attempts
-    ), setup_attempts
+    call_identifiers = {identifier for identifier, _ in forward_calls if identifier}
+    assert call_identifiers == created_subentries
+    assert len(forward_calls) == len(created_subentries)
+
+    expected_platforms: dict[str, tuple[str, ...]] = {}
+    for key, subentry in entry.subentries.items():
+        identifier = getattr(subentry, "config_subentry_id", subentry.subentry_id)
+        data_features = getattr(subentry, "data", {}).get("features")
+        if isinstance(data_features, (list, tuple)):
+            expected_platforms[identifier] = tuple(str(feature) for feature in data_features)
+        elif key == TRACKER_SUBENTRY_KEY:
+            expected_platforms[identifier] = integration.TRACKER_FEATURE_PLATFORMS
+        else:
+            expected_platforms[identifier] = integration.SERVICE_FEATURE_PLATFORMS
+
+    assert {
+        identifier: _platform_names(platforms)
+        for identifier, platforms in forward_calls
+        if identifier
+    } == expected_platforms
 
 
 def test_setup_entry_failure_does_not_register_cache(
@@ -2142,3 +2163,17 @@ def test_service_no_active_entry_placeholders(
     finally:
         loop.close()
         asyncio.set_event_loop(None)
+def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:
+    """Return normalized platform names for recorded calls."""
+
+    names: list[str] = []
+    for platform in platforms:
+        if isinstance(platform, str):
+            names.append(platform)
+        else:
+            value = getattr(platform, "value", None)
+            if isinstance(value, str):
+                names.append(value)
+            else:
+                names.append(str(platform))
+    return tuple(names)

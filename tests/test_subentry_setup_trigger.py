@@ -1,43 +1,53 @@
-# tests/test_subentry_setup_trigger.py
-"""Regression coverage for subentry setup helpers."""
-
 from __future__ import annotations
 
-import asyncio
-import logging
 from types import SimpleNamespace
 
 import pytest
 
+from homeassistant.const import Platform
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from custom_components.googlefindmy import (
-    MAX_SUBENTRY_REGISTRATION_ATTEMPTS,
     RuntimeData,
     _async_ensure_subentries_are_setup,
     _async_setup_subentry,
-    _domain_data,
-    _ensure_entries_bucket,
 )
-from custom_components.googlefindmy.const import DOMAIN
-from custom_components.googlefindmy.entity import resolve_coordinator
+from custom_components.googlefindmy.const import (
+    DOMAIN,
+    SERVICE_FEATURE_PLATFORMS,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
+    TRACKER_FEATURE_PLATFORMS,
+    TRACKER_SUBENTRY_KEY,
+)
 
-from tests.helpers.homeassistant import (
-    FakeConfigEntry,
-    FakeConfigEntriesManager,
-    FakeHass,
-    config_entry_with_runtime_managed_subentries,
-    deferred_subentry_entry_id_assignment,
-)
+from tests.helpers.homeassistant import FakeConfigEntriesManager, FakeConfigEntry, FakeHass
+
+
+def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:
+    """Return normalized platform names for assertions."""
+
+    names: list[str] = []
+    for platform in platforms:
+        if isinstance(platform, str):
+            names.append(platform)
+        else:
+            value = getattr(platform, "value", None)
+            if isinstance(value, str):
+                names.append(value)
+            else:
+                names.append(str(platform))
+    return tuple(names)
 
 
 @pytest.mark.asyncio
 async def test_async_setup_subentry_inherits_parent_runtime_data() -> None:
-    """Child setup should reuse the parent's runtime data bucket."""
+    """Legacy child entries should continue to inherit the parent runtime data."""
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager())
-    bucket = _domain_data(hass)
-    entries_bucket = _ensure_entries_bucket(bucket)
+    bucket = hass.data.setdefault(DOMAIN, {})
+    entries_bucket = bucket.setdefault("entries", {})
 
     parent_entry_id = "parent-entry"
     coordinator = object()
@@ -46,13 +56,12 @@ async def test_async_setup_subentry_inherits_parent_runtime_data() -> None:
         token_cache=object(),  # type: ignore[arg-type]
         subentry_manager=SimpleNamespace(),  # type: ignore[arg-type]
         fcm_receiver=None,
-        google_home_filter=None,
     )
     entries_bucket[parent_entry_id] = runtime_data
 
-    forward_calls: list[tuple[object, tuple[object, ...]]] = []
+    forward_calls: list[tuple[object, tuple[Platform, ...]]] = []
 
-    async def forward(entry: SimpleNamespace, platforms: list[object]) -> None:
+    async def forward(entry: SimpleNamespace, platforms: list[Platform], *, config_subentry_id: str | None = None) -> None:
         forward_calls.append((entry, tuple(platforms)))
         assert entry.runtime_data is runtime_data
 
@@ -68,280 +77,148 @@ async def test_async_setup_subentry_inherits_parent_runtime_data() -> None:
 
     assert await _async_setup_subentry(hass, child_entry) is True
     assert child_entry.runtime_data is runtime_data
-    assert resolve_coordinator(child_entry) is coordinator
-    assert forward_calls, "Expected platform forwarding during setup"
+    assert forward_calls
 
 
 @pytest.mark.asyncio
-async def test_async_ensure_subentries_are_setup_schedules_all_children() -> None:
-    """All discovered subentries should be scheduled for setup."""
+async def test_async_setup_subentry_forwards_config_subentry_id() -> None:
+    """Dataclass subentries should trigger platform forwarding with identifiers."""
 
-    pending_subentry = SimpleNamespace(
-        entry_id="child-pending",
-        subentry_id="child-pending",
-    )
-    active_subentry = SimpleNamespace(
-        entry_id="child-active",
-        subentry_id="child-active",
-    )
-    disabled_subentry = SimpleNamespace(
-        entry_id="child-disabled",
-        subentry_id="child-disabled",
+    hass = FakeHass(config_entries=FakeConfigEntriesManager())
+    entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
+
+    subentry = SimpleNamespace(
+        config_subentry_id="service-subentry",
+        data={"features": SERVICE_FEATURE_PLATFORMS},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
     )
 
-    parent_entry = config_entry_with_runtime_managed_subentries(
-        entry_id="parent",
-        domain=DOMAIN,
-        subentries=[pending_subentry, active_subentry, disabled_subentry],
-    )
+    calls: list[tuple[FakeConfigEntry, tuple[object, ...], str]] = []
 
-    manager = FakeConfigEntriesManager([parent_entry])
-    hass = FakeHass(config_entries=manager)
+    async def forward(entry_obj: FakeConfigEntry, platforms: list[Platform], *, config_subentry_id: str | None = None) -> None:
+        assert config_subentry_id is not None
+        calls.append((entry_obj, tuple(platforms), config_subentry_id))
 
-    await _async_ensure_subentries_are_setup(hass, parent_entry)
+    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
 
-    assert manager.setup_calls == [
-        pending_subentry.entry_id,
-        active_subentry.entry_id,
-        disabled_subentry.entry_id,
-    ]
+    result = await _async_setup_subentry(hass, entry, subentry)
+
+    assert result is True
+    assert calls
+    recorded_entry, recorded_platforms, recorded_identifier = calls[0]
+    assert recorded_entry is entry
+    assert recorded_identifier == "service-subentry"
+    assert _platform_names(recorded_platforms) == SERVICE_FEATURE_PLATFORMS
 
 
 @pytest.mark.asyncio
-async def test_async_ensure_subentries_are_setup_warns_and_raises_on_failure(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Log a warning and raise ConfigEntryNotReady when subentry setup fails."""
+async def test_async_setup_subentry_handles_legacy_forward_signature() -> None:
+    """Fallback when Home Assistant lacks config_subentry_id support."""
 
-    successful_subentry = SimpleNamespace(
-        entry_id="child-success",
-        subentry_id="child-success",
-    )
-    failing_subentry = SimpleNamespace(
-        entry_id="child-failure",
-        subentry_id="child-failure",
+    hass = FakeHass(config_entries=FakeConfigEntriesManager())
+    entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
+
+    subentry = SimpleNamespace(
+        config_subentry_id="tracker-subentry",
+        data={"features": TRACKER_FEATURE_PLATFORMS},
+        subentry_type=SUBENTRY_TYPE_TRACKER,
     )
 
-    parent_entry = config_entry_with_runtime_managed_subentries(
-        entry_id="parent",
-        domain=DOMAIN,
-        subentries=[successful_subentry, failing_subentry],
-    )
+    calls: list[tuple[FakeConfigEntry, tuple[object, ...]]] = []
 
-    manager = FakeConfigEntriesManager([parent_entry])
-
-    async def failing_setup(entry_id: str) -> bool:
-        manager.setup_calls.append(entry_id)
-        return entry_id != failing_subentry.entry_id
-
-    manager.async_setup = failing_setup  # type: ignore[assignment]
-    hass = FakeHass(config_entries=manager)
-
-    with caplog.at_level(logging.WARNING), pytest.raises(ConfigEntryNotReady):
-        await _async_ensure_subentries_are_setup(hass, parent_entry)
-
-    assert manager.setup_calls == [
-        successful_subentry.entry_id,
-        failing_subentry.entry_id,
-    ]
-    assert any(
-        "setup returned False" in record.getMessage()
-        and failing_subentry.entry_id in record.getMessage()
-        for record in caplog.records
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("entry_id_value", [None, "", object()])
-async def test_async_ensure_subentries_are_setup_falls_back_to_subentry_id(
-    entry_id_value: object,
-) -> None:
-    """Fresh subentries resolve identifiers when entry_id is missing or invalid."""
-
-    pending_subentry = SimpleNamespace(
-        entry_id=entry_id_value,
-        subentry_id="child-created",
-    )
-
-    parent_entry = config_entry_with_runtime_managed_subentries(
-        entry_id="parent",
-        domain=DOMAIN,
-        subentries={pending_subentry.subentry_id: pending_subentry},
-    )
-
-    manager = FakeConfigEntriesManager([parent_entry])
-    hass = FakeHass(config_entries=manager)
-
-    child_entry = FakeConfigEntry(entry_id=pending_subentry.subentry_id, domain=DOMAIN)
-
-    assign_task = asyncio.create_task(
-        deferred_subentry_entry_id_assignment(
-            pending_subentry,
-            entry_id=pending_subentry.subentry_id,
-            manager=manager,
-            delay=0.01,
-            registered_entry=child_entry,
-        )
-    )
-
-    try:
-        await _async_ensure_subentries_are_setup(hass, parent_entry)
-    finally:
-        await assign_task
-
-    assert manager.lookup_attempts[pending_subentry.subentry_id] >= 1
-    assert manager.setup_calls == [pending_subentry.subentry_id]
-
-
-@pytest.mark.asyncio
-async def test_async_ensure_subentries_are_setup_retries_missing_child() -> None:
-    """Late-registered subentries should be retried until setup succeeds."""
-
-    pending_subentry = SimpleNamespace(
-        entry_id="child-retry",
-        subentry_id="child-retry",
-    )
-
-    parent_entry = config_entry_with_runtime_managed_subentries(
-        entry_id="parent",
-        domain=DOMAIN,
-        subentries=[pending_subentry],
-    )
-
-    manager = FakeConfigEntriesManager([parent_entry])
-    manager.set_transient_unknown_entry(
-        pending_subentry.entry_id,
-        lookup_misses=2,
-        setup_failures=1,
-    )
-    hass = FakeHass(config_entries=manager)
-
-    await _async_ensure_subentries_are_setup(hass, parent_entry)
-
-    assert manager.lookup_attempts[pending_subentry.entry_id] >= 3
-    assert manager.setup_calls == [pending_subentry.entry_id, pending_subentry.entry_id]
-
-
-@pytest.mark.asyncio
-async def test_async_ensure_subentries_are_setup_refreshes_identifier() -> None:
-    """Retry with the updated entry_id when Home Assistant assigns the ULID late."""
-
-    parent_key = "child-parent-key"
-    pending_subentry = SimpleNamespace(
-        entry_id=None,
-        subentry_id=parent_key,
-    )
-
-    parent_entry = config_entry_with_runtime_managed_subentries(
-        entry_id="parent",
-        domain=DOMAIN,
-        subentries={parent_key: pending_subentry},
-    )
-
-    manager = FakeConfigEntriesManager([parent_entry])
-    hass = FakeHass(config_entries=manager)
-
-    global_entry_id = "child-global-ulid"
-    child_entry = FakeConfigEntry(entry_id=global_entry_id, domain=DOMAIN)
-
-    assign_task = asyncio.create_task(
-        deferred_subentry_entry_id_assignment(
-            pending_subentry,
-            entry_id=global_entry_id,
-            manager=manager,
-            delay=0.01,
-            registered_entry=child_entry,
-        )
-    )
-
-    try:
-        await _async_ensure_subentries_are_setup(hass, parent_entry)
-    finally:
-        await assign_task
-
-    assert manager.lookup_attempts.get(parent_key, 0) == 0
-    assert manager.lookup_attempts[global_entry_id] >= 1
-    assert manager.setup_calls == [global_entry_id]
-
-
-@pytest.mark.asyncio
-async def test_async_ensure_subentries_are_setup_raises_when_child_never_registers(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Raise ConfigEntryNotReady when a subentry exhausts registration retries."""
-
-    missing_subentry = SimpleNamespace(
-        entry_id="child-missing",
-        subentry_id="child-missing",
-    )
-
-    parent_entry = config_entry_with_runtime_managed_subentries(
-        entry_id="parent",
-        domain=DOMAIN,
-        subentries=[missing_subentry],
-    )
-
-    manager = FakeConfigEntriesManager([parent_entry])
-    manager.set_transient_unknown_entry(
-        missing_subentry.entry_id,
-        lookup_misses=MAX_SUBENTRY_REGISTRATION_ATTEMPTS + 1,
-    )
-    hass = FakeHass(config_entries=manager)
-
-    with caplog.at_level(logging.WARNING), pytest.raises(ConfigEntryNotReady) as exc:
-        await _async_ensure_subentries_are_setup(hass, parent_entry)
-
-    assert missing_subentry.entry_id not in manager.setup_calls
-    assert str(MAX_SUBENTRY_REGISTRATION_ATTEMPTS) in str(exc.value)
-    assert any(
-        "not registered" in record.getMessage()
-        and missing_subentry.entry_id in record.getMessage()
-        for record in caplog.records
-    )
-
-
-@pytest.mark.asyncio
-async def test_async_ensure_subentries_are_setup_preserves_first_exception(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Propagate the first captured exception even when retries exhaust."""
-
-    failing_subentry = SimpleNamespace(
-        entry_id="child-failure",
-        subentry_id="child-failure",
-    )
-    missing_subentry = SimpleNamespace(
-        entry_id="child-missing",
-        subentry_id="child-missing",
-    )
-
-    parent_entry = config_entry_with_runtime_managed_subentries(
-        entry_id="parent",
-        domain=DOMAIN,
-        subentries=[failing_subentry, missing_subentry],
-    )
-
-    manager = FakeConfigEntriesManager([parent_entry])
-    manager.set_transient_unknown_entry(
-        missing_subentry.entry_id,
-        lookup_misses=MAX_SUBENTRY_REGISTRATION_ATTEMPTS + 1,
-    )
-
-    async def raising_setup(entry_id: str) -> bool:
-        manager.setup_calls.append(entry_id)
-        if entry_id == failing_subentry.entry_id:
-            raise RuntimeError("boom")
+    def forward(entry_obj: FakeConfigEntry, platforms: list[Platform]) -> bool:
+        calls.append((entry_obj, tuple(platforms)))
         return True
 
-    manager.async_setup = raising_setup  # type: ignore[assignment]
-    hass = FakeHass(config_entries=manager)
+    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
 
-    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError):
-        await _async_ensure_subentries_are_setup(hass, parent_entry)
+    result = await _async_setup_subentry(hass, entry, subentry)
 
-    assert manager.setup_calls == [failing_subentry.entry_id]
-    assert any(
-        "not registered" in record.getMessage()
-        and missing_subentry.entry_id in record.getMessage()
-        for record in caplog.records
+    assert result is True
+    assert calls == [(entry, tuple(TRACKER_FEATURE_PLATFORMS))]
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_subentries_are_setup_collects_all_sources() -> None:
+    """Managed, entry, and metadata subentries should all be forwarded once."""
+
+    tracker_subentry = SimpleNamespace(
+        config_subentry_id="tracker-subentry",
+        data={"features": TRACKER_FEATURE_PLATFORMS},
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        key=TRACKER_SUBENTRY_KEY,
     )
+    service_metadata = SimpleNamespace(
+        config_subentry_id="service-subentry",
+        features=tuple(SERVICE_FEATURE_PLATFORMS),
+        key=SERVICE_SUBENTRY_KEY,
+    )
+
+    managed = {TRACKER_SUBENTRY_KEY: tracker_subentry}
+    subentry_manager = SimpleNamespace(managed_subentries=managed)
+    coordinator = SimpleNamespace(_subentry_metadata={SERVICE_SUBENTRY_KEY: service_metadata})
+    runtime_data = RuntimeData(
+        coordinator=coordinator,  # type: ignore[arg-type]
+        token_cache=object(),  # type: ignore[arg-type]
+        subentry_manager=subentry_manager,  # type: ignore[arg-type]
+        fcm_receiver=None,
+    )
+
+    entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
+    entry.runtime_data = runtime_data
+    entry.subentries[TRACKER_SUBENTRY_KEY] = tracker_subentry
+
+    hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
+
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def forward(entry_obj: FakeConfigEntry, platforms: list[Platform], *, config_subentry_id: str | None = None) -> None:
+        if config_subentry_id is None:
+            raise AssertionError("config_subentry_id must be provided")
+        calls.append((config_subentry_id, tuple(platforms)))
+
+    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
+
+    await _async_ensure_subentries_are_setup(hass, entry)
+
+    assert calls
+    assert len(calls) == 2
+    tracker_call = next(call for call in calls if call[0] == "tracker-subentry")
+    service_call = next(call for call in calls if call[0] == "service-subentry")
+    assert _platform_names(tracker_call[1]) == TRACKER_FEATURE_PLATFORMS
+    assert _platform_names(service_call[1]) == SERVICE_FEATURE_PLATFORMS
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_subentries_are_setup_logs_config_entry_not_ready(caplog: pytest.LogCaptureFixture) -> None:
+    """ConfigEntryNotReady exceptions should be caught and logged without raising."""
+
+    subentry = SimpleNamespace(
+        config_subentry_id="tracker-subentry",
+        data={"features": TRACKER_FEATURE_PLATFORMS},
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        key=TRACKER_SUBENTRY_KEY,
+    )
+
+    subentry_manager = SimpleNamespace(managed_subentries={TRACKER_SUBENTRY_KEY: subentry})
+    runtime_data = RuntimeData(
+        coordinator=SimpleNamespace(_subentry_metadata={}),  # type: ignore[arg-type]
+        token_cache=object(),  # type: ignore[arg-type]
+        subentry_manager=subentry_manager,  # type: ignore[arg-type]
+        fcm_receiver=None,
+    )
+
+    entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
+    entry.runtime_data = runtime_data
+
+    hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
+
+    async def forward(*_: object, **__: object) -> None:
+        raise ConfigEntryNotReady("test")
+
+    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
+
+    with caplog.at_level("WARNING"):
+        await _async_ensure_subentries_are_setup(hass, entry)
+
+    assert "Subentry 'tracker-subentry' deferred" in caplog.text

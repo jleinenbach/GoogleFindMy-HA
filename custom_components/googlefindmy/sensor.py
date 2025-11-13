@@ -111,6 +111,7 @@ async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
+    config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device sensor entities.
 
@@ -119,6 +120,7 @@ async def async_setup_entry(
     - Optionally create diagnostic stat sensors when enabled via options.
     - Dynamically add per-device sensors when new devices appear.
     """
+    _ = config_subentry_id
     coordinator = resolve_coordinator(entry)
 
     service_meta = coordinator.get_subentry_metadata(feature="binary_sensor")

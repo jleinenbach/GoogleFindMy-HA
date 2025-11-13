@@ -793,6 +793,39 @@ The objective is reliability and auditability: every change must document its so
 
 After completing each task, Codex must finish with a brief, constructive note proposing improvements to this environment—preferably actionable suggestions for refining `AGENTS.md` or adjacent tooling—based on the experience gained during the most recent assignment.
 
+## X. PROTOCOL: Runtime API Validation (Single Source of Truth - SSoT)
+
+**Core Principle:** AI training data is inherently outdated. Test stubs (e.g., in `conftest.py` or `tests/helpers/`) may be incorrect or obsolete. The only immutable "Single Source of Truth" (SSoT) for API contracts is the **runtime behavior of the packages installed in the `.venv`** (e.g., `homeassistant`, `pytest-homeassistant-custom-component`).
+
+**Mandate:** Runtime errors encountered during validation (`TypeError`, `AttributeError`, `ImportError`, `NotImplementedError`) that contradict the AI's internal model *must* be treated as a failure of the AI's model, not a failure of the code or environment.
+
+**MANDATORY SSoT VALIDATION WORKFLOW:**
+
+If a patch fails validation with an error that implies a mismatch in API contracts (e.g., `TypeError: unexpected keyword argument 'config_subentry_id'`, `TypeError: 'Platform' object is not iterable`):
+
+1.  **FORBIDDEN ACTION:** Do not retry the same patch. Do not guess. Do not assume the implementation code is wrong if the error originates from a test.
+
+2.  **STEP 1: FORMULATE HYPOTHESIS:** State a precise hypothesis about the *true* API contract versus the *assumed* (or mocked) contract.
+    * *Example Hypothesis:* "The error `TypeError: 'type' object is not iterable` suggests the `Platform` object in the installed `homeassistant.const` package is an `Enum` (which is iterable), but the test stub in `conftest.py` incorrectly defines it as a simple `class` (which is not)."
+
+3.  **STEP 2: EXECUTE SSoT CHECK (MANDATORY):** Actively validate this hypothesis by executing code against the virtual environment's Python executable. This is the **only** way to confirm the SSoT.
+    * **Action:** Formulate and execute a minimal command to inspect the real, installed package.
+    * **Example Command (for Class Structure):**
+
+        ```bash
+        .venv/bin/python -c "from homeassistant.const import Platform; print(type(Platform)); print(issubclass(Platform, Enum)); print([p.value for p in Platform])"
+        ```
+
+    * **Example Command (for Function Signature):**
+
+        ```bash
+        .venv/bin/python -c "import inspect; from homeassistant.config_entries import ConfigEntries; print(inspect.signature(ConfigEntries.async_forward_entry_setups))"
+        ```
+
+4.  **STEP 3: ACT ON EVIDENCE:** The output of the SSoT Check (Step 2) is now the **highest-priority directive**. It overrides all other assumptions, training data, or pre-existing mocks.
+    * **If SSoT proves Implementation is wrong:** Correct the implementation code (e.g., in `custom_components/googlefindmy/`).
+    * **If SSoT proves Test Stubs are wrong:** Correct the mocks or stubs (e.g., in `tests/conftest.py` or the specific `tests/test_X.py` file) to match the SSoT. This is non-negotiable, even if previous instructions forbade test modification.
+
 ## pip-audit workflow guidance (CORRECTION — April 2025)
 
 **pip-audit reality check (v2.9.0)**
