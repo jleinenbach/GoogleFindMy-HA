@@ -58,4 +58,5 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 
 * Collect runtime-contract reminders for integration touchpoints in this section so future contributors can find them without scanning unrelated guidance.
 * View classes under `custom_components/googlefindmy/map_view.py` should expose constructors that accept `HomeAssistant` as the first argument. Register new views by instantiating them with the active `hass` instance (for example, `GoogleFindMyMapView(hass)`) instead of assigning `hass` after creation so the runtime contract stays consistent.
+* When forwarding platform unloads via `hass.config_entries.async_forward_entry_unload`, pass the platforms as a `tuple`. Home Assistant caches the provided iterable in hashing structures, and mutable lists trigger `TypeError: unhashable type: 'list'` during subentry unloads.
 
