@@ -237,6 +237,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – ruff check . *(mandatory; you may run `ruff check --fix` beforehand, but finish with a non-fixing run and document the result)*
 > – mypy --strict --explicit-package-bases custom_components/googlefindmy tests *(mandatory for Python changes; capture the outcome)*
 > – pytest -q *(mandatory; investigate and resolve every `DeprecationWarning`; capture the outcome)*
+> – If Home Assistant stubs are missing, run `make install-ha-stubs` before rerunning pytest (see [README — Installing Home Assistant test dependencies on demand](README.md#installing-home-assistant-test-dependencies-on-demand)).
 >
 > **Online mode (in addition to the offline steps):**
 > – pip install -r requirements-dev.txt *(install or update missing dependencies)*
