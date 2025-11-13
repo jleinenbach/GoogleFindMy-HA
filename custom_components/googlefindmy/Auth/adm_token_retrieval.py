@@ -137,18 +137,19 @@ async def _get_or_generate_android_id(username: str) -> int:
     return new_id
 
 
-async def _perform_oauth_with_aas(username: str, android_id: int) -> str:
+async def _perform_oauth_with_aas(username: str, android_id: int, cache: Optional[any] = None) -> str:
     """Exchange AAS -> scope token (ADM) using gpsoauth in a thread executor.
 
     Args:
         username: The Google account email.
         android_id: The unique Android ID for this user.
+        cache: Optional TokenCache instance for multi-account isolation.
 
     Returns:
         The ADM token string.
     """
     # Get AAS token asynchronously (it handles its own blocking via executor)
-    aas_token = await async_get_aas_token()
+    aas_token = await async_get_aas_token(cache=cache)
 
     def _run() -> str:
         """Synchronous part to be run in an executor."""
@@ -229,7 +230,7 @@ async def async_get_adm_token(
             from custom_components.googlefindmy.Auth.aas_token_retrieval import _get_or_generate_android_id
             android_id = await _get_or_generate_android_id(user, cache=cache)
 
-            tok = await _perform_oauth_with_aas(user, android_id)
+            tok = await _perform_oauth_with_aas(user, android_id, cache=cache)
 
             # Persist token & issued-at metadata (safe during validation)
             try:

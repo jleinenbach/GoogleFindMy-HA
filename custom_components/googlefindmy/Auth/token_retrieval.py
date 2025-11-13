@@ -188,12 +188,15 @@ def request_token(username: str, scope: str, play_services: bool = False) -> str
         raise RuntimeError(f"Failed to get auth token for scope '{scope}': {e}") from e
 
 
-async def async_request_token(username: str, scope: str, play_services: bool = False) -> str:
+async def async_request_token(username: str, scope: str, play_services: bool = False, cache: Optional[any] = None) -> str:
     """Async token request via gpsoauth (HA-safe).
 
     Uses async token retrieval and runs gpsoauth in a thread pool to avoid blocking the event loop.
+
+    Args:
+        cache: Optional TokenCache instance for multi-account isolation.
     """
-    aas_token = await async_get_aas_token()  # async path
+    aas_token = await async_get_aas_token(cache=cache)  # async path
 
     # Get unique Android ID for this user
     android_id = await _get_or_generate_android_id_async(username)

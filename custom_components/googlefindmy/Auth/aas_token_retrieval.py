@@ -181,6 +181,9 @@ async def _generate_aas_token(cache: Optional[any] = None) -> str:
         if cache:
             username: Optional[str] = await cache.async_get_cached_value(username_string)
             username = str(username) if isinstance(username, str) else None
+            # Fallback: Try global cache if entry-specific cache is empty
+            if not username:
+                username = await async_get_username()
         else:
             username: Optional[str] = await async_get_username()
     except Exception:  # noqa: BLE001
