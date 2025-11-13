@@ -5271,17 +5271,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Distinguish cold start vs. reload
     domain_bucket = _domain_data(hass)
-
-    # A "reload" occurs when Home Assistant is setting up an entry that is already
-    # in a setup-related state. New entries report ``NOT_LOADED`` and must allow
-    # the coordinator to repair missing subentries during first-run setup. This
-    # entry-scoped check avoids the earlier global flag that broke multi-account
-    # installations by suppressing repairs for every subsequent account.
-    entry_state = getattr(entry, "state", None)
-    is_reload = entry_state in (
-        ConfigEntryState.SETUP_IN_PROGRESS,
-        ConfigEntryState.SETUP_RETRY,
-    )
     _ensure_device_owner_index(domain_bucket)  # ensure present (E2.5)
     if "nova_refcount" not in domain_bucket:
         _set_nova_refcount(domain_bucket, 0)
@@ -5628,7 +5617,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
 
     runtime_subentry_manager = ConfigEntrySubEntryManager(hass, entry)
-    coordinator.attach_subentry_manager(runtime_subentry_manager, is_reload=is_reload)
+    coordinator.attach_subentry_manager(runtime_subentry_manager)
 
     # Expose runtime object via the typed container (preferred access pattern)
     entity_recovery_manager = EntityRecoveryManager(hass, entry, coordinator)
@@ -5776,20 +5765,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         nonlocal listener_active
         listener_active = False
         try:
-            subentry_setup_failed = False
             if ensure_subentries_task is not None:
                 try:
                     await asyncio.shield(ensure_subentries_task)
                 except asyncio.CancelledError:
                     raise
                 except ConfigEntryNotReady as err:
-                    subentry_setup_failed = True
                     _LOGGER.warning(
                         "Subentry setup did not complete before the first refresh: %s",
                         err,
                     )
                 except Exception as err:  # pragma: no cover - defensive
-                    subentry_setup_failed = True
                     _LOGGER.error(
                         "Subentry setup task raised %s: %s",
                         type(err).__name__,
@@ -5797,17 +5783,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                         exc_info=True,
                     )
 
-            if is_reload:
-                _LOGGER.info(
-                    "Integration reloaded: forcing an immediate device scan window."
-                )
-                coordinator.force_poll_due()
-
             await coordinator.async_request_refresh()
-            if is_reload:
-                manager = getattr(runtime_data, "entity_recovery_manager", None)
-                if isinstance(manager, EntityRecoveryManager) and not subentry_setup_failed:
-                    await manager.async_recover_missing_entities()
             last_update_success = getattr(coordinator, "last_update_success", None)
             if last_update_success is False:
                 _LOGGER.warning(
