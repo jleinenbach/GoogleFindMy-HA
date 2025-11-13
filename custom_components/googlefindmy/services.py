@@ -107,6 +107,112 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
         _LOGGER.warning("Device registry cleanup skipped: No entries bucket found.")
         return
 
+    def _extract_hub_details(candidate: Any) -> tuple[str, Mapping[Any, Any]] | None:
+        """Normalize hub container details from the runtime bucket."""
+
+        entry_id: str | None
+        coordinators: Any
+
+        if isinstance(candidate, Mapping):
+            raw_entry_id = candidate.get("entry_id")
+            if isinstance(raw_entry_id, str) and raw_entry_id:
+                entry_id = raw_entry_id
+            elif raw_entry_id is not None:
+                entry_id = str(raw_entry_id)
+            else:
+                entry_id = None
+            coordinators = candidate.get("coordinators")
+        else:
+            raw_entry_id = getattr(candidate, "entry_id", None)
+            if isinstance(raw_entry_id, str) and raw_entry_id:
+                entry_id = raw_entry_id
+            elif raw_entry_id is not None:
+                entry_id = str(raw_entry_id)
+            else:
+                entry_id = None
+            coordinators = getattr(candidate, "coordinators", None)
+
+        if not entry_id:
+            return None
+
+        if isinstance(coordinators, Mapping):
+            return entry_id, coordinators
+
+        return None
+
+    def _iter_hubs() -> list[tuple[str, Mapping[Any, Any]]]:
+        """Yield hub entry_id and coordinator mapping tuples."""
+
+        hubs: list[tuple[str, Mapping[Any, Any]]] = []
+        seen: set[int] = set()
+
+        hub_bucket = (
+            domain_bucket.get("hubs") if isinstance(domain_bucket, Mapping) else None
+        )
+        if isinstance(hub_bucket, Mapping):
+            for item in hub_bucket.values():
+                if item is None or id(item) in seen:
+                    continue
+                seen.add(id(item))
+                details = _extract_hub_details(item)
+                if details is not None:
+                    hubs.append(details)
+
+        for value in domain_bucket.values():
+            if value is None or id(value) in seen:
+                continue
+            details = _extract_hub_details(value)
+            if details is not None:
+                hubs.append(details)
+
+        return hubs
+
+    processed_coordinators = 0
+    seen_coordinators: set[int] = set()
+
+    for _hub_entry_id, coordinators in _iter_hubs():
+        for coordinator in coordinators.values():
+            if coordinator is None or id(coordinator) in seen_coordinators:
+                continue
+            update_registry = getattr(coordinator, "async_update_device_registry", None)
+            if not callable(update_registry):
+                continue
+            try:
+                await update_registry()
+            except Exception as err:  # noqa: BLE001 - defensive logging
+                _LOGGER.warning(
+                    "Coordinator %s failed during registry rebuild: %s",
+                    getattr(coordinator, "name", "<unknown>"),
+                    err,
+                )
+                continue
+            processed_coordinators += 1
+            seen_coordinators.add(id(coordinator))
+
+    for runtime in entries_bucket.values():
+        coordinator = getattr(runtime, "coordinator", None)
+        if coordinator is None or id(coordinator) in seen_coordinators:
+            continue
+        update_registry = getattr(coordinator, "async_update_device_registry", None)
+        if not callable(update_registry):
+            continue
+        try:
+            await update_registry()
+        except Exception as err:  # noqa: BLE001 - defensive logging
+            _LOGGER.warning(
+                "Runtime coordinator %s failed during registry rebuild: %s",
+                getattr(coordinator, "name", "<unknown>"),
+                err,
+            )
+            continue
+        processed_coordinators += 1
+        seen_coordinators.add(id(coordinator))
+
+    _LOGGER.info(
+        "Completed device registry ensure phase; processed %d coordinators.",
+        processed_coordinators,
+    )
+
     cleaned_devices_total = 0
 
     # Iterate over all active googlefindmy RuntimeData instances
@@ -196,20 +302,38 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
 
             # If we are here, the device is not the service device AND
             # it is not linked to the correct tracker subentry. It's an orphan.
+            raw_links = getattr(device, "config_entries", set()) or set()
+            linked_entry_ids = {
+                str(link_entry_id)
+                for link_entry_id in raw_links
+                if isinstance(link_entry_id, str) and link_entry_id
+            }
+
+            if correct_tracker_subentry_id not in linked_entry_ids:
+                _LOGGER.debug(
+                    "[%s] Hub Cleanup: Skipping device '%s' (ID: %s); tracker subentry %s not yet linked.",
+                    entry_id,
+                    device.name or "<unknown>",
+                    device.id,
+                    correct_tracker_subentry_id,
+                )
+                continue
+
             _LOGGER.info(
-                "[%s] Hub Cleanup: Removing orphaned device '%s' (ID: %s). "
-                "It was not linked to subentry %s.",
+                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (ID: %s).",
                 entry_id,
                 device.name or "<unknown>",
                 device.id,
-                correct_tracker_subentry_id,
             )
             try:
-                dev_reg.async_remove_device(device.id)
+                dev_reg.async_update_device(
+                    device.id,
+                    remove_config_entry_id=entry_id,
+                )
                 cleaned_devices_entry += 1
             except Exception as err:
                 _LOGGER.error(
-                    "[%s] Hub Cleanup: Failed to remove device %s: %s",
+                    "[%s] Hub Cleanup: Failed to detach hub entry from device %s: %s",
                     entry_id,
                     device.id,
                     err,
