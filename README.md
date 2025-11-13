@@ -1,5 +1,12 @@
 # Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> 
 
+>[!CAUTION]
+> ## **V1.6 Semi-Breaking Change**
+>
+> After installing this update, you must delete your existing configuration and re-add the integration.  This is due to major changes for the multi-account feature.  Location history should not be affected.
+
+---
+
 A comprehensive Home Assistant custom integration for Google's FindMy Device network, enabling real-time(ish) tracking and control of FindMy devices directly within Home Assistant!
 
 >[!TIP]
