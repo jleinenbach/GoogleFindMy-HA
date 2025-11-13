@@ -754,7 +754,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         return self._cache
 
-    def attach_subentry_manager(self, manager: ConfigEntrySubEntryManager) -> None:
+    def attach_subentry_manager(
+        self, manager: ConfigEntrySubEntryManager, *, is_reload: bool = False
+    ) -> None:
         """Attach the config entry subentry manager to the coordinator."""
 
         self._subentry_manager = manager
@@ -762,7 +764,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         try:
-            self._refresh_subentry_index(skip_manager_update=True)
+            self._refresh_subentry_index(
+                skip_manager_update=True, skip_repair=is_reload
+            )
         except Exception as err:  # noqa: BLE001 - defensive guard
             _LOGGER.debug(
                 "Initial subentry refresh failed during setup: %s",
@@ -914,6 +918,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         visible_devices: Sequence[Mapping[str, Any]] | None = None,
         *,
         skip_manager_update: bool = False,
+        skip_repair: bool = False,
     ) -> None:
         """Refresh internal subentry metadata caches."""
 
@@ -948,7 +953,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             for key in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY)
             if key not in present_core_keys
         }
-        if required_missing:
+        if required_missing and not skip_repair:
             self._schedule_core_subentry_repair(required_missing)
 
         if not raw_entries:

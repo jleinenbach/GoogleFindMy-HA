@@ -5623,7 +5623,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
 
     runtime_subentry_manager = ConfigEntrySubEntryManager(hass, entry)
-    coordinator.attach_subentry_manager(runtime_subentry_manager)
+    coordinator.attach_subentry_manager(runtime_subentry_manager, is_reload=is_reload)
 
     # Expose runtime object via the typed container (preferred access pattern)
     entity_recovery_manager = EntityRecoveryManager(hass, entry, coordinator)
