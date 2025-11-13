@@ -1,4 +1,4 @@
-.PHONY: clean clean-wheelhouse lint test-ha wheelhouse
+.PHONY: clean clean-wheelhouse install-ha-stubs lint test-ha wheelhouse
 
 VENV ?= .venv
 PYTHON ?= python3
@@ -25,15 +25,19 @@ clean-wheelhouse:
 		echo "[make clean-wheelhouse] No wheel cache present"; \
 	fi
 
+install-ha-stubs:
+	@echo "[make install-ha-stubs] Installing Home Assistant pytest dependencies"
+	@$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
+
 $(WHEELHOUSE_SENTINEL): requirements-dev.txt
 	@mkdir -p $(WHEELHOUSE)
 	@if [ "$(SKIP_WHEELHOUSE_REFRESH)" = "1" ] && find "$(WHEELHOUSE)" -mindepth 1 -maxdepth 1 -type f >/dev/null 2>&1; then \
 		echo "[make wheelhouse] Reusing existing wheel cache in $(WHEELHOUSE)"; \
-        else \
-                echo "[make wheelhouse] Downloading development wheels into $(WHEELHOUSE)"; \
-                echo "[make wheelhouse] Hint: set SKIP_WHEELHOUSE_REFRESH=1 to reuse the cache on future make test-ha runs"; \
-                $(PYTHON) -m pip download --requirement requirements-dev.txt --dest $(WHEELHOUSE) --exists-action=i; \
-        fi
+	else \
+		echo "[make wheelhouse] Downloading development wheels into $(WHEELHOUSE)"; \
+		echo "[make wheelhouse] Hint: set SKIP_WHEELHOUSE_REFRESH=1 to reuse the cache on future make test-ha runs"; \
+		$(PYTHON) -m pip download --requirement requirements-dev.txt --dest $(WHEELHOUSE) --exists-action=i; \
+	fi
 	@touch $(WHEELHOUSE_SENTINEL)
 
 $(VENV)/bin/activate: requirements-dev.txt $(WHEELHOUSE_SENTINEL)
