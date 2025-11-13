@@ -5271,11 +5271,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Distinguish cold start vs. reload
     domain_bucket = _domain_data(hass)
-    initial_setup_complete = domain_bucket.get("initial_setup_complete")
-    is_reload = (
-        bool(initial_setup_complete)
-        if isinstance(initial_setup_complete, bool)
-        else False
+
+    # A "reload" occurs when Home Assistant is setting up an entry that is already
+    # in a setup-related state. New entries report ``NOT_LOADED`` and must allow
+    # the coordinator to repair missing subentries during first-run setup. This
+    # entry-scoped check avoids the earlier global flag that broke multi-account
+    # installations by suppressing repairs for every subsequent account.
+    entry_state = getattr(entry, "state", None)
+    is_reload = entry_state in (
+        ConfigEntryState.SETUP_IN_PROGRESS,
+        ConfigEntryState.SETUP_RETRY,
     )
     _ensure_device_owner_index(domain_bucket)  # ensure present (E2.5)
     if "nova_refcount" not in domain_bucket:
