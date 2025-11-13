@@ -2531,6 +2531,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         tracker_config_subentry_id is not None
                         and (name_needs_update or needs_parent_clear)
                     ):
+                        update_existing_kwargs["config_subentry_id"] = (
+                            tracker_config_subentry_id
+                        )
                         update_existing_kwargs["add_config_entry_id"] = entry_id
                     _update_device_with_kwargs(update_existing_kwargs)
                     dev = _refresh_device_entry(device_id or "", dev)

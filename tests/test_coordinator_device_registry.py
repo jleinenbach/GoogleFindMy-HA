@@ -819,10 +819,49 @@ def test_existing_device_name_refresh_uses_add_config_entry_id(
     assert fake_registry.updated
     payload = fake_registry.updated[-1]
     assert payload["name"] == "Fresh Label"
-    assert payload["config_subentry_id"] in (None, entry.tracker_subentry_id)
+    assert payload["config_subentry_id"] == entry.tracker_subentry_id
     assert payload["via_device_id"] is None
     assert payload["add_config_entry_id"] == entry.entry_id
     assert existing.via_device_id is None
+    assert existing.config_subentry_id == entry.tracker_subentry_id
+
+
+def test_existing_device_parent_clear_keeps_subentry(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Clearing the tracker parent retains the subentry association."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    coordinator._service_device_id = "svc-device-1"
+
+    existing = _FakeDeviceEntry(
+        identifiers={(DOMAIN, "entry-42:abc123")},
+        config_entry_id="entry-42",
+        name="Pixel",
+        via_device_id="svc-device-1",
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+    fake_registry.devices.append(existing)
+
+    devices = [{"id": "abc123", "name": "Pixel"}]
+    coordinator.data = devices
+
+    created = coordinator._ensure_registry_for_devices(
+        devices=devices,
+        ignored=set(),
+    )
+
+    assert created == 1
+    assert fake_registry.updated
+    payload = fake_registry.updated[-1]
+    assert payload["device_id"] == existing.id
+    assert payload["config_subentry_id"] == entry.tracker_subentry_id
+    assert payload["via_device_id"] is None
+    assert payload["add_config_entry_id"] == entry.entry_id
+    assert existing.via_device_id is None
+    assert existing.config_subentry_id == entry.tracker_subentry_id
 
 
 def test_service_device_creation_does_not_modify_tracker_parents(
