@@ -2504,16 +2504,24 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if isinstance(raw_links, Collection) and not isinstance(
                     raw_links, (str, bytes, Mapping)
                 ):
-                    return {
-                        cast(str | None, item)
-                        for item in raw_links
-                        if item is None or isinstance(item, str)
-                    }
+                    typed_links: set[str | None] = set()
+                    for item in raw_links:
+                        if item is None:
+                            typed_links.add(None)
+                        elif isinstance(item, str):
+                            typed_links.add(item)
+                    return typed_links
                 if raw_links is None:
                     return set()
-            fallback = getattr(device, "config_subentry_id", cast(str | None, None))
-            if fallback is not None:
+            fallback = getattr(device, "config_subentry_id", None)
+            if isinstance(fallback, str):
                 return {fallback}
+            if fallback is not None:
+                _LOGGER.debug(
+                    "Skipping unexpected config_subentry_id type for device %s: %r",
+                    getattr(device, "id", "unknown"),
+                    fallback,
+                )
             if fallback is None and getattr(device, "config_entries", None):
                 return {None}
             return set()

@@ -1669,6 +1669,7 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 self._device_location_data: dict[str, Any] = {}
                 self._device_caps: dict[str, Any] = {}
                 self._present_last_seen: dict[str, float] = {}
+                self.first_refresh_calls = 0
                 if extra_attributes:
                     for key, value in extra_attributes.items():
                         setattr(self, key, _coerce_attribute(value))
@@ -1690,6 +1691,10 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 return None
 
             async def async_refresh(self) -> None:
+                return None
+
+            async def async_config_entry_first_refresh(self) -> None:
+                self.first_refresh_calls += 1
                 return None
 
             async def async_shutdown(self) -> None:

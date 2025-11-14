@@ -802,6 +802,10 @@ def test_hass_data_layout(
             if hass._tasks:
                 await asyncio.gather(*hass._tasks)
 
+            runtime_data = getattr(entry, "runtime_data", None)
+            coordinator = getattr(runtime_data, "coordinator", None)
+            assert getattr(coordinator, "first_refresh_calls", 0) == 1
+
             expected_subentries = {
                 subentry.subentry_id for subentry in entry.subentries.values()
             }
@@ -1145,6 +1149,10 @@ async def test_async_setup_entry_propagates_subentry_registration(
     assert forwarded_identifier is None
     forwarded_names = _platform_names(forwarded_platforms)
     assert len(forwarded_names) == len(set(forwarded_names))
+
+    runtime_data = getattr(entry, "runtime_data", None)
+    coordinator = getattr(runtime_data, "coordinator", None)
+    assert getattr(coordinator, "first_refresh_calls", 0) == 1
 
     expected_platforms: set[str] = set()
     for key, subentry in entry.subentries.items():
