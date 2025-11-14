@@ -41,6 +41,7 @@ from .const import (
     SERVICE_STOP_SOUND,
     SERVICE_REFRESH_DEVICE_URLS,
     SERVICE_REBUILD_REGISTRY,
+    SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,  # ctx provides the key but we keep a local fallback constant
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -200,6 +201,46 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             }
         return set()
 
+    def _entry_links_for_device(device: Any, target_entry_id: str) -> set[str | None]:
+        """Return normalized subentry identifiers for ``target_entry_id``."""
+
+        if not isinstance(target_entry_id, str) or not target_entry_id:
+            return set()
+
+        mapping_obj = getattr(device, "config_entries_subentries", None)
+        normalized: set[str | None] = set()
+        if isinstance(mapping_obj, Mapping):
+            raw_links = mapping_obj.get(target_entry_id)
+            if isinstance(raw_links, str):
+                normalized.add(raw_links)
+            elif isinstance(raw_links, Iterable) and not isinstance(
+                raw_links, (str, bytes)
+            ):
+                for candidate in raw_links:
+                    if isinstance(candidate, str):
+                        normalized.add(candidate)
+                    elif candidate is None:
+                        normalized.add(None)
+            elif raw_links is None and target_entry_id in mapping_obj:
+                normalized.add(None)
+
+        if not normalized:
+            fallback = getattr(device, "config_subentry_id", None)
+            if isinstance(fallback, str):
+                normalized.add(fallback)
+            elif fallback is None:
+                linked_entries = getattr(device, "config_entries", None)
+                if isinstance(linked_entries, Iterable):
+                    for candidate_entry_id in linked_entries:
+                        if (
+                            isinstance(candidate_entry_id, str)
+                            and candidate_entry_id == target_entry_id
+                        ):
+                            normalized.add(None)
+                            break
+
+        return normalized
+
     processed_coordinators = 0
     seen_coordinators: set[int] = set()
 
@@ -278,6 +319,22 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             identifiers={service_device_ident}
         )
         service_device_id = getattr(service_device, "id", None)
+        service_meta = None
+        get_metadata = getattr(coordinator, "get_subentry_metadata", None)
+        if callable(get_metadata):
+            try:
+                service_meta = get_metadata(key=SERVICE_SUBENTRY_KEY)
+            except TypeError:
+                service_meta = None
+        service_subentry_id = None
+        if service_meta is not None:
+            candidate_service_id = getattr(service_meta, "config_subentry_id", None)
+            if isinstance(candidate_service_id, str) and candidate_service_id:
+                service_subentry_id = candidate_service_id
+        if not isinstance(service_subentry_id, str) or not service_subentry_id:
+            fallback_service_id = getattr(entry, "service_subentry_id", None)
+            if isinstance(fallback_service_id, str) and fallback_service_id:
+                service_subentry_id = fallback_service_id
         if not service_device_id:
             _LOGGER.debug("[%s] Hub Cleanup: Service device not found.", entry_id)
             # Try to ensure it exists before continuing
@@ -298,6 +355,45 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     "[%s] Hub Cleanup: Error ensuring service device: %s", entry_id, e
                 )
                 continue
+
+        service_cleanup_applied = False
+        service_links = _entry_links_for_device(service_device, entry_id)
+        if (
+            isinstance(service_subentry_id, str)
+            and service_subentry_id
+            and service_links
+            and None in service_links
+            and service_subentry_id in service_links
+            and isinstance(service_device_id, str)
+            and service_device_id
+        ):
+            _LOGGER.info(
+                "[%s] Hub Cleanup: Detaching redundant hub link from service device '%s' (device_id=%s). Links prior to cleanup: %s",
+                entry_id,
+                getattr(service_device, "name", "<unknown>"),
+                service_device_id,
+                sorted(link for link in service_links if link is not None)
+                + (["<hub>"] if None in service_links else []),
+            )
+            try:
+                dev_reg.async_update_device(
+                    service_device_id,
+                    remove_config_entry_id=entry_id,
+                    remove_config_subentry_id=None,
+                )
+                service_cleanup_applied = True
+                refresh_service = getattr(dev_reg, "async_get", None)
+                if callable(refresh_service):
+                    refreshed = refresh_service(service_device_id)
+                    if refreshed is not None:
+                        service_device = refreshed
+            except Exception as err:
+                _LOGGER.error(
+                    "[%s] Hub Cleanup: Failed to detach hub entry from service device %s: %s",
+                    entry_id,
+                    service_device_id,
+                    err,
+                )
 
         # 2. Find the correct Tracker Subentry ID
         # We access the coordinator's metadata which was refreshed during setup
@@ -371,7 +467,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
 
         # 3. Find and remove orphaned devices
         devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
-        cleaned_devices_entry = 0
+        cleaned_devices_entry = 1 if service_cleanup_applied else 0
 
         for device in devices_for_entry:
             if device is None or not hasattr(device, "id"):

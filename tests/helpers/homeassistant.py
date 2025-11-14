@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from custom_components.googlefindmy import UnknownEntry
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import DOMAIN, service_device_identifier
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import ServiceCall
 
@@ -33,7 +33,107 @@ __all__ = [
     "config_entry_with_runtime_managed_subentries",
     "resolve_config_entry_lookup",
     "deferred_subentry_entry_id_assignment",
+    "service_device_stub",
 ]
+
+try:  # pragma: no cover - fallback runs only when HA stubs are absent
+    from homeassistant.helpers import device_registry as dr
+except ModuleNotFoundError:  # pragma: no cover - exercised when helpers unavailable
+    dr = SimpleNamespace(DeviceEntryType=None)  # type: ignore[assignment]
+
+_DEFAULT_SERVICE_ENTRY_TYPE = getattr(dr.DeviceEntryType, "SERVICE", "service")
+
+
+def service_device_stub(
+    *,
+    entry_id: str,
+    service_subentry_id: str | None,
+    device_id: str = "service-device",
+    name: str | None = None,
+    identifiers: Iterable[tuple[str, str]] | None = None,
+    include_service_subentry_identifier: bool = True,
+    include_hub_link: bool = False,
+    config_entries_subentries: Mapping[str, Iterable[str | None]] | None = None,
+    entry_type: Any | None = _DEFAULT_SERVICE_ENTRY_TYPE,
+    extra_attributes: Mapping[str, Any] | None = None,
+) -> SimpleNamespace:
+    """Return a service-device stub aligned with registry expectations.
+
+    Parameters
+    ----------
+    entry_id:
+        Parent config entry identifier.
+    service_subentry_id:
+        Subentry identifier associated with the service device. When ``None``
+        the returned namespace omits ``config_subentry_id``.
+    device_id:
+        Stable device registry identifier.
+    name:
+        Optional display name attached to the stub.
+    identifiers:
+        Additional identifier tuples merged with the canonical service
+        identifier.
+    include_service_subentry_identifier:
+        When ``True`` (default) append the derived service-subentry identifier
+        used by the coordinator for diagnostics.
+    include_hub_link:
+        Append ``None`` to the config-subentry mapping for ``entry_id`` to
+        emulate legacy hub links when tests require the pre-cleanup state.
+    config_entries_subentries:
+        Optional explicit mapping. When omitted the helper constructs a
+        ``{entry_id: {service_subentry_id}}`` mapping (plus ``None`` when
+        ``include_hub_link`` is ``True``).
+    entry_type:
+        The registry ``entry_type`` assigned to the stub. Defaults to the
+        service entry type exposed by Home Assistant's stubs.
+    extra_attributes:
+        Additional attribute/value pairs copied onto the namespace before
+        returning.
+    """
+
+    resolved_identifiers: set[tuple[str, str]] = set(identifiers or ())
+    resolved_identifiers.add(service_device_identifier(entry_id))
+    if include_service_subentry_identifier and service_subentry_id is not None:
+        resolved_identifiers.add((DOMAIN, f"{entry_id}:{service_subentry_id}:service"))
+
+    config_entries = set()
+    if entry_id:
+        config_entries.add(entry_id)
+
+    if config_entries_subentries is None:
+        subentries_map: dict[str, set[str | None]] = {entry_id: set()}
+        if service_subentry_id is not None:
+            subentries_map[entry_id].add(service_subentry_id)
+        if include_hub_link:
+            subentries_map[entry_id].add(None)
+    else:
+        subentries_map = {}
+        for key, values in config_entries_subentries.items():
+            if values is None:
+                subentries_map[key] = {None}
+                continue
+            if isinstance(values, str):
+                subentries_map[key] = {values}
+                continue
+            subentries_map[key] = set(values)
+
+    payload: dict[str, Any] = {
+        "id": device_id,
+        "identifiers": resolved_identifiers,
+        "config_entries": config_entries,
+        "config_entries_subentries": subentries_map,
+    }
+
+    if service_subentry_id is not None:
+        payload["config_subentry_id"] = service_subentry_id
+    if name is not None:
+        payload["name"] = name
+    if entry_type is not None:
+        payload["entry_type"] = entry_type
+    if extra_attributes:
+        payload.update(extra_attributes)
+
+    return SimpleNamespace(**payload)
 
 
 def _assign_if_present(target: Any, attribute: str, value: Any) -> None:

@@ -28,6 +28,8 @@ from custom_components.googlefindmy.const import (
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
+from tests.helpers import service_device_stub
+
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
     """Return deterministic config_subentry identifiers for tests."""
@@ -1186,15 +1188,16 @@ def test_service_device_updates_add_translation(
     assert metadata["new_identifiers"] == {service_ident, service_subentry_ident}
 
 
-def test_service_device_update_uses_add_config_entry_id() -> None:
+def test_service_device_update_uses_add_config_entry_id(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
     """Service device refreshes must link config entries via add_config_entry_id."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     entry = _build_entry_with_subentries("entry-88")
     _prepare_coordinator_for_registry(coordinator, entry)
 
-    hass = coordinator.hass
-    registry = dr.async_get(hass)
+    registry = fake_registry
 
     service_ident = service_device_identifier(entry.entry_id)
     existing = registry.async_get_or_create(  # type: ignore[attr-defined]
@@ -1219,10 +1222,18 @@ def test_service_device_update_uses_add_config_entry_id() -> None:
     coordinator._ensure_service_device_exists()
 
     assert registry.updated, "Service device update should have been recorded"
-    payload = registry.updated[-1]  # type: ignore[index]
-    assert payload["add_config_entry_id"] == entry.entry_id
-    assert payload["config_entry_id"] is None
-    assert payload["config_subentry_id"] == entry.service_subentry_id
+    add_payload = next(
+        payload
+        for payload in registry.updated  # type: ignore[assignment]
+        if payload["add_config_entry_id"] == entry.entry_id
+    )
+    assert add_payload["config_entry_id"] == entry.entry_id
+    assert add_payload["config_subentry_id"] == entry.service_subentry_id
+
+    mapping = existing.config_entries_subentries.get(entry.entry_id)
+    assert mapping is not None
+    assert entry.service_subentry_id in mapping
+    assert None not in mapping
 
 
 def test_service_device_preserves_user_defined_name(
@@ -1263,7 +1274,47 @@ def test_service_device_preserves_user_defined_name(
     assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
     assert metadata["translation_placeholders"] == {}
     assert metadata["config_subentry_id"] == entry.service_subentry_id
-    assert metadata["new_identifiers"] == {service_ident, service_subentry_ident}
+
+
+def test_service_device_detaches_hub_link_when_service_subentry_active(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Legacy hub links are removed once the service subentry is linked."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-77")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    service_ident = service_device_identifier(entry.entry_id)
+    service_subentry_ident = _service_subentry_identifier(entry)
+    legacy_service = _FakeDeviceEntry(
+        identifiers={service_ident},
+        config_entry_id=entry.entry_id,
+        name="Existing Hub",
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        sw_version=INTEGRATION_VERSION,
+        entry_type=dr.DeviceEntryType.SERVICE,
+        configuration_url="https://example.invalid",
+        translation_key=None,
+        translation_placeholders=None,
+        config_subentry_id=None,
+    )
+    legacy_service.config_entries_subentries[entry.entry_id].add(entry.service_subentry_id)
+    fake_registry.devices.append(legacy_service)
+
+    coordinator._ensure_service_device_exists()
+
+    removal_payload = next(
+        payload
+        for payload in fake_registry.updated  # type: ignore[assignment]
+        if payload.get("remove_config_entry_id") == entry.entry_id
+    )
+    assert removal_payload["remove_config_subentry_id"] is None
+    mapping = legacy_service.config_entries_subentries.get(entry.entry_id)
+    assert mapping == {entry.service_subentry_id}
+    assert entry.entry_id in legacy_service.config_entries
+    assert legacy_service.identifiers == {service_ident, service_subentry_ident}
 
 
 def test_rebuild_flow_creates_devices_without_service_parent(
@@ -1302,16 +1353,10 @@ async def test_relink_subentry_entities_repairs_mislinked_devices(
     entry = _build_entry_with_subentries("entry-heal")
     hass = SimpleNamespace(data={})
 
-    service_identifier = service_device_identifier(entry.entry_id)
-    service_device = SimpleNamespace(
-        id="device-service",
-        identifiers={
-            service_identifier,
-            (DOMAIN, f"{entry.entry_id}:{entry.service_subentry_id}:service"),
-        },
-        config_entries={entry.entry_id},
-        entry_type=getattr(dr.DeviceEntryType, "SERVICE", "service"),
-        config_subentry_id=entry.service_subentry_id,
+    service_device = service_device_stub(
+        entry_id=entry.entry_id,
+        service_subentry_id=entry.service_subentry_id,
+        device_id="device-service",
     )
 
     tracker_device = SimpleNamespace(

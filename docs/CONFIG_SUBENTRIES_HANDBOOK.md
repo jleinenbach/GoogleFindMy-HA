@@ -468,10 +468,10 @@ children fail to appear in the UI, refuse to unload, or leave orphaned registry 
      assigns it to `entry.runtime_data` before calling `async_forward_entry_setups`. If the parent runtime data is unavailable,
      raise `ConfigEntryNotReady`; Home Assistant will retry after the parent rebuilds the shared mapping.
    - Confirm `entry.runtime_data` stores any per-subentry helpers that platforms need to bind the correct device identifiers.
-   - Add regression tests that instantiate the flow, create the child entry, and assert the coordinator exposes
-     `async_update_device_registry` or similar helpers. See `tests/test_coordinator_device_registry.py` for examples that validate
-     `async_update_device` calls pair `add_config_subentry_id` with `remove_config_entry_id` to keep tracker devices linked solely
-     through their subentry while stripping redundant hub associations.
+    - Add regression tests that instantiate the flow, create the child entry, and assert the coordinator exposes
+      `async_update_device_registry` or similar helpers. See `tests/test_coordinator_device_registry.py` for examples that validate
+      `async_update_device` calls pair `add_config_subentry_id` with `remove_config_entry_id` to keep tracker and service devices linked
+      solely through their subentries while stripping redundant hub associations.
 
 2. **Entity linkage: confirm identifiers and config entry IDs.**
    - Entity factories must source identifiers from the subentry (`entry.unique_id`) and pass them through `DeviceInfo`. Avoid
