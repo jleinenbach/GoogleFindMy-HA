@@ -25,7 +25,9 @@ except ModuleNotFoundError:  # pragma: no cover - environment guard
 from custom_components.googlefindmy.const import (
     DOMAIN,
     OPT_ENABLE_STATS_ENTITIES,
+    SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
@@ -174,16 +176,28 @@ async def test_integration_device_info_uses_service_device(
     if hasattr(http_module, "async_setup_entry"):
         monkeypatch.setattr(http_module, "async_setup_entry", AsyncMock(return_value=True))
 
-    forward_calls: list[tuple[str | None, tuple[str, ...]]] = []
+    forward_calls: list[tuple[str | None, tuple[object, ...]]] = []
+
+    def _normalize_platform_names(platforms: tuple[object, ...]) -> set[str]:
+        names: set[str] = set()
+        for platform in platforms:
+            value = getattr(platform, "value", platform)
+            if not isinstance(value, str):
+                value = str(value)
+            names.add(value)
+        return names
 
     async def _capture_forward_entry_setups(
         entry_obj: MockConfigEntry,
-        platforms: list[str],
+        platforms: list[object],
         *,
         config_subentry_id: str | None = None,
         **_kwargs: Any,
     ) -> bool:
-        forward_calls.append((config_subentry_id, tuple(platforms)))
+        platforms_tuple = tuple(platforms)
+        forward_calls.append((config_subentry_id, platforms_tuple))
+        platform_names = _normalize_platform_names(platforms_tuple)
+
         if config_subentry_id:
             identifier = service_device_identifier(entry_obj.entry_id)
             service_device = device_registry.async_get_or_create(
@@ -192,6 +206,21 @@ async def test_integration_device_info_uses_service_device(
                 name="Google Find My Service",
             )
             if SERVICE_SUBENTRY_KEY in config_subentry_id:
+                entity_registry.async_get_or_create(
+                    "binary_sensor",
+                    DOMAIN,
+                    unique_id=f"{entry_obj.entry_id}:{SERVICE_SUBENTRY_KEY}:auth_status",
+                    config_entry=entry_obj,
+                    device_id=service_device.id,
+                )
+        else:
+            if "binary_sensor" in platform_names:
+                identifier = service_device_identifier(entry_obj.entry_id)
+                service_device = device_registry.async_get_or_create(
+                    config_entry_id=entry_obj.entry_id,
+                    identifiers={identifier},
+                    name="Google Find My Service",
+                )
                 entity_registry.async_get_or_create(
                     "binary_sensor",
                     DOMAIN,
@@ -234,17 +263,15 @@ async def test_integration_device_info_uses_service_device(
     managed_subentries = tuple(subentry_manager.managed_subentries.values())
     assert managed_subentries
 
-    expected_forward_ids = {
-        getattr(subentry, "config_subentry_id", None)
-        or getattr(subentry, "subentry_id", None)
-        for subentry in managed_subentries
-    }
-    assert None not in expected_forward_ids
-
-    forwarded_identifiers = {
-        identifier for identifier, _ in forward_calls if identifier is not None
-    }
-    assert forwarded_identifiers == expected_forward_ids
+    assert len(forward_calls) == 1
+    forwarded_identifier, forwarded_platforms = forward_calls[0]
+    assert forwarded_identifier is None
+    platform_names = _normalize_platform_names(forwarded_platforms)
+    expected_platforms = set(TRACKER_FEATURE_PLATFORMS) | set(
+        SERVICE_FEATURE_PLATFORMS
+    )
+    assert platform_names == expected_platforms
+    assert len(forwarded_platforms) == len(platform_names)
 
     service_identifier = service_device_identifier(entry.entry_id)
     service_device = device_registry.async_get_device({service_identifier})
