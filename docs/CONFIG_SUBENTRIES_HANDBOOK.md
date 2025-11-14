@@ -470,17 +470,18 @@ children fail to appear in the UI, refuse to unload, or leave orphaned registry 
    - Confirm `entry.runtime_data` stores any per-subentry helpers that platforms need to bind the correct device identifiers.
    - Add regression tests that instantiate the flow, create the child entry, and assert the coordinator exposes
      `async_update_device_registry` or similar helpers. See `tests/test_coordinator_device_registry.py` for examples that validate
-     `async_update_device` calls include `add_config_entry_id` so the device registry links back to the subentry owner.
+     `async_update_device` calls pair `add_config_subentry_id` with `remove_config_entry_id` to keep tracker devices linked solely
+     through their subentry while stripping redundant hub associations.
 
 2. **Entity linkage: confirm identifiers and config entry IDs.**
    - Entity factories must source identifiers from the subentry (`entry.unique_id`) and pass them through `DeviceInfo`. Avoid
      copying parent identifiers; devices tied to the parent will not reload when only the child changes.
-   - Whenever registry helpers run (for example, coordinator refreshes or service-driven cleanups), log the `device_id` and
-     `config_entry_id` parameters. During debugging, temporarily enable debug logging around `DeviceRegistry.async_update_device`
-     to observe which entries receive updates.
-   - In tests, simulate both Home Assistant 2025.7+ (`add_config_entry_id`) and legacy keyword shapes to guarantee backward
-     compatibility. The existing fakes in `tests/helpers/homeassistant.py` illustrate how to guard keyword names without suppressing
-     mypy.
+   - Whenever registry helpers run (for example, coordinator refreshes or service-driven cleanups), log the `device_id`,
+     `remove_config_entry_id`, and `add_config_subentry_id` parameters. During debugging, temporarily enable debug logging around
+     `DeviceRegistry.async_update_device` to observe which entries receive updates.
+   - In tests, simulate both Home Assistant 2025.7+ (`add_config_subentry_id`/`remove_config_entry_id`) and legacy keyword shapes
+     to guarantee backward compatibility. The existing fakes in `tests/helpers/homeassistant.py` illustrate how to guard keyword
+     names without suppressing mypy.
 
 3. **Removal: cascade deletes in the correct order.**
    - Parent unload handlers must wait for every subentry to unload successfully before tearing down shared clients. Use
@@ -498,7 +499,7 @@ children fail to appear in the UI, refuse to unload, or leave orphaned registry 
      data. Afterwards, trigger `async_reload` on the child entry to refresh device registry metadata such as `name` or
      `configuration_url`.
    - Write regression tests that edit a subentry and assert that `DeviceRegistry.async_update_device` receives new labels while
-     preserving the `add_config_entry_id` parameter.
+     leaving the tracker-only linkage intact (no unexpected `add_config_entry_id` calls).
 
 5. **Instrumenting debug logs:**
    - Wrap registry writes in helper functions that emit structured logs (entry ID, device ID, identifiers). This makes it easier to
