@@ -65,7 +65,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from types import MappingProxyType, SimpleNamespace
 
 if TYPE_CHECKING:
@@ -1723,6 +1723,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             return
 
+        entry_id = getattr(entry, "entry_id", None)
+
         # Refresh subentry metadata to obtain the current service subentry context.
         try:
             self._refresh_subentry_index(
@@ -1741,6 +1743,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 DOMAIN,
                 f"{entry.entry_id}:{service_config_subentry_id}:service",
             )
+        if not service_config_subentry_id:
+            fallback_service_id = getattr(entry, "service_subentry_id", None)
+            if isinstance(fallback_service_id, str) and fallback_service_id:
+                service_config_subentry_id = fallback_service_id
+                service_subentry_identifier = (
+                    DOMAIN,
+                    f"{entry.entry_id}:{fallback_service_id}:service",
+                )
 
         setattr(
             self,
@@ -1769,6 +1779,70 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         }  # {(DOMAIN, f"integration_<entry_id>")}
         if service_subentry_identifier is not None:
             identifiers.add(service_subentry_identifier)
+
+        def _service_entry_links(device: Any) -> set[str | None]:
+            """Return the set of subentry identifiers linked to ``entry``."""
+
+            if not entry_id:
+                return set()
+
+            mapping_obj = getattr(device, "config_entries_subentries", None)
+            normalized: set[str | None] = set()
+            if isinstance(mapping_obj, Mapping):
+                raw_links = mapping_obj.get(entry_id)
+                if isinstance(raw_links, str):
+                    normalized.add(raw_links)
+                elif isinstance(raw_links, Iterable) and not isinstance(
+                    raw_links, (str, bytes)
+                ):
+                    for candidate in raw_links:
+                        if isinstance(candidate, str):
+                            normalized.add(candidate)
+                        elif candidate is None:
+                            normalized.add(None)
+                elif raw_links is None and entry_id in mapping_obj:
+                    normalized.add(None)
+
+            if not normalized:
+                fallback = getattr(device, "config_subentry_id", None)
+                if isinstance(fallback, str):
+                    normalized.add(fallback)
+                elif fallback is None and isinstance(
+                    getattr(device, "config_entries", None), Iterable
+                ):
+                    for candidate_entry_id in cast(
+                        Iterable[Any], getattr(device, "config_entries", ())
+                    ):
+                        if isinstance(candidate_entry_id, str) and candidate_entry_id == entry_id:
+                            normalized.add(None)
+                            break
+
+            return normalized
+
+        def _service_has_service_link(device: Any) -> bool:
+            if service_config_subentry_id is None:
+                return False
+            return service_config_subentry_id in _service_entry_links(device)
+
+        def _service_has_hub_link(device: Any) -> bool:
+            return None in _service_entry_links(device)
+
+        def _detach_service_hub_link(device: Any) -> Any:
+            update_call = getattr(dev_reg, "async_update_device", None)
+            if not callable(update_call) or not entry_id:
+                return device
+            device_id = getattr(device, "id", None)
+            if not isinstance(device_id, str) or not device_id:
+                return device
+            self._call_device_registry_api(
+                update_call,
+                base_kwargs={
+                    "device_id": device_id,
+                    "remove_config_entry_id": entry_id,
+                    "remove_config_subentry_id": None,
+                },
+            )
+            return _refresh_service_device_entry(device)
 
         get_device = getattr(dev_reg, "async_get_device", None)
         device = None
@@ -1952,6 +2026,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # Book-keeping for quick re-entrance
         self._service_device_ready = True
         self._service_device_id = getattr(device, "id", None)
+
+        if device is not None:
+            links = _service_entry_links(device)
+            has_hub_link = None in links
+            if has_hub_link:
+                _LOGGER.info(
+                    "[%s] Removing redundant hub link from service device %s",
+                    entry.entry_id,
+                    getattr(device, "id", "<unknown>"),
+                )
+                device = _detach_service_hub_link(device)
+                self._service_device_id = getattr(device, "id", None)
 
         if device is not None:
             _LOGGER.debug(
@@ -2400,6 +2486,53 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         get_device_by_id = getattr(dev_reg, "async_get", None)
         created_or_updated = 0
 
+        def _subentry_links(device: Any) -> set[str | None]:
+            """Return tracker subentry links associated with ``entry_id``."""
+
+            if not entry_id:
+                return set()
+            mapping_obj = getattr(device, "config_entries_subentries", None)
+            if isinstance(mapping_obj, Mapping):
+                raw_links = mapping_obj.get(entry_id, set())
+                if isinstance(raw_links, set):
+                    return set(raw_links)
+                if isinstance(raw_links, (list, tuple)):
+                    return {cast(str | None, item) for item in raw_links}
+            fallback = getattr(device, "config_subentry_id", cast(str | None, None))
+            if fallback is not None:
+                return {fallback}
+            if fallback is None and getattr(device, "config_entries", None):
+                return {None}
+            return set()
+
+        def _has_tracker_link(device: Any) -> bool:
+            if tracker_config_subentry_id is None:
+                return False
+            return tracker_config_subentry_id in _subentry_links(device)
+
+        def _has_hub_link(device: Any) -> bool:
+            return None in _subentry_links(device)
+
+        def _remove_hub_link(device: Any) -> Any:
+            if (
+                not callable(update_device)
+                or not entry_id
+                or tracker_config_subentry_id is None
+            ):
+                return device
+            device_id = getattr(device, "id", "")
+            if not device_id:
+                return device
+            self._call_device_registry_api(
+                update_device,
+                base_kwargs={
+                    "device_id": device_id,
+                    "remove_config_entry_id": entry_id,
+                    "remove_config_subentry_id": None,
+                },
+            )
+            return _refresh_device_entry(device_id, device)
+
         def _update_device_with_kwargs(kwargs: dict[str, Any]) -> None:
             if not callable(update_device):
                 return
@@ -2448,8 +2581,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         new_idents.add(ns_ident)
                         needs_identifiers = new_idents != legacy_dev.identifiers
                         needs_config_subentry = (
-                            getattr(legacy_dev, "config_subentry_id", None)
-                            != tracker_config_subentry_id
+                            tracker_config_subentry_id is not None
+                            and not _has_tracker_link(legacy_dev)
                         )
                         raw_name = (d.get("name") or "").strip()
                         use_name = (
@@ -2473,10 +2606,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         ):
                             update_kwargs: dict[str, Any] = {
                                 "device_id": legacy_dev.id,
-                                "config_subentry_id": tracker_config_subentry_id,
                             }
-                            if tracker_config_subentry_id is not None:
+                            if needs_config_subentry:
                                 update_kwargs["add_config_entry_id"] = entry_id
+                                update_kwargs["add_config_subentry_id"] = (
+                                    tracker_config_subentry_id
+                                )
                             if needs_identifiers:
                                 update_kwargs["new_identifiers"] = new_idents
                             if needs_name:
@@ -2489,6 +2624,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 legacy_id or "",
                                 legacy_dev,
                             )
+                            if (
+                                tracker_config_subentry_id is not None
+                                and _has_tracker_link(legacy_dev)
+                                and _has_hub_link(legacy_dev)
+                            ):
+                                legacy_dev = _remove_hub_link(legacy_dev)
                         created_or_updated += 1
                         dev = legacy_dev
                     else:
@@ -2518,6 +2659,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     async_get_or_create,
                     base_kwargs=create_kwargs,
                 )
+                if (
+                    tracker_config_subentry_id is not None
+                    and dev is not None
+                    and _has_tracker_link(dev)
+                    and _has_hub_link(dev)
+                ):
+                    dev = _remove_hub_link(dev)
                 created_or_updated += 1
             else:
                 # Keep name fresh if not user-overridden and a new upstream label is available
@@ -2539,8 +2687,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     update_existing_kwargs["name"] = use_name
 
                 needs_config_subentry_update = (
-                    getattr(dev, "config_subentry_id", None)
-                    != tracker_config_subentry_id
+                    tracker_config_subentry_id is not None
+                    and not _has_tracker_link(dev)
                 )
 
                 needs_parent_clear = (
@@ -2558,21 +2706,35 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
                 if needs_update and callable(update_device) and device_id:
                     if needs_config_subentry_update:
-                        update_existing_kwargs["config_subentry_id"] = (
+                        update_existing_kwargs["add_config_entry_id"] = entry_id
+                        update_existing_kwargs["add_config_subentry_id"] = (
                             tracker_config_subentry_id
                         )
-                        if tracker_config_subentry_id is not None:
-                            update_existing_kwargs["add_config_entry_id"] = entry_id
                     elif (
                         tracker_config_subentry_id is not None
-                        and (name_needs_update or needs_parent_clear)
+                        and _has_tracker_link(dev)
+                        and _has_hub_link(dev)
                     ):
-                        update_existing_kwargs["config_subentry_id"] = (
-                            tracker_config_subentry_id
-                        )
-                        update_existing_kwargs["add_config_entry_id"] = entry_id
+                        update_existing_kwargs["remove_config_entry_id"] = entry_id
+                        update_existing_kwargs["remove_config_subentry_id"] = None
                     _update_device_with_kwargs(update_existing_kwargs)
                     dev = _refresh_device_entry(device_id or "", dev)
+                    if (
+                        tracker_config_subentry_id is not None
+                        and _has_tracker_link(dev)
+                        and _has_hub_link(dev)
+                    ):
+                        dev = _remove_hub_link(dev)
+                    created_or_updated += 1
+
+                elif (
+                    tracker_config_subentry_id is not None
+                    and callable(update_device)
+                    and device_id
+                    and _has_tracker_link(dev)
+                    and _has_hub_link(dev)
+                ):
+                    dev = _remove_hub_link(dev)
                     created_or_updated += 1
 
         self._apply_pending_via_updates()

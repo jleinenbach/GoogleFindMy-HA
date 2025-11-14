@@ -483,6 +483,12 @@ ensure the helper continues to accept both the legacy `via_device_id` keyword
 and the newer tuple form so regression tests can assert that the integration
 leaves both fields unset for tracker entries.
 
+Reuse `tests.helpers.service_device_stub` whenever a test needs a
+`SimpleNamespace`-based service-device object with
+`config_entries_subentries` metadata. The shared factory keeps identifier
+defaults aligned across modules and avoids drift between coordinator and
+registry-rebuild coverage as new scenarios are added.
+
 ### DeviceInfo assertion style
 
 When asserting `DeviceInfo` contents, prefer attribute access (for example,
