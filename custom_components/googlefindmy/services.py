@@ -350,25 +350,25 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     if not normalized_entry_id:
                         continue
 
-                    subentry_candidates: tuple[str, ...] = ()
+                    normalized_subentries: set[str] = set()
                     if isinstance(mapped_subentries, str):
-                        subentry_candidates = (mapped_subentries,)
+                        if mapped_subentries:
+                            normalized_subentries = {mapped_subentries}
                     elif isinstance(mapped_subentries, Iterable):
-                        subentry_candidates = tuple(
+                        normalized_subentries = {
                             candidate
                             for candidate in mapped_subentries
                             if isinstance(candidate, str) and candidate
-                        )
+                        }
 
-                    for mapped_subentry_id in subentry_candidates:
-                        if (
-                            isinstance(mapped_subentry_id, str)
-                            and mapped_subentry_id == correct_tracker_subentry_id
-                        ):
-                            tracker_linked_entry_ids.add(normalized_entry_id)
-                            break
+                    if correct_tracker_subentry_id in normalized_subentries:
+                        tracker_linked_entry_ids.add(normalized_entry_id)
 
-            is_correctly_linked_tracker = entry_id in tracker_linked_entry_ids
+            device_config_subentry_id = getattr(device, "config_subentry_id", None)
+            is_correctly_linked_tracker = (
+                isinstance(device_config_subentry_id, str)
+                and device_config_subentry_id == correct_tracker_subentry_id
+            )
 
             if is_correctly_linked_tracker:
                 continue
@@ -381,7 +381,12 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             }
 
             has_hub_link = entry_id in linked_entry_ids
-            has_tracker_link = bool(tracker_linked_entry_ids)
+            confirmed_tracker_entry_ids = {
+                candidate
+                for candidate in tracker_linked_entry_ids
+                if candidate in linked_entry_ids
+            }
+            has_tracker_link = bool(confirmed_tracker_entry_ids)
             tracker_identifier_for_log = correct_tracker_subentry_id
 
             if not has_hub_link:
@@ -411,7 +416,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 device.name or "<unknown>",
                 device.id,
                 tracker_identifier_for_log,
-                sorted(tracker_linked_entry_ids),
+                sorted(confirmed_tracker_entry_ids),
             )
             try:
                 dev_reg.async_update_device(
