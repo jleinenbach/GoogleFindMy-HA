@@ -352,9 +352,21 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 if isinstance(link_entry_id, str) and link_entry_id
             }
 
-            if correct_tracker_subentry_id not in linked_entry_ids:
+            has_hub_link = entry_id in linked_entry_ids
+            has_tracker_link = correct_tracker_subentry_id in linked_entry_ids
+
+            if not has_hub_link:
                 _LOGGER.debug(
-                    "[%s] Hub Cleanup: Skipping device '%s' (ID: %s); tracker subentry %s not yet linked.",
+                    "[%s] Hub Cleanup: Device '%s' (ID: %s) already detached from hub entry; skipping.",
+                    entry_id,
+                    device.name or "<unknown>",
+                    device.id,
+                )
+                continue
+
+            if has_tracker_link:
+                _LOGGER.debug(
+                    "[%s] Hub Cleanup: Device '%s' (ID: %s) linked to both hub entry and tracker %s; deferring cleanup.",
                     entry_id,
                     device.name or "<unknown>",
                     device.id,
@@ -363,7 +375,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             _LOGGER.info(
-                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (ID: %s).",
+                "[%s] Hub Cleanup: Detaching orphaned hub config entry from device '%s' (ID: %s).",
                 entry_id,
                 device.name or "<unknown>",
                 device.id,
