@@ -78,6 +78,20 @@ class _AddConfigSubentryFallbackRecorder:
         return "ok"
 
 
+class _RemoveConfigSubentryFallbackRecorder:
+    """Recorder that forces a retry when ``remove_config_subentry_id`` is provided."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, **kwargs: Any) -> str:
+        self.calls.append(dict(kwargs))
+        if "remove_config_subentry_id" in kwargs:
+            raise TypeError("unexpected keyword argument 'remove_config_subentry_id'")
+        assert "remove_config_entry_id" in kwargs
+        return "ok"
+
+
 def test_device_registry_wrapper_passes_kwargs() -> None:
     """The wrapper should pass kwargs to the underlying callable unchanged."""
 
@@ -214,5 +228,36 @@ def test_device_registry_wrapper_retries_with_legacy_config_subentry_kwarg(
         {
             "device_id": "device-id",
             "config_subentry_id": "service-subentry",
+        },
+    ]
+
+
+def test_device_registry_wrapper_retries_with_legacy_remove_config_subentry_kwarg() -> None:
+    """The wrapper retries without ``remove_config_subentry_id`` on legacy cores."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    recorder = _RemoveConfigSubentryFallbackRecorder()
+
+    payload: dict[str, Any] = {
+        "device_id": "device-id",
+        "remove_config_entry_id": "entry-id",
+        "remove_config_subentry_id": None,
+    }
+
+    result = coordinator._call_device_registry_api(  # type: ignore[attr-defined]
+        recorder,
+        base_kwargs=payload,
+    )
+
+    assert result == "ok"
+    assert recorder.calls == [
+        {
+            "device_id": "device-id",
+            "remove_config_entry_id": "entry-id",
+            "remove_config_subentry_id": None,
+        },
+        {
+            "device_id": "device-id",
+            "remove_config_entry_id": "entry-id",
         },
     ]

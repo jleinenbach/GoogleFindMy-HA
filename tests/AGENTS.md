@@ -483,6 +483,13 @@ ensure the helper continues to accept both the legacy `via_device_id` keyword
 and the newer tuple form so regression tests can assert that the integration
 leaves both fields unset for tracker entries.
 
+For shared Home Assistant registry stubs referenced across multiple modules,
+start with [`_StubDeviceRegistry` in `tests/conftest.py`](tests/conftest.py#L1035-L1196).
+The helper documents the canonical keyword support (`add_config_entry_id`,
+`remove_config_entry_id`, `add_config_subentry_id`, `remove_config_subentry_id`)
+and records each payload so coordinator- and service-level tests observe the
+same removal behavior.
+
 Reuse `tests.helpers.service_device_stub` whenever a test needs a
 `SimpleNamespace`-based service-device object with
 `config_entries_subentries` metadata. The shared factory keeps identifier

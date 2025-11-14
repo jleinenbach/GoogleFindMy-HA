@@ -508,3 +508,196 @@ async def test_rebuild_registry_detaches_redundant_hub_link(
         service_subentry_id
     }
     assert entry.entry_id in service_device.config_entries
+
+
+@pytest.mark.asyncio
+async def test_rebuild_registry_handles_legacy_remove_config_subentry_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry hub-detach updates when legacy cores reject the new keyword."""
+
+    entry = FakeConfigEntry(entry_id="hub-entry", title="Hub Entry")
+    tracker_subentry_id = "tracker-subentry"
+    tracker_entry_id = "tracker-config-entry"
+    service_subentry_id = "service-subentry"
+
+    service_device = service_device_stub(
+        entry_id=entry.entry_id,
+        service_subentry_id=service_subentry_id,
+        device_id="service-device",
+        name="Service Device",
+        include_hub_link=True,
+    )
+    redundant_tracker = SimpleNamespace(
+        id="tracker-device",
+        identifiers={(DOMAIN, "tracker-device")},
+        config_entries={entry.entry_id, tracker_entry_id},
+        name="Tracker Device",
+        config_subentry_id=tracker_subentry_id,
+        config_entries_subentries={
+            entry.entry_id: {None},
+            tracker_entry_id: {tracker_subentry_id},
+        },
+    )
+
+    class RaisingDeviceRegistry:
+        """Registry stub that raises on ``remove_config_subentry_id`` usage."""
+
+        def __init__(self, devices: Iterable[Any]) -> None:
+            self._devices = {device.id: device for device in devices}
+            self._identifier_index = {
+                identifier: device
+                for device in devices
+                for identifier in device.identifiers
+            }
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+            self.updated: list[tuple[str, dict[str, Any]]] = []
+
+        def async_get_device(
+            self, *, identifiers: set[tuple[str, str]] | None = None, **_: Any
+        ) -> Any | None:
+            if not identifiers:
+                return None
+            for identifier in identifiers:
+                device = self._identifier_index.get(identifier)
+                if device is not None:
+                    return device
+            return None
+
+        def async_entries_for_config_entry(self, entry_id: str) -> tuple[Any, ...]:
+            return tuple(
+                device
+                for device in self._devices.values()
+                if entry_id in device.config_entries
+            )
+
+        def async_get(self, device_id: str) -> Any | None:
+            return self._devices.get(device_id)
+
+        def async_update_device(self, device_id: str, **changes: Any) -> None:
+            self.calls.append((device_id, dict(changes)))
+            if "remove_config_subentry_id" in changes:
+                raise TypeError(
+                    "unexpected keyword argument 'remove_config_subentry_id'"
+                )
+
+            device = self._devices[device_id]
+            if "remove_config_entry_id" in changes:
+                entry_to_remove = changes["remove_config_entry_id"]
+                mapping = getattr(device, "config_entries_subentries", None)
+                removed_entry = False
+                if isinstance(mapping, dict):
+                    subset = mapping.get(entry_to_remove)
+                    if subset is not None:
+                        if changes.get("remove_config_subentry_id") is None:
+                            if None in subset:
+                                subset.discard(None)
+                            if not subset:
+                                mapping.pop(entry_to_remove, None)
+                                removed_entry = True
+                        else:
+                            subset.discard(changes["remove_config_subentry_id"])
+                            if not subset:
+                                mapping.pop(entry_to_remove, None)
+                                removed_entry = True
+                    else:
+                        removed_entry = True
+                else:
+                    removed_entry = True
+
+                if removed_entry:
+                    device.config_entries.discard(entry_to_remove)
+                elif isinstance(mapping, dict):
+                    subset = mapping.get(entry_to_remove)
+                    if subset:
+                        non_null = [item for item in subset if item is not None]
+                        if non_null and len(subset - {None}) == 1:
+                            device.config_subentry_id = non_null[0]
+                        elif len(subset) == 1 and None in subset:
+                            device.config_subentry_id = None
+                if removed_entry and not getattr(device, "config_entries_subentries", {}):
+                    device.config_subentry_id = None
+
+            self.updated.append((device_id, dict(changes)))
+
+    registry = RaisingDeviceRegistry([service_device, redundant_tracker])
+
+    manager = FakeConfigEntriesManager([entry])
+    hass = FakeHass(manager)
+
+    tracker_metadata = SimpleNamespace(
+        config_subentry_id=tracker_subentry_id,
+        entry_id=tracker_entry_id,
+    )
+    service_metadata = SimpleNamespace(
+        config_subentry_id=service_subentry_id,
+        entry_id="service-config-entry",
+    )
+
+    def _metadata(*, key: str) -> SimpleNamespace | None:
+        if key == TRACKER_SUBENTRY_KEY:
+            return tracker_metadata
+        if key == SERVICE_SUBENTRY_KEY:
+            return service_metadata
+        return None
+
+    coordinator = SimpleNamespace(
+        config_entry=entry,
+        data=[],
+        name="Coordinator",
+        _ensure_registry_for_devices=lambda devices, ignored: 0,
+        _get_ignored_set=lambda: set(),
+        _ensure_service_device_exists=lambda: None,
+        get_subentry_metadata=_metadata,
+    )
+
+    runtime = SimpleNamespace(coordinator=coordinator)
+    entry.runtime_data = runtime
+    hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})[entry.entry_id] = runtime
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.services.dr.async_get",
+        lambda hass: registry,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.services.dr.async_entries_for_config_entry",
+        device_registry_async_entries_for_config_entry,
+        raising=False,
+    )
+
+    entity_registry = FakeEntityRegistry()
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.services.er.async_get",
+        lambda hass: entity_registry,
+    )
+
+    await services.async_rebuild_device_registry(hass, ServiceCall({}))
+
+    assert registry.calls == [
+        (
+            "service-device",
+            {
+                "remove_config_entry_id": entry.entry_id,
+                "remove_config_subentry_id": None,
+            },
+        ),
+        ("service-device", {"remove_config_entry_id": entry.entry_id}),
+        (
+            "tracker-device",
+            {
+                "remove_config_entry_id": entry.entry_id,
+                "remove_config_subentry_id": None,
+            },
+        ),
+        ("tracker-device", {"remove_config_entry_id": entry.entry_id}),
+    ]
+    assert registry.updated == [
+        ("service-device", {"remove_config_entry_id": entry.entry_id}),
+        ("tracker-device", {"remove_config_entry_id": entry.entry_id}),
+    ]
+    assert entry.entry_id not in redundant_tracker.config_entries
+    assert redundant_tracker.config_entries_subentries[entry.entry_id] == set()
+    assert service_device.config_entries_subentries[entry.entry_id] == {
+        service_subentry_id
+    }
+    assert service_device.config_subentry_id == service_subentry_id

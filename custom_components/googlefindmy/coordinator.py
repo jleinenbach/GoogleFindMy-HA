@@ -65,7 +65,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from types import MappingProxyType, SimpleNamespace
 
 if TYPE_CHECKING:
@@ -1621,6 +1621,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return True
         if "add_config_subentry_id" in kwargs and "add_config_subentry_id" in err_str:
             return True
+        if (
+            "remove_config_subentry_id" in kwargs
+            and "remove_config_subentry_id" in err_str
+        ):
+            return True
         return False
 
     @staticmethod
@@ -1636,6 +1641,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             legacy_kwargs["config_subentry_id"] = legacy_kwargs.pop(
                 "add_config_subentry_id"
             )
+        if "remove_config_subentry_id" in legacy_kwargs:
+            legacy_kwargs.pop("remove_config_subentry_id")
         return legacy_kwargs
 
     def _device_registry_config_subentry_kwarg_name(
@@ -2493,11 +2500,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return set()
             mapping_obj = getattr(device, "config_entries_subentries", None)
             if isinstance(mapping_obj, Mapping):
-                raw_links = mapping_obj.get(entry_id, set())
-                if isinstance(raw_links, set):
-                    return set(raw_links)
-                if isinstance(raw_links, (list, tuple)):
-                    return {cast(str | None, item) for item in raw_links}
+                raw_links = mapping_obj.get(entry_id)
+                if isinstance(raw_links, Collection) and not isinstance(
+                    raw_links, (str, bytes, Mapping)
+                ):
+                    return {
+                        cast(str | None, item)
+                        for item in raw_links
+                        if item is None or isinstance(item, str)
+                    }
+                if raw_links is None:
+                    return set()
             fallback = getattr(device, "config_subentry_id", cast(str | None, None))
             if fallback is not None:
                 return {fallback}
