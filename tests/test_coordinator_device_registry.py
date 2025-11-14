@@ -79,7 +79,35 @@ class _FakeDeviceEntry:
         self.configuration_url = configuration_url
         self.translation_key = translation_key
         self.translation_placeholders = translation_placeholders
+        subentry_set: set[str | None]
+        if config_subentry_id is None:
+            subentry_set = {None}
+        else:
+            subentry_set = {config_subentry_id}
+        self.config_entries_subentries: dict[str, set[str | None]] = {
+            config_entry_id: set(subentry_set)
+        }
+        # Backwards-compat attribute used by legacy assertions; keep in sync with
+        # the single-subentry view when applicable.
         self.config_subentry_id = config_subentry_id
+
+    def _sync_config_subentry_id(self, entry_id: str) -> None:
+        """Keep the legacy config_subentry_id attribute aligned with mappings."""
+
+        subentries = self.config_entries_subentries.get(entry_id)
+        if not subentries:
+            self.config_subentry_id = None
+            return
+        # Prefer deterministic ordering for stable expectations.
+        non_null = [candidate for candidate in subentries if candidate is not None]
+        if len(subentries) == 1 and not non_null:
+            self.config_subentry_id = None
+        elif len(non_null) == 1:
+            self.config_subentry_id = non_null[0]
+        else:
+            # When multiple tracker subentries are attached, surface None to make
+            # assertions explicitly inspect the mapping instead of the shortcut.
+            self.config_subentry_id = None
 
 
 _UNSET_DEVICE = object()
@@ -121,24 +149,37 @@ class _FakeDeviceRegistry:
     ) -> _FakeDeviceEntry:
         existing = self.async_get_device(identifiers=identifiers)
         if existing is not None:
-            if name is not None:
-                existing.name = name
-            existing.manufacturer = manufacturer
-            existing.model = model
-            existing.sw_version = kwargs.get("sw_version")
-            existing.entry_type = kwargs.get("entry_type")
-            existing.configuration_url = kwargs.get("configuration_url")
-            translation_key = kwargs.get("translation_key")
-            if translation_key is not None:
-                existing.translation_key = translation_key
-            translation_placeholders = kwargs.get("translation_placeholders")
-            if translation_placeholders is not None:
-                existing.translation_placeholders = translation_placeholders
-            config_subentry_id = kwargs.get("config_subentry_id")
-            if config_subentry_id is not None:
-                existing.config_subentry_id = config_subentry_id
-            existing.identifiers = set(existing.identifiers) | set(identifiers)
-            return existing
+            mapping = {
+                entry_id: set(subentries)
+                for entry_id, subentries in existing.config_entries_subentries.items()
+            }
+            config_entries = set(existing.config_entries)
+            config_entries.add(config_entry_id)
+            subentries = mapping.setdefault(config_entry_id, set())
+            provided_subentry = kwargs.get("config_subentry_id")
+            if provided_subentry is not None:
+                subentries.add(provided_subentry)
+            elif not subentries:
+                subentries.add(None)
+            new_entry = replace(
+                existing,
+                name=name if name is not None else existing.name,
+                manufacturer=manufacturer,
+                model=model,
+                sw_version=kwargs.get("sw_version"),
+                entry_type=kwargs.get("entry_type"),
+                configuration_url=kwargs.get("configuration_url"),
+                translation_key=kwargs.get("translation_key"),
+                translation_placeholders=cast(
+                    Mapping[str, str] | None,
+                    kwargs.get("translation_placeholders"),
+                ),
+                config_entries=frozenset(config_entries),
+                config_entries_subentries=self._normalize_subentries(mapping),
+                config_subentry_id=self._canonical_config_subentry(mapping),
+            )
+            self._store(new_entry)
+            return new_entry
 
         entry = _FakeDeviceEntry(
             identifiers=identifiers,
@@ -184,7 +225,10 @@ class _FakeDeviceRegistry:
         name: str | None = None,
         translation_key: str | None = None,
         translation_placeholders: dict[str, str] | None = None,
-        config_subentry_id: str | None = None,
+        add_config_entry_id: str | None = None,
+        add_config_subentry_id: str | None = None,
+        remove_config_entry_id: str | None = None,
+        remove_config_subentry_id: str | None = None,
         **kwargs: Any,
     ) -> None:
         for device in self.devices:
@@ -199,8 +243,44 @@ class _FakeDeviceRegistry:
                     device.translation_key = translation_key
                 if translation_placeholders is not None:
                     device.translation_placeholders = translation_placeholders
-                if config_subentry_id is not None:
-                    device.config_subentry_id = config_subentry_id
+                if add_config_entry_id:
+                    device.config_entries.add(add_config_entry_id)
+                    subentries = device.config_entries_subentries.setdefault(
+                        add_config_entry_id, set()
+                    )
+                    if add_config_subentry_id is None:
+                        subentries.add(None)
+                    else:
+                        subentries.add(add_config_subentry_id)
+                    device._sync_config_subentry_id(add_config_entry_id)
+                elif add_config_subentry_id is not None:
+                    # Tests cover the "missing add_config_entry_id" regression by
+                    # recording the raw payload. Mimic Home Assistant's error by
+                    # raising so assertions fail loudly instead of silently mutating
+                    # the stub state.
+                    raise AssertionError(
+                        "add_config_subentry_id provided without add_config_entry_id"
+                    )
+                if remove_config_entry_id:
+                    subentries = device.config_entries_subentries.get(
+                        remove_config_entry_id
+                    )
+                    if remove_config_subentry_id is None:
+                        if subentries is not None:
+                            subentries.discard(None)
+                            if not subentries:
+                                device.config_entries_subentries.pop(
+                                    remove_config_entry_id, None
+                                )
+                                device.config_entries.discard(remove_config_entry_id)
+                    elif subentries is not None:
+                        subentries.discard(remove_config_subentry_id)
+                        if not subentries:
+                            device.config_entries_subentries.pop(
+                                remove_config_entry_id, None
+                            )
+                            device.config_entries.discard(remove_config_entry_id)
+                    device._sync_config_subentry_id(remove_config_entry_id)
                 if "manufacturer" in kwargs:
                     device.manufacturer = kwargs["manufacturer"]
                 if "model" in kwargs:
@@ -223,14 +303,17 @@ class _FakeDeviceRegistry:
                         "name": name,
                         "translation_key": translation_key,
                         "translation_placeholders": translation_placeholders,
-                        "config_subentry_id": config_subentry_id,
+                        "config_entry_id": add_config_entry_id,
+                        "config_subentry_id": add_config_subentry_id,
+                        "add_config_entry_id": add_config_entry_id,
+                        "add_config_subentry_id": add_config_subentry_id,
+                        "remove_config_entry_id": remove_config_entry_id,
+                        "remove_config_subentry_id": remove_config_subentry_id,
                         "manufacturer": kwargs.get("manufacturer"),
                         "model": kwargs.get("model"),
                         "sw_version": kwargs.get("sw_version"),
                         "entry_type": kwargs.get("entry_type"),
                         "configuration_url": kwargs.get("configuration_url"),
-                        "add_config_entry_id": kwargs.get("add_config_entry_id"),
-                        "config_entry_id": kwargs.get("config_entry_id"),
                     }
                 )
                 return
@@ -260,6 +343,7 @@ class _FrozenDeviceEntry:
     translation_key: str | None = None
     translation_placeholders: Mapping[str, str] | None = None
     config_subentry_id: str | None = None
+    config_entries_subentries: Mapping[str, frozenset[str | None]] = MappingProxyType({})
 
 
 class _FrozenDeviceRegistry:
@@ -284,6 +368,34 @@ class _FrozenDeviceRegistry:
                 break
         else:
             self.devices.append(entry)
+
+    @staticmethod
+    def _normalize_subentries(
+        mapping: Mapping[str, set[str | None]]
+    ) -> Mapping[str, frozenset[str | None]]:
+        normalized: dict[str, frozenset[str | None]] = {}
+        for entry_id, items in mapping.items():
+            if not items:
+                continue
+            subset = {item for item in items if item is not None}
+            if None in items:
+                subset.add(None)
+            normalized[entry_id] = frozenset(subset)
+        return MappingProxyType(normalized)
+
+    @staticmethod
+    def _canonical_config_subentry(
+        mapping: Mapping[str, set[str | None]]
+    ) -> str | None:
+        non_null = [
+            candidate
+            for subentries in mapping.values()
+            for candidate in subentries
+            if candidate is not None
+        ]
+        if len(non_null) == 1:
+            return non_null[0]
+        return None
 
     def async_get(self, device_id: str) -> _FrozenDeviceEntry | None:
         return self._devices.get(device_id)
@@ -313,6 +425,11 @@ class _FrozenDeviceRegistry:
             return existing
 
         device_id = self._next_id(config_entry_id)
+        initial_subentries: dict[str, set[str | None]] = {}
+        provided_subentry = kwargs.get("config_subentry_id")
+        initial_subentries[config_entry_id] = (
+            {provided_subentry} if provided_subentry is not None else {None}
+        )
         entry = _FrozenDeviceEntry(
             id=device_id,
             identifiers=frozenset(identifiers),
@@ -329,7 +446,8 @@ class _FrozenDeviceRegistry:
             translation_placeholders=cast(
                 Mapping[str, str] | None, kwargs.get("translation_placeholders")
             ),
-            config_subentry_id=kwargs.get("config_subentry_id"),
+            config_subentry_id=self._canonical_config_subentry(initial_subentries),
+            config_entries_subentries=self._normalize_subentries(initial_subentries),
         )
         self._store(entry)
         self.created.append(
@@ -360,12 +478,21 @@ class _FrozenDeviceRegistry:
         name: str | None | object = _UNSET,
         translation_key: str | None = None,
         translation_placeholders: Mapping[str, str] | None = None,
-        config_subentry_id: str | None = None,
+        add_config_entry_id: str | None = None,
+        add_config_subentry_id: str | None = None,
+        remove_config_entry_id: str | None = None,
+        remove_config_subentry_id: str | None = None,
         **kwargs: Any,
     ) -> None:
         entry = self._devices.get(device_id)
         if entry is None:
             raise AssertionError(f"Unknown device_id {device_id}")
+
+        mapping = {
+            entry_id: set(subentries)
+            for entry_id, subentries in entry.config_entries_subentries.items()
+        }
+        config_entries = set(entry.config_entries)
 
         replace_kwargs: dict[str, Any] = {}
         if new_identifiers is not None:
@@ -378,11 +505,39 @@ class _FrozenDeviceRegistry:
             replace_kwargs["translation_key"] = translation_key
         if translation_placeholders is not None:
             replace_kwargs["translation_placeholders"] = dict(translation_placeholders)
-        if config_subentry_id is not None:
-            replace_kwargs["config_subentry_id"] = config_subentry_id
         for field in ("manufacturer", "model", "sw_version", "entry_type", "configuration_url"):
             if field in kwargs:
                 replace_kwargs[field] = kwargs[field]
+
+        if add_config_entry_id:
+            config_entries.add(add_config_entry_id)
+            subentries = mapping.setdefault(add_config_entry_id, set())
+            if add_config_subentry_id is None:
+                subentries.add(None)
+            else:
+                subentries.add(add_config_subentry_id)
+        elif add_config_subentry_id is not None:
+            raise AssertionError(
+                "add_config_subentry_id provided without add_config_entry_id"
+            )
+
+        if remove_config_entry_id:
+            subentries = mapping.get(remove_config_entry_id)
+            if remove_config_subentry_id is None:
+                if subentries is not None:
+                    subentries.discard(None)
+                    if not subentries:
+                        mapping.pop(remove_config_entry_id, None)
+                        config_entries.discard(remove_config_entry_id)
+            elif subentries is not None:
+                subentries.discard(remove_config_subentry_id)
+                if not subentries:
+                    mapping.pop(remove_config_entry_id, None)
+                    config_entries.discard(remove_config_entry_id)
+
+        replace_kwargs["config_entries"] = frozenset(config_entries)
+        replace_kwargs["config_entries_subentries"] = self._normalize_subentries(mapping)
+        replace_kwargs["config_subentry_id"] = self._canonical_config_subentry(mapping)
 
         new_entry = replace(entry, **replace_kwargs)
         self._store(new_entry)
@@ -396,7 +551,12 @@ class _FrozenDeviceRegistry:
                 "name": None if name is _UNSET else cast(str | None, name),
                 "translation_key": translation_key,
                 "translation_placeholders": translation_placeholders,
-                "config_subentry_id": config_subentry_id,
+                "config_entry_id": add_config_entry_id,
+                "config_subentry_id": add_config_subentry_id,
+                "add_config_entry_id": add_config_entry_id,
+                "add_config_subentry_id": add_config_subentry_id,
+                "remove_config_entry_id": remove_config_entry_id,
+                "remove_config_subentry_id": remove_config_subentry_id,
                 "manufacturer": kwargs.get("manufacturer"),
                 "model": kwargs.get("model"),
                 "sw_version": kwargs.get("sw_version"),
@@ -415,13 +575,17 @@ class _FrozenDeviceRegistry:
         config_subentry_id: str | None = None,
     ) -> _FrozenDeviceEntry:
         device_id = self._next_id(config_entry_id)
+        initial_subentries: dict[str, set[str | None]] = {
+            config_entry_id: {config_subentry_id} if config_subentry_id else {None}
+        }
         entry = _FrozenDeviceEntry(
             id=device_id,
             identifiers=frozenset(identifiers),
             config_entries=frozenset({config_entry_id}),
             name=name,
             via_device_id=via_device_id,
-            config_subentry_id=config_subentry_id,
+            config_subentry_id=self._canonical_config_subentry(initial_subentries),
+            config_entries_subentries=self._normalize_subentries(initial_subentries),
         )
         self._store(entry)
         return entry
@@ -654,7 +818,10 @@ def test_legacy_device_migrates_without_service_parent(
     assert legacy.via_device_id is None
     assert legacy.identifiers == {(DOMAIN, "abc123"), (DOMAIN, "entry-42:abc123")}
     assert fake_registry.updated[0]["via_device_id"] is None
-    assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
+    assert fake_registry.updated[0]["add_config_subentry_id"] == entry.tracker_subentry_id
+    assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
+    assert fake_registry.updated[-1]["remove_config_entry_id"] == entry.entry_id
+    assert fake_registry.updated[-1]["remove_config_subentry_id"] is None
     assert legacy.name == "Pixel"
     assert legacy.config_subentry_id == entry.tracker_subentry_id
 
@@ -747,7 +914,10 @@ def test_existing_device_remains_standalone(
     assert created == 1
     assert fake_registry.updated[0]["via_device_id"] is None
     assert existing.via_device_id is None
-    assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
+    assert fake_registry.updated[0]["add_config_subentry_id"] == entry.tracker_subentry_id
+    assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
+    assert fake_registry.updated[-1]["remove_config_entry_id"] == entry.entry_id
+    assert fake_registry.updated[-1]["remove_config_subentry_id"] is None
     assert existing.config_subentry_id == entry.tracker_subentry_id
 
 
@@ -779,19 +949,22 @@ def test_existing_device_backfills_config_subentry(
     )
 
     assert created == 1
-    assert len(fake_registry.updated) == 1
+    assert len(fake_registry.updated) >= 1
     payload = fake_registry.updated[0]
     assert payload["device_id"] == existing.id
-    assert payload["config_subentry_id"] == entry.tracker_subentry_id
+    assert payload["add_config_subentry_id"] == entry.tracker_subentry_id
+    assert payload["add_config_entry_id"] == entry.entry_id
     assert payload["via_device_id"] is None
+    assert fake_registry.updated[-1]["remove_config_entry_id"] == entry.entry_id
+    assert fake_registry.updated[-1]["remove_config_subentry_id"] is None
     assert existing.config_subentry_id == entry.tracker_subentry_id
     assert existing.via_device_id is None
 
 
-def test_existing_device_name_refresh_uses_add_config_entry_id(
+def test_existing_device_name_refresh_does_not_readd_hub_link(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:
-    """Name refreshes keep config-entry linkage for tracker devices."""
+    """Name refreshes avoid touching config-entry linkage for tracker devices."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     entry = _build_entry_with_subentries("entry-42")
@@ -819,9 +992,10 @@ def test_existing_device_name_refresh_uses_add_config_entry_id(
     assert fake_registry.updated
     payload = fake_registry.updated[-1]
     assert payload["name"] == "Fresh Label"
-    assert payload["config_subentry_id"] == entry.tracker_subentry_id
+    assert payload["config_subentry_id"] is None
     assert payload["via_device_id"] is None
-    assert payload["add_config_entry_id"] == entry.entry_id
+    assert payload["add_config_entry_id"] is None
+    assert payload["remove_config_entry_id"] is None
     assert existing.via_device_id is None
     assert existing.config_subentry_id == entry.tracker_subentry_id
 
@@ -857,9 +1031,10 @@ def test_existing_device_parent_clear_keeps_subentry(
     assert fake_registry.updated
     payload = fake_registry.updated[-1]
     assert payload["device_id"] == existing.id
-    assert payload["config_subentry_id"] == entry.tracker_subentry_id
+    assert payload["config_subentry_id"] is None
     assert payload["via_device_id"] is None
-    assert payload["add_config_entry_id"] == entry.entry_id
+    assert payload["add_config_entry_id"] is None
+    assert payload["remove_config_entry_id"] is None
     assert existing.via_device_id is None
     assert existing.config_subentry_id == entry.tracker_subentry_id
 

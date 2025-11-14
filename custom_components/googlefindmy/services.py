@@ -406,15 +406,6 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     if correct_tracker_subentry_id in normalized_subentries:
                         tracker_linked_entry_ids.add(normalized_entry_id)
 
-            device_config_subentry_id = getattr(device, "config_subentry_id", None)
-            is_correctly_linked_tracker = (
-                isinstance(device_config_subentry_id, str)
-                and device_config_subentry_id == correct_tracker_subentry_id
-            )
-
-            if is_correctly_linked_tracker:
-                continue
-
             raw_links = getattr(device, "config_entries", set()) or set()
             linked_entry_ids = {
                 str(link_entry_id)
@@ -430,7 +421,14 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             }
             if tracker_entry_id and tracker_entry_id in linked_entry_ids:
                 confirmed_tracker_entry_ids.add(tracker_entry_id)
-            has_tracker_link = bool(confirmed_tracker_entry_ids)
+            device_config_subentry_id = getattr(device, "config_subentry_id", None)
+            is_correctly_linked_tracker = (
+                isinstance(device_config_subentry_id, str)
+                and device_config_subentry_id == correct_tracker_subentry_id
+            )
+            has_tracker_link = bool(confirmed_tracker_entry_ids) or (
+                is_correctly_linked_tracker and bool(linked_entry_ids)
+            )
 
             if not has_hub_link:
                 _LOGGER.debug(
@@ -443,27 +441,28 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             if has_tracker_link:
-                _LOGGER.debug(
-                    "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); tracker config entry '%s' already linked.",
+                _LOGGER.info(
+                    "[%s] Hub Cleanup: Detaching redundant hub config entry from device '%s' (device_id=%s); tracker link '%s' already active. Linked entries prior to cleanup: %s",
                     entry_id,
                     device.name or "<unknown>",
                     device.id,
                     tracker_identifier_for_log,
+                    sorted(linked_entry_ids),
                 )
-                continue
-
-            _LOGGER.info(
-                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (device_id=%s); tracker link '%s' not found. Linked entries prior to cleanup: %s",
-                entry_id,
-                device.name or "<unknown>",
-                device.id,
-                tracker_identifier_for_log,
-                sorted(linked_entry_ids),
-            )
+            else:
+                _LOGGER.info(
+                    "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (device_id=%s); tracker link '%s' not found. Linked entries prior to cleanup: %s",
+                    entry_id,
+                    device.name or "<unknown>",
+                    device.id,
+                    tracker_identifier_for_log,
+                    sorted(linked_entry_ids),
+                )
             try:
                 dev_reg.async_update_device(
                     device.id,
                     remove_config_entry_id=entry_id,
+                    remove_config_subentry_id=None,
                 )
                 cleaned_devices_entry += 1
             except Exception as err:
