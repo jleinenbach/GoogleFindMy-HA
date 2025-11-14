@@ -888,6 +888,52 @@ def test_frozen_legacy_device_merges_identifiers(
     assert refreshed.config_subentry_id == entry.tracker_subentry_id
 
 
+def test_frozen_registry_removes_hub_link_with_frozenset(
+    frozen_registry: _FrozenDeviceRegistry,
+) -> None:
+    """Hub links are removed when subentry sets are exposed as frozensets."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-42")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    coordinator._ensure_service_device_exists()
+
+    existing = frozen_registry.seed_device(
+        identifiers={(DOMAIN, "entry-42:abc123")},
+        config_entry_id=entry.entry_id,
+        name="Pixel",
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+
+    frozen_registry.async_update_device(
+        device_id=existing.id,
+        add_config_entry_id=entry.entry_id,
+        add_config_subentry_id=None,
+    )
+    frozen_registry.updated.clear()
+
+    devices = [{"id": "abc123", "name": "Pixel"}]
+    coordinator.data = devices
+
+    created = coordinator._ensure_registry_for_devices(
+        devices=devices,
+        ignored=set(),
+    )
+
+    assert created == 1
+    assert frozen_registry.updated
+    removal_payload = frozen_registry.updated[-1]
+    assert removal_payload["remove_config_entry_id"] == entry.entry_id
+    assert removal_payload["remove_config_subentry_id"] is None
+
+    refreshed = frozen_registry.async_get(existing.id)
+    assert refreshed is not None
+    subentries = refreshed.config_entries_subentries.get(entry.entry_id)
+    assert subentries is not None
+    assert None not in subentries
+    assert entry.tracker_subentry_id in subentries
+
+
 def test_existing_device_remains_standalone(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:

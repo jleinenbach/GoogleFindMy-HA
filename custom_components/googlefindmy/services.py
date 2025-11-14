@@ -108,6 +108,46 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
         _LOGGER.warning("Device registry cleanup skipped: No entries bucket found.")
         return
 
+    def _detach_hub_link_from_device(
+        device_id: str,
+        *,
+        context_label: str,
+        error_log_template: str,
+    ) -> bool:
+        """Remove the hub link from ``device_id`` with legacy kwarg support."""
+
+        try:
+            dev_reg.async_update_device(
+                device_id,
+                remove_config_entry_id=entry_id,
+                remove_config_subentry_id=None,
+            )
+        except TypeError as err:
+            if "remove_config_subentry_id" not in str(err):
+                _LOGGER.error(error_log_template, entry_id, device_id, err)
+                return False
+            _LOGGER.debug(
+                "[%s] Hub Cleanup: Retrying device registry update for %s %s without remove_config_subentry_id after %s",
+                entry_id,
+                context_label,
+                device_id,
+                err,
+            )
+            try:
+                dev_reg.async_update_device(
+                    device_id,
+                    remove_config_entry_id=entry_id,
+                )
+            except Exception as retry_err:  # pragma: no cover - defensive guard
+                _LOGGER.error(error_log_template, entry_id, device_id, retry_err)
+                return False
+            return True
+        except Exception as err:  # pragma: no cover - defensive guard
+            _LOGGER.error(error_log_template, entry_id, device_id, err)
+            return False
+
+        return True
+
     def _extract_hub_details(candidate: Any) -> tuple[str, Mapping[Any, Any]] | None:
         """Normalize hub container details from the runtime bucket."""
 
@@ -375,25 +415,17 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 sorted(link for link in service_links if link is not None)
                 + (["<hub>"] if None in service_links else []),
             )
-            try:
-                dev_reg.async_update_device(
-                    service_device_id,
-                    remove_config_entry_id=entry_id,
-                    remove_config_subentry_id=None,
-                )
+            if _detach_hub_link_from_device(
+                service_device_id,
+                context_label="service device",
+                error_log_template="[%s] Hub Cleanup: Failed to detach hub entry from service device %s: %s",
+            ):
                 service_cleanup_applied = True
                 refresh_service = getattr(dev_reg, "async_get", None)
                 if callable(refresh_service):
                     refreshed = refresh_service(service_device_id)
                     if refreshed is not None:
                         service_device = refreshed
-            except Exception as err:
-                _LOGGER.error(
-                    "[%s] Hub Cleanup: Failed to detach hub entry from service device %s: %s",
-                    entry_id,
-                    service_device_id,
-                    err,
-                )
 
         # 2. Find the correct Tracker Subentry ID
         # We access the coordinator's metadata which was refreshed during setup
@@ -554,20 +586,12 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     tracker_identifier_for_log,
                     sorted(linked_entry_ids),
                 )
-            try:
-                dev_reg.async_update_device(
-                    device.id,
-                    remove_config_entry_id=entry_id,
-                    remove_config_subentry_id=None,
-                )
+            if _detach_hub_link_from_device(
+                device.id,
+                context_label="device",
+                error_log_template="[%s] Hub Cleanup: Failed to detach hub entry from device %s: %s",
+            ):
                 cleaned_devices_entry += 1
-            except Exception as err:
-                _LOGGER.error(
-                    "[%s] Hub Cleanup: Failed to detach hub entry from device %s: %s",
-                    entry_id,
-                    device.id,
-                    err,
-                )
 
         if cleaned_devices_entry > 0:
             _LOGGER.info(

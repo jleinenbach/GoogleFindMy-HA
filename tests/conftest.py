@@ -1119,6 +1119,8 @@ def _stub_homeassistant() -> None:
             add_config_subentry_id: object = _MISSING,
             config_entry_id: object = _MISSING,
             add_config_entry_id: object = _MISSING,
+            remove_config_entry_id: object = _MISSING,
+            remove_config_subentry_id: object = _MISSING,
             name: str | None = None,
             manufacturer: str | None = None,
             model: str | None = None,
@@ -1150,11 +1152,20 @@ def _stub_homeassistant() -> None:
                 updates["add_config_entry_id"] = cast(
                     str | None, add_config_entry_id
                 )
+            if remove_config_entry_id is not _MISSING:
+                entries = set(getattr(device, "config_entries", set()) or set())
+                if remove_config_entry_id is None:
+                    entries.clear()
+                else:
+                    entries.discard(cast(str, remove_config_entry_id))
+                device.config_entries = entries
             effective_subentry = _MISSING
             if config_subentry_id is not _MISSING:
                 effective_subentry = config_subentry_id
             elif add_config_subentry_id is not _MISSING:
                 effective_subentry = add_config_subentry_id
+            elif remove_config_subentry_id is not _MISSING:
+                effective_subentry = None
             if effective_subentry is not _MISSING:
                 device.config_subentry_id = cast(str | None, effective_subentry)
                 updates["config_subentry_id"] = cast(str | None, effective_subentry)
@@ -1206,6 +1217,12 @@ def _stub_homeassistant() -> None:
                     "add_config_entry_id": None
                     if add_config_entry_id is _MISSING
                     else cast(str | None, add_config_entry_id),
+                    "remove_config_entry_id": None
+                    if remove_config_entry_id is _MISSING
+                    else cast(str | None, remove_config_entry_id),
+                    "remove_config_subentry_id": None
+                    if remove_config_subentry_id is _MISSING
+                    else cast(str | None, remove_config_subentry_id),
                 }
             )
 
