@@ -353,7 +353,15 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             # Check if the device is correctly linked to the tracker subentry
-            if device.config_subentry_id == correct_tracker_subentry_id:
+            # --- START RESOLVED CONFLICT 1 (from Bugfixes-for-1.6-beta3) ---
+            # Use robust getattr for safety
+            device_config_subentry_id = getattr(device, "config_subentry_id", None)
+            is_correctly_linked_tracker = (
+                device_config_subentry_id == correct_tracker_subentry_id
+            )
+
+            if is_correctly_linked_tracker:
+            # --- END RESOLVED CONFLICT 1 ---
                 continue
 
             raw_links = getattr(device, "config_entries", set()) or set()
@@ -364,6 +372,8 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             }
 
             has_hub_link = entry_id in linked_entry_ids
+            # --- START RESOLVED CONFLICT 2 (from codex/refactor-async_rebuild_device_registry) ---
+            # Use the correct tracker_entry_id (Config Entry ID) for the check
             has_tracker_link = bool(
                 tracker_entry_id and tracker_entry_id in linked_entry_ids
             )
@@ -376,12 +386,15 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     device.name or "<unknown>",
                     device.id,
                     entry_id,
+            # --- END RESOLVED CONFLICT 2 ---
                 )
                 continue
 
             if has_tracker_link:
                 _LOGGER.debug(
+            # --- START RESOLVED CONFLICT 3 (from codex/refactor-async_rebuild_device_registry) ---
                     "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); tracker config entry '%s' already linked.",
+            # --- END RESOLVED CONFLICT 3 ---
                     entry_id,
                     device.name or "<unknown>",
                     device.id,
@@ -390,7 +403,9 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             _LOGGER.info(
+            # --- START RESOLVED CONFLICT 4 (from codex/refactor-async_rebuild_device_registry) ---
                 "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (device_id=%s).",
+            # --- END RESOLVED CONFLICT 4 ---
                 entry_id,
                 device.name or "<unknown>",
                 device.id,
