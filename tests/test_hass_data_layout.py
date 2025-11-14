@@ -692,6 +692,27 @@ def test_hass_data_layout(
         if not hasattr(entity_platform_module, "AddEntitiesCallback"):
             entity_platform_module.AddEntitiesCallback = Callable[[list[Any]], None]
 
+        class _StubPlatform:
+            def async_register_platform_entity_service(
+                self, *_: Any, **__: Any
+            ) -> None:
+                return None
+
+            def async_register_entity_service(self, *_: Any, **__: Any) -> None:
+                return None
+
+        monkeypatch.setattr(
+            entity_platform_module,
+            "async_get_current_platform",
+            lambda: _StubPlatform(),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "homeassistant.helpers.entity_platform.async_get_current_platform",
+            lambda: _StubPlatform(),
+            raising=False,
+        )
+
         helpers_pkg = sys.modules.setdefault(
             "homeassistant.helpers", ModuleType("homeassistant.helpers")
         )
@@ -758,6 +779,12 @@ def test_hass_data_layout(
         integration = harness.integration
         button_module = harness.button_module
         map_view_module = harness.map_view_module
+        monkeypatch.setattr(
+            button_module.entity_platform,
+            "async_get_current_platform",
+            lambda: _StubPlatform(),
+            raising=False,
+        )
         entry = harness.entry
         hass = harness.hass
         cache = harness.cache
@@ -778,7 +805,20 @@ def test_hass_data_layout(
             expected_subentries = {
                 subentry.subentry_id for subentry in entry.subentries.values()
             }
-            assert set(hass.config_entries.setup_calls) == expected_subentries
+            assert len(expected_subentries) == len(entry.subentries)
+
+            assert len(hass.config_entries.forward_calls) == 1
+            forwarded_entry, forwarded_platforms, forwarded_subentry_id = (
+                hass.config_entries.forward_calls[0]
+            )
+            assert forwarded_entry is entry
+            assert forwarded_subentry_id is None
+            forwarded_names = _platform_names(forwarded_platforms)
+            assert len(forwarded_names) == len(set(forwarded_names))
+            expected_platforms = set(TRACKER_FEATURE_PLATFORMS) | set(
+                SERVICE_FEATURE_PLATFORMS
+            )
+            assert set(forwarded_names) == expected_platforms
 
             domain_bucket = hass.data[DOMAIN]
             assert entry.entry_id not in domain_bucket
@@ -1095,27 +1135,28 @@ async def test_async_setup_entry_propagates_subentry_registration(
     if hass._tasks:
         await asyncio.gather(*hass._tasks)
 
-    created_subentries = {subentry.subentry_id for subentry in entry.subentries.values()}
-    call_identifiers = {identifier for identifier, _ in forward_calls if identifier}
-    assert call_identifiers == created_subentries
-    assert len(forward_calls) == len(created_subentries)
+    created_subentries = {
+        subentry.subentry_id for subentry in entry.subentries.values()
+    }
+    assert len(created_subentries) == len(entry.subentries)
 
-    expected_platforms: dict[str, tuple[str, ...]] = {}
+    assert len(forward_calls) == 1
+    forwarded_identifier, forwarded_platforms = forward_calls[0]
+    assert forwarded_identifier is None
+    forwarded_names = _platform_names(forwarded_platforms)
+    assert len(forwarded_names) == len(set(forwarded_names))
+
+    expected_platforms: set[str] = set()
     for key, subentry in entry.subentries.items():
-        identifier = getattr(subentry, "config_subentry_id", subentry.subentry_id)
         data_features = getattr(subentry, "data", {}).get("features")
         if isinstance(data_features, (list, tuple)):
-            expected_platforms[identifier] = tuple(str(feature) for feature in data_features)
+            expected_platforms.update(str(feature) for feature in data_features)
         elif key == TRACKER_SUBENTRY_KEY:
-            expected_platforms[identifier] = integration.TRACKER_FEATURE_PLATFORMS
+            expected_platforms.update(integration.TRACKER_FEATURE_PLATFORMS)
         else:
-            expected_platforms[identifier] = integration.SERVICE_FEATURE_PLATFORMS
+            expected_platforms.update(integration.SERVICE_FEATURE_PLATFORMS)
 
-    assert {
-        identifier: _platform_names(platforms)
-        for identifier, platforms in forward_calls
-        if identifier
-    } == expected_platforms
+    assert set(forwarded_names) == expected_platforms
 
 
 def test_setup_entry_failure_does_not_register_cache(

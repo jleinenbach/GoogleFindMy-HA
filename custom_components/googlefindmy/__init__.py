@@ -5198,11 +5198,9 @@ async def _async_ensure_subentries_are_setup(
     if not subentries:
         return
 
-    _LOGGER.debug(
-        "[%s] Triggering setup for %d subentries",
-        entry.entry_id,
-        len(subentries),
-    )
+    identifiers: list[str] = []
+    platforms: list[Platform] = []
+    seen_platforms: set[Platform] = set()
 
     for subentry in subentries:
         identifier = _resolve_config_subentry_identifier(subentry)
@@ -5213,24 +5211,65 @@ async def _async_ensure_subentries_are_setup(
                 subentry,
             )
             continue
-        try:
-            await _async_setup_subentry(hass, entry, subentry)
-        except asyncio.CancelledError:
-            raise
-        except ConfigEntryNotReady as err:
-            _LOGGER.warning(
-                "[%s] Subentry '%s' deferred during setup: %s",  # noqa: G004
+
+        disabled_by = getattr(subentry, "disabled_by", None)
+        if disabled_by is not None:
+            _LOGGER.debug(
+                "[%s] Skipping setup for disabled subentry '%s' (%s)",  # noqa: G004
                 entry.entry_id,
                 identifier,
-                err,
+                disabled_by,
             )
-        except Exception as err:  # noqa: BLE001 - defensive logging
-            _LOGGER.exception(
-                "[%s] Subentry '%s' setup raised %s",  # noqa: G004
-                entry.entry_id,
-                identifier,
-                type(err).__name__,
-            )
+            continue
+
+        identifiers.append(identifier)
+        for platform in _determine_subentry_platforms(subentry):
+            if platform not in seen_platforms:
+                seen_platforms.add(platform)
+                platforms.append(platform)
+
+    if not identifiers or not platforms:
+        _LOGGER.debug(
+            "[%s] No eligible subentries to setup after filtering",  # noqa: G004
+            entry.entry_id,
+        )
+        return
+
+    _LOGGER.debug(
+        "[%s] Triggering aggregated setup for %d subentries across %d platforms",  # noqa: G004
+        entry.entry_id,
+        len(identifiers),
+        len(platforms),
+    )
+
+    forward = getattr(hass.config_entries, "async_forward_entry_setups", None)
+    if not callable(forward):
+        _LOGGER.debug(
+            "[%s] Home Assistant instance does not expose async_forward_entry_setups",
+            entry.entry_id,
+        )
+        return
+
+    try:
+        result = forward(entry, tuple(platforms))
+        if isinstance(result, Awaitable):
+            await result
+    except asyncio.CancelledError:
+        raise
+    except ConfigEntryNotReady as err:
+        _LOGGER.warning(
+            "[%s] Aggregated subentry setup deferred for %s: %s",  # noqa: G004
+            entry.entry_id,
+            ", ".join(identifiers),
+            err,
+        )
+    except Exception as err:  # noqa: BLE001 - defensive logging
+        _LOGGER.exception(
+            "[%s] Aggregated subentry setup raised %s for %s",  # noqa: G004
+            entry.entry_id,
+            type(err).__name__,
+            ", ".join(identifiers),
+        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:

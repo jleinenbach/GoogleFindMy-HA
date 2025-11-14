@@ -170,23 +170,22 @@ async def test_async_ensure_subentries_are_setup_collects_all_sources() -> None:
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
 
-    calls: list[tuple[str, tuple[object, ...]]] = []
+    calls: list[tuple[FakeConfigEntry, tuple[object, ...]]] = []
 
-    async def forward(entry_obj: FakeConfigEntry, platforms: list[Platform], *, config_subentry_id: str | None = None) -> None:
-        if config_subentry_id is None:
-            raise AssertionError("config_subentry_id must be provided")
-        calls.append((config_subentry_id, tuple(platforms)))
+    async def forward(entry_obj: FakeConfigEntry, platforms: tuple[Platform, ...]) -> None:
+        calls.append((entry_obj, tuple(platforms)))
 
     hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
 
     await _async_ensure_subentries_are_setup(hass, entry)
 
     assert calls
-    assert len(calls) == 2
-    tracker_call = next(call for call in calls if call[0] == "tracker-subentry")
-    service_call = next(call for call in calls if call[0] == "service-subentry")
-    assert _platform_names(tracker_call[1]) == TRACKER_FEATURE_PLATFORMS
-    assert _platform_names(service_call[1]) == SERVICE_FEATURE_PLATFORMS
+    assert len(calls) == 1
+    recorded_entry, recorded_platforms = calls[0]
+    assert recorded_entry is entry
+    platform_names = _platform_names(recorded_platforms)
+    assert set(platform_names) == set(TRACKER_FEATURE_PLATFORMS) | set(SERVICE_FEATURE_PLATFORMS)
+    assert len(platform_names) == len(set(platform_names))
 
 
 @pytest.mark.asyncio
@@ -213,7 +212,7 @@ async def test_async_ensure_subentries_are_setup_logs_config_entry_not_ready(cap
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
 
-    async def forward(*_: object, **__: object) -> None:
+    async def forward(*_: object) -> None:
         raise ConfigEntryNotReady("test")
 
     hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
@@ -221,4 +220,4 @@ async def test_async_ensure_subentries_are_setup_logs_config_entry_not_ready(cap
     with caplog.at_level("WARNING"):
         await _async_ensure_subentries_are_setup(hass, entry)
 
-    assert "Subentry 'tracker-subentry' deferred" in caplog.text
+    assert "Aggregated subentry setup deferred for tracker-subentry" in caplog.text
