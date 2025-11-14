@@ -696,7 +696,9 @@ async def test_rebuild_registry_handles_legacy_remove_config_subentry_kwarg(
         ("tracker-device", {"remove_config_entry_id": entry.entry_id}),
     ]
     assert entry.entry_id not in redundant_tracker.config_entries
-    assert redundant_tracker.config_entries_subentries[entry.entry_id] == set()
+    assert (
+        redundant_tracker.config_entries_subentries.get(entry.entry_id, set()) == set()
+    )
     assert service_device.config_entries_subentries[entry.entry_id] == {
         service_subentry_id
     }

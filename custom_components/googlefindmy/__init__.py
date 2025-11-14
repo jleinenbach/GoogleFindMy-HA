@@ -67,13 +67,12 @@ try:  # pragma: no cover - UnknownEntry introduced alongside subentry helpers
 except ImportError:  # pragma: no cover - legacy Home Assistant builds
     _ConfigUnknownEntry = None
 from homeassistant.const import (
-    EVENT_HOMEASSISTANT_STARTED,
     EVENT_HOMEASSISTANT_STOP,
     Platform,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import CoreState, Event, HomeAssistant
+from homeassistant.core import Event, HomeAssistant
 
 try:
     from homeassistant.helpers.entity import split_entity_id
@@ -90,6 +89,7 @@ except ImportError:  # pragma: no cover - fallback for legacy or test environmen
             domain, object_id = entity_id.split(".", 1)
             return domain, object_id
 from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
     ConfigEntryNotReady,
     HomeAssistantError,
 )
@@ -5521,6 +5521,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     )
     coordinator.config_entry = entry  # convenience for platforms
 
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except ConfigEntryAuthFailed:
+        raise
+    except Exception as err:  # noqa: BLE001 - wrap unexpected failures for HA retry
+        _LOGGER.error(
+            "[%s] Initial coordinator refresh failed: %s", entry.entry_id, err, exc_info=True
+        )
+        raise ConfigEntryNotReady(f"Initial refresh failed: {err}") from err
+
+    await _async_normalize_device_names(hass)
+
     subentry_accessor = getattr(entry, "subentries", None)
     hass_subentry_manager = getattr(hass.config_entries, "subentries", None)
     if hass_subentry_manager is not None and not callable(
@@ -5777,7 +5789,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # the registry has recorded the new child entries. Avoid
     # hass.async_create_task here; it would detach failure handling from the
     # config entry lifecycle and reintroduce silent retries.
-    ensure_subentries_task: asyncio.Task[None] | None = entry.async_create_background_task(
+    entry.async_create_background_task(
         hass,
         _async_ensure_subentries_are_setup(hass, entry),
         name=f"{DOMAIN}.ensure_subentries_setup.{entry.entry_id}",
@@ -5812,60 +5824,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _async_self_heal_duplicate_entities(hass, entry),
         name=f"{DOMAIN}.self_heal_duplicates.{entry.entry_id}",
     )
-
-    # Defer the first refresh until HA is fully started
-    listener_active = False
-
-    async def _do_first_refresh(_: Any) -> None:
-        """Perform the initial coordinator refresh after HA has started."""
-        nonlocal listener_active
-        listener_active = False
-        try:
-            if ensure_subentries_task is not None:
-                try:
-                    await asyncio.shield(ensure_subentries_task)
-                except asyncio.CancelledError:
-                    raise
-                except ConfigEntryNotReady as err:
-                    _LOGGER.warning(
-                        "Subentry setup did not complete before the first refresh: %s",
-                        err,
-                    )
-                except Exception as err:  # pragma: no cover - defensive
-                    _LOGGER.error(
-                        "Subentry setup task raised %s: %s",
-                        type(err).__name__,
-                        err,
-                        exc_info=True,
-                    )
-
-            await coordinator.async_request_refresh()
-            last_update_success = getattr(coordinator, "last_update_success", None)
-            if last_update_success is False:
-                _LOGGER.warning(
-                    "Initial refresh failed; entities will recover on subsequent polls."
-                )
-            await _async_normalize_device_names(hass)
-        except Exception as err:
-            _LOGGER.error(
-                "Initial refresh raised an unexpected error: %s", err, exc_info=True
-            )
-
-    if hass.state == CoreState.running:
-        hass.async_create_task(
-            _do_first_refresh(None), name="googlefindmy.initial_refresh"
-        )
-    else:
-        unsub = hass.bus.async_listen_once(
-            EVENT_HOMEASSISTANT_STARTED, _do_first_refresh
-        )
-        listener_active = True
-
-        def _safe_unsub() -> None:
-            if listener_active:
-                unsub()
-
-        entry.async_on_unload(_safe_unsub)
 
     # Mark initial setup complete (used to distinguish cold start vs. reload)
     domain_bucket["initial_setup_complete"] = True
