@@ -445,6 +445,25 @@ assert two consecutive calls return distinct objects. Home Assistant constructs
 update flows itself using ``(config_entry, subentry)`` and does not expect the
 integration's factories to bind existing subentries.
 
+### Subentry platform forwarding expectations
+
+Home Assistant's contract for platform setup requires the parent config entry
+to forward **all** platforms for its child subentries in a single
+``async_forward_entry_setups`` call. Test doubles that exercise
+``_async_ensure_subentries_are_setup`` should therefore expect:
+
+* The helper yields control to the event loop **once** before forwarding so new
+  subentries finalize registration (avoids ``UnknownEntry`` when forwarding).
+* Disabled subentries or those missing identifiers are skipped prior to
+  aggregation so only eligible children contribute platforms.
+* Platforms are deduplicated across subentries; the consolidated forward call
+  receives a tuple containing each platform **at most once**.
+
+Tests that patch ``async_forward_entry_setups`` or examine forwarded platforms
+must assert a single aggregated call without ``config_subentry_id`` arguments.
+This mirrors Home Assistant's runtime behavior and prevents regressions that
+attempt to forward platforms per-subentry.
+
 ## AST extraction helper
 
 The :mod:`tests.helpers.ast_extract` module exposes

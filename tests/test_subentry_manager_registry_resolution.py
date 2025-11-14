@@ -62,16 +62,14 @@ async def test_async_ensure_subentries_setup_handles_placeholder_objects() -> No
     )
     manager = DeferredRegistryConfigEntriesManager(parent_entry, resolved_child)
     hass = FakeHass(config_entries=manager)
-    forwarded_subentries: list[str | None] = []
+    forwarded_calls: list[tuple[FakeConfigEntry, tuple[Any, ...]]] = []
 
     async def _capture_forwarded_subentry(
         entry_obj: FakeConfigEntry,
-        platforms: list[str],
-        *,
-        config_subentry_id: str | None = None,
+        platforms: tuple[Any, ...],
         **_kwargs: Any,
     ) -> bool:
-        forwarded_subentries.append(config_subentry_id)
+        forwarded_calls.append((entry_obj, tuple(platforms)))
         return True
 
     setattr(manager, "async_forward_entry_setups", _capture_forwarded_subentry)
@@ -106,7 +104,12 @@ async def test_async_ensure_subentries_setup_handles_placeholder_objects() -> No
         await assign_task
 
     expected_identifier = _resolve_config_subentry_identifier(resolved_child)
-    assert forwarded_subentries == [expected_identifier]
+    assert forwarded_calls
+    assert len(forwarded_calls) == 1
+    recorded_entry, recorded_platforms = forwarded_calls[0]
+    assert recorded_entry is parent_entry
+    assert recorded_platforms, "Expected at least one platform to be forwarded"
+    assert expected_identifier == resolved_child.subentry_id
 
 
 @pytest.mark.asyncio
