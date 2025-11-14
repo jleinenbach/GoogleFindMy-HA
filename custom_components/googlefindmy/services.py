@@ -335,8 +335,9 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             # Check if the device is correctly linked to the tracker subentry
+            device_config_subentry_id = getattr(device, "config_subentry_id", None)
             is_correctly_linked_tracker = (
-                device.config_subentry_id == correct_tracker_subentry_id
+                device_config_subentry_id == correct_tracker_subentry_id
             )
 
             if is_correctly_linked_tracker:
