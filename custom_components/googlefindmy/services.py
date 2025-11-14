@@ -350,12 +350,15 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     if not normalized_entry_id:
                         continue
 
+                    subentry_candidates: tuple[str, ...] = ()
                     if isinstance(mapped_subentries, str):
                         subentry_candidates = (mapped_subentries,)
                     elif isinstance(mapped_subentries, Iterable):
-                        subentry_candidates = tuple(mapped_subentries)
-                    else:
-                        subentry_candidates = ()
+                        subentry_candidates = tuple(
+                            candidate
+                            for candidate in mapped_subentries
+                            if isinstance(candidate, str) and candidate
+                        )
 
                     for mapped_subentry_id in subentry_candidates:
                         if (
