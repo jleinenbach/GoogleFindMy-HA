@@ -752,6 +752,24 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
 
+    async def async_config_entry_first_refresh(self) -> None:
+        """Run the first refresh, tolerating coordinators without the helper."""
+
+        try:
+            parent_first_refresh = super().async_config_entry_first_refresh
+        except AttributeError:  # pragma: no cover - compatibility with older cores
+            parent_first_refresh = None
+
+        if parent_first_refresh is not None:
+            await parent_first_refresh()
+            return
+
+        _LOGGER.debug(
+            "[%s] Falling back to async_refresh for initial coordinator sync",
+            self._entry_id() or "unknown",
+        )
+        await self.async_refresh()
+
     @property
     def cache(self) -> CacheProtocol:
         """Return the entry-scoped token cache backing this coordinator."""

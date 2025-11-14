@@ -87,6 +87,8 @@ if TYPE_CHECKING:
 
         async def async_config_entry_first_refresh(self) -> None: ...
 
+        async def async_refresh(self) -> None: ...
+
     class ButtonEntity(_EntityBase):
         """Structural type for button platform entities."""
 

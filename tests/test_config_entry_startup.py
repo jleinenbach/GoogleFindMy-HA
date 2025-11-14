@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -80,3 +81,30 @@ async def test_device_trackers_populate_after_initial_refresh(
         TRACKER_SUBENTRY_KEY
     )
     assert follow_up == snapshot
+
+
+@pytest.mark.asyncio
+async def test_coordinator_first_refresh_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Coordinator should fall back to async_refresh when HA lacks helper."""
+
+    from custom_components.googlefindmy import coordinator as coordinator_module
+
+    monkeypatch.delattr(
+        coordinator_module.DataUpdateCoordinator,
+        "async_config_entry_first_refresh",
+    )
+
+    called: list[None] = []
+
+    class _Harness(coordinator_module.GoogleFindMyCoordinator):
+        def __init__(self) -> None:
+            self.config_entry = SimpleNamespace(entry_id="entry-test")
+
+        async def async_refresh(self) -> None:  # type: ignore[override]
+            called.append(None)
+
+    harness = _Harness()
+
+    await harness.async_config_entry_first_refresh()
+
+    assert called, "Fallback should invoke async_refresh when helper is absent"
