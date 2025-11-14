@@ -311,18 +311,6 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             continue
 
         correct_tracker_subentry_id = tracker_meta.config_subentry_id
-        tracker_entry_id: str | None = None
-        raw_tracker_entry_id = getattr(tracker_meta, "entry_id", None)
-        if isinstance(raw_tracker_entry_id, str) and raw_tracker_entry_id:
-            tracker_entry_id = raw_tracker_entry_id
-        elif raw_tracker_entry_id is not None:
-            tracker_entry_id = str(raw_tracker_entry_id)
-        else:
-            raw_tracker_entry_id = getattr(tracker_meta, "config_entry_id", None)
-            if isinstance(raw_tracker_entry_id, str) and raw_tracker_entry_id:
-                tracker_entry_id = raw_tracker_entry_id
-            elif raw_tracker_entry_id is not None:
-                tracker_entry_id = str(raw_tracker_entry_id)
         _LOGGER.debug(
             "[%s] Hub Cleanup: Found Service Device ID: %s",
             entry_id,
@@ -333,12 +321,11 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             entry_id,
             correct_tracker_subentry_id,
         )
-        if tracker_entry_id:
-            _LOGGER.debug(
-                "[%s] Hub Cleanup: Found Tracker Config Entry ID: %s",
-                entry_id,
-                tracker_entry_id,
-            )
+        _LOGGER.debug(
+            "[%s] Hub Cleanup: Tracker subentry link will use ConfigEntry %s",
+            entry_id,
+            entry_id,
+        )
 
         # 3. Find and remove orphaned devices
         devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
@@ -353,15 +340,34 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             # Check if the device is correctly linked to the tracker subentry
-            # --- START RESOLVED CONFLICT 1 (from Bugfixes-for-1.6-beta3) ---
-            # Use robust getattr for safety
-            device_config_subentry_id = getattr(device, "config_subentry_id", None)
-            is_correctly_linked_tracker = (
-                device_config_subentry_id == correct_tracker_subentry_id
+            tracker_linked_entry_ids: set[str] = set()
+            device_subentry_mapping = getattr(
+                device, "config_entries_subentries", None
             )
+            if isinstance(device_subentry_mapping, Mapping):
+                for mapped_entry_id, mapped_subentries in device_subentry_mapping.items():
+                    normalized_entry_id = str(mapped_entry_id)
+                    if not normalized_entry_id:
+                        continue
+
+                    if isinstance(mapped_subentries, str):
+                        subentry_candidates = (mapped_subentries,)
+                    elif isinstance(mapped_subentries, Iterable):
+                        subentry_candidates = tuple(mapped_subentries)
+                    else:
+                        subentry_candidates = ()
+
+                    for mapped_subentry_id in subentry_candidates:
+                        if (
+                            isinstance(mapped_subentry_id, str)
+                            and mapped_subentry_id == correct_tracker_subentry_id
+                        ):
+                            tracker_linked_entry_ids.add(normalized_entry_id)
+                            break
+
+            is_correctly_linked_tracker = entry_id in tracker_linked_entry_ids
 
             if is_correctly_linked_tracker:
-            # --- END RESOLVED CONFLICT 1 ---
                 continue
 
             raw_links = getattr(device, "config_entries", set()) or set()
@@ -372,12 +378,8 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             }
 
             has_hub_link = entry_id in linked_entry_ids
-            # --- START RESOLVED CONFLICT 2 (from codex/refactor-async_rebuild_device_registry) ---
-            # Use the correct tracker_entry_id (Config Entry ID) for the check
-            has_tracker_link = bool(
-                tracker_entry_id and tracker_entry_id in linked_entry_ids
-            )
-            tracker_identifier_for_log = tracker_entry_id or correct_tracker_subentry_id
+            has_tracker_link = bool(tracker_linked_entry_ids)
+            tracker_identifier_for_log = correct_tracker_subentry_id
 
             if not has_hub_link:
                 _LOGGER.debug(
@@ -386,29 +388,27 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     device.name or "<unknown>",
                     device.id,
                     entry_id,
-            # --- END RESOLVED CONFLICT 2 ---
                 )
                 continue
 
-            if has_tracker_link:
+            if not has_tracker_link:
                 _LOGGER.debug(
-            # --- START RESOLVED CONFLICT 3 (from codex/refactor-async_rebuild_device_registry) ---
-                    "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); tracker config entry '%s' already linked.",
-            # --- END RESOLVED CONFLICT 3 ---
+                    "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); hub link '%s' is present, but tracker link '%s' is missing. Deferring cleanup.",
                     entry_id,
                     device.name or "<unknown>",
                     device.id,
+                    entry_id,
                     tracker_identifier_for_log,
                 )
                 continue
 
             _LOGGER.info(
-            # --- START RESOLVED CONFLICT 4 (from codex/refactor-async_rebuild_device_registry) ---
-                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (device_id=%s).",
-            # --- END RESOLVED CONFLICT 4 ---
+                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (device_id=%s). (Tracker link '%s' is confirmed via entries: %s)",
                 entry_id,
                 device.name or "<unknown>",
                 device.id,
+                tracker_identifier_for_log,
+                sorted(tracker_linked_entry_ids),
             )
             try:
                 dev_reg.async_update_device(
