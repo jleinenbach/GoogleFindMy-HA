@@ -311,6 +311,18 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             continue
 
         correct_tracker_subentry_id = tracker_meta.config_subentry_id
+        tracker_entry_id: str | None = None
+        raw_tracker_entry_id = getattr(tracker_meta, "entry_id", None)
+        if isinstance(raw_tracker_entry_id, str) and raw_tracker_entry_id:
+            tracker_entry_id = raw_tracker_entry_id
+        elif raw_tracker_entry_id is not None:
+            tracker_entry_id = str(raw_tracker_entry_id)
+        else:
+            raw_tracker_entry_id = getattr(tracker_meta, "config_entry_id", None)
+            if isinstance(raw_tracker_entry_id, str) and raw_tracker_entry_id:
+                tracker_entry_id = raw_tracker_entry_id
+            elif raw_tracker_entry_id is not None:
+                tracker_entry_id = str(raw_tracker_entry_id)
         _LOGGER.debug(
             "[%s] Hub Cleanup: Found Service Device ID: %s",
             entry_id,
@@ -321,6 +333,12 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             entry_id,
             correct_tracker_subentry_id,
         )
+        if tracker_entry_id:
+            _LOGGER.debug(
+                "[%s] Hub Cleanup: Found Tracker Config Entry ID: %s",
+                entry_id,
+                tracker_entry_id,
+            )
 
         # 3. Find and remove orphaned devices
         devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
@@ -335,15 +353,9 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             # Check if the device is correctly linked to the tracker subentry
-            is_correctly_linked_tracker = (
-                device.config_subentry_id == correct_tracker_subentry_id
-            )
-
-            if is_correctly_linked_tracker:
+            if device.config_subentry_id == correct_tracker_subentry_id:
                 continue
 
-            # If we are here, the device is not the service device AND
-            # it is not linked to the correct tracker subentry. It's an orphan.
             raw_links = getattr(device, "config_entries", set()) or set()
             linked_entry_ids = {
                 str(link_entry_id)
@@ -351,18 +363,34 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 if isinstance(link_entry_id, str) and link_entry_id
             }
 
-            if correct_tracker_subentry_id not in linked_entry_ids:
+            has_hub_link = entry_id in linked_entry_ids
+            has_tracker_link = bool(
+                tracker_entry_id and tracker_entry_id in linked_entry_ids
+            )
+            tracker_identifier_for_log = tracker_entry_id or correct_tracker_subentry_id
+
+            if not has_hub_link:
                 _LOGGER.debug(
-                    "[%s] Hub Cleanup: Skipping device '%s' (ID: %s); tracker subentry %s not yet linked.",
+                    "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); hub config entry '%s' not linked.",
                     entry_id,
                     device.name or "<unknown>",
                     device.id,
-                    correct_tracker_subentry_id,
+                    entry_id,
+                )
+                continue
+
+            if has_tracker_link:
+                _LOGGER.debug(
+                    "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); tracker config entry '%s' already linked.",
+                    entry_id,
+                    device.name or "<unknown>",
+                    device.id,
+                    tracker_identifier_for_log,
                 )
                 continue
 
             _LOGGER.info(
-                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (ID: %s).",
+                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (device_id=%s).",
                 entry_id,
                 device.name or "<unknown>",
                 device.id,
