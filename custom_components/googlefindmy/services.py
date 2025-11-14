@@ -311,6 +311,41 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             continue
 
         correct_tracker_subentry_id = tracker_meta.config_subentry_id
+        tracker_entry_id: str | None = None
+
+        subentries_iterable: tuple[Any, ...]
+        subentries_container = getattr(entry, "subentries", None)
+        if isinstance(subentries_container, Mapping):
+            subentries_iterable = tuple(subentries_container.values())
+        elif isinstance(subentries_container, Iterable) and not isinstance(
+            subentries_container, (str, bytes)
+        ):
+            subentries_iterable = tuple(subentries_container)
+        else:
+            subentries_iterable = ()
+
+        for subentry in subentries_iterable:
+            subentry_identifier = getattr(subentry, "subentry_id", None)
+            if subentry_identifier is None:
+                subentry_identifier = getattr(subentry, "config_subentry_id", None)
+            if subentry_identifier != correct_tracker_subentry_id:
+                continue
+
+            raw_tracker_entry_id = getattr(subentry, "entry_id", None)
+            if isinstance(raw_tracker_entry_id, str) and raw_tracker_entry_id:
+                tracker_entry_id = raw_tracker_entry_id
+                break
+            if raw_tracker_entry_id is not None:
+                tracker_entry_id = str(raw_tracker_entry_id)
+                if tracker_entry_id:
+                    break
+
+        if not tracker_entry_id:
+            fallback_tracker_entry_id = getattr(tracker_meta, "entry_id", None)
+            if isinstance(fallback_tracker_entry_id, str) and fallback_tracker_entry_id:
+                tracker_entry_id = fallback_tracker_entry_id
+
+        tracker_identifier_for_log = tracker_entry_id or correct_tracker_subentry_id
         _LOGGER.debug(
             "[%s] Hub Cleanup: Found Service Device ID: %s",
             entry_id,
@@ -321,11 +356,18 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             entry_id,
             correct_tracker_subentry_id,
         )
-        _LOGGER.debug(
-            "[%s] Hub Cleanup: Tracker subentry link will use ConfigEntry %s",
-            entry_id,
-            entry_id,
-        )
+        if tracker_entry_id:
+            _LOGGER.debug(
+                "[%s] Hub Cleanup: Tracker subentry link resolves to ConfigEntry %s",
+                entry_id,
+                tracker_entry_id,
+            )
+        else:
+            _LOGGER.debug(
+                "[%s] Hub Cleanup: Tracker subentry link falling back to identifier %s",
+                entry_id,
+                tracker_identifier_for_log,
+            )
 
         # 3. Find and remove orphaned devices
         devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
@@ -386,8 +428,9 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 for candidate in tracker_linked_entry_ids
                 if candidate in linked_entry_ids
             }
+            if tracker_entry_id and tracker_entry_id in linked_entry_ids:
+                confirmed_tracker_entry_ids.add(tracker_entry_id)
             has_tracker_link = bool(confirmed_tracker_entry_ids)
-            tracker_identifier_for_log = correct_tracker_subentry_id
 
             if not has_hub_link:
                 _LOGGER.debug(
@@ -399,24 +442,23 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 )
                 continue
 
-            if not has_tracker_link:
+            if has_tracker_link:
                 _LOGGER.debug(
-                    "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); hub link '%s' is present, but tracker link '%s' is missing. Deferring cleanup.",
+                    "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); tracker config entry '%s' already linked.",
                     entry_id,
                     device.name or "<unknown>",
                     device.id,
-                    entry_id,
                     tracker_identifier_for_log,
                 )
                 continue
 
             _LOGGER.info(
-                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (device_id=%s). (Tracker link '%s' is confirmed via entries: %s)",
+                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (device_id=%s); tracker link '%s' not found. Linked entries prior to cleanup: %s",
                 entry_id,
                 device.name or "<unknown>",
                 device.id,
                 tracker_identifier_for_log,
-                sorted(confirmed_tracker_entry_ids),
+                sorted(linked_entry_ids),
             )
             try:
                 dev_reg.async_update_device(
