@@ -486,6 +486,7 @@ class FakeDeviceEntry:
     id: str
     identifiers: set[tuple[str, str]] = field(default_factory=set)
     config_entries: set[str] = field(default_factory=set)
+    config_subentry_id: str | None = None
     via_device_id: str | None = None
     name: str | None = None
 

@@ -4,15 +4,29 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from custom_components.googlefindmy import services
-from custom_components.googlefindmy.const import DOMAIN, SERVICE_REBUILD_REGISTRY
+from custom_components.googlefindmy.const import (
+    DOMAIN,
+    SERVICE_REBUILD_REGISTRY,
+    TRACKER_SUBENTRY_KEY,
+    service_device_identifier,
+)
 from homeassistant.core import ServiceCall
 
-from tests.helpers import FakeConfigEntriesManager, FakeConfigEntry, FakeHass
+from tests.helpers import (
+    FakeConfigEntriesManager,
+    FakeConfigEntry,
+    FakeDeviceEntry,
+    FakeEntityRegistry,
+    FakeHass,
+    device_registry_async_entries_for_config_entry,
+)
 
 
 async def _register_rebuild_service(hass: FakeHass, ctx: dict[str, Any]) -> Any:
@@ -142,3 +156,119 @@ async def test_rebuild_registry_handles_missing_entries(caplog: pytest.LogCaptur
         "No config entries available to reload." in record.message
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_rebuild_registry_detaches_orphaned_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remove hub links when a tracker lacks the matching subentry."""
+
+    entry = FakeConfigEntry(entry_id="hub-entry", title="Hub Entry")
+    tracker_subentry_id = "tracker-subentry"
+    tracker_entry_id = "tracker-config-entry"
+    service_identifier = service_device_identifier(entry.entry_id)
+
+    service_device = FakeDeviceEntry(
+        id="service-device",
+        identifiers={service_identifier},
+        config_entries={entry.entry_id},
+        name="Service Device",
+    )
+    orphan_tracker = FakeDeviceEntry(
+        id="orphan-tracker",
+        identifiers={(DOMAIN, "tracker-orphan")},
+        config_entries={entry.entry_id},
+        name="Orphan Tracker",
+    )
+    setattr(orphan_tracker, "config_subentry_id", None)
+
+    class RecordingDeviceRegistry:
+        """Minimal registry stub tracking update calls for assertions."""
+
+        def __init__(self, devices: Iterable[FakeDeviceEntry]) -> None:
+            self._devices = {device.id: device for device in devices}
+            self._identifier_index = {
+                identifier: device
+                for device in devices
+                for identifier in device.identifiers
+            }
+            self.updated: list[tuple[str, dict[str, Any]]] = []
+
+        def async_get_device(
+            self, *, identifiers: set[tuple[str, str]] | None = None, **_: Any
+        ) -> FakeDeviceEntry | None:
+            if not identifiers:
+                return None
+            for identifier in identifiers:
+                device = self._identifier_index.get(identifier)
+                if device is not None:
+                    return device
+            return None
+
+        def async_entries_for_config_entry(
+            self, entry_id: str
+        ) -> tuple[FakeDeviceEntry, ...]:
+            return tuple(
+                device
+                for device in self._devices.values()
+                if entry_id in device.config_entries
+            )
+
+        def async_update_device(self, device_id: str, **changes: Any) -> None:
+            if "remove_config_entry_id" in changes:
+                entry_to_remove = changes["remove_config_entry_id"]
+                self._devices[device_id].config_entries.discard(entry_to_remove)
+            self.updated.append((device_id, dict(changes)))
+
+    registry = RecordingDeviceRegistry([service_device, orphan_tracker])
+
+    manager = FakeConfigEntriesManager([entry])
+    hass = FakeHass(manager)
+
+    metadata = SimpleNamespace(
+        config_subentry_id=tracker_subentry_id,
+        entry_id=tracker_entry_id,
+    )
+
+    def _metadata(*, key: str) -> SimpleNamespace | None:
+        if key == TRACKER_SUBENTRY_KEY:
+            return metadata
+        return None
+
+    coordinator = SimpleNamespace(
+        config_entry=entry,
+        data=[],
+        name="Coordinator",
+        _ensure_registry_for_devices=lambda devices, ignored: 0,
+        _get_ignored_set=lambda: set(),
+        _ensure_service_device_exists=lambda: None,
+        get_subentry_metadata=_metadata,
+    )
+
+    runtime = SimpleNamespace(coordinator=coordinator)
+    entry.runtime_data = runtime
+    hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})[entry.entry_id] = runtime
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.services.dr.async_get",
+        lambda hass: registry,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.services.dr.async_entries_for_config_entry",
+        device_registry_async_entries_for_config_entry,
+        raising=False,
+    )
+
+    entity_registry = FakeEntityRegistry()
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.services.er.async_get",
+        lambda hass: entity_registry,
+    )
+
+    await services.async_rebuild_device_registry(hass, ServiceCall({}))
+
+    assert registry.updated == [
+        ("orphan-tracker", {"remove_config_entry_id": entry.entry_id})
+    ]
+    assert entry.entry_id not in orphan_tracker.config_entries

@@ -311,6 +311,18 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             continue
 
         correct_tracker_subentry_id = tracker_meta.config_subentry_id
+        tracker_entry_id: str | None = None
+        raw_tracker_entry_id = getattr(tracker_meta, "entry_id", None)
+        if isinstance(raw_tracker_entry_id, str) and raw_tracker_entry_id:
+            tracker_entry_id = raw_tracker_entry_id
+        elif raw_tracker_entry_id is not None:
+            tracker_entry_id = str(raw_tracker_entry_id)
+        else:
+            raw_tracker_entry_id = getattr(tracker_meta, "config_entry_id", None)
+            if isinstance(raw_tracker_entry_id, str) and raw_tracker_entry_id:
+                tracker_entry_id = raw_tracker_entry_id
+            elif raw_tracker_entry_id is not None:
+                tracker_entry_id = str(raw_tracker_entry_id)
         _LOGGER.debug(
             "[%s] Hub Cleanup: Found Service Device ID: %s",
             entry_id,
@@ -321,6 +333,12 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             entry_id,
             correct_tracker_subentry_id,
         )
+        if tracker_entry_id:
+            _LOGGER.debug(
+                "[%s] Hub Cleanup: Found Tracker Config Entry ID: %s",
+                entry_id,
+                tracker_entry_id,
+            )
 
         # 3. Find and remove orphaned devices
         devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
@@ -335,16 +353,17 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 continue
 
             # Check if the device is correctly linked to the tracker subentry
+            # --- START RESOLVED CONFLICT 1 (from Bugfixes-for-1.6-beta3) ---
+            # Use robust getattr for safety
             device_config_subentry_id = getattr(device, "config_subentry_id", None)
             is_correctly_linked_tracker = (
                 device_config_subentry_id == correct_tracker_subentry_id
             )
 
             if is_correctly_linked_tracker:
+            # --- END RESOLVED CONFLICT 1 ---
                 continue
 
-            # If we are here, the device is not the service device AND
-            # it is not linked to the correct tracker subentry. It's an orphan.
             raw_links = getattr(device, "config_entries", set()) or set()
             linked_entry_ids = {
                 str(link_entry_id)
@@ -353,29 +372,40 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             }
 
             has_hub_link = entry_id in linked_entry_ids
-            has_tracker_link = correct_tracker_subentry_id in linked_entry_ids
+            # --- START RESOLVED CONFLICT 2 (from codex/refactor-async_rebuild_device_registry) ---
+            # Use the correct tracker_entry_id (Config Entry ID) for the check
+            has_tracker_link = bool(
+                tracker_entry_id and tracker_entry_id in linked_entry_ids
+            )
+            tracker_identifier_for_log = tracker_entry_id or correct_tracker_subentry_id
 
             if not has_hub_link:
                 _LOGGER.debug(
-                    "[%s] Hub Cleanup: Device '%s' (ID: %s) already detached from hub entry; skipping.",
+                    "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); hub config entry '%s' not linked.",
                     entry_id,
                     device.name or "<unknown>",
                     device.id,
+                    entry_id,
+            # --- END RESOLVED CONFLICT 2 ---
                 )
                 continue
 
             if has_tracker_link:
                 _LOGGER.debug(
-                    "[%s] Hub Cleanup: Device '%s' (ID: %s) linked to both hub entry and tracker %s; deferring cleanup.",
+            # --- START RESOLVED CONFLICT 3 (from codex/refactor-async_rebuild_device_registry) ---
+                    "[%s] Hub Cleanup: Skipping device '%s' (device_id=%s); tracker config entry '%s' already linked.",
+            # --- END RESOLVED CONFLICT 3 ---
                     entry_id,
                     device.name or "<unknown>",
                     device.id,
-                    correct_tracker_subentry_id,
+                    tracker_identifier_for_log,
                 )
                 continue
 
             _LOGGER.info(
-                "[%s] Hub Cleanup: Detaching orphaned hub config entry from device '%s' (ID: %s).",
+            # --- START RESOLVED CONFLICT 4 (from codex/refactor-async_rebuild_device_registry) ---
+                "[%s] Hub Cleanup: Detaching hub config entry from device '%s' (device_id=%s).",
+            # --- END RESOLVED CONFLICT 4 ---
                 entry_id,
                 device.name or "<unknown>",
                 device.id,
