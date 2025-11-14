@@ -167,6 +167,39 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
 
         return hubs
 
+    def _coordinator_devices(candidate: Any) -> list[Any]:
+        """Normalize device payloads exposed by a coordinator."""
+
+        data = getattr(candidate, "data", [])
+        if isinstance(data, list):
+            return data
+        if isinstance(data, Iterable) and not isinstance(data, (str, bytes)):
+            try:
+                return list(data)
+            except Exception:  # pragma: no cover - defensive guard
+                return []
+        return []
+
+    def _coordinator_ignored(candidate: Any) -> set[str]:
+        """Return the coordinator's ignored device ids, if exposed."""
+
+        getter = getattr(candidate, "_get_ignored_set", None)
+        if not callable(getter):
+            return set()
+        try:
+            ignored = getter()
+        except Exception:  # pragma: no cover - defensive guard
+            return set()
+        if isinstance(ignored, set):
+            return ignored
+        if isinstance(ignored, Iterable) and not isinstance(ignored, (str, bytes)):
+            return {
+                item
+                for item in ignored
+                if isinstance(item, str) and item
+            }
+        return set()
+
     processed_coordinators = 0
     seen_coordinators: set[int] = set()
 
@@ -174,11 +207,15 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
         for coordinator in coordinators.values():
             if coordinator is None or id(coordinator) in seen_coordinators:
                 continue
-            update_registry = getattr(coordinator, "async_update_device_registry", None)
-            if not callable(update_registry):
+            ensure_devices = getattr(coordinator, "_ensure_registry_for_devices", None)
+            if not callable(ensure_devices):
                 continue
+            devices = _coordinator_devices(coordinator)
+            ignored = _coordinator_ignored(coordinator)
             try:
-                await update_registry()
+                # Until Home Assistant exposes a public API for this workflow,
+                # rely on the coordinator's private helper to mirror runtime behavior.
+                created = ensure_devices(devices, ignored)
             except Exception as err:  # noqa: BLE001 - defensive logging
                 _LOGGER.warning(
                     "Coordinator %s failed during registry rebuild: %s",
@@ -186,18 +223,23 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     err,
                 )
                 continue
-            processed_coordinators += 1
+            processed_coordinators += int(created or 0)
             seen_coordinators.add(id(coordinator))
 
     for runtime in entries_bucket.values():
         coordinator = getattr(runtime, "coordinator", None)
         if coordinator is None or id(coordinator) in seen_coordinators:
             continue
-        update_registry = getattr(coordinator, "async_update_device_registry", None)
-        if not callable(update_registry):
+        ensure_devices = getattr(coordinator, "_ensure_registry_for_devices", None)
+        if not callable(ensure_devices):
             continue
         try:
-            await update_registry()
+            # Until Home Assistant exposes a public API for this workflow,
+            # rely on the coordinator's private helper to mirror runtime behavior.
+            created = ensure_devices(
+                _coordinator_devices(coordinator),
+                _coordinator_ignored(coordinator),
+            )
         except Exception as err:  # noqa: BLE001 - defensive logging
             _LOGGER.warning(
                 "Runtime coordinator %s failed during registry rebuild: %s",
@@ -205,7 +247,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                 err,
             )
             continue
-        processed_coordinators += 1
+        processed_coordinators += int(created or 0)
         seen_coordinators.add(id(coordinator))
 
     _LOGGER.info(
