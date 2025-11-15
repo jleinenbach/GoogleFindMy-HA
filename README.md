@@ -51,6 +51,28 @@ selection while still benefiting from the automated dependency install.
 
 `make test-ha` depends on the `.wheelhouse/` cache and automatically refreshes it when `requirements-dev.txt` changes. Delete the directory (or run `make wheelhouse` manually) whenever you need to rebuild the cache for a clean-room test of updated dependencies. When the existing cache already satisfies the pinned requirements, skip the refresh step by invoking `make test-ha SKIP_WHEELHOUSE_REFRESH=1` (or the equivalent `make wheelhouse SKIP_WHEELHOUSE_REFRESH=1`).
 
+##### Sharing cached wheels between environments
+
+The `make wheelhouse` target pulls down the heavy `homeassistant` and
+`pytest-homeassistant-custom-component` wheels into `.wheelhouse/`. Package the
+cache once and reuse it on future containers or machines instead of redownloading
+hundreds of megabytes every regression run:
+
+```bash
+tar -czf wheelhouse-ha-cache.tgz -C .wheelhouse .
+```
+
+Copy `wheelhouse-ha-cache.tgz` to the new environment, extract it at the project
+root, and the next `make wheelhouse`/`make test-ha` invocation will reuse the
+cached wheels immediately:
+
+```bash
+tar -xzf wheelhouse-ha-cache.tgz -C .
+```
+
+When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
+`make wheelhouse` to regenerate the cache before producing a fresh snapshot.
+
 #### Running Home Assistant integration tests locally
 
 1. Create a virtual environment for development: `python -m venv .venv`
