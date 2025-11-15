@@ -1234,6 +1234,59 @@ def test_service_device_updates_add_translation(
     assert metadata["new_identifiers"] == {service_ident, service_subentry_ident}
 
 
+def test_service_device_missing_subentry(fake_registry: _FakeDeviceRegistry) -> None:
+    """Guard against linking the service device to synthesized subentry identifiers."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-missing")
+    service_subentry_id = entry.service_subentry_id
+    if service_subentry_id is not None:
+        entry.subentries.pop(service_subentry_id, None)
+    entry.service_subentry_id = None
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    service_ident = service_device_identifier(entry.entry_id)
+
+    coordinator._service_device_ready = False
+    coordinator._service_device_id = None
+
+    coordinator._ensure_service_device_exists()
+
+    assert fake_registry.created, "Service device should be created without subentry metadata"
+    create_payload = fake_registry.created[-1]
+    assert create_payload["config_subentry_id"] is None
+    assert create_payload["identifiers"] == {service_ident}
+
+    service_entry = next(
+        device for device in fake_registry.devices if service_ident in device.identifiers
+    )
+    assert service_entry.identifiers == {service_ident}
+    assert service_entry.config_subentry_id is None
+    mapping = service_entry.config_entries_subentries.get(entry.entry_id)
+    assert mapping == {None}
+
+    service_entry.translation_key = None
+    service_entry.translation_placeholders = None
+    service_entry.manufacturer = "Legacy"
+    coordinator._service_device_ready = False
+
+    coordinator._ensure_service_device_exists()
+
+    assert fake_registry.updated, "Service device metadata update should be recorded"
+    update_payload = fake_registry.updated[-1]
+    assert update_payload["config_subentry_id"] is None
+    assert update_payload["add_config_entry_id"] is None
+    assert update_payload["add_config_subentry_id"] is None
+    assert update_payload["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
+    assert not any(
+        identifier[1].endswith(":service") and identifier[0] == DOMAIN
+        for identifier in service_entry.identifiers
+    )
+    assert service_entry.config_subentry_id is None
+    assert service_entry.manufacturer == SERVICE_DEVICE_MANUFACTURER
+    assert service_entry.config_entries_subentries.get(entry.entry_id) == {None}
+
+
 def test_service_device_update_uses_add_config_entry_id(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:

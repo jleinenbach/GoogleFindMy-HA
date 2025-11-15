@@ -1759,23 +1759,69 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             pass
 
         service_meta = self._subentry_metadata.get(SERVICE_SUBENTRY_KEY)
-        service_config_subentry_id = (
-            service_meta.config_subentry_id if service_meta is not None else None
+
+        def _normalize_subentry_id(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            candidate = value.strip()
+            return candidate or None
+
+        entry_service_subentry_id = _normalize_subentry_id(
+            getattr(entry, "service_subentry_id", None)
         )
+
+        entry_subentries = getattr(entry, "subentries", None)
+        service_subentry_ids: set[str] = set()
+        if isinstance(entry_subentries, Mapping):
+            for subentry_id, subentry in entry_subentries.items():
+                normalized_id = _normalize_subentry_id(subentry_id)
+                if normalized_id is None:
+                    continue
+                subentry_type = getattr(subentry, "subentry_type", None)
+                group_key: Any = None
+                data_obj = getattr(subentry, "data", None)
+                if isinstance(data_obj, Mapping):
+                    group_key = data_obj.get("group_key")
+                if (
+                    subentry_type == SUBENTRY_TYPE_SERVICE
+                    or (
+                        isinstance(group_key, str)
+                        and group_key == SERVICE_SUBENTRY_KEY
+                    )
+                ):
+                    service_subentry_ids.add(normalized_id)
+
+        def _is_real_service_subentry(candidate: Any) -> str | None:
+            normalized_candidate = _normalize_subentry_id(candidate)
+            if normalized_candidate is None:
+                return None
+            if service_subentry_ids and normalized_candidate not in service_subentry_ids:
+                return None
+            if (
+                entry_service_subentry_id is not None
+                and normalized_candidate != entry_service_subentry_id
+            ):
+                return None
+            if not service_subentry_ids and entry_service_subentry_id is None:
+                return None
+            return normalized_candidate
+
+        service_config_subentry_id = None
+        if service_meta is not None:
+            service_config_subentry_id = _is_real_service_subentry(
+                service_meta.config_subentry_id
+            )
+        if service_config_subentry_id is None:
+            service_config_subentry_id = _is_real_service_subentry(
+                entry_service_subentry_id
+            )
+
         service_subentry_identifier: tuple[str, str] | None = None
         if service_config_subentry_id is not None:
             service_subentry_identifier = (
                 DOMAIN,
                 f"{entry.entry_id}:{service_config_subentry_id}:service",
             )
-        if not service_config_subentry_id:
-            fallback_service_id = getattr(entry, "service_subentry_id", None)
-            if isinstance(fallback_service_id, str) and fallback_service_id:
-                service_config_subentry_id = fallback_service_id
-                service_subentry_identifier = (
-                    DOMAIN,
-                    f"{entry.entry_id}:{fallback_service_id}:service",
-                )
 
         setattr(
             self,
@@ -1930,7 +1976,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 create_kwargs["name"] = service_device_name
             create_kwargs["translation_key"] = SERVICE_DEVICE_TRANSLATION_KEY
             create_kwargs["translation_placeholders"] = {}
-            create_kwargs["config_subentry_id"] = service_config_subentry_id
+            if service_config_subentry_id is not None:
+                create_kwargs["config_subentry_id"] = service_config_subentry_id
 
             device = self._call_device_registry_api(
                 dev_reg.async_get_or_create,
@@ -1985,8 +2032,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "sw_version": INTEGRATION_VERSION,
                     "entry_type": dr.DeviceEntryType.SERVICE,
                     "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
-                    "config_subentry_id": service_config_subentry_id,
                 }
+                if service_config_subentry_id is not None:
+                    update_kwargs["config_subentry_id"] = service_config_subentry_id
                 if service_config_subentry_id is not None:
                     update_kwargs["add_config_entry_id"] = entry.entry_id
                 if needs_identifier_backfill:
@@ -2030,8 +2078,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
                         "translation_key": SERVICE_DEVICE_TRANSLATION_KEY,
                         "translation_placeholders": {},
-                        "config_subentry_id": service_config_subentry_id,
                     }
+                    if service_config_subentry_id is not None:
+                        translation_kwargs["config_subentry_id"] = (
+                            service_config_subentry_id
+                        )
                     if needs_name_refresh and service_device_name:
                         translation_kwargs["name"] = service_device_name
                     device = self._call_device_registry_api(
@@ -2055,7 +2106,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if device is not None:
             links = _service_entry_links(device)
             has_hub_link = None in links
-            if has_hub_link:
+            if has_hub_link and service_config_subentry_id is not None:
                 _LOGGER.info(
                     "[%s] Removing redundant hub link from service device %s",
                     entry.entry_id,
