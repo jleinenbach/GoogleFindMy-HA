@@ -1325,6 +1325,115 @@ def test_service_device_clears_missing_service_link(
     assert service_entry.config_entries_subentries.get(entry.entry_id) == {None}
 
 
+def test_service_device_skips_provisional_identifier(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Provisional service identifiers must not be written to the registry."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry_id = "entry-provisional"
+    provisional_service_id = f"{entry_id}-{SERVICE_SUBENTRY_KEY}-provisional"
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id=f"{entry_id}-tracker",
+        subentry_id=_stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY),
+    )
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id=f"{entry_id}-service",
+        subentry_id=provisional_service_id,
+    )
+    entry = SimpleNamespace(
+        entry_id=entry_id,
+        title="Google Find My",
+        data={},
+        options={},
+        subentries={
+            service_subentry.subentry_id: service_subentry,
+            tracker_subentry.subentry_id: tracker_subentry,
+        },
+        runtime_data=None,
+        service_subentry_id=None,
+        tracker_subentry_id=tracker_subentry.subentry_id,
+    )
+
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    coordinator._ensure_service_device_exists()
+
+    service_ident = service_device_identifier(entry_id)
+    service_entry = next(
+        device for device in fake_registry.devices if service_ident in device.identifiers
+    )
+
+    assert service_entry.config_subentry_id is None
+    assert service_entry.identifiers == {service_ident}
+    assert service_entry.config_entries_subentries.get(entry_id) == {None}
+
+    created_payload = fake_registry.created[-1]
+    assert created_payload["config_subentry_id"] is None
+
+
+def test_refresh_subentry_index_discards_provisional_ids(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Provisional subentry identifiers should not drive metadata caches."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry_id = "entry-provisional-metadata"
+    provisional_service_id = f"{entry_id}-{SERVICE_SUBENTRY_KEY}-provisional"
+    provisional_tracker_id = f"{entry_id}-{TRACKER_SUBENTRY_KEY}-provisional"
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id=f"{entry_id}-service",
+        subentry_id=provisional_service_id,
+    )
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id=f"{entry_id}-tracker",
+        subentry_id=provisional_tracker_id,
+    )
+    entry = SimpleNamespace(
+        entry_id=entry_id,
+        title="Google Find My",
+        data={},
+        options={},
+        subentries={
+            service_subentry.subentry_id: service_subentry,
+            tracker_subentry.subentry_id: tracker_subentry,
+        },
+        runtime_data=None,
+        service_subentry_id=None,
+        tracker_subentry_id=None,
+    )
+
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    coordinator._refresh_subentry_index()
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+    assert service_meta is not None
+    assert service_meta.config_subentry_id is None
+    assert service_meta.stable_identifier() == SERVICE_SUBENTRY_KEY
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert tracker_meta is not None
+    assert tracker_meta.config_subentry_id is None
+    assert tracker_meta.stable_identifier() == TRACKER_SUBENTRY_KEY
+    assert (
+        coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
+        == TRACKER_SUBENTRY_KEY
+    )
+
+
 def test_service_device_update_uses_add_config_entry_id(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:

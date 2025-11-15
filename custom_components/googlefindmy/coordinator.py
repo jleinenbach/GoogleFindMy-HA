@@ -271,6 +271,22 @@ class SubentryMetadata:
         return self.config_subentry_id
 
 
+def _sanitize_subentry_identifier(candidate: Any) -> str | None:
+    """Return a normalized subentry identifier or ``None`` when fabricated."""
+
+    if not isinstance(candidate, str):
+        return None
+
+    normalized = candidate.strip()
+    if not normalized:
+        return None
+
+    if normalized.endswith("-provisional"):
+        return None
+
+    return normalized
+
+
 # --- Epoch normalization (ms→s tolerant) -----------------------------------
 def _normalize_epoch_seconds(ts: Any) -> float | None:
     """Return epoch seconds as float; accept str/int/float; convert ms→s if needed."""
@@ -971,10 +987,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
                 if group_key in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY):
                     core_group_keys_present.add(group_key)
+                identifier = _sanitize_subentry_identifier(
+                    getattr(subentry, "subentry_id", None)
+                )
                 raw_entries.append(
                     (
                         group_key,
-                        getattr(subentry, "subentry_id", None),
+                        identifier,
                         data,
                         getattr(subentry, "title", None),
                     )
@@ -1761,10 +1780,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         service_meta = self._subentry_metadata.get(SERVICE_SUBENTRY_KEY)
 
         def _normalize_subentry_id(value: Any) -> str | None:
-            if not isinstance(value, str):
-                return None
-            candidate = value.strip()
-            return candidate or None
+            return _sanitize_subentry_identifier(value)
 
         entry_service_subentry_id = _normalize_subentry_id(
             getattr(entry, "service_subentry_id", None)
@@ -1807,14 +1823,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return normalized_candidate
 
         service_config_subentry_id = None
+        meta_identifier: Any | None = None
         if service_meta is not None:
-            service_config_subentry_id = _is_real_service_subentry(
-                service_meta.config_subentry_id
-            )
-        if service_config_subentry_id is None:
-            service_config_subentry_id = _is_real_service_subentry(
-                entry_service_subentry_id
-            )
+            meta_identifier = getattr(service_meta, "config_subentry_id", None)
+        for candidate in (meta_identifier, entry_service_subentry_id):
+            resolved = _is_real_service_subentry(candidate)
+            if resolved is not None:
+                service_config_subentry_id = resolved
+                break
+
+        if service_config_subentry_id is None and service_subentry_ids:
+            service_config_subentry_id = next(iter(sorted(service_subentry_ids)))
 
         service_subentry_identifier: tuple[str, str] | None = None
         if service_config_subentry_id is not None:
