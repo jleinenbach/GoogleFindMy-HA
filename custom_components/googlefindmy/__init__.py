@@ -57,7 +57,12 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from .ProtoDecoders import Common_pb2, DeviceUpdate_pb2, LocationReportsUpload_pb2
 
 from homeassistant import data_entry_flow
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigEntryState,
+    ConfigSubentry,
+    OperationNotAllowed,
+)
 try:  # pragma: no cover - ConfigEntryDisabler introduced in HA 2023.12
     from homeassistant.config_entries import ConfigEntryDisabler as _ConfigEntryDisabler
 except ImportError:  # pragma: no cover - legacy Home Assistant builds
@@ -4955,6 +4960,29 @@ def _determine_subentry_platforms(subentry: Any) -> tuple[Platform, ...]:
     return _normalize_platforms_from_features(features)
 
 
+def _platform_names(platforms: Iterable[Platform | str]) -> tuple[str, ...]:
+    """Return normalized platform names for logging/debugging."""
+
+    names: list[str] = []
+    for platform in platforms:
+        candidate: str | None = None
+        if isinstance(platform, Platform):
+            candidate = getattr(platform, "value", None)
+            if not candidate:
+                candidate = str(platform)
+        elif isinstance(platform, str):
+            candidate = platform
+        else:
+            candidate = str(platform)
+
+        if candidate:
+            names.append(candidate)
+
+    # Preserve ordering while deduplicating so repeated platform enums only
+    # appear once in debug output.
+    return tuple(dict.fromkeys(names))
+
+
 def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> bool:
     """Return ``True`` if ``callback`` accepts ``keyword`` as a kwarg."""
 
@@ -5194,6 +5222,20 @@ async def _async_ensure_subentries_are_setup(
     # before we request their setup; otherwise ``async_setup`` can raise UnknownEntry.
     await asyncio.sleep(0)
 
+    entry_state = getattr(entry, "state", None)
+    if isinstance(entry_state, ConfigEntryState):
+        state_name = entry_state.value
+    elif isinstance(entry_state, str):
+        state_name = entry_state
+    else:
+        state_name = "unknown"
+
+    _LOGGER.debug(
+        "[%s] ensure_subentries_setup invoked (state=%s)",
+        entry.entry_id,
+        state_name,
+    )
+
     subentries = _collect_entry_subentries(entry)
     if not subentries:
         return
@@ -5236,10 +5278,12 @@ async def _async_ensure_subentries_are_setup(
         return
 
     _LOGGER.debug(
-        "[%s] Triggering aggregated setup for %d subentries across %d platforms",  # noqa: G004
+        "[%s] Triggering aggregated setup for %d subentries (%s) across %d platforms (state=%s)",  # noqa: G004
         entry.entry_id,
         len(identifiers),
+        ", ".join(identifiers),
         len(platforms),
+        state_name,
     )
 
     forward = getattr(hass.config_entries, "async_forward_entry_setups", None)
@@ -5263,6 +5307,16 @@ async def _async_ensure_subentries_are_setup(
             ", ".join(identifiers),
             err,
         )
+    except OperationNotAllowed as err:
+        _LOGGER.error(
+            "[%s] Aggregated subentry setup blocked while entry state=%s (subentries=%s, platforms=%s): %s",
+            entry.entry_id,
+            state_name,
+            ", ".join(identifiers),
+            ", ".join(_platform_names(platforms)),
+            err,
+        )
+        raise
     except Exception as err:  # noqa: BLE001 - defensive logging
         _LOGGER.exception(
             "[%s] Aggregated subentry setup raised %s for %s",  # noqa: G004
@@ -5781,23 +5835,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         ]
     )
 
-    # --- BEGIN RACE-CONDITION AND ERROR-HANDLING FIX ---
-    # Awaiting _async_ensure_subentries_are_setup immediately after creating
-    # the subentries triggers a race condition where Home Assistant Core raises
-    # UnknownEntry because it has not finished registering the new subentries.
-    # Schedule the setup in a background task so HA finalizes registration
-    # before the setup runs. Using ConfigEntry.async_create_background_task keeps
-    # the task tied to the entry lifecycle so ConfigEntryNotReady propagates
-    # correctly when setup fails, while still deferring execution until after
-    # the registry has recorded the new child entries. Avoid
-    # hass.async_create_task here; it would detach failure handling from the
-    # config entry lifecycle and reintroduce silent retries.
-    entry.async_create_background_task(
-        hass,
-        _async_ensure_subentries_are_setup(hass, entry),
-        name=f"{DOMAIN}.ensure_subentries_setup.{entry.entry_id}",
-    )
-    # --- END RACE-CONDITION AND ERROR-HANDLING FIX ---
+    # Home Assistant's platform forwarding helpers expect every platform to be
+    # loaded before the parent entry finishes setup. Await the aggregated
+    # subentry setup directly so unload/reload cycles never observe a partially
+    # initialized integration. `_async_ensure_subentries_are_setup` yields once
+    # at the beginning to give Home Assistant time to register freshly created
+    # subentries before it forwards platform setup.
+    await _async_ensure_subentries_are_setup(hass, entry)
 
     bucket = domain_bucket
 
