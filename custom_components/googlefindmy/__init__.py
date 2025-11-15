@@ -6112,21 +6112,29 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
     unload_parent_platforms = True
     unload_callable = getattr(hass.config_entries, "async_unload_platforms", None)
-    already_unloaded = bool(
+    unload_call_count = int(getattr(entry, "_gfm_parent_unload_call_count", 0) or 0)
+    in_progress = bool(getattr(entry, "_gfm_parent_unload_in_progress", False))
+    unload_completed = bool(
         getattr(entry, "_gfm_parent_platforms_unloaded", False)
     )
-    unload_call_count = int(getattr(entry, "_gfm_parent_unload_call_count", 0) or 0)
-    if callable(unload_callable):
-        if already_unloaded or unload_call_count > 0:
-            _LOGGER.debug(
-                "[%s] Parent platforms already requested to unload; skipping duplicate call",
-                entry.entry_id,
-            )
-        else:
-            # Mark as unloaded pre-emptively so re-entrant attempts triggered from the
-            # Home Assistant helpers short-circuit. The flag and counter are reverted on
-            # failure so subsequent retries still invoke the unload helper.
-            setattr(entry, "_gfm_parent_platforms_unloaded", True)
+
+    if unload_completed and not in_progress:
+        _LOGGER.debug(
+            "[%s] Parent platforms already unloaded; skipping duplicate call",
+            entry.entry_id,
+        )
+        return True
+    if in_progress:
+        _LOGGER.debug(
+            "[%s] Parent unload already in progress; ignoring duplicate request",
+            entry.entry_id,
+        )
+        return True
+
+    overall_success = False
+    setattr(entry, "_gfm_parent_unload_in_progress", True)
+    try:
+        if callable(unload_callable):
             setattr(entry, "_gfm_parent_unload_call_count", unload_call_count + 1)
             try:
                 result = unload_callable(entry, tuple(PLATFORMS))
@@ -6140,175 +6148,163 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                     err,
                 )
                 unload_parent_platforms = False
-            finally:
-                if not unload_parent_platforms:
-                    setattr(entry, "_gfm_parent_platforms_unloaded", False)
-                    setattr(entry, "_gfm_parent_unload_call_count", unload_call_count)
-    else:
-        _LOGGER.debug(
-            "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
-            entry.entry_id,
-        )
-
-    if not unload_parent_platforms:
-        if runtime_data is not None:
-            entries_bucket[entry.entry_id] = runtime_data
-        try:
-            await _async_ensure_subentries_are_setup(hass, entry)
-        except Exception as err:  # noqa: BLE001 - defensive logging
+            else:
+                if unload_parent_platforms:
+                    setattr(entry, "_gfm_parent_platforms_unloaded", True)
+        else:
             _LOGGER.debug(
-                "[%s] Failed to restore subentries after parent unload abort: %s",  # noqa: G004
+                "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
                 entry.entry_id,
-                err,
             )
-        return False
+            setattr(entry, "_gfm_parent_platforms_unloaded", True)
 
-    async def _unload_config_subentry(subentry: Any) -> bool:
-        identifier = _resolve_config_subentry_identifier(subentry)
-        platforms = _determine_subentry_platforms(subentry)
-
-        forward_unload = getattr(hass.config_entries, "async_forward_entry_unload", None)
-        if isinstance(identifier, str) and identifier and callable(forward_unload):
-            result = _invoke_with_optional_keyword(
-                forward_unload,
-                (entry, tuple(platforms)),
-                "config_subentry_id",
-                identifier,
-            )
-            if isinstance(result, Awaitable):
-                result = await result
-            return bool(result) if result is not None else True
-
-        entry_id = getattr(subentry, "entry_id", None)
-        unload_child = getattr(hass.config_entries, "async_unload", None)
-        if isinstance(entry_id, str) and entry_id and callable(unload_child):
-            result = unload_child(entry_id)
-            if isinstance(result, Awaitable):
-                result = await result
-            return bool(result)
-
-        remove_callable = getattr(hass.config_entries, "async_remove_subentry", None)
-        if isinstance(identifier, str) and identifier and callable(remove_callable):
-            result = remove_callable(entry, identifier)
-            if isinstance(result, Awaitable):
-                result = await result
-            return bool(result)
-
-        return True
-
-    unload_results = await asyncio.gather(
-        *(_unload_config_subentry(subentry) for subentry in subentries),
-        return_exceptions=True,
-    )
-
-    unload_success = all(
-        isinstance(result, bool) and result for result in unload_results
-    )
-    if not unload_success:
-        _LOGGER.error(
-            "[%s] Failed to unload one or more subentries; aborting parent unload",
-            entry.entry_id,
-        )
-        for index, result in enumerate(unload_results):
-            if isinstance(result, Exception):
-                sub_obj = subentries[index]
-                sub_id = _resolve_config_subentry_identifier(sub_obj) or getattr(
-                    sub_obj, "entry_id", f"index {index}"
-                )
-                _LOGGER.debug(
-                    "[%s] Subentry %s unload failed: %s",
-                    entry.entry_id,
-                    sub_id,
-                    result,
-                )
-        if runtime_data is not None:
-            entries_bucket[entry.entry_id] = runtime_data
-        try:
-            await _async_ensure_subentries_are_setup(hass, entry)
-        except Exception as err:  # noqa: BLE001 - defensive logging
-            _LOGGER.debug("Failed to restore subentries after unload failure: %s", err)
-        return False
-
-    unload_parent_platforms = True
-    unload_callable = getattr(hass.config_entries, "async_unload_platforms", None)
-    if callable(unload_callable):
-        try:
-            result = unload_callable(entry, tuple(PLATFORMS))
-            if isinstance(result, Awaitable):
-                result = await result
-            unload_parent_platforms = bool(result) if result is not None else True
-        except Exception as err:  # noqa: BLE001 - defensive logging
-            _LOGGER.error(
-                "[%s] Failed to unload parent platforms: %s",  # noqa: G004
-                entry.entry_id,
-                err,
-            )
-            unload_parent_platforms = False
-    else:
-        _LOGGER.debug(
-            "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
-            entry.entry_id,
-        )
-
-    if not unload_parent_platforms:
-        if runtime_data is not None:
-            entries_bucket[entry.entry_id] = runtime_data
-        return False
-
-    if runtime_data is not None:
-        coordinator = runtime_data.coordinator
-        if coordinator is not None:
-            await coordinator.async_shutdown()
-
-        if runtime_data.subentry_manager is not None:
+        if not unload_parent_platforms:
+            if runtime_data is not None:
+                entries_bucket[entry.entry_id] = runtime_data
             try:
-                await runtime_data.subentry_manager.async_remove_all()
-            except Exception as err:
-                _LOGGER.debug("Subentry cleanup raised during unload: %s", err)
-
-        cache = runtime_data.token_cache
-        if cache is not None:
-            fallback_cache = _unregister_instance(entry.entry_id)
-            try:
-                await cache.close()
+                await _async_ensure_subentries_are_setup(hass, entry)
+            except Exception as err:  # noqa: BLE001 - defensive logging
                 _LOGGER.debug(
-                    "TokenCache for entry '%s' has been flushed and closed.",
-                    entry.entry_id,
-                )
-            except Exception as err:
-                _LOGGER.warning(
-                    "Closing TokenCache for entry '%s' failed: %s",
+                    "[%s] Failed to restore subentries after parent unload abort: %s",  # noqa: G004
                     entry.entry_id,
                     err,
                 )
-            if fallback_cache is not None and fallback_cache is not cache:
-                with suppress(Exception):
-                    await fallback_cache.close()
+            return False
 
-    try:
-        await _async_release_shared_fcm(hass)
-    except Exception as err:
-        _LOGGER.debug("FCM release during parent unload raised: %s", err)
+        async def _unload_config_subentry(subentry: Any) -> bool:
+            identifier = _resolve_config_subentry_identifier(subentry)
+            platforms = _determine_subentry_platforms(subentry)
 
-    try:
-        owner_index: dict[str, str] = _ensure_device_owner_index(bucket)
-        stale = [cid for cid, eid in list(owner_index.items()) if eid == entry.entry_id]
-        for cid in stale:
-            owner_index.pop(cid, None)
-        if stale:
-            _LOGGER.debug(
-                "Cleared %d owner-index claim(s) for entry '%s'",
-                len(stale),
+            forward_unload = getattr(
+                hass.config_entries, "async_forward_entry_unload", None
+            )
+            if isinstance(identifier, str) and identifier and callable(forward_unload):
+                result = _invoke_with_optional_keyword(
+                    forward_unload,
+                    (entry, tuple(platforms)),
+                    "config_subentry_id",
+                    identifier,
+                )
+                if isinstance(result, Awaitable):
+                    result = await result
+                return bool(result) if result is not None else True
+
+            entry_id = getattr(subentry, "entry_id", None)
+            unload_child = getattr(hass.config_entries, "async_unload", None)
+            if isinstance(entry_id, str) and entry_id and callable(unload_child):
+                result = unload_child(entry_id)
+                if isinstance(result, Awaitable):
+                    result = await result
+                return bool(result)
+
+            remove_callable = getattr(
+                hass.config_entries, "async_remove_subentry", None
+            )
+            if isinstance(identifier, str) and identifier and callable(remove_callable):
+                result = remove_callable(entry, identifier)
+                if isinstance(result, Awaitable):
+                    result = await result
+                return bool(result)
+
+            return True
+
+        unload_results = await asyncio.gather(
+            *(_unload_config_subentry(subentry) for subentry in subentries),
+            return_exceptions=True,
+        )
+
+        unload_success = all(
+            isinstance(result, bool) and result for result in unload_results
+        )
+        if not unload_success:
+            _LOGGER.error(
+                "[%s] Failed to unload one or more subentries; aborting parent unload",
                 entry.entry_id,
             )
-    except Exception as err:
-        _LOGGER.debug("Owner-index cleanup failed: %s", err)
+            for index, result in enumerate(unload_results):
+                if isinstance(result, Exception):
+                    sub_obj = subentries[index]
+                    sub_id = _resolve_config_subentry_identifier(sub_obj) or getattr(
+                        sub_obj, "entry_id", f"index {index}"
+                    )
+                    _LOGGER.debug(
+                        "[%s] Subentry %s unload failed: %s",
+                        entry.entry_id,
+                        sub_id,
+                        result,
+                    )
+            if runtime_data is not None:
+                entries_bucket[entry.entry_id] = runtime_data
+            try:
+                await _async_ensure_subentries_are_setup(hass, entry)
+            except Exception as err:  # noqa: BLE001 - defensive logging
+                _LOGGER.debug(
+                    "Failed to restore subentries after unload failure: %s", err
+                )
+            return False
 
-    if hasattr(entry, "runtime_data"):
-        with suppress(Exception):
-            setattr(entry, "runtime_data", None)
+        if runtime_data is not None:
+            coordinator = runtime_data.coordinator
+            if coordinator is not None:
+                await coordinator.async_shutdown()
 
-    return True
+            if runtime_data.subentry_manager is not None:
+                try:
+                    await runtime_data.subentry_manager.async_remove_all()
+                except Exception as err:
+                    _LOGGER.debug("Subentry cleanup raised during unload: %s", err)
+
+            cache = runtime_data.token_cache
+            if cache is not None:
+                fallback_cache = _unregister_instance(entry.entry_id)
+                try:
+                    await cache.close()
+                    _LOGGER.debug(
+                        "TokenCache for entry '%s' has been flushed and closed.",
+                        entry.entry_id,
+                    )
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Closing TokenCache for entry '%s' failed: %s",
+                        entry.entry_id,
+                        err,
+                    )
+                if fallback_cache is not None and fallback_cache is not cache:
+                    with suppress(Exception):
+                        await fallback_cache.close()
+
+        try:
+            await _async_release_shared_fcm(hass)
+        except Exception as err:
+            _LOGGER.debug("FCM release during parent unload raised: %s", err)
+
+        try:
+            owner_index: dict[str, str] = _ensure_device_owner_index(bucket)
+            stale = [
+                cid for cid, eid in list(owner_index.items()) if eid == entry.entry_id
+            ]
+            for cid in stale:
+                owner_index.pop(cid, None)
+            if stale:
+                _LOGGER.debug(
+                    "Cleared %d owner-index claim(s) for entry '%s'",
+                    len(stale),
+                    entry.entry_id,
+                )
+        except Exception as err:
+            _LOGGER.debug("Owner-index cleanup failed: %s", err)
+
+        if hasattr(entry, "runtime_data"):
+            with suppress(Exception):
+                setattr(entry, "runtime_data", None)
+
+        overall_success = True
+        return True
+    finally:
+        setattr(entry, "_gfm_parent_unload_in_progress", False)
+        if not overall_success:
+            setattr(entry, "_gfm_parent_platforms_unloaded", False)
+            setattr(entry, "_gfm_parent_unload_call_count", unload_call_count)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
