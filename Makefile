@@ -10,11 +10,11 @@ WHEELHOUSE_SENTINEL := $(WHEELHOUSE)/.requirements-dev.stamp
 BOOTSTRAP_SENTINEL := .bootstrap/homeassistant-preinstall.stamp
 
 clean:
-        @python script/clean_pycache.py
-        @if [ -f "$(BOOTSTRAP_SENTINEL)" ]; then \
-                echo "[make clean] Removing Home Assistant bootstrap sentinel"; \
-                rm -f "$(BOOTSTRAP_SENTINEL)"; \
-        fi
+	@python script/clean_pycache.py
+	@if [ -f "$(BOOTSTRAP_SENTINEL)" ]; then \
+		echo "[make clean] Removing Home Assistant bootstrap sentinel"; \
+		rm -f "$(BOOTSTRAP_SENTINEL)"; \
+	fi
 
 lint:
 	@ruff check . --fix
@@ -31,17 +31,17 @@ clean-wheelhouse:
 	fi
 
 install-ha-stubs:
-        @echo "[make install-ha-stubs] Installing Home Assistant pytest dependencies"
-        @$(PYTHON) -m pip install --upgrade -r requirements-ha-stubs.txt
+	@echo "[make install-ha-stubs] Installing Home Assistant pytest dependencies"
+	@$(PYTHON) -m pip install --upgrade -r requirements-ha-stubs.txt
 
 bootstrap-base-deps: $(BOOTSTRAP_SENTINEL)
-        @echo "[make bootstrap-base-deps] Home Assistant base dependencies are ready"
+	@echo "[make bootstrap-base-deps] Home Assistant base dependencies are ready"
 
 $(BOOTSTRAP_SENTINEL):
-        @mkdir -p $(dir $(BOOTSTRAP_SENTINEL))
-        @echo "[make bootstrap-base-deps] Pre-installing Home Assistant base dependencies"
-        @$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
-        @touch $(BOOTSTRAP_SENTINEL)
+	@mkdir -p $(dir $(BOOTSTRAP_SENTINEL))
+	@echo "[make bootstrap-base-deps] Pre-installing Home Assistant base dependencies"
+	@$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
+	@touch $(BOOTSTRAP_SENTINEL)
 
 $(WHEELHOUSE_SENTINEL): requirements-dev.txt
 	@mkdir -p $(WHEELHOUSE)
@@ -55,9 +55,9 @@ $(WHEELHOUSE_SENTINEL): requirements-dev.txt
 	@touch $(WHEELHOUSE_SENTINEL)
 
 $(VENV)/bin/activate: requirements-dev.txt $(WHEELHOUSE_SENTINEL) $(BOOTSTRAP_SENTINEL)
-        @$(PYTHON) -m venv $(VENV)
-        @$(VENV)/bin/pip install --find-links=$(WHEELHOUSE) -r requirements-dev.txt
-        @touch $(VENV)/bin/activate
+	@$(PYTHON) -m venv $(VENV)
+	@$(VENV)/bin/pip install --find-links=$(WHEELHOUSE) -r requirements-dev.txt
+	@touch $(VENV)/bin/activate
 
 test-ha: $(VENV)/bin/activate
 	@echo "[make test-ha] Running targeted Home Assistant regression smoke tests"
