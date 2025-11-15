@@ -3,3 +3,4 @@ __pycache__/
 pytest_output.log
 .coverage
 .wheelhouse/
+.bootstrap/

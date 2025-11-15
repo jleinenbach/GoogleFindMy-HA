@@ -6112,13 +6112,13 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
     unload_parent_platforms = True
     unload_callable = getattr(hass.config_entries, "async_unload_platforms", None)
-    already_unloaded = bool(
-        getattr(entry, "_gfm_parent_platforms_unloaded", False)
-    )
     unload_call_count = int(getattr(entry, "_gfm_parent_unload_call_count", 0) or 0)
     in_progress = bool(getattr(entry, "_gfm_parent_unload_in_progress", False))
+    unload_completed = bool(
+        getattr(entry, "_gfm_parent_platforms_unloaded", False)
+    )
 
-    if already_unloaded and not in_progress:
+    if unload_completed and not in_progress:
         _LOGGER.debug(
             "[%s] Parent platforms already unloaded; skipping duplicate call",
             entry.entry_id,
@@ -6135,10 +6135,6 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
     setattr(entry, "_gfm_parent_unload_in_progress", True)
     try:
         if callable(unload_callable):
-            # Mark as unloaded pre-emptively so re-entrant attempts triggered from the
-            # Home Assistant helpers short-circuit. The flag and counter are reverted on
-            # failure so subsequent retries still invoke the unload helper.
-            setattr(entry, "_gfm_parent_platforms_unloaded", True)
             setattr(entry, "_gfm_parent_unload_call_count", unload_call_count + 1)
             try:
                 result = unload_callable(entry, tuple(PLATFORMS))
@@ -6152,11 +6148,15 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                     err,
                 )
                 unload_parent_platforms = False
+            else:
+                if unload_parent_platforms:
+                    setattr(entry, "_gfm_parent_platforms_unloaded", True)
         else:
             _LOGGER.debug(
                 "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
                 entry.entry_id,
             )
+            setattr(entry, "_gfm_parent_platforms_unloaded", True)
 
         if not unload_parent_platforms:
             if runtime_data is not None:
