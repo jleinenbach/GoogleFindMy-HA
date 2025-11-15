@@ -29,6 +29,7 @@ __all__ = [
     "config_entry_with_subentries",
     "resolve_config_entry_lookup",
     "install_homeassistant_core_callback_stub",
+    "GoogleFindMyConfigEntryStub",
 ]
 
 _EXPORT_MAP = {
@@ -49,6 +50,7 @@ _EXPORT_MAP = {
     "config_entry_with_subentries": ".homeassistant",
     "resolve_config_entry_lookup": ".homeassistant",
     "install_homeassistant_core_callback_stub": ".homeassistant_stub",
+    "GoogleFindMyConfigEntryStub": ".homeassistant",
 }
 
 

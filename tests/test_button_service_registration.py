@@ -18,21 +18,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 
-from tests.helpers import drain_loop
-
-
-class _StubConfigEntry:
-    """Config entry stub capturing unload callbacks."""
-
-    def __init__(self) -> None:
-        self.entry_id = "entry-test"
-        self.data: dict[str, Any] = {}
-        self.options: dict[str, Any] = {}
-        self.runtime_data: Any | None = None
-        self._unload_callbacks: list[Callable[[], None]] = []
-
-    def async_on_unload(self, callback: Callable[[], None]) -> None:
-        self._unload_callbacks.append(callback)
+from tests.helpers import GoogleFindMyConfigEntryStub, drain_loop
 
 
 class _StubHass:
@@ -68,7 +54,7 @@ def test_button_setup_skips_service_registration_when_platform_missing(
         def __init__(
             self,
             hass: Any,
-            config_entry: _StubConfigEntry,
+            config_entry: GoogleFindMyConfigEntryStub,
             devices: list[dict[str, Any]],
         ) -> None:
             self.hass = hass
@@ -126,7 +112,7 @@ def test_button_setup_skips_service_registration_when_platform_missing(
     asyncio.set_event_loop(loop)
 
     hass = _StubHass(loop, button_module.DOMAIN)
-    config_entry = _StubConfigEntry()
+    config_entry = GoogleFindMyConfigEntryStub()
 
     coordinator = _StubCoordinator(
         hass,
@@ -137,7 +123,10 @@ def test_button_setup_skips_service_registration_when_platform_missing(
 
     added_entities: list[Any] = []
 
-    def _async_add_entities(entities: list[Any], _: bool = False) -> None:
+    def _async_add_entities(
+        entities: list[Any], _update_before_add: bool = False, **kwargs: Any
+    ) -> None:
+        del _update_before_add, kwargs
         added_entities.extend(entities)
 
     monkeypatch.setattr(
