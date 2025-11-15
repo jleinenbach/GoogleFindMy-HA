@@ -864,8 +864,9 @@ def test_hass_data_layout(
             added_entities: list[Any] = []
 
             def _collect_entities(
-                entities: list[Any], _update_before_add: bool = False
+                entities: list[Any], _update_before_add: bool = False, **kwargs: Any
             ) -> None:
+                del _update_before_add, kwargs
                 added_entities.extend(entities)
 
             await button_module.async_setup_entry(hass, entry, _collect_entities)

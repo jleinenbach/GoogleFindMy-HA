@@ -11,7 +11,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from custom_components.googlefindmy import UnknownEntry
-from custom_components.googlefindmy.const import DOMAIN, service_device_identifier
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+    DOMAIN,
+    service_device_identifier,
+)
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import ServiceCall
 
@@ -34,6 +39,7 @@ __all__ = [
     "resolve_config_entry_lookup",
     "deferred_subentry_entry_id_assignment",
     "service_device_stub",
+    "GoogleFindMyConfigEntryStub",
 ]
 
 try:  # pragma: no cover - fallback runs only when HA stubs are absent
@@ -135,6 +141,84 @@ def service_device_stub(
 
     return SimpleNamespace(**payload)
 
+
+class GoogleFindMyConfigEntryStub:
+    """Config-entry double with Google Find My defaults and unload tracking."""
+
+    __slots__ = (
+        "entry_id",
+        "domain",
+        "data",
+        "options",
+        "title",
+        "unique_id",
+        "state",
+        "runtime_data",
+        "subentries",
+        "pref_disable_new_entities",
+        "pref_disable_polling",
+        "disabled_by",
+        "source",
+        "version",
+        "minor_version",
+        "_unload_callbacks",
+    )
+
+    def __init__(
+        self,
+        *,
+        entry_id: str = "entry-test",
+        email: str = "user@example.com",
+        data: Mapping[str, Any] | None = None,
+        options: Mapping[str, Any] | None = None,
+        title: str | None = None,
+        unique_id: str | None = None,
+        state: ConfigEntryState = ConfigEntryState.NOT_LOADED,
+        source: str | None = "user",
+    ) -> None:
+        self.entry_id = entry_id
+        self.domain = DOMAIN
+        self.title = title or "Google Find My"
+        default_data = {
+            DATA_SECRET_BUNDLE: {"username": email},
+            CONF_GOOGLE_EMAIL: email,
+        }
+        if data:
+            merged = dict(default_data)
+            merged.update(data)
+            self.data = merged
+        else:
+            self.data = dict(default_data)
+        self.options = dict(options or {})
+        self.unique_id = unique_id
+        self.state = state
+        self.runtime_data: Any | None = None
+        self.subentries: dict[str, Any] = {}
+        self.pref_disable_new_entities = False
+        self.pref_disable_polling = False
+        self.disabled_by: object | None = None
+        self.source = source
+        self.version = 1
+        self.minor_version = 1
+        self._unload_callbacks: list[Callable[[], None]] = []
+
+    def async_on_unload(self, callback: Callable[[], None]) -> None:
+        """Record ``callback`` for later invocation during unload."""
+
+        self._unload_callbacks.append(callback)
+
+    def invoke_unload_callbacks(self) -> None:
+        """Invoke and clear tracked unload callbacks."""
+
+        for callback in self.pop_unload_callbacks():
+            callback()
+
+    def pop_unload_callbacks(self) -> list[Callable[[], None]]:
+        """Return and clear the recorded unload callbacks."""
+
+        callbacks = list(self._unload_callbacks)
+        self._unload_callbacks.clear()
+        return callbacks
 
 def _assign_if_present(target: Any, attribute: str, value: Any) -> None:
     """Assign ``value`` to ``attribute`` when the target exposes the field."""
