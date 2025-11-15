@@ -6122,28 +6122,28 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 "[%s] Parent platforms already requested to unload; skipping duplicate call",
                 entry.entry_id,
             )
-        else:
-            # Mark as unloaded pre-emptively so re-entrant attempts triggered from the
-            # Home Assistant helpers short-circuit. The flag and counter are reverted on
-            # failure so subsequent retries still invoke the unload helper.
-            setattr(entry, "_gfm_parent_platforms_unloaded", True)
-            setattr(entry, "_gfm_parent_unload_call_count", unload_call_count + 1)
-            try:
-                result = unload_callable(entry, tuple(PLATFORMS))
-                if isinstance(result, Awaitable):
-                    result = await result
-                unload_parent_platforms = bool(result) if result is not None else True
-            except Exception as err:  # noqa: BLE001 - defensive logging
-                _LOGGER.error(
-                    "[%s] Failed to unload parent platforms: %s",  # noqa: G004
-                    entry.entry_id,
-                    err,
-                )
-                unload_parent_platforms = False
-            finally:
-                if not unload_parent_platforms:
-                    setattr(entry, "_gfm_parent_platforms_unloaded", False)
-                    setattr(entry, "_gfm_parent_unload_call_count", unload_call_count)
+            return True
+        # Mark as unloaded pre-emptively so re-entrant attempts triggered from the
+        # Home Assistant helpers short-circuit. The flag and counter are reverted on
+        # failure so subsequent retries still invoke the unload helper.
+        setattr(entry, "_gfm_parent_platforms_unloaded", True)
+        setattr(entry, "_gfm_parent_unload_call_count", unload_call_count + 1)
+        try:
+            result = unload_callable(entry, tuple(PLATFORMS))
+            if isinstance(result, Awaitable):
+                result = await result
+            unload_parent_platforms = bool(result) if result is not None else True
+        except Exception as err:  # noqa: BLE001 - defensive logging
+            _LOGGER.error(
+                "[%s] Failed to unload parent platforms: %s",  # noqa: G004
+                entry.entry_id,
+                err,
+            )
+            unload_parent_platforms = False
+        finally:
+            if not unload_parent_platforms:
+                setattr(entry, "_gfm_parent_platforms_unloaded", False)
+                setattr(entry, "_gfm_parent_unload_call_count", unload_call_count)
     else:
         _LOGGER.debug(
             "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
@@ -6227,32 +6227,6 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
             await _async_ensure_subentries_are_setup(hass, entry)
         except Exception as err:  # noqa: BLE001 - defensive logging
             _LOGGER.debug("Failed to restore subentries after unload failure: %s", err)
-        return False
-
-    unload_parent_platforms = True
-    unload_callable = getattr(hass.config_entries, "async_unload_platforms", None)
-    if callable(unload_callable):
-        try:
-            result = unload_callable(entry, tuple(PLATFORMS))
-            if isinstance(result, Awaitable):
-                result = await result
-            unload_parent_platforms = bool(result) if result is not None else True
-        except Exception as err:  # noqa: BLE001 - defensive logging
-            _LOGGER.error(
-                "[%s] Failed to unload parent platforms: %s",  # noqa: G004
-                entry.entry_id,
-                err,
-            )
-            unload_parent_platforms = False
-    else:
-        _LOGGER.debug(
-            "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
-            entry.entry_id,
-        )
-
-    if not unload_parent_platforms:
-        if runtime_data is not None:
-            entries_bucket[entry.entry_id] = runtime_data
         return False
 
     if runtime_data is not None:
