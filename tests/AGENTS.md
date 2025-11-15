@@ -21,6 +21,15 @@ helper remains synchronous by default. When adding new tests or stubs,
 keep this split explicit so flows under test can safely handle both
 awaitable and immediate responses.
 
+When a test or helper needs access to Home Assistant's config-entry
+exception classes, call
+`tests.helpers.config_entries_stub.install_config_entries_stubs(module)`
+first and then reference the exceptions directly off the populated module
+(for example, `module.ConfigEntryAuthFailed`, `module.OperationNotAllowed`).
+The helper installs every config-entry related export in one place, so
+new tests only need to import the helper once rather than duplicating
+definitions across `tests/conftest.py` or other fixtures.
+
 ## Package layout
 
 The test suite is a Python package (`tests/__init__.py`). Use
