@@ -25,7 +25,7 @@ Provided sensors:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
@@ -84,15 +84,61 @@ async def async_setup_entry(
 
     Registers both diagnostic sensors under the per-entry service device.
     """
-    _ = config_subentry_id
     coordinator = resolve_coordinator(entry)
     service_meta = coordinator.get_subentry_metadata(feature="binary_sensor")
     service_subentry_key = (
         service_meta.key if service_meta is not None else SERVICE_SUBENTRY_KEY
     )
+    service_meta_config_id = (
+        getattr(service_meta, "config_subentry_id", None)
+        if service_meta is not None
+        else None
+    )
     service_subentry_identifier = coordinator.stable_subentry_identifier(
         key=service_subentry_key
     )
+    service_config_subentry_id = config_subentry_id or service_meta_config_id
+
+    _LOGGER.debug(
+        "Binary sensor setup: subentry_key=%s, config_subentry_id=%s",
+        service_subentry_key,
+        service_config_subentry_id,
+    )
+
+    if (
+        config_subentry_id
+        and service_meta_config_id
+        and config_subentry_id != service_meta_config_id
+    ):
+        _LOGGER.debug(
+            "Binary sensor setup ignored for unrelated subentry '%s' (expected '%s')",
+            config_subentry_id,
+            service_meta_config_id,
+        )
+        return
+
+    def _schedule_service_entities(
+        new_entities: Iterable[BinarySensorEntity],
+        update_before_add: bool = True,
+    ) -> None:
+        entity_list = list(new_entities)
+        if not entity_list:
+            return
+        try:
+            async_add_entities(
+                entity_list,
+                update_before_add=update_before_add,
+                config_subentry_id=service_config_subentry_id,
+            )
+        except TypeError as err:
+            if "config_subentry_id" not in str(err):
+                raise
+            _LOGGER.debug(
+                "Binary sensor setup: AddEntitiesCallback rejected config_subentry_id; retrying without (error=%s)",
+                err,
+            )
+            async_add_entities(entity_list, update_before_add=update_before_add)
+
     entities: list[BinarySensorEntity] = [
         GoogleFindMyPollingSensor(
             coordinator,
@@ -107,7 +153,7 @@ async def async_setup_entry(
             subentry_identifier=service_subentry_identifier,
         ),
     ]
-    async_add_entities(entities, True)
+    _schedule_service_entities(entities, True)
 
     runtime_data = getattr(entry, "runtime_data", None)
     recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
@@ -155,7 +201,7 @@ async def async_setup_entry(
         recovery_manager.register_binary_sensor_platform(
             expected_unique_ids=_expected_unique_ids,
             entity_factory=_build_entities,
-            add_entities=async_add_entities,
+            add_entities=_schedule_service_entities,
         )
 
 

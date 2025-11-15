@@ -22,6 +22,7 @@ Quality & design notes (HA Platinum guidelines)
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from homeassistant.components.button import ButtonEntityDescription
@@ -91,7 +92,6 @@ async def async_setup_entry(
     config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device button entities."""
-    _ = config_subentry_id
     coordinator = resolve_coordinator(config_entry)
 
     platform_getter = getattr(entity_platform, "async_get_current_platform", None)
@@ -109,11 +109,58 @@ async def async_setup_entry(
     tracker_subentry_key = (
         tracker_meta.key if tracker_meta is not None else TRACKER_SUBENTRY_KEY
     )
+    tracker_meta_config_id = (
+        getattr(tracker_meta, "config_subentry_id", None)
+        if tracker_meta is not None
+        else None
+    )
     tracker_subentry_identifier = coordinator.stable_subentry_identifier(
         key=tracker_subentry_key
     )
+    tracker_config_subentry_id = config_subentry_id or tracker_meta_config_id
+
+    _LOGGER.debug(
+        "Button setup: subentry_key=%s, config_subentry_id=%s",
+        tracker_subentry_key,
+        tracker_config_subentry_id,
+    )
+
+    if (
+        config_subentry_id
+        and tracker_meta_config_id
+        and config_subentry_id != tracker_meta_config_id
+    ):
+        _LOGGER.debug(
+            "Button setup ignored for unrelated subentry '%s' (expected '%s')",
+            config_subentry_id,
+            tracker_meta_config_id,
+        )
+        return
+
     known_ids: set[str] = set()
     entities: list[ButtonEntity] = []
+
+    def _schedule_button_entities(
+        new_entities: Iterable[ButtonEntity],
+        update_before_add: bool = True,
+    ) -> None:
+        entity_list = list(new_entities)
+        if not entity_list:
+            return
+        try:
+            async_add_entities(
+                entity_list,
+                update_before_add=update_before_add,
+                config_subentry_id=tracker_config_subentry_id,
+            )
+        except TypeError as err:
+            if "config_subentry_id" not in str(err):
+                raise
+            _LOGGER.debug(
+                "Button setup: AddEntitiesCallback rejected config_subentry_id; retrying without (error=%s)",
+                err,
+            )
+            async_add_entities(entity_list, update_before_add=update_before_add)
 
     # Initial population from coordinator.data (if already available)
     for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
@@ -153,7 +200,7 @@ async def async_setup_entry(
 
     if entities:
         _LOGGER.debug("Adding %d initial button entity(ies)", len(entities))
-        async_add_entities(entities, True)
+        _schedule_button_entities(entities, True)
 
     # Dynamically add buttons when new devices appear later
     @callback
@@ -205,7 +252,7 @@ async def async_setup_entry(
 
         if new_entities:
             _LOGGER.debug("Dynamically adding %d button entity(ies)", len(new_entities))
-            async_add_entities(new_entities, True)
+            _schedule_button_entities(new_entities, True)
 
     unsub = coordinator.async_add_listener(_add_new_devices)
     config_entry.async_on_unload(unsub)
@@ -286,7 +333,7 @@ async def async_setup_entry(
         recovery_manager.register_button_platform(
             expected_unique_ids=_expected_unique_ids,
             entity_factory=_build_entities,
-            add_entities=async_add_entities,
+            add_entities=_schedule_button_entities,
         )
 
 

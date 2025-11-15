@@ -16,6 +16,7 @@ Best practices:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -120,12 +121,16 @@ async def async_setup_entry(
     - Optionally create diagnostic stat sensors when enabled via options.
     - Dynamically add per-device sensors when new devices appear.
     """
-    _ = config_subentry_id
     coordinator = resolve_coordinator(entry)
 
     service_meta = coordinator.get_subentry_metadata(feature="binary_sensor")
     service_subentry_key = (
         service_meta.key if service_meta is not None else SERVICE_SUBENTRY_KEY
+    )
+    service_meta_config_id = (
+        getattr(service_meta, "config_subentry_id", None)
+        if service_meta is not None
+        else None
     )
     service_subentry_identifier = coordinator.stable_subentry_identifier(
         key=service_subentry_key
@@ -134,13 +139,113 @@ async def async_setup_entry(
     tracker_subentry_key = (
         tracker_meta.key if tracker_meta is not None else TRACKER_SUBENTRY_KEY
     )
+    tracker_meta_config_id = (
+        getattr(tracker_meta, "config_subentry_id", None)
+        if tracker_meta is not None
+        else None
+    )
     tracker_subentry_identifier = coordinator.stable_subentry_identifier(
         key=tracker_subentry_key
     )
-    entities: list[SensorEntity] = []
+    service_config_subentry_id = service_meta_config_id
+    tracker_config_subentry_id = tracker_meta_config_id
+
+    _LOGGER.debug(
+        "Sensor setup: service_key=%s (id=%s), tracker_key=%s (id=%s), config_subentry_id=%s",
+        service_subentry_key,
+        service_config_subentry_id,
+        tracker_subentry_key,
+        tracker_config_subentry_id,
+        config_subentry_id,
+    )
+
+    def _matches(identifier: str | None, fallback: str) -> bool:
+        if not isinstance(config_subentry_id, str) or not config_subentry_id:
+            return False
+        if identifier and config_subentry_id == identifier:
+            return True
+        return config_subentry_id == fallback
+
+    should_init_service = True
+    should_init_tracker = True
+    if isinstance(config_subentry_id, str) and config_subentry_id:
+        matches_service = _matches(service_config_subentry_id, service_subentry_identifier)
+        matches_tracker = _matches(tracker_config_subentry_id, tracker_subentry_identifier)
+        if matches_service and not matches_tracker:
+            should_init_tracker = False
+        elif matches_tracker and not matches_service:
+            should_init_service = False
+        elif not matches_service and not matches_tracker:
+            _LOGGER.debug(
+                "Sensor setup received unknown config_subentry_id '%s'; defaulting to all scopes",
+                config_subentry_id,
+            )
+
+    service_entities: list[SensorEntity] = []
+    tracker_entities: list[SensorEntity] = []
     known_ids: set[str] = set()
 
-    # Options-first toggle for diagnostic counters (single source of truth)
+    def _schedule_service_entities(
+        new_entities: Iterable[SensorEntity],
+        update_before_add: bool = True,
+    ) -> None:
+        entity_list = list(new_entities)
+        if not entity_list:
+            return
+        try:
+            async_add_entities(
+                entity_list,
+                update_before_add=update_before_add,
+                config_subentry_id=service_config_subentry_id,
+            )
+        except TypeError as err:
+            if "config_subentry_id" not in str(err):
+                raise
+            _LOGGER.debug(
+                "Sensor setup: AddEntitiesCallback rejected service config_subentry_id; retrying without (error=%s)",
+                err,
+            )
+            async_add_entities(entity_list, update_before_add=update_before_add)
+
+    def _schedule_tracker_entities(
+        new_entities: Iterable[SensorEntity],
+        update_before_add: bool = True,
+    ) -> None:
+        entity_list = list(new_entities)
+        if not entity_list:
+            return
+        try:
+            async_add_entities(
+                entity_list,
+                update_before_add=update_before_add,
+                config_subentry_id=tracker_config_subentry_id,
+            )
+        except TypeError as err:
+            if "config_subentry_id" not in str(err):
+                raise
+            _LOGGER.debug(
+                "Sensor setup: AddEntitiesCallback rejected tracker config_subentry_id; retrying without (error=%s)",
+                err,
+            )
+            async_add_entities(entity_list, update_before_add=update_before_add)
+
+    def _schedule_recovered_entities(
+        new_entities: Iterable[SensorEntity],
+        update_before_add: bool = True,
+    ) -> None:
+        service_batch: list[SensorEntity] = []
+        tracker_batch: list[SensorEntity] = []
+        for entity in new_entities:
+            if isinstance(entity, GoogleFindMyStatsSensor):
+                service_batch.append(entity)
+            else:
+                tracker_batch.append(entity)
+
+        if service_batch:
+            _schedule_service_entities(service_batch, update_before_add)
+        if tracker_batch:
+            _schedule_tracker_entities(tracker_batch, update_before_add)
+
     enable_stats_raw = entry.options.get(
         OPT_ENABLE_STATS_ENTITIES,
         entry.data.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES),
@@ -148,11 +253,10 @@ async def async_setup_entry(
     enable_stats = bool(enable_stats_raw)
 
     created_stats: list[str] = []
-    if enable_stats:
+    if should_init_service and enable_stats:
         for stat_key, desc in STATS_DESCRIPTIONS.items():
-            # Only create sensors for counters that actually exist in the coordinator
             if hasattr(coordinator, "stats") and stat_key in coordinator.stats:
-                entities.append(
+                service_entities.append(
                     GoogleFindMyStatsSensor(
                         coordinator,
                         stat_key,
@@ -164,38 +268,41 @@ async def async_setup_entry(
                 created_stats.append(stat_key)
         if created_stats:
             _LOGGER.debug("Stats sensors created: %s", ", ".join(created_stats))
-        else:
+        elif enable_stats:
             _LOGGER.debug(
                 "Stats option enabled but no known counters were present in coordinator.stats"
             )
 
-    # Per-device last_seen sensors from current snapshot
-    snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
-    for device in snapshot:
-        dev_id = device.get("id")
-        dev_name = device.get("name")
-        if not dev_id or not dev_name:
-            _LOGGER.debug("Skipping device without id/name: %s", device)
-            continue
-        if dev_id in known_ids:
-            _LOGGER.debug("Ignoring duplicate device id %s in startup snapshot", dev_id)
-            continue
-        entities.append(
-            GoogleFindMyLastSeenSensor(
-                coordinator,
-                device,
-                subentry_key=tracker_subentry_key,
-                subentry_identifier=tracker_subentry_identifier,
+    if should_init_tracker:
+        snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
+        for device in snapshot:
+            dev_id = device.get("id")
+            dev_name = device.get("name")
+            if not dev_id or not dev_name:
+                _LOGGER.debug("Skipping device without id/name: %s", device)
+                continue
+            if dev_id in known_ids:
+                _LOGGER.debug("Ignoring duplicate device id %s in startup snapshot", dev_id)
+                continue
+            tracker_entities.append(
+                GoogleFindMyLastSeenSensor(
+                    coordinator,
+                    device,
+                    subentry_key=tracker_subentry_key,
+                    subentry_identifier=tracker_subentry_identifier,
+                )
             )
-        )
-        known_ids.add(dev_id)
+            known_ids.add(dev_id)
 
-    if entities:
-        async_add_entities(entities, True)
+    if service_entities:
+        _schedule_service_entities(service_entities, True)
+    if tracker_entities:
+        _schedule_tracker_entities(tracker_entities, True)
 
-    # Dynamically add sensors when new devices appear later
     @callback
     def _add_new_sensors_on_update() -> None:
+        if not should_init_tracker:
+            return
         try:
             new_entities: list[SensorEntity] = []
             for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
@@ -218,17 +325,20 @@ async def async_setup_entry(
                     "Discovered %d new devices; adding last_seen sensors",
                     len(new_entities),
                 )
-                async_add_entities(new_entities, True)
+                _schedule_tracker_entities(new_entities, True)
         except (AttributeError, TypeError) as err:
             _LOGGER.debug("Dynamic sensor add failed: %s", err)
 
-    unsub = coordinator.async_add_listener(_add_new_sensors_on_update)
-    entry.async_on_unload(unsub)
+    if should_init_tracker:
+        unsub = coordinator.async_add_listener(_add_new_sensors_on_update)
+        entry.async_on_unload(unsub)
 
     runtime_data = getattr(entry, "runtime_data", None)
     recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
 
-    if isinstance(recovery_manager, EntityRecoveryManager):
+    if isinstance(recovery_manager, EntityRecoveryManager) and (
+        should_init_tracker or (should_init_service and created_stats)
+    ):
         entry_id = getattr(entry, "entry_id", None)
 
         def _is_visible(device_id: str) -> bool:
@@ -245,16 +355,25 @@ async def async_setup_entry(
             if not isinstance(entry_id, str) or not entry_id:
                 return set()
             expected: set[str] = set()
-            if isinstance(service_subentry_identifier, str) and service_subentry_identifier and created_stats:
+            if (
+                should_init_service
+                and created_stats
+                and isinstance(service_subentry_identifier, str)
+                and service_subentry_identifier
+            ):
                 for stat_key in created_stats:
                     expected.add(
                         f"{DOMAIN}_{entry_id}_{service_subentry_identifier}_{stat_key}"
                     )
-            if isinstance(tracker_subentry_identifier, str) and tracker_subentry_identifier:
+            if should_init_tracker and isinstance(
+                tracker_subentry_identifier, str
+            ) and tracker_subentry_identifier:
                 for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
                     dev_id = device.get("id")
                     dev_name = device.get("name")
-                    if not isinstance(dev_id, str) or not dev_id or not isinstance(dev_name, str) or not dev_name:
+                    if not isinstance(dev_id, str) or not dev_id or not isinstance(
+                        dev_name, str
+                    ) or not dev_name:
                         continue
                     if not _is_visible(dev_id):
                         continue
@@ -269,7 +388,12 @@ async def async_setup_entry(
             built: list[SensorEntity] = []
             if not isinstance(entry_id, str) or not entry_id:
                 return built
-            if isinstance(service_subentry_identifier, str) and service_subentry_identifier:
+            if (
+                should_init_service
+                and created_stats
+                and isinstance(service_subentry_identifier, str)
+                and service_subentry_identifier
+            ):
                 for stat_key in created_stats:
                     unique_id = (
                         f"{DOMAIN}_{entry_id}_{service_subentry_identifier}_{stat_key}"
@@ -288,11 +412,15 @@ async def async_setup_entry(
                             subentry_identifier=service_subentry_identifier,
                         )
                     )
-            if isinstance(tracker_subentry_identifier, str) and tracker_subentry_identifier:
+            if should_init_tracker and isinstance(
+                tracker_subentry_identifier, str
+            ) and tracker_subentry_identifier:
                 for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
                     dev_id = device.get("id")
                     dev_name = device.get("name")
-                    if not isinstance(dev_id, str) or not dev_id or not isinstance(dev_name, str) or not dev_name:
+                    if not isinstance(dev_id, str) or not dev_id or not isinstance(
+                        dev_name, str
+                    ) or not dev_name:
                         continue
                     if not _is_visible(dev_id):
                         continue
@@ -314,7 +442,7 @@ async def async_setup_entry(
         recovery_manager.register_sensor_platform(
             expected_unique_ids=_expected_unique_ids,
             entity_factory=_build_entities,
-            add_entities=async_add_entities,
+            add_entities=_schedule_recovered_entities,
         )
 
 

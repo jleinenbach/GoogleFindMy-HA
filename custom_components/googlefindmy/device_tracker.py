@@ -21,6 +21,7 @@ Entry-scope guarantees (C2):
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any, Mapping
 
 from homeassistant.components.device_tracker import SourceType
@@ -74,18 +75,64 @@ async def async_setup_entry(
     - On setup, create entities for all devices in the coordinator snapshot (if any).
     - Listen for coordinator updates and add entities for newly discovered devices.
     """
-    _ = config_subentry_id
     coordinator = resolve_coordinator(config_entry)
 
     tracker_meta = coordinator.get_subentry_metadata(feature="device_tracker")
     tracker_subentry_key = (
         tracker_meta.key if tracker_meta is not None else TRACKER_SUBENTRY_KEY
     )
+    tracker_meta_config_id = (
+        getattr(tracker_meta, "config_subentry_id", None)
+        if tracker_meta is not None
+        else None
+    )
     tracker_subentry_identifier = coordinator.stable_subentry_identifier(
         key=tracker_subentry_key
     )
+    tracker_config_subentry_id = config_subentry_id or tracker_meta_config_id
+
+    _LOGGER.debug(
+        "Device tracker setup: subentry_key=%s, config_subentry_id=%s",
+        tracker_subentry_key,
+        tracker_config_subentry_id,
+    )
+
+    if (
+        config_subentry_id
+        and tracker_meta_config_id
+        and config_subentry_id != tracker_meta_config_id
+    ):
+        _LOGGER.debug(
+            "Device tracker setup ignored for unrelated subentry '%s' (expected '%s')",
+            config_subentry_id,
+            tracker_meta_config_id,
+        )
+        return
+
     entities: list[GoogleFindMyDeviceTracker] = []
     known_ids: set[str] = set()
+
+    def _schedule_tracker_entities(
+        new_entities: Iterable[GoogleFindMyDeviceTracker],
+        update_before_add: bool = True,
+    ) -> None:
+        entity_list = list(new_entities)
+        if not entity_list:
+            return
+        try:
+            async_add_entities(
+                entity_list,
+                update_before_add=update_before_add,
+                config_subentry_id=tracker_config_subentry_id,
+            )
+        except TypeError as err:
+            if "config_subentry_id" not in str(err):
+                raise
+            _LOGGER.debug(
+                "Device tracker setup: AddEntitiesCallback rejected config_subentry_id; retrying without (error=%s)",
+                err,
+            )
+            async_add_entities(entity_list, update_before_add=update_before_add)
 
     # Startup population from coordinator snapshot (if already present).
     # Pointer for maintainers: coordinator.py documents the "Subentry awareness"
@@ -122,7 +169,7 @@ async def async_setup_entry(
         )
 
     if entities:
-        async_add_entities(entities, True)
+        _schedule_tracker_entities(entities, True)
 
     # Dynamically add new trackers when the coordinator learns about more devices
     @callback
@@ -161,7 +208,7 @@ async def async_setup_entry(
 
         if to_add:
             _LOGGER.info("Adding %d newly discovered Find My tracker(s)", len(to_add))
-            async_add_entities(to_add, True)
+            _schedule_tracker_entities(to_add, True)
 
             email = _extract_email_from_entry(config_entry) or None
             token = config_entry.data.get(CONF_OAUTH_TOKEN)
@@ -271,7 +318,7 @@ async def async_setup_entry(
         recovery_manager.register_device_tracker_platform(
             expected_unique_ids=_expected_unique_ids,
             entity_factory=_build_entities,
-            add_entities=async_add_entities,
+            add_entities=_schedule_tracker_entities,
         )
 
 
