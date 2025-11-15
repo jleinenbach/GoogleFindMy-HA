@@ -281,9 +281,6 @@ def _sanitize_subentry_identifier(candidate: Any) -> str | None:
     if not normalized:
         return None
 
-    if normalized.endswith("-provisional"):
-        return None
-
     return normalized
 
 
@@ -974,6 +971,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         entry = self.config_entry
 
         entry_id = getattr(entry, "entry_id", None)
+        entry_service_subentry_id = (
+            _sanitize_subentry_identifier(getattr(entry, "service_subentry_id", None))
+            if entry is not None
+            else None
+        )
+        entry_tracker_subentry_id = (
+            _sanitize_subentry_identifier(getattr(entry, "tracker_subentry_id", None))
+            if entry is not None
+            else None
+        )
 
         raw_entries: list[tuple[str, str | None, dict[str, Any], str | None]] = []
         core_group_keys_present: set[str] = set()
@@ -990,6 +997,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 identifier = _sanitize_subentry_identifier(
                     getattr(subentry, "subentry_id", None)
                 )
+                if (
+                    identifier is not None
+                    and identifier.endswith("-provisional")
+                ):
+                    if (
+                        group_key == SERVICE_SUBENTRY_KEY
+                        and identifier != entry_service_subentry_id
+                    ) or (
+                        group_key == TRACKER_SUBENTRY_KEY
+                        and identifier != entry_tracker_subentry_id
+                    ):
+                        identifier = None
                 raw_entries.append(
                     (
                         group_key,
@@ -1793,6 +1812,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 normalized_id = _normalize_subentry_id(subentry_id)
                 if normalized_id is None:
                     continue
+                if (
+                    normalized_id.endswith("-provisional")
+                    and normalized_id != entry_service_subentry_id
+                ):
+                    continue
                 subentry_type = getattr(subentry, "subentry_type", None)
                 group_key: Any = None
                 data_obj = getattr(subentry, "data", None)
@@ -1808,19 +1832,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     service_subentry_ids.add(normalized_id)
 
         def _is_real_service_subentry(candidate: Any) -> str | None:
+            """Return candidate when it matches a confirmed service subentry."""
+
             normalized_candidate = _normalize_subentry_id(candidate)
             if normalized_candidate is None:
                 return None
-            if service_subentry_ids and normalized_candidate not in service_subentry_ids:
-                return None
-            if (
-                entry_service_subentry_id is not None
-                and normalized_candidate != entry_service_subentry_id
-            ):
-                return None
-            if not service_subentry_ids and entry_service_subentry_id is None:
-                return None
-            return normalized_candidate
+
+            if entry_service_subentry_id is not None:
+                if normalized_candidate != entry_service_subentry_id:
+                    return None
+                if (
+                    service_subentry_ids
+                    and normalized_candidate not in service_subentry_ids
+                ):
+                    return None
+                return normalized_candidate
+
+            if service_subentry_ids and normalized_candidate in service_subentry_ids:
+                return normalized_candidate
+
+            return None
 
         service_config_subentry_id = None
         meta_identifier: Any | None = None
@@ -1831,9 +1862,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if resolved is not None:
                 service_config_subentry_id = resolved
                 break
-
-        if service_config_subentry_id is None and service_subentry_ids:
-            service_config_subentry_id = next(iter(sorted(service_subentry_ids)))
 
         service_subentry_identifier: tuple[str, str] | None = None
         if service_config_subentry_id is not None:
@@ -2631,9 +2659,71 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             pass
 
         tracker_meta = self._subentry_metadata.get(TRACKER_SUBENTRY_KEY)
-        tracker_config_subentry_id = (
-            tracker_meta.config_subentry_id if tracker_meta is not None else None
+
+        def _normalize_tracker_subentry_id(value: Any) -> str | None:
+            return _sanitize_subentry_identifier(value)
+
+        entry_tracker_subentry_id = _normalize_tracker_subentry_id(
+            getattr(entry, "tracker_subentry_id", None)
         )
+
+        entry_subentries = getattr(entry, "subentries", None)
+        tracker_subentry_ids: set[str] = set()
+        if isinstance(entry_subentries, Mapping):
+            for subentry_id, subentry in entry_subentries.items():
+                normalized_id = _normalize_tracker_subentry_id(subentry_id)
+                if normalized_id is None:
+                    continue
+                if (
+                    normalized_id.endswith("-provisional")
+                    and normalized_id != entry_tracker_subentry_id
+                ):
+                    continue
+                subentry_type = getattr(subentry, "subentry_type", None)
+                group_key: Any = None
+                data_obj = getattr(subentry, "data", None)
+                if isinstance(data_obj, Mapping):
+                    group_key = data_obj.get("group_key")
+                if (
+                    subentry_type == SUBENTRY_TYPE_TRACKER
+                    or (
+                        isinstance(group_key, str)
+                        and group_key == TRACKER_SUBENTRY_KEY
+                    )
+                ):
+                    tracker_subentry_ids.add(normalized_id)
+
+        def _resolve_tracker_subentry(candidate: Any) -> str | None:
+            normalized_candidate = _normalize_tracker_subentry_id(candidate)
+            if normalized_candidate is None:
+                return None
+
+            if entry_tracker_subentry_id is not None:
+                if normalized_candidate != entry_tracker_subentry_id:
+                    return None
+                if (
+                    tracker_subentry_ids
+                    and normalized_candidate not in tracker_subentry_ids
+                ):
+                    return None
+                return normalized_candidate
+
+            if tracker_subentry_ids and normalized_candidate in tracker_subentry_ids:
+                return normalized_candidate
+
+            return None
+
+        tracker_config_subentry_id = None
+        tracker_meta_identifier: Any | None = None
+        if tracker_meta is not None:
+            tracker_meta_identifier = getattr(
+                tracker_meta, "config_subentry_id", None
+            )
+        for candidate in (tracker_meta_identifier, entry_tracker_subentry_id):
+            resolved_tracker = _resolve_tracker_subentry(candidate)
+            if resolved_tracker is not None:
+                tracker_config_subentry_id = resolved_tracker
+                break
 
         parent_identifier = service_device_identifier(entry_id)
         setattr(self, "_service_device_identifier", parent_identifier)

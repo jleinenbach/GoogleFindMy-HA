@@ -1378,6 +1378,62 @@ def test_service_device_skips_provisional_identifier(
     assert created_payload["config_subentry_id"] is None
 
 
+def test_tracker_device_skips_provisional_identifier(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Tracker registry updates must ignore provisional subentry identifiers."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry_id = "entry-provisional-tracker"
+    provisional_tracker_id = f"{entry_id}-{TRACKER_SUBENTRY_KEY}-provisional"
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id=f"{entry_id}-service",
+        subentry_id=_stable_subentry_id(entry_id, SERVICE_SUBENTRY_KEY),
+    )
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id=f"{entry_id}-tracker",
+        subentry_id=provisional_tracker_id,
+    )
+    entry = SimpleNamespace(
+        entry_id=entry_id,
+        title="Google Find My",
+        data={},
+        options={},
+        subentries={
+            service_subentry.subentry_id: service_subentry,
+            tracker_subentry.subentry_id: tracker_subentry,
+        },
+        runtime_data=None,
+        service_subentry_id=service_subentry.subentry_id,
+        tracker_subentry_id=None,
+    )
+
+    _prepare_coordinator_for_registry(coordinator, entry)
+    coordinator._service_device_id = "service-device-id"
+
+    devices = [{"id": "device-1", "name": "Tracker"}]
+    coordinator.data = devices
+
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created == 1
+    created_payload = fake_registry.created[-1]
+    assert created_payload["config_subentry_id"] is None
+
+    tracker_identifier = (DOMAIN, f"{entry_id}:device-1")
+    tracker_entry = next(
+        device for device in fake_registry.devices if tracker_identifier in device.identifiers
+    )
+    assert tracker_entry.config_subentry_id is None
+    assert tracker_entry.config_entries_subentries.get(entry_id) == {None}
+
+
 def test_refresh_subentry_index_discards_provisional_ids(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:

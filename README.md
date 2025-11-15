@@ -28,6 +28,7 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 - `make wheelhouse` — pre-download the Home Assistant development dependencies into `.wheelhouse/` so subsequent virtual environment rebuilds reuse cached wheels instead of re-fetching from PyPI.
 - `make clean-wheelhouse` — delete `.wheelhouse/` (and any manifests or sentinels inside) when you want to prune cached wheels after a bootstrap run or before refreshing dependencies from scratch.
 - `make install-ha-stubs` — install the packages listed in `requirements-ha-stubs.txt` (currently `homeassistant` and `pytest-homeassistant-custom-component`) into the active environment so `pytest` and the regression helpers work immediately after cloning the repository.
+- `make test-unload` — activate the managed virtual environment and run the focused parent-unload rollback regression (`tests/test_unload_subentry_cleanup.py`) so you can confirm the recovery guardrails without executing the entire suite.
 - `script/bootstrap_ssot_cached.sh` — stage the Home Assistant Single Source of Truth (SSoT) wheels in `.wheelhouse/ssot` and install them from the local cache. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse the cached artifacts on subsequent bootstrap runs or `PYTHON=python3.12` to target an alternate interpreter. The helper also validates `.wheelhouse/ssot` against `script/ssot_wheel_manifest.txt` (override with `SSOT_MANIFEST=…`) so repeated runs can confirm the primary wheels are cached without re-listing the full directory.
 - `python script/list_wheelhouse.py` — print a grouped index of cached wheels (optionally against `--manifest script/ssot_wheel_manifest.txt`) before running lengthy installs so you can confirm the cache satisfies the manifest without scrolling through pip logs. Pass `--allow-missing` to preview the formatter when `.wheelhouse/ssot` has not been generated yet.
 - `make test-ha` — provision the `.venv` environment (installing `homeassistant` and `pytest-homeassistant-custom-component` when missing), execute the targeted regression smoke tests, and then run `pytest -q --cov` for the full suite while teeing detailed output to `pytest_output.log`. Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options, override the coverage summary with `make test-ha PYTEST_COV_FLAGS="--cov-report=term"` (or `term-summary`, `term-skip-covered`, etc.) for slimmer CI logs, and reuse an existing wheel cache without redownloading by passing `make test-ha SKIP_WHEELHOUSE_REFRESH=1`.
@@ -87,6 +88,7 @@ When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
 
 - `make lint`: Run `ruff check .` across the entire repository to ensure lint compliance before sending a pull request.
 - `make clean`: Remove Python bytecode caches via `script/clean_pycache.py` to keep local environments tidy during development.
+- `make test-unload`: Execute the targeted unload regression suite (`tests/test_unload_subentry_cleanup.py`) inside the managed virtual environment to verify the parent-unload rollback path.
 
 ---
 ## Features
