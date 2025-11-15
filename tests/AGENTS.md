@@ -464,6 +464,13 @@ must assert a single aggregated call without ``config_subentry_id`` arguments.
 This mirrors Home Assistant's runtime behavior and prevents regressions that
 attempt to forward platforms per-subentry.
 
+When parent-unload rollbacks are exercised (for example,
+``tests/test_unload_subentry_cleanup.py::test_async_unload_entry_rolls_back_when_parent_unload_fails``),
+the helper now expects the aggregated setup retry to be recorded **exactly
+once**. Guarding the length keeps future fixes from accidentally double-scheduling
+the recovery call while still catching scenarios where the rollback path stops
+forwarding altogether.
+
 ## AST extraction helper
 
 The :mod:`tests.helpers.ast_extract` module exposes
