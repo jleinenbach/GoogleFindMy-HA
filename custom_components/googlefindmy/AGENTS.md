@@ -61,3 +61,23 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 * View classes under `custom_components/googlefindmy/map_view.py` should expose constructors that accept `HomeAssistant` as the first argument. Register new views by instantiating them with the active `hass` instance (for example, `GoogleFindMyMapView(hass)`) instead of assigning `hass` after creation so the runtime contract stays consistent.
 * When forwarding platform unloads via `hass.config_entries.async_forward_entry_unload`, pass the platforms as a `tuple`. Home Assistant caches the provided iterable in hashing structures, and mutable lists trigger `TypeError: unhashable type: 'list'` during subentry unloads.
 
+### Optional import fallback pattern (`type()` guard)
+
+When Home Assistant introduces a new helper or exception (for example, `OperationNotAllowed`), the integration must remain
+importable on legacy cores that do not yet ship that attribute. Guard those imports with a `try/except ImportError` block and
+construct a typed fallback via `type()` so both ruff (import ordering) and `mypy --strict` accept the shim:
+
+```python
+try:
+    from homeassistant.config_entries import OperationNotAllowed
+except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
+    from homeassistant.exceptions import HomeAssistantError
+
+    OperationNotAllowed = type("OperationNotAllowed", (HomeAssistantError,), {})
+```
+
+The dynamically created fallback must inherit from an existing Home Assistant error (usually `HomeAssistantError`) and be
+assigned immediately after the guarded import so downstream modules can reference the shared symbol without additional
+`# type: ignore` comments. Prefer short inline comments that state which Home Assistant versions lack the helper so future
+contributors know when the guard can be removed.
+
