@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from types import MappingProxyType, SimpleNamespace
-from typing import Any
+from typing import Any, Sequence
 
 import pytest
 
@@ -87,6 +87,7 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self.unloaded_subentries: list[str] = []
         self.setup_calls: list[str] = []
         self.forward_unload_calls: list[tuple[_EntryStub, tuple[object, ...], str | None]] = []
+        self.unload_platform_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
 
     def async_entries(self, domain: str | None = None) -> list[_EntryStub]:
         if domain is not None and domain != DOMAIN:
@@ -98,9 +99,10 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         return True
 
     async def async_unload_platforms(
-        self, entry: _EntryStub, platforms: list[str]
+        self, entry: _EntryStub, platforms: Sequence[object]
     ) -> bool:
         assert entry is self._entry
+        self.unload_platform_calls.append((entry, tuple(platforms)))
         return True
 
     async def async_forward_entry_unload(
@@ -321,6 +323,9 @@ def test_async_unload_entry_removes_subentries_and_registries(
     tracker_platforms = _platform_names(calls[0][1])
     assert tracker_platforms == integration.TRACKER_FEATURE_PLATFORMS
     assert _platform_names(calls[1][1]) == tracker_platforms
+    assert hass.config_entries.unload_platform_calls == [
+        (entry, tuple(integration.PLATFORMS))
+    ]
     assert hass.config_entries.removed_subentries == []
 
 
@@ -368,3 +373,6 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
 
     assert result is True
     assert legacy_calls == [(entry, tuple(integration.TRACKER_FEATURE_PLATFORMS))]
+    assert hass.config_entries.unload_platform_calls == [
+        (entry, tuple(integration.PLATFORMS))
+    ]
