@@ -41,6 +41,11 @@ The plugin ships the canonical Home Assistant stubs that our contract
 tests depend on; skipping this pairing risks exercising stale or
 partial interfaces.
 
+Expect the paired `pip install --upgrade homeassistant
+pytest-homeassistant-custom-component` command to run for roughly five
+minutes in the hosted environment. Plan regression runs and shell work
+around that window so long installs finish before invoking `pytest`.
+
 When those stubs are active, remember that the entity registry fixture
 populates `hass.data["entity_registry"]`. Integration helpers under test
 should consult that cached instance before calling
@@ -463,6 +468,13 @@ Tests that patch ``async_forward_entry_setups`` or examine forwarded platforms
 must assert a single aggregated call without ``config_subentry_id`` arguments.
 This mirrors Home Assistant's runtime behavior and prevents regressions that
 attempt to forward platforms per-subentry.
+
+When parent-unload rollbacks are exercised (for example,
+``tests/test_unload_subentry_cleanup.py::test_async_unload_entry_rolls_back_when_parent_unload_fails``),
+the helper now expects the aggregated setup retry to be recorded **exactly
+once**. Guarding the length keeps future fixes from accidentally double-scheduling
+the recovery call while still catching scenarios where the rollback path stops
+forwarding altogether.
 
 ## AST extraction helper
 

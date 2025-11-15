@@ -5287,6 +5287,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     if parent_entry_id:
         return await _async_setup_subentry(hass, entry)
 
+    setattr(entry, "_gfm_parent_platforms_unloaded", False)
+    setattr(entry, "_gfm_parent_unload_call_count", 0)
+
     _ensure_runtime_imports()
     # --- Multi-entry policy: allow MA; block duplicate-account (same email) ----
     # Legacy issue cleanup: we no longer block on multiple config entries
@@ -6107,6 +6110,59 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
     subentries = _collect_entry_subentries(entry)
 
+    unload_parent_platforms = True
+    unload_callable = getattr(hass.config_entries, "async_unload_platforms", None)
+    already_unloaded = bool(
+        getattr(entry, "_gfm_parent_platforms_unloaded", False)
+    )
+    unload_call_count = int(getattr(entry, "_gfm_parent_unload_call_count", 0) or 0)
+    if callable(unload_callable):
+        if already_unloaded or unload_call_count > 0:
+            _LOGGER.debug(
+                "[%s] Parent platforms already requested to unload; skipping duplicate call",
+                entry.entry_id,
+            )
+        else:
+            # Mark as unloaded pre-emptively so re-entrant attempts triggered from the
+            # Home Assistant helpers short-circuit. The flag and counter are reverted on
+            # failure so subsequent retries still invoke the unload helper.
+            setattr(entry, "_gfm_parent_platforms_unloaded", True)
+            setattr(entry, "_gfm_parent_unload_call_count", unload_call_count + 1)
+            try:
+                result = unload_callable(entry, tuple(PLATFORMS))
+                if isinstance(result, Awaitable):
+                    result = await result
+                unload_parent_platforms = bool(result) if result is not None else True
+            except Exception as err:  # noqa: BLE001 - defensive logging
+                _LOGGER.error(
+                    "[%s] Failed to unload parent platforms: %s",  # noqa: G004
+                    entry.entry_id,
+                    err,
+                )
+                unload_parent_platforms = False
+            finally:
+                if not unload_parent_platforms:
+                    setattr(entry, "_gfm_parent_platforms_unloaded", False)
+                    setattr(entry, "_gfm_parent_unload_call_count", unload_call_count)
+    else:
+        _LOGGER.debug(
+            "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
+            entry.entry_id,
+        )
+
+    if not unload_parent_platforms:
+        if runtime_data is not None:
+            entries_bucket[entry.entry_id] = runtime_data
+        try:
+            await _async_ensure_subentries_are_setup(hass, entry)
+        except Exception as err:  # noqa: BLE001 - defensive logging
+            _LOGGER.debug(
+                "[%s] Failed to restore subentries after parent unload abort: %s",  # noqa: G004
+                entry.entry_id,
+                err,
+            )
+        return False
+
     async def _unload_config_subentry(subentry: Any) -> bool:
         identifier = _resolve_config_subentry_identifier(subentry)
         platforms = _determine_subentry_platforms(subentry)
@@ -6124,9 +6180,9 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
             return bool(result) if result is not None else True
 
         entry_id = getattr(subentry, "entry_id", None)
-        unload_callable = getattr(hass.config_entries, "async_unload", None)
-        if isinstance(entry_id, str) and entry_id and callable(unload_callable):
-            result = unload_callable(entry_id)
+        unload_child = getattr(hass.config_entries, "async_unload", None)
+        if isinstance(entry_id, str) and entry_id and callable(unload_child):
+            result = unload_child(entry_id)
             if isinstance(result, Awaitable):
                 result = await result
             return bool(result)
@@ -6167,6 +6223,10 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 )
         if runtime_data is not None:
             entries_bucket[entry.entry_id] = runtime_data
+        try:
+            await _async_ensure_subentries_are_setup(hass, entry)
+        except Exception as err:  # noqa: BLE001 - defensive logging
+            _LOGGER.debug("Failed to restore subentries after unload failure: %s", err)
         return False
 
     if runtime_data is not None:
