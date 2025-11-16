@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Mapping, Iterable
+from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -27,9 +27,7 @@ from custom_components.googlefindmy import _platform_value
 from custom_components.googlefindmy.const import (
     DOMAIN,
     OPT_ENABLE_STATS_ENTITIES,
-    SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
-    TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
@@ -130,8 +128,8 @@ async def test_integration_device_info_uses_service_device(
     integration = importlib.import_module("custom_components.googlefindmy")
     coordinator_module = importlib.import_module("custom_components.googlefindmy.coordinator")
     button_module = importlib.import_module("custom_components.googlefindmy.button")
-    sensor_module = importlib.import_module("custom_components.googlefindmy.sensor")
-    device_tracker_module = importlib.import_module("custom_components.googlefindmy.device_tracker")
+    importlib.import_module("custom_components.googlefindmy.sensor")
+    importlib.import_module("custom_components.googlefindmy.device_tracker")
     binary_sensor_module = importlib.import_module("custom_components.googlefindmy.binary_sensor")
     map_view_module = importlib.import_module("custom_components.googlefindmy.map_view")
 
