@@ -5327,11 +5327,14 @@ async def _async_ensure_subentries_are_setup(
         _LOGGER.debug("[%s] No subentries found to set up.", entry.entry_id)
         return
 
+    # Subentries require the singular forward helper so each platform carries the
+    # correct ``config_subentry_id``. Home Assistant cores without this API are
+    # unsupported for config subentries.
     forward_setup = getattr(hass.config_entries, "async_forward_entry_setup", None)
-    forward_setups = getattr(hass.config_entries, "async_forward_entry_setups", None)
-    if not callable(forward_setup) and not callable(forward_setups):
+    if not callable(forward_setup):
         _LOGGER.error(
-            "[%s] Home Assistant instance does not expose async_forward_entry_setup",
+            "[%s] Home Assistant instance does not expose 'async_forward_entry_setup'. "
+            "Subentry setup cannot proceed. This may be an unsupported HA version.",
             entry.entry_id,
         )
         return
@@ -5388,53 +5391,22 @@ async def _async_ensure_subentries_are_setup(
             ", ".join(_platform_names(platforms)),
         )
 
-        if callable(forward_setup):
-            for platform in platforms:
-                platform_name = _platform_value(platform)
+        for platform in platforms:
+            platform_name = _platform_value(platform)
 
-                setup_task = _invoke_with_optional_keyword(
-                    forward_setup,
-                    (entry, platform_name),
-                    "config_subentry_id",
-                    identifier,
-                )
-                if inspect.isawaitable(setup_task):
-                    setup_tasks.append(setup_task)
-                    forwarded_subentries.append(subentry)
-                else:
-                    # Legacy helpers may return ``None``; mimic the gather() flow for consistency
-                    setup_tasks.append(asyncio.sleep(0, result=setup_task))
-                    forwarded_subentries.append(subentry)
-            continue
-
-        assert callable(forward_setups)
-        filtered_platforms: tuple[Platform | str, ...] = platforms
-        if legacy_tracker is not None:
-            filtered_platforms = tuple(
-                platform
-                for platform in platforms
-                if _platform_value(platform) not in legacy_tracker
+            setup_task = _invoke_with_optional_keyword(
+                forward_setup,
+                (entry, platform_name),
+                "config_subentry_id",
+                identifier,
             )
-            if not filtered_platforms:
-                _LOGGER.debug(
-                    "[%s] Skipping subentry '%s' on legacy core; no new platforms to forward",
-                    entry.entry_id,
-                    identifier,
-                )
-                continue
-
-        setup_task = _invoke_with_optional_keyword(
-            forward_setups,
-            (entry, list(filtered_platforms)),
-            "config_subentry_id",
-            identifier,
-        )
-        if inspect.isawaitable(setup_task):
-            setup_tasks.append(setup_task)
-            forwarded_subentries.append(subentry)
-        else:
-            setup_tasks.append(asyncio.sleep(0, result=setup_task))
-            forwarded_subentries.append(subentry)
+            if inspect.isawaitable(setup_task):
+                setup_tasks.append(setup_task)
+                forwarded_subentries.append(subentry)
+            else:
+                # Legacy helpers may return ``None``; mimic the gather() flow for consistency
+                setup_tasks.append(asyncio.sleep(0, result=setup_task))
+                forwarded_subentries.append(subentry)
 
         if legacy_tracker is not None:
             for platform in filtered_platforms:

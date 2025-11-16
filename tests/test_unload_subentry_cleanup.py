@@ -88,7 +88,7 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self.setup_calls: list[str] = []
         self.forward_unload_calls: list[tuple[_EntryStub, tuple[object, ...], str | None]] = []
         self.unload_platform_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
-        self.forward_setup_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
+        self.forward_setup_calls: list[tuple[_EntryStub, object]] = []
         self.parent_unload_invocations = 0
 
     def async_entries(self, domain: str | None = None) -> list[_EntryStub]:
@@ -123,11 +123,15 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self.forward_unload_calls.append((entry, payload, config_subentry_id))
         return True
 
-    async def async_forward_entry_setups(
-        self, entry: _EntryStub, platforms: Sequence[object]
+    async def async_forward_entry_setup(
+        self,
+        entry: _EntryStub,
+        platform: object,
+        *,
+        config_subentry_id: str | None = None,
     ) -> bool:
         assert entry is self._entry
-        self.forward_setup_calls.append((entry, tuple(platforms)))
+        self.forward_setup_calls.append((entry, platform))
         return True
 
     def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
@@ -460,10 +464,14 @@ def test_async_unload_entry_rolls_back_when_parent_unload_fails(
     assert hass.config_entries.unload_platform_calls == [
         (entry, tuple(integration.PLATFORMS))
     ]
-    assert len(hass.config_entries.forward_setup_calls) == 1
-    setup_entry, setup_platforms = hass.config_entries.forward_setup_calls[0]
-    assert setup_entry is entry
-    assert _platform_names(setup_platforms) == integration.TRACKER_FEATURE_PLATFORMS
+    assert hass.config_entries.forward_setup_calls
+    recorded_entries = {call[0] for call in hass.config_entries.forward_setup_calls}
+    assert recorded_entries == {entry}
+    recorded_platforms = {
+        getattr(platform, "value", platform)
+        for _, platform in hass.config_entries.forward_setup_calls
+    }
+    assert recorded_platforms == set(integration.TRACKER_FEATURE_PLATFORMS)
     # Runtime data is reattached to the bucket so the entry keeps running.
     assert hass.data[DOMAIN]["entries"][entry.entry_id] is runtime_data
     assert entry.runtime_data is runtime_data

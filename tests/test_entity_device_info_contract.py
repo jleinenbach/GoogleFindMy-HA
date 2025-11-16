@@ -177,26 +177,22 @@ async def test_integration_device_info_uses_service_device(
     if hasattr(http_module, "async_setup_entry"):
         monkeypatch.setattr(http_module, "async_setup_entry", AsyncMock(return_value=True))
 
-    forward_calls: list[tuple[str | None, tuple[object, ...]]] = []
+    forward_calls: list[tuple[str | None, str]] = []
 
-    def _normalize_platform_names(platforms: tuple[object, ...]) -> set[str]:
-        names: set[str] = set()
-        for platform in platforms:
-            value = getattr(platform, "value", platform)
-            if not isinstance(value, str):
-                value = str(value)
-            names.add(value)
-        return names
+    def _normalize_platform_name(platform: object) -> str:
+        value = getattr(platform, "value", platform)
+        if not isinstance(value, str):
+            value = str(value)
+        return value
 
-    async def _capture_forward_entry_setups(
+    async def _capture_forward_entry_setup(
         entry_obj: MockConfigEntry,
-        platforms: list[object],
+        platform: object,
         *,
         config_subentry_id: str | None = None,
         **_kwargs: Any,
     ) -> bool:
-        platforms_tuple = tuple(platforms)
-        platform_names = _normalize_platform_names(platforms_tuple)
+        platform_name = _normalize_platform_name(platform)
 
         if config_subentry_id:
             identifier = service_device_identifier(entry_obj.entry_id)
@@ -205,7 +201,7 @@ async def test_integration_device_info_uses_service_device(
                 identifiers={identifier},
                 name="Google Find My Service",
             )
-            if SERVICE_SUBENTRY_KEY in config_subentry_id:
+            if SERVICE_SUBENTRY_KEY in config_subentry_id and platform_name == "binary_sensor":
                 entity_registry.async_get_or_create(
                     "binary_sensor",
                     DOMAIN,
@@ -213,48 +209,47 @@ async def test_integration_device_info_uses_service_device(
                     config_entry=entry_obj,
                     device_id=service_device.id,
                 )
-        else:
-            if "binary_sensor" in platform_names:
-                identifier = service_device_identifier(entry_obj.entry_id)
-                service_device = device_registry.async_get_or_create(
-                    config_entry_id=entry_obj.entry_id,
-                    identifiers={identifier},
-                    name="Google Find My Service",
-                )
-                entity_registry.async_get_or_create(
-                    "binary_sensor",
-                    DOMAIN,
-                    unique_id=f"{entry_obj.entry_id}:{SERVICE_SUBENTRY_KEY}:auth_status",
-                    config_entry=entry_obj,
-                    device_id=service_device.id,
-        )
+        elif platform_name == "binary_sensor":
+            identifier = service_device_identifier(entry_obj.entry_id)
+            service_device = device_registry.async_get_or_create(
+                config_entry_id=entry_obj.entry_id,
+                identifiers={identifier},
+                name="Google Find My Service",
+            )
+            entity_registry.async_get_or_create(
+                "binary_sensor",
+                DOMAIN,
+                unique_id=f"{entry_obj.entry_id}:{SERVICE_SUBENTRY_KEY}:auth_status",
+                config_entry=entry_obj,
+                device_id=service_device.id,
+            )
         return True
 
-    async def _capture_forward_entry_setups_bound(
+    async def _capture_forward_entry_setup_bound(
         _manager: Any,
         entry_obj: MockConfigEntry,
-        platforms: list[object],
+        platform: object,
         *,
         config_subentry_id: str | None = None,
         **_kwargs: Any,
     ) -> bool:
-        return await _capture_forward_entry_setups(
+        return await _capture_forward_entry_setup(
             entry_obj,
-            platforms,
+            platform,
             config_subentry_id=config_subentry_id,
             **_kwargs,
         )
 
     monkeypatch.setattr(
         hass.config_entries,
-        "async_forward_entry_setups",
-        _capture_forward_entry_setups,
+        "async_forward_entry_setup",
+        _capture_forward_entry_setup,
         raising=False,
     )
     monkeypatch.setattr(
         config_entries_module.ConfigEntries,
-        "async_forward_entry_setups",
-        _capture_forward_entry_setups_bound,
+        "async_forward_entry_setup",
+        _capture_forward_entry_setup_bound,
         raising=False,
     )
 
@@ -266,11 +261,15 @@ async def test_integration_device_info_uses_service_device(
         keyword: str,
         value: Any,
     ) -> Any:
-        if keyword == "config_subentry_id":
-            platforms_arg: tuple[object, ...] = ()
-            if len(args) >= 2 and isinstance(args[1], list):
-                platforms_arg = tuple(args[1])
-            forward_calls.append((value, platforms_arg))
+        if (
+            keyword == "config_subentry_id"
+            and len(args) >= 2
+            and isinstance(value, str)
+            and value
+        ):
+            platform_arg = args[1]
+            platform_name = _normalize_platform_name(platform_arg)
+            forward_calls.append((value, platform_name))
         return original_invoke(callback, args, keyword, value)
 
     monkeypatch.setattr(
@@ -306,11 +305,9 @@ async def test_integration_device_info_uses_service_device(
     assert managed_subentries
 
     forwarded_by_identifier: dict[str, set[str]] = {}
-    for forwarded_identifier, forwarded_platforms in forward_calls:
+    for forwarded_identifier, platform_name in forward_calls:
         assert isinstance(forwarded_identifier, str) and forwarded_identifier
-        platform_names = _normalize_platform_names(forwarded_platforms)
-        forwarded_by_identifier[forwarded_identifier] = platform_names
-        assert len(forwarded_platforms) == len(platform_names)
+        forwarded_by_identifier.setdefault(forwarded_identifier, set()).add(platform_name)
 
     expected_platforms: dict[str, set[str]] = {}
     for subentry in managed_subentries:

@@ -150,7 +150,7 @@ class _StubConfigEntries:
     """
     def __init__(self, entries: list[_StubConfigEntry]) -> None:
         self._entries: list[_StubConfigEntry] = entries
-        self.forward_calls: list[tuple[str, tuple[str, ...], str | None]] = []
+        self.forward_calls: list[tuple[str, str, str | None]] = []
         self.added_subentries: list[tuple[str, ConfigSubentry]] = []
         self.updated_subentries: list[tuple[str, ConfigSubentry]] = []
         self.removed_subentries: list[tuple[str, str]] = []
@@ -172,15 +172,16 @@ class _StubConfigEntries:
             return []
         return list(entry.subentries.values())
 
-    async def async_forward_entry_setups(
+    async def async_forward_entry_setup(
         self,
         entry: _StubConfigEntry,
-        platforms: list[str],
+        platform: str,
         *,
         config_subentry_id: str | None = None,
         **_kwargs: Any,
     ) -> None:
-        self.forward_calls.append((entry.entry_id, tuple(platforms), config_subentry_id))
+        platform_name = str(platform)
+        self.forward_calls.append((entry.entry_id, platform_name, config_subentry_id))
 
     async def async_unload_platforms(
         self, _entry: _StubConfigEntry, _platforms: list[str]

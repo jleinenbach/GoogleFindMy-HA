@@ -530,27 +530,26 @@ Keep this handbook synchronized with upstream Home Assistant releases. When new 
 
 ---
 
-## Fehlerbehebung: `ValueError: Config entry ... already been setup!`
+## Postmortem: `ValueError` on Setup/Unload (Regression 1.6.0)
 
-Bei der Implementierung des Plattform-Ladens für Sub-Entries trat ein `ValueError` auf, weil Plattformen (insb. `sensor`) mehrfach für denselben *Haupt*-Config-Entry registriert wurden, anstatt für die jeweiligen *Sub*-Entries.
+A regression was introduced that caused catastrophic loading failures (`ValueError: Config entry ... already been setup!`) and non-recoverable unload failures (`ConfigEntryState.FAILED_UNLOAD`).
 
-### Analyse des Fehlers
+### Root Cause Analysis
 
-1. **Fehlerhafte Annahme:** Die Funktion `_async_ensure_subentries_are_setup` (in `__init__.py`) rief fälschlicherweise `hass.config_entries.async_forward_entry_setups` (Plural) auf und übergab eine *Liste* von Plattformen (`['sensor', 'button']`).
-2. **Falsches Keyword:** Sie versuchte, das Keyword `config_subentry_id` an die `..._setups` (Plural)-Funktion zu übergeben. Diese Funktion akzeptiert das Keyword jedoch nicht.
-3. **Fehlerhafter Fallback:** Eine Kompatibilitäts-Wrapper-Funktion (`_invoke_with_optional_keyword`) fing den `TypeError` ab und rief `async_forward_entry_setups` *erneut* auf, diesmal *ohne* `config_subentry_id`.
-4. **Konsequenz:** Dies führte dazu, dass alle Plattformen (z. B. `sensor` von `core_tracking`) fälschlicherweise auf dem *Haupt*-Entry registriert wurden.
-5. **Absturz:** Als die Schleife den zweiten Sub-Entry (`service`) lud und ebenfalls versuchte, die `sensor`-Plattform über denselben fehlerhaften Fallback auf dem *Haupt*-Entry zu registrieren, schlug dies mit `ValueError: ... already been setup!` fehl.
+The core issue was a flawed implementation of platform forwarding for config subentries in `__init__.py`.
 
-### Die Lösung
+1. **Setup Failure:** The `_async_ensure_subentries_are_setup` function attempted to feature-detect the singular `async_forward_entry_setup` helper and fell back to the *plural* `async_forward_entry_setups` API whenever the attribute probe failed. When this fallback path executed (for example, on HA 2025.10.1), it repeated the original bug: the plural helper does not accept `config_subentry_id`, so `_invoke_with_optional_keyword` logged the rejection and re-ran the call without the ID. As a result, all platforms were registered on the **parent** entry, corrupting every child entry's registry state and eventually raising `ValueError: Config entry ... already been setup!` as soon as a second child reused the same platform.
+2. **Unload Failure:** The historical `_unload_config_subentry` helper mirrored the same mistake. It passed a tuple of platforms to the singular unload helper, causing Home Assistant to complain that subentries had never been loaded. This poisoned the entry lifecycle and left the parent stuck in `FAILED_UNLOAD` after the unload attempt.
 
-Die korrekte Methode, Plattformen für einen bestimmten Sub-Entry zu laden, ist die Verwendung der **singulären** Funktion `hass.config_entries.async_forward_entry_setup` (ohne 's').
+### The Solution
 
-Die Logik in `_async_ensure_subentries_are_setup` (und analog in `_unload_config_subentry` für das Entladen) muss wie folgt geändert werden:
+The only correct method to load or unload platforms for a child entry is to use the singular helpers (`async_forward_entry_setup` / `async_forward_entry_unload`) **one platform at a time** while supplying the child's `config_subentry_id`.
 
-1. Iteriere durch jeden Sub-Entry (`core_tracking`, `service`).
-2. Ermittle die Plattformen für diesen Sub-Entry (z. B. `[Platform.SENSOR, Platform.BINARY_SENSOR]`).
-3. Starte eine **innere Schleife**, die durch *jede einzelne Plattform* iteriert.
-4. Rufe für *jede einzelne Plattform* die singuläre Funktion `async_forward_entry_setup(entry, platform_name, config_subentry_id=subentry_identifier)` auf (eingebettet in den `_invoke_with_optional_keyword`-Wrapper, um die `config_subentry_id` sicher zu übergeben).
+Fixing the regression required replacing the entire body of `_async_ensure_subentries_are_setup` so it always:
 
-Dies stellt sicher, dass Home Assistant jede Plattform explizit dem korrekten Sub-Entry zuordnet und `ValueError`-Konflikte auf dem Haupt-Entry vermieden werden.
+1. Resolves the singular helper (`hass.config_entries.async_forward_entry_setup`) and aborts with an error if it is missing.
+2. Iterates each managed subentry, filters disabled entries, and determines the relevant platforms.
+3. Loops over the platforms **per subentry** and calls the singular helper with `(entry, platform_name)` plus `config_subentry_id=<child_id>`.
+4. Aggregates the awaitables via `asyncio.gather`, mirroring Home Assistant's parent-entry setup fan-out but scoped to the child entry identifiers.
+
+The `_unload_config_subentry` helper already follows the same per-platform singular pattern (see the 1.6-beta3 bugfixes), so both setup and unload paths now share the same mental model: one helper invocation per platform, always tagged with the correct `config_subentry_id`.
