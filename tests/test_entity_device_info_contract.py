@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -195,7 +196,6 @@ async def test_integration_device_info_uses_service_device(
         **_kwargs: Any,
     ) -> bool:
         platforms_tuple = tuple(platforms)
-        forward_calls.append((config_subentry_id, platforms_tuple))
         platform_names = _normalize_platform_names(platforms_tuple)
 
         if config_subentry_id:
@@ -227,14 +227,56 @@ async def test_integration_device_info_uses_service_device(
                     unique_id=f"{entry_obj.entry_id}:{SERVICE_SUBENTRY_KEY}:auth_status",
                     config_entry=entry_obj,
                     device_id=service_device.id,
-                )
+        )
         return True
+
+    async def _capture_forward_entry_setups_bound(
+        _manager: Any,
+        entry_obj: MockConfigEntry,
+        platforms: list[object],
+        *,
+        config_subentry_id: str | None = None,
+        **_kwargs: Any,
+    ) -> bool:
+        return await _capture_forward_entry_setups(
+            entry_obj,
+            platforms,
+            config_subentry_id=config_subentry_id,
+            **_kwargs,
+        )
 
     monkeypatch.setattr(
         hass.config_entries,
         "async_forward_entry_setups",
         _capture_forward_entry_setups,
         raising=False,
+    )
+    monkeypatch.setattr(
+        config_entries_module.ConfigEntries,
+        "async_forward_entry_setups",
+        _capture_forward_entry_setups_bound,
+        raising=False,
+    )
+
+    original_invoke = integration._invoke_with_optional_keyword
+
+    def _record_forward_calls(
+        callback: Callable[..., Any],
+        args: tuple[Any, ...],
+        keyword: str,
+        value: Any,
+    ) -> Any:
+        if keyword == "config_subentry_id":
+            platforms_arg: tuple[object, ...] = ()
+            if len(args) >= 2 and isinstance(args[1], list):
+                platforms_arg = tuple(args[1])
+            forward_calls.append((value, platforms_arg))
+        return original_invoke(callback, args, keyword, value)
+
+    monkeypatch.setattr(
+        integration,
+        "_invoke_with_optional_keyword",
+        _record_forward_calls,
     )
 
     entry = MockConfigEntry(
@@ -263,15 +305,34 @@ async def test_integration_device_info_uses_service_device(
     managed_subentries = tuple(subentry_manager.managed_subentries.values())
     assert managed_subentries
 
-    assert len(forward_calls) == 1
-    forwarded_identifier, forwarded_platforms = forward_calls[0]
-    assert forwarded_identifier is None
-    platform_names = _normalize_platform_names(forwarded_platforms)
-    expected_platforms = set(TRACKER_FEATURE_PLATFORMS) | set(
-        SERVICE_FEATURE_PLATFORMS
-    )
-    assert platform_names == expected_platforms
-    assert len(forwarded_platforms) == len(platform_names)
+    forwarded_by_identifier: dict[str, set[str]] = {}
+    for forwarded_identifier, forwarded_platforms in forward_calls:
+        assert isinstance(forwarded_identifier, str) and forwarded_identifier
+        platform_names = _normalize_platform_names(forwarded_platforms)
+        forwarded_by_identifier[forwarded_identifier] = platform_names
+        assert len(forwarded_platforms) == len(platform_names)
+
+    expected_platforms: dict[str, set[str]] = {}
+    for subentry in managed_subentries:
+        identifier = integration._resolve_config_subentry_identifier(subentry)
+        assert isinstance(identifier, str) and identifier
+        raw_data = getattr(subentry, "data", {}) if isinstance(subentry, object) else {}
+        data = raw_data if isinstance(raw_data, Mapping) else {}
+        group_key = data.get("group_key")
+        if group_key == TRACKER_SUBENTRY_KEY:
+            expected_platforms[identifier] = set(TRACKER_FEATURE_PLATFORMS)
+            continue
+        if group_key == SERVICE_SUBENTRY_KEY:
+            expected_platforms[identifier] = set(SERVICE_FEATURE_PLATFORMS)
+            continue
+
+        features = data.get("features")
+        if isinstance(features, (list, tuple, set)):
+            expected_platforms[identifier] = {str(item) for item in features}
+        else:
+            expected_platforms[identifier] = set()
+
+    assert forwarded_by_identifier == expected_platforms
 
     service_identifier = service_device_identifier(entry.entry_id)
     service_device = device_registry.async_get_device({service_identifier})

@@ -170,22 +170,85 @@ async def test_async_ensure_subentries_are_setup_collects_all_sources() -> None:
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
 
-    calls: list[tuple[FakeConfigEntry, tuple[object, ...]]] = []
+    calls: list[tuple[str | None, tuple[object, ...]]] = []
 
-    async def forward(entry_obj: FakeConfigEntry, platforms: tuple[Platform, ...]) -> None:
-        calls.append((entry_obj, tuple(platforms)))
+    async def forward(
+        entry_obj: FakeConfigEntry,
+        platforms: tuple[Platform, ...],
+        *,
+        config_subentry_id: str | None = None,
+    ) -> None:
+        calls.append((config_subentry_id, tuple(platforms)))
 
     hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
 
     await _async_ensure_subentries_are_setup(hass, entry)
 
     assert calls
-    assert len(calls) == 1
-    recorded_entry, recorded_platforms = calls[0]
-    assert recorded_entry is entry
-    platform_names = _platform_names(recorded_platforms)
-    assert set(platform_names) == set(TRACKER_FEATURE_PLATFORMS) | set(SERVICE_FEATURE_PLATFORMS)
-    assert len(platform_names) == len(set(platform_names))
+    assert len(calls) == 2
+    identifiers = {identifier for identifier, _ in calls}
+    assert identifiers == {"tracker-subentry", "service-subentry"}
+
+    for identifier, recorded_platforms in calls:
+        assert identifier is not None
+        if identifier == "tracker-subentry":
+            assert _platform_names(recorded_platforms) == TRACKER_FEATURE_PLATFORMS
+        elif identifier == "service-subentry":
+            assert _platform_names(recorded_platforms) == SERVICE_FEATURE_PLATFORMS
+        else:  # pragma: no cover - defensive guard for future test updates
+            pytest.fail(f"Unexpected subentry identifier forwarded: {identifier}")
+
+
+@pytest.mark.asyncio
+async def test_async_ensure_subentries_are_setup_retries_keyword_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forwarding must still include identifiers if the signature probe fails."""
+
+    tracker_subentry = SimpleNamespace(
+        config_subentry_id="tracker-subentry",
+        data={"features": TRACKER_FEATURE_PLATFORMS},
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        key=TRACKER_SUBENTRY_KEY,
+    )
+
+    subentry_manager = SimpleNamespace(
+        managed_subentries={TRACKER_SUBENTRY_KEY: tracker_subentry}
+    )
+    runtime_data = RuntimeData(
+        coordinator=SimpleNamespace(_subentry_metadata={}),  # type: ignore[arg-type]
+        token_cache=object(),  # type: ignore[arg-type]
+        subentry_manager=subentry_manager,  # type: ignore[arg-type]
+        fcm_receiver=None,
+    )
+
+    entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
+    entry.runtime_data = runtime_data
+    entry.subentries[TRACKER_SUBENTRY_KEY] = tracker_subentry
+
+    hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
+
+    calls: list[tuple[str | None, tuple[object, ...]]] = []
+
+    async def forward(
+        entry_obj: FakeConfigEntry,
+        platforms: tuple[Platform, ...],
+        *,
+        config_subentry_id: str | None = None,
+    ) -> None:
+        calls.append((config_subentry_id, tuple(platforms)))
+        assert entry_obj is entry
+
+    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy._callable_accepts_keyword",
+        lambda *_: False,
+    )
+
+    await _async_ensure_subentries_are_setup(hass, entry)
+
+    assert calls == [("tracker-subentry", tuple(TRACKER_FEATURE_PLATFORMS))]
 
 
 @pytest.mark.asyncio
@@ -220,4 +283,7 @@ async def test_async_ensure_subentries_are_setup_logs_config_entry_not_ready(cap
     with caplog.at_level("WARNING"):
         await _async_ensure_subentries_are_setup(hass, entry)
 
-    assert "Aggregated subentry setup deferred for tracker-subentry" in caplog.text
+    assert (
+        "Setup for subentry 'tracker-subentry' raised an unexpected error: test"
+        in caplog.text
+    )
