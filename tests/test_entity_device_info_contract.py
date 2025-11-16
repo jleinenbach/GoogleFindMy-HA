@@ -121,8 +121,11 @@ async def test_integration_device_info_uses_service_device(
     credentialed_config_entry_data: Callable[..., dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
     enable_custom_integrations: None,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """Integration startup should link diagnostic entities to the service device."""
+
+    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
 
     integration = importlib.import_module("custom_components.googlefindmy")
     coordinator_module = importlib.import_module("custom_components.googlefindmy.coordinator")
@@ -234,20 +237,6 @@ async def test_integration_device_info_uses_service_device(
         _StubMapRedirectView,
         raising=False,
     )
-
-
-    def _force_config_subentry_id(entry_obj: MockConfigEntry, platform_name: str, candidate: str | None) -> str:
-        if candidate:
-            return candidate
-        return f"{entry_obj.entry_id}:{platform_name}"
-
-    for module in (button_module, sensor_module, device_tracker_module, binary_sensor_module):
-        monkeypatch.setattr(
-            module,
-            "ensure_config_subentry_id",
-            _force_config_subentry_id,
-            raising=False,
-        )
 
 
     real_forward_entry_setups = hass.config_entries.async_forward_entry_setups

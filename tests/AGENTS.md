@@ -473,6 +473,13 @@ of issuing per-subentry forward calls. Update tests accordingly:
 * Platform tests should focus on verifying that entities/devices refuse to load
   when ``config_subentry_id`` is missing (skipped creations, warnings) and that
   the metadata plumbing continues to provide sanitized identifiers.
+* When a regression needs deterministic ``config_subentry_id`` fallbacks without
+  repeating monkeypatch boilerplate, depend on the
+  ``deterministic_config_subentry_id`` fixture from ``tests.conftest``.  Adding
+  the fixture to a test function signature automatically patches the integration
+  platforms (button, sensor, binary_sensor, device_tracker, and entity helpers)
+  so they synthesize ``"<entry_id>:<platform>"`` identifiers whenever Home
+  Assistant omits the value.
 
 When parent-unload rollbacks are exercised (for example,
 ``tests/test_unload_subentry_cleanup.py::test_async_unload_entry_rolls_back_when_parent_unload_fails``),

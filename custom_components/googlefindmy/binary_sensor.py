@@ -98,7 +98,7 @@ async def async_setup_entry(
         key=service_subentry_key
     )
     service_config_subentry_id = ensure_config_subentry_id(
-        config_entry,
+        entry,
         "binary_sensor",
         config_subentry_id or service_meta_config_id,
     )

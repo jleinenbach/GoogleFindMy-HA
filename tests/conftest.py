@@ -227,6 +227,48 @@ def issue_registry_capture(
 
 
 @pytest.fixture
+def deterministic_config_subentry_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[Any, str, str | None], str]:
+    """Provide deterministic config_subentry_id fallbacks for platform setup."""
+
+    modules = [
+        importlib.import_module(path)
+        for path in (
+            "custom_components.googlefindmy.entity",
+            "custom_components.googlefindmy.binary_sensor",
+            "custom_components.googlefindmy.button",
+            "custom_components.googlefindmy.sensor",
+            "custom_components.googlefindmy.device_tracker",
+        )
+    ]
+
+    assigned: dict[tuple[str, str], str] = {}
+
+    def _assign(entry: Any, platform: str, candidate: str | None) -> str:
+        if isinstance(candidate, str):
+            normalized = candidate.strip()
+            if normalized:
+                return normalized
+
+        entry_id = getattr(entry, "entry_id", "<unknown-entry>")
+        if not isinstance(entry_id, str) or not entry_id:
+            entry_id = "<unknown-entry>"
+
+        key = (entry_id, platform)
+        fallback = assigned.get(key)
+        if fallback is None:
+            fallback = f"{entry_id}:{platform}"
+            assigned[key] = fallback
+        return fallback
+
+    for module in modules:
+        monkeypatch.setattr(module, "ensure_config_subentry_id", _assign, raising=False)
+
+    return _assign
+
+
+@pytest.fixture
 def subentry_support(monkeypatch: pytest.MonkeyPatch):
     """Toggle config subentry support between modern and legacy cores."""
 
