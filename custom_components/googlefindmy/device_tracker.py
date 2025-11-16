@@ -42,7 +42,12 @@ from .const import (
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
-from .entity import GoogleFindMyDeviceEntity, resolve_coordinator, _entry_option
+from .entity import (
+    GoogleFindMyDeviceEntity,
+    ensure_config_subentry_id,
+    resolve_coordinator,
+    _entry_option,
+)
 from .ha_typing import RestoreEntity, TrackerEntity, callback
 from .discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
@@ -89,13 +94,24 @@ async def async_setup_entry(
     tracker_subentry_identifier = coordinator.stable_subentry_identifier(
         key=tracker_subentry_key
     )
-    tracker_config_subentry_id = config_subentry_id or tracker_meta_config_id
+    tracker_config_subentry_id = ensure_config_subentry_id(
+        config_entry,
+        "device_tracker",
+        config_subentry_id or tracker_meta_config_id,
+    )
 
     _LOGGER.debug(
         "Device tracker setup: subentry_key=%s, config_subentry_id=%s",
         tracker_subentry_key,
         tracker_config_subentry_id,
     )
+
+    if tracker_config_subentry_id is None:
+        _LOGGER.debug(
+            "Device tracker setup: awaiting config_subentry_id for key '%s'; skipping",
+            tracker_subentry_key,
+        )
+        return
 
     if (
         config_subentry_id

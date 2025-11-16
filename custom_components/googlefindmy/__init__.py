@@ -1944,6 +1944,8 @@ class RuntimeData:
 type MyConfigEntry = ConfigEntry
 
 
+SUBENTRY_FORWARD_HELPER_LOG_KEY = "_subentry_forward_helper_logs"
+
 class GoogleFindMyDomainData(TypedDict, total=False):
     """Typed container describing objects stored under ``hass.data[DOMAIN]``."""
 
@@ -2005,6 +2007,46 @@ def _ensure_device_owner_index(bucket: GoogleFindMyDomainData) -> dict[str, str]
         owner_index = {}
         bucket["device_owner_index"] = owner_index
     return owner_index
+
+
+def _has_logged_missing_subentry_forward_helper(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> bool:
+    """Return True if the missing forward helper warning already logged."""
+
+    if getattr(entry, "_gfm_logged_subentry_forward_absence", False):
+        return True
+
+    entry_id = getattr(entry, "entry_id", None)
+    if not isinstance(entry_id, str):
+        return False
+
+    bucket = _domain_data(hass)
+    logged = bucket.get(SUBENTRY_FORWARD_HELPER_LOG_KEY)
+    if isinstance(logged, set):
+        return entry_id in logged
+    return False
+
+
+def _mark_missing_subentry_forward_helper_logged(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Record that the missing forward helper warning has been emitted."""
+
+    try:
+        setattr(entry, "_gfm_logged_subentry_forward_absence", True)
+    except (AttributeError, TypeError):
+        pass
+
+    bucket = _domain_data(hass)
+    logged = bucket.get(SUBENTRY_FORWARD_HELPER_LOG_KEY)
+    if not isinstance(logged, set):
+        logged = set()
+        bucket[SUBENTRY_FORWARD_HELPER_LOG_KEY] = logged
+
+    entry_id = getattr(entry, "entry_id", None)
+    if isinstance(entry_id, str):
+        logged.add(entry_id)
 
 
 def _get_fcm_receiver(
@@ -5251,6 +5293,28 @@ async def _async_setup_subentry(
         )
         return False
 
+    forward_setups = getattr(hass.config_entries, "async_forward_entry_setups", None)
+    if callable(forward_setups):
+        try:
+            await forward_setups(entry, platforms)
+        except OperationNotAllowed as err:
+            _LOGGER.error(
+                "[%s] Aggregated subentry setup blocked for '%s': %s",
+                entry.entry_id,
+                identifier,
+                err,
+            )
+            return False
+        except Exception as err:  # noqa: BLE001 - propagate context
+            _LOGGER.exception(
+                "[%s] Aggregated subentry setup raised an unexpected error for '%s': %s",
+                entry.entry_id,
+                identifier,
+                err,
+            )
+            return False
+        return True
+
     forward_setup = getattr(hass.config_entries, "async_forward_entry_setup", None)
     if callable(forward_setup):
         success = True
@@ -5268,27 +5332,13 @@ async def _async_setup_subentry(
                 success = success and setup_result
         return success
 
-    forward_setups = getattr(hass.config_entries, "async_forward_entry_setups", None)
-    if not callable(forward_setups):
-        _LOGGER.debug(
-            "[%s] Home Assistant instance does not expose async_forward_entry_setups",
-            entry.entry_id,
-        )
-        return False
-
-    result = _invoke_with_optional_keyword(
-        forward_setups,
-        (entry, list(platforms)),
-        "config_subentry_id",
+    _LOGGER.error(
+        "[%s] Home Assistant instance does not expose async_forward_entry_setups; "
+        "subentry '%s' cannot be forwarded.",
+        entry.entry_id,
         identifier,
     )
-    if isinstance(result, Awaitable):
-        result = await result
-
-    if isinstance(result, bool):
-        return result
-
-    return True
+    return False
 
 
 async def _async_ensure_subentries_are_setup(
@@ -5327,32 +5377,22 @@ async def _async_ensure_subentries_are_setup(
         _LOGGER.debug("[%s] No subentries found to set up.", entry.entry_id)
         return
 
-    # Subentries require the singular forward helper so each platform carries the
-    # correct ``config_subentry_id``. Home Assistant cores without this API are
-    # unsupported for config subentries.
-    forward_setup = getattr(hass.config_entries, "async_forward_entry_setup", None)
-    if not callable(forward_setup):
-        _LOGGER.error(
-            "[%s] Home Assistant instance does not expose 'async_forward_entry_setup'. "
-            "Subentry setup cannot proceed. This may be an unsupported HA version.",
-            entry.entry_id,
-        )
+    forward_setups = getattr(hass.config_entries, "async_forward_entry_setups", None)
+    if not callable(forward_setups):
+        if not _has_logged_missing_subentry_forward_helper(hass, entry):
+            _LOGGER.info(
+                "[%s] Home Assistant %s does not expose 'async_forward_entry_setups'; "
+                "skipping aggregated subentry forwarding.",
+                entry.entry_id,
+                getattr(hass, "version", "core"),
+            )
+            _mark_missing_subentry_forward_helper_logged(hass, entry)
         return
 
-    accepts_subentry_kwarg = _callable_accepts_keyword(forward_setup, "config_subentry_id")
-    legacy_tracker: set[str] | None = None
-    if not accepts_subentry_kwarg:
-        legacy_tracker = _legacy_forwarded_platforms(entry)
-        if not _legacy_notice_logged(entry):
-            _LOGGER.warning(
-                "[%s] Legacy Home Assistant core detected; forwarding platforms once "
-                "per parent entry until config_subentry_id support is available.",
-                entry.entry_id,
-            )
-            _mark_legacy_notice_logged(entry)
-
-    setup_tasks: list[Awaitable[Any]] = []
-    forwarded_subentries: list[ConfigSubentry | dict[str, Any] | None] = []
+    aggregated_platforms: list[Platform] = []
+    aggregated_names: list[str] = []
+    seen_platforms: set[str] = set()
+    per_subentry: dict[str, tuple[str, ...]] = {}
 
     for subentry in subentries:
         identifier = _resolve_config_subentry_identifier(subentry)
@@ -5383,70 +5423,43 @@ async def _async_ensure_subentries_are_setup(
             )
             continue
 
+        platform_names = _platform_names(platforms)
+        per_subentry[identifier] = platform_names
         _LOGGER.debug(
-            "[%s] Triggering setup for subentry '%s' across %d platforms (%s)",
+            "[%s] Subentry '%s' requires %s",
             entry.entry_id,
             identifier,
-            len(platforms),
-            ", ".join(_platform_names(platforms)),
+            ", ".join(platform_names),
         )
 
         for platform in platforms:
             platform_name = _platform_value(platform)
+            if platform_name in seen_platforms:
+                continue
+            seen_platforms.add(platform_name)
+            aggregated_platforms.append(platform)
+            aggregated_names.append(platform_name)
 
-            setup_task = _invoke_with_optional_keyword(
-                forward_setup,
-                (entry, platform_name),
-                "config_subentry_id",
-                identifier,
-            )
-            if inspect.isawaitable(setup_task):
-                setup_tasks.append(setup_task)
-                forwarded_subentries.append(subentry)
-            else:
-                # Legacy helpers may return ``None``; mimic the gather() flow for consistency
-                setup_tasks.append(asyncio.sleep(0, result=setup_task))
-                forwarded_subentries.append(subentry)
-
-            if legacy_tracker is not None:
-                legacy_tracker.add(platform_name)
-
-    if not setup_tasks:
-        _LOGGER.debug(
-            "[%s] No eligible subentries to set up after filtering",
-            entry.entry_id,
-        )
+    if not aggregated_platforms:
+        _LOGGER.debug("[%s] No eligible subentries to set up after filtering", entry.entry_id)
         return
 
+    _LOGGER.debug(
+        "[%s] Aggregated subentry platforms (%d): %s",
+        entry.entry_id,
+        len(aggregated_platforms),
+        ", ".join(aggregated_names),
+    )
+
     try:
-        results = await asyncio.gather(*setup_tasks, return_exceptions=True)
-        for subentry, result in zip(forwarded_subentries, results, strict=False):
-            sub_id = _resolve_config_subentry_identifier(subentry) or "<unknown>"
-            if isinstance(result, BaseException):
-                if isinstance(result, asyncio.CancelledError):
-                    raise result
-                if isinstance(result, OperationNotAllowed):
-                    _LOGGER.error(
-                        "[%s] Setup for subentry '%s' blocked while entry state=%s: %s. "
-                        "This may indicate a Home Assistant Core timing issue.",
-                        entry.entry_id,
-                        sub_id,
-                        state_name,
-                        result,
-                    )
-                else:
-                    _LOGGER.exception(
-                        "[%s] Setup for subentry '%s' raised an unexpected error: %s",
-                        entry.entry_id,
-                        sub_id,
-                        result,
-                    )
-            elif result is False:
-                _LOGGER.warning(
-                    "[%s] One or more platforms failed to set up for subentry '%s'",
-                    entry.entry_id,
-                    sub_id,
-                )
+        await forward_setups(entry, tuple(aggregated_platforms))
+    except OperationNotAllowed as err:
+        _LOGGER.error(
+            "[%s] Aggregated subentry setup blocked while entry state=%s: %s",
+            entry.entry_id,
+            state_name,
+            err,
+        )
     except asyncio.CancelledError:
         _LOGGER.info("[%s] Subentry setup was cancelled.", entry.entry_id)
         raise

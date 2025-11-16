@@ -87,6 +87,26 @@ def _entry_option(entry: ConfigEntry | None, key: str, default: Any) -> Any:
     return default
 
 
+def ensure_config_subentry_id(
+    entry: ConfigEntry, platform: str, candidate: str | None
+) -> str | None:
+    """Return a sanitized config_subentry_id or log why it is unavailable."""
+
+    if isinstance(candidate, str):
+        normalized = candidate.strip()
+        if normalized:
+            return normalized
+
+    _LOGGER.warning(
+        "[%s] %s platform deferred because config_subentry_id is unavailable; "
+        "metadata may be stale or Home Assistant has not finished registering "
+        "subentries yet.",
+        getattr(entry, "entry_id", "<unknown>"),
+        platform,
+    )
+    return None
+
+
 class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
     """Base entity for Google Find My Device platforms.
 

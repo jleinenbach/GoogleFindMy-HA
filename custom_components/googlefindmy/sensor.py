@@ -39,7 +39,12 @@ from .const import (
 )
 from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
-from .entity import GoogleFindMyDeviceEntity, GoogleFindMyEntity, resolve_coordinator
+from .entity import (
+    GoogleFindMyDeviceEntity,
+    GoogleFindMyEntity,
+    ensure_config_subentry_id,
+    resolve_coordinator,
+)
 from .ha_typing import RestoreSensor, SensorEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
@@ -191,6 +196,31 @@ async def async_setup_entry(
         service_config_subentry_id = config_subentry_id
     if not tracker_config_subentry_id and matches_tracker:
         tracker_config_subentry_id = config_subentry_id
+
+    service_config_subentry_id = ensure_config_subentry_id(
+        entry,
+        "sensor_service",
+        service_config_subentry_id,
+    )
+    tracker_config_subentry_id = ensure_config_subentry_id(
+        entry,
+        "sensor_tracker",
+        tracker_config_subentry_id,
+    )
+
+    if service_config_subentry_id is None:
+        should_init_service = False
+    if tracker_config_subentry_id is None:
+        should_init_tracker = False
+
+    if not should_init_service:
+        _LOGGER.debug(
+            "Sensor setup: service metrics paused because config_subentry_id is unavailable",
+        )
+    if not should_init_tracker:
+        _LOGGER.debug(
+            "Sensor setup: tracker metrics paused because config_subentry_id is unavailable",
+        )
 
     service_entities: list[SensorEntity] = []
     tracker_entities: list[SensorEntity] = []

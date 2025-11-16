@@ -88,7 +88,7 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self.setup_calls: list[str] = []
         self.forward_unload_calls: list[tuple[_EntryStub, tuple[object, ...], str | None]] = []
         self.unload_platform_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
-        self.forward_setup_calls: list[tuple[_EntryStub, object]] = []
+        self.forward_setup_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
         self.parent_unload_invocations = 0
 
     def async_entries(self, domain: str | None = None) -> list[_EntryStub]:
@@ -123,15 +123,11 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self.forward_unload_calls.append((entry, payload, config_subentry_id))
         return True
 
-    async def async_forward_entry_setup(
-        self,
-        entry: _EntryStub,
-        platform: object,
-        *,
-        config_subentry_id: str | None = None,
+    async def async_forward_entry_setups(
+        self, entry: _EntryStub, platforms: Sequence[object]
     ) -> bool:
         assert entry is self._entry
-        self.forward_setup_calls.append((entry, platform))
+        self.forward_setup_calls.append((entry, tuple(platforms)))
         return True
 
     def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
@@ -467,11 +463,12 @@ def test_async_unload_entry_rolls_back_when_parent_unload_fails(
     assert hass.config_entries.forward_setup_calls
     recorded_entries = {call[0] for call in hass.config_entries.forward_setup_calls}
     assert recorded_entries == {entry}
-    recorded_platforms = {
-        getattr(platform, "value", platform)
-        for _, platform in hass.config_entries.forward_setup_calls
-    }
-    assert recorded_platforms == set(integration.TRACKER_FEATURE_PLATFORMS)
+    recorded_batches = [
+        _platform_names(platforms)
+        for _, platforms in hass.config_entries.forward_setup_calls
+    ]
+    flattened = {name for batch in recorded_batches for name in batch}
+    assert set(integration.TRACKER_FEATURE_PLATFORMS).issubset(flattened)
     # Runtime data is reattached to the bucket so the entry keeps running.
     assert hass.data[DOMAIN]["entries"][entry.entry_id] is runtime_data
     assert entry.runtime_data is runtime_data

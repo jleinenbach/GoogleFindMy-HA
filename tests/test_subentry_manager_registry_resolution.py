@@ -62,20 +62,15 @@ async def test_async_ensure_subentries_setup_handles_placeholder_objects() -> No
     )
     manager = DeferredRegistryConfigEntriesManager(parent_entry, resolved_child)
     hass = FakeHass(config_entries=manager)
-    forwarded_calls: list[tuple[FakeConfigEntry, str]] = []
+    forwarded_calls: list[tuple[FakeConfigEntry, tuple[Any, ...]]] = []
 
     async def _capture_forwarded_subentry(
-        entry_obj: FakeConfigEntry,
-        platform: Any,
-        **_kwargs: Any,
+        entry_obj: FakeConfigEntry, platforms: list[Any]
     ) -> bool:
-        platform_name = getattr(platform, "value", None)
-        if not isinstance(platform_name, str):
-            platform_name = str(platform)
-        forwarded_calls.append((entry_obj, platform_name))
+        forwarded_calls.append((entry_obj, tuple(platforms)))
         return True
 
-    setattr(manager, "async_forward_entry_setup", _capture_forwarded_subentry)
+    setattr(manager, "async_forward_entry_setups", _capture_forwarded_subentry)
     runtime_manager = await _build_runtime_manager(
         hass=hass,
         parent_entry=parent_entry,
@@ -108,7 +103,7 @@ async def test_async_ensure_subentries_setup_handles_placeholder_objects() -> No
 
     expected_identifier = _resolve_config_subentry_identifier(resolved_child)
     assert forwarded_calls
-    recorded_entry, _platform = forwarded_calls[0]
+    recorded_entry, _platforms = forwarded_calls[0]
     assert recorded_entry is parent_entry
     assert expected_identifier == resolved_child.subentry_id
 

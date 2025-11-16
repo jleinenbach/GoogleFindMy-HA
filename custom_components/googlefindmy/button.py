@@ -38,7 +38,11 @@ from .const import (
 )
 from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator
-from .entity import GoogleFindMyDeviceEntity, resolve_coordinator
+from .entity import (
+    GoogleFindMyDeviceEntity,
+    ensure_config_subentry_id,
+    resolve_coordinator,
+)
 from .ha_typing import ButtonEntity, callback
 from .util_services import register_entity_service
 
@@ -117,13 +121,24 @@ async def async_setup_entry(
     tracker_subentry_identifier = coordinator.stable_subentry_identifier(
         key=tracker_subentry_key
     )
-    tracker_config_subentry_id = config_subentry_id or tracker_meta_config_id
+    tracker_config_subentry_id = ensure_config_subentry_id(
+        config_entry,
+        "button",
+        config_subentry_id or tracker_meta_config_id,
+    )
 
     _LOGGER.debug(
         "Button setup: subentry_key=%s, config_subentry_id=%s",
         tracker_subentry_key,
         tracker_config_subentry_id,
     )
+
+    if tracker_config_subentry_id is None:
+        _LOGGER.debug(
+            "Button setup: awaiting config_subentry_id for key '%s'; deferring entity creation",
+            tracker_subentry_key,
+        )
+        return
 
     if (
         config_subentry_id
