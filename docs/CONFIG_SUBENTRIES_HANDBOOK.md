@@ -527,3 +527,30 @@ children fail to appear in the UI, refuse to unload, or leave orphaned registry 
 ---
 
 Keep this handbook synchronized with upstream Home Assistant releases. When new subentry features ship (for example, additional lifecycle hooks or translation keys), update this document and add links in `AGENTS.md` so every contributor can find the latest requirements quickly.
+
+---
+
+## Fehlerbehebung: `ValueError: Config entry ... already been setup!`
+
+Bei der Implementierung des Plattform-Ladens für Sub-Entries trat ein `ValueError` auf, weil Plattformen (insb. `sensor`) mehrfach für denselben *Haupt*-Config-Entry registriert wurden, anstatt für die jeweiligen *Sub*-Entries.
+
+### Analyse des Fehlers
+
+1. **Fehlerhafte Annahme:** Die Funktion `_async_ensure_subentries_are_setup` (in `__init__.py`) rief fälschlicherweise `hass.config_entries.async_forward_entry_setups` (Plural) auf und übergab eine *Liste* von Plattformen (`['sensor', 'button']`).
+2. **Falsches Keyword:** Sie versuchte, das Keyword `config_subentry_id` an die `..._setups` (Plural)-Funktion zu übergeben. Diese Funktion akzeptiert das Keyword jedoch nicht.
+3. **Fehlerhafter Fallback:** Eine Kompatibilitäts-Wrapper-Funktion (`_invoke_with_optional_keyword`) fing den `TypeError` ab und rief `async_forward_entry_setups` *erneut* auf, diesmal *ohne* `config_subentry_id`.
+4. **Konsequenz:** Dies führte dazu, dass alle Plattformen (z. B. `sensor` von `core_tracking`) fälschlicherweise auf dem *Haupt*-Entry registriert wurden.
+5. **Absturz:** Als die Schleife den zweiten Sub-Entry (`service`) lud und ebenfalls versuchte, die `sensor`-Plattform über denselben fehlerhaften Fallback auf dem *Haupt*-Entry zu registrieren, schlug dies mit `ValueError: ... already been setup!` fehl.
+
+### Die Lösung
+
+Die korrekte Methode, Plattformen für einen bestimmten Sub-Entry zu laden, ist die Verwendung der **singulären** Funktion `hass.config_entries.async_forward_entry_setup` (ohne 's').
+
+Die Logik in `_async_ensure_subentries_are_setup` (und analog in `_unload_config_subentry` für das Entladen) muss wie folgt geändert werden:
+
+1. Iteriere durch jeden Sub-Entry (`core_tracking`, `service`).
+2. Ermittle die Plattformen für diesen Sub-Entry (z. B. `[Platform.SENSOR, Platform.BINARY_SENSOR]`).
+3. Starte eine **innere Schleife**, die durch *jede einzelne Plattform* iteriert.
+4. Rufe für *jede einzelne Plattform* die singuläre Funktion `async_forward_entry_setup(entry, platform_name, config_subentry_id=subentry_identifier)` auf (eingebettet in den `_invoke_with_optional_keyword`-Wrapper, um die `config_subentry_id` sicher zu übergeben).
+
+Dies stellt sicher, dass Home Assistant jede Plattform explizit dem korrekten Sub-Entry zuordnet und `ValueError`-Konflikte auf dem Haupt-Entry vermieden werden.

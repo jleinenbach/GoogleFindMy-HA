@@ -5259,10 +5259,10 @@ async def _async_ensure_subentries_are_setup(
         _LOGGER.debug("[%s] No subentries found to set up.", entry.entry_id)
         return
 
-    forward = getattr(hass.config_entries, "async_forward_entry_setups", None)
-    if not callable(forward):
+    forward_setup = getattr(hass.config_entries, "async_forward_entry_setup", None)
+    if not callable(forward_setup):
         _LOGGER.error(
-            "[%s] Home Assistant instance does not expose async_forward_entry_setups. "
+            "[%s] Home Assistant instance does not expose async_forward_entry_setup. "
             "Subentry setup cannot proceed.",
             entry.entry_id,
         )
@@ -5308,19 +5308,22 @@ async def _async_ensure_subentries_are_setup(
             ", ".join(_platform_names(platforms)),
         )
 
-        setup_task = _invoke_with_optional_keyword(
-            forward,
-            (entry, list(platforms)),
-            "config_subentry_id",
-            identifier,
-        )
-        if inspect.isawaitable(setup_task):
-            setup_tasks.append(setup_task)
-            forwarded_subentries.append(subentry)
-        else:
-            # Legacy helpers may return ``None``; mimic the gather() flow for consistency
-            setup_tasks.append(asyncio.sleep(0, result=setup_task))
-            forwarded_subentries.append(subentry)
+        for platform in platforms:
+            platform_name = getattr(platform, "value", str(platform))
+
+            setup_task = _invoke_with_optional_keyword(
+                forward_setup,
+                (entry, platform_name),
+                "config_subentry_id",
+                identifier,
+            )
+            if inspect.isawaitable(setup_task):
+                setup_tasks.append(setup_task)
+                forwarded_subentries.append(subentry)
+            else:
+                # Legacy helpers may return ``None``; mimic the gather() flow for consistency
+                setup_tasks.append(asyncio.sleep(0, result=setup_task))
+                forwarded_subentries.append(subentry)
 
     if not setup_tasks:
         _LOGGER.debug(
@@ -6167,15 +6170,37 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 hass.config_entries, "async_forward_entry_unload", None
             )
             if isinstance(identifier, str) and identifier and callable(forward_unload):
-                result = _invoke_with_optional_keyword(
-                    forward_unload,
-                    (entry, tuple(platforms)),
-                    "config_subentry_id",
-                    identifier,
-                )
-                if isinstance(result, Awaitable):
-                    result = await result
-                return bool(result) if result is not None else True
+                all_unloaded = True
+                unload_awaitables: list[Awaitable[Any]] = []
+                for platform in platforms:
+                    platform_name = getattr(platform, "value", str(platform))
+                    result = _invoke_with_optional_keyword(
+                        forward_unload,
+                        (entry, platform_name),
+                        "config_subentry_id",
+                        identifier,
+                    )
+                    if inspect.isawaitable(result):
+                        unload_awaitables.append(result)
+                    else:
+                        all_unloaded = all_unloaded and (
+                            bool(result) if result is not None else True
+                        )
+
+                if unload_awaitables:
+                    gathered = await asyncio.gather(
+                        *unload_awaitables, return_exceptions=True
+                    )
+                    for outcome in gathered:
+                        if isinstance(outcome, BaseException):
+                            all_unloaded = False
+                            continue
+                        if isinstance(outcome, bool):
+                            all_unloaded = all_unloaded and outcome
+                        else:
+                            all_unloaded = all_unloaded and True
+
+                return all_unloaded
 
             entry_id = getattr(subentry, "entry_id", None)
             unload_child = getattr(hass.config_entries, "async_unload", None)
