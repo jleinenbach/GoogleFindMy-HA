@@ -12,7 +12,6 @@ import pytest
 from custom_components.googlefindmy import (
     ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
-    _resolve_config_subentry_identifier,
 )
 from custom_components.googlefindmy.const import DOMAIN
 from tests.helpers.homeassistant import (

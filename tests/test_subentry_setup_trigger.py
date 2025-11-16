@@ -13,7 +13,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_FEATURE_PLATFORMS,
 )
 
-from tests.helpers.homeassistant import FakeConfigEntriesManager, FakeConfigEntry, FakeHass
+from tests.helpers.homeassistant import FakeConfigEntriesManager, FakeHass
 
 
 @pytest.mark.asyncio
