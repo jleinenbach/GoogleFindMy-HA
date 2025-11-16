@@ -49,3 +49,7 @@ except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
 ```
 
 The dynamically created fallback must inherit from an existing Home Assistant error (usually `HomeAssistantError`) and be assigned immediately after the guarded import so downstream modules can reference the shared symbol without additional `# type: ignore` comments. Prefer short inline comments that state which Home Assistant versions lack the helper so future contributors know when the guard can be removed.
+
+## Cross-reference checklist
+
+* [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Documents where these strict-mypy fallbacks are applied in the runtime, including the new subentry cross-link list. Keep the handbook and this guide synchronized whenever typing guards or iterator requirements change.

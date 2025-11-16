@@ -528,6 +528,12 @@ children fail to appear in the UI, refuse to unload, or leave orphaned registry 
 
 Keep this handbook synchronized with upstream Home Assistant releases. When new subentry features ship (for example, additional lifecycle hooks or translation keys), update this document and add links in `AGENTS.md` so every contributor can find the latest requirements quickly.
 
+### Cross-reference checklist
+
+* [`custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md`](../custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md) — Platform forwarding, unload fan-out, and the legacy tracker warning flow. Mirror changes between this handbook and that runtime guide so unsupported-core fallbacks stay documented in both places.
+* [`custom_components/googlefindmy/agents/config_flow/AGENTS.md`](../custom_components/googlefindmy/agents/config_flow/AGENTS.md) — Config-flow registration, discovery updates, and service validation fallbacks. Add or update subentry-specific reminders in tandem with the handbook to keep the UI + runtime expectations aligned.
+* [`custom_components/googlefindmy/agents/typing_guidance/AGENTS.md`](../custom_components/googlefindmy/agents/typing_guidance/AGENTS.md) — Strict-mypy import guards and iterator typing conventions referenced by the handbook’s registry sections. Revisit this list whenever new helpers land so every AGENT mentions the handbook (and vice versa).
+
 ---
 
 ## Postmortem: `ValueError` on Setup/Unload (Regression 1.6.0)
@@ -553,3 +559,5 @@ Fixing the regression required replacing the entire body of `_async_ensure_suben
 4. Aggregates the awaitables via `asyncio.gather`, mirroring Home Assistant's parent-entry setup fan-out but scoped to the child entry identifiers.
 
 The `_unload_config_subentry` helper already follows the same per-platform singular pattern (see the 1.6-beta3 bugfixes), so both setup and unload paths now share the same mental model: one helper invocation per platform, always tagged with the correct `config_subentry_id`.
+
+For Home Assistant cores that still expose `async_forward_entry_setup` without a `config_subentry_id` parameter, the integration logs a single warning and records the affected platforms through the weakref-backed tracker described in [`custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md`](../custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md). Refer back to that guidance whenever the legacy tracker surfaces in logs so the unsupported-core fallback stays documented alongside this postmortem.

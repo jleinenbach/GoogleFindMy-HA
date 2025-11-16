@@ -45,3 +45,7 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
       options=existing_options,
   )
   ```
+
+## Cross-reference checklist
+
+* [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Mirrors this guide’s subentry-flow reminders and now tracks every AGENT link. Update both documents together whenever setup/unload contracts, discovery affordances, or reconfigure hooks change.
