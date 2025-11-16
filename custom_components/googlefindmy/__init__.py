@@ -5036,25 +5036,27 @@ def _invoke_with_optional_keyword(
     if value is None:
         return callback(*args)
 
-    if _callable_accepts_keyword(callback, keyword):
-        try:
-            return callback(*args, **{keyword: value})
-        except TypeError as err:
-            if keyword not in str(err):
-                raise
+    accepts_keyword = _callable_accepts_keyword(callback, keyword)
+    callback_name = getattr(callback, "__qualname__", repr(callback))
+
+    try:
+        return callback(*args, **{keyword: value})
+    except TypeError as err:
+        if keyword not in str(err):
+            raise
+        if accepts_keyword:
             _LOGGER.debug(
-                "Callable %s rejected keyword '%s'; retrying without it",  # noqa: G004
-                getattr(callback, "__qualname__", repr(callback)),
+                "%s advertised keyword '%s' but raised TypeError; retrying without it",  # noqa: G004
+                callback_name,
                 keyword,
             )
-            return callback(*args)
-
-    _LOGGER.debug(
-        "Callable %s does not accept keyword '%s'; falling back to legacy signature",  # noqa: G004
-        getattr(callback, "__qualname__", repr(callback)),
-        keyword,
-    )
-    return callback(*args)
+        else:
+            _LOGGER.debug(
+                "%s rejected optional keyword '%s'; retrying without it",  # noqa: G004
+                callback_name,
+                keyword,
+            )
+        return callback(*args)
 
 
 def _collect_entry_subentries(entry: ConfigEntry) -> tuple[Any, ...]:
@@ -5227,15 +5229,15 @@ async def _async_ensure_subentries_are_setup(
     """Ensure programmatically created subentries are fully set up.
 
     Home Assistant's config subentry handbook requires parent entries to trigger
-    setup for their child subentries after synchronizing them. See
-    docs/CONFIG_SUBENTRIES_HANDBOOK.md (Section IV.C, step 3).
-    NOTE: This MUST iterate the subentries from the runtime_data manager,
-    as ``entry.subentries`` may be stale immediately after ``async_sync`` creates
-    or updates the managed subentries.
+    setup for their child subentries after synchronizing them.
+
+    This helper iterates the managed subentries and forwards their setup to the
+    relevant platforms with the correct ``config_subentry_id`` so Home Assistant's
+    registries keep each child entry isolated.
     """
 
     # Yield once so Home Assistant finishes registering freshly created subentries
-    # before we request their setup; otherwise ``async_setup`` can raise UnknownEntry.
+    # before we request their setup; otherwise, ``async_setup`` can raise UnknownEntry.
     await asyncio.sleep(0)
 
     entry_state = getattr(entry, "state", None)
@@ -5254,11 +5256,20 @@ async def _async_ensure_subentries_are_setup(
 
     subentries = _collect_entry_subentries(entry)
     if not subentries:
+        _LOGGER.debug("[%s] No subentries found to set up.", entry.entry_id)
         return
 
-    identifiers: list[str] = []
-    platforms: list[Platform] = []
-    seen_platforms: set[Platform] = set()
+    forward = getattr(hass.config_entries, "async_forward_entry_setups", None)
+    if not callable(forward):
+        _LOGGER.error(
+            "[%s] Home Assistant instance does not expose async_forward_entry_setups. "
+            "Subentry setup cannot proceed.",
+            entry.entry_id,
+        )
+        return
+
+    setup_tasks: list[Awaitable[Any]] = []
+    forwarded_subentries: list[ConfigSubentry | dict[str, Any] | None] = []
 
     for subentry in subentries:
         identifier = _resolve_config_subentry_identifier(subentry)
@@ -5273,72 +5284,88 @@ async def _async_ensure_subentries_are_setup(
         disabled_by = getattr(subentry, "disabled_by", None)
         if disabled_by is not None:
             _LOGGER.debug(
-                "[%s] Skipping setup for disabled subentry '%s' (%s)",  # noqa: G004
+                "[%s] Skipping setup for disabled subentry '%s' (%s)",
                 entry.entry_id,
                 identifier,
                 disabled_by,
             )
             continue
 
-        identifiers.append(identifier)
-        for platform in _determine_subentry_platforms(subentry):
-            if platform not in seen_platforms:
-                seen_platforms.add(platform)
-                platforms.append(platform)
+        platforms = _determine_subentry_platforms(subentry)
+        if not platforms:
+            _LOGGER.debug(
+                "[%s] No platforms determined for subentry '%s'; skipping.",
+                entry.entry_id,
+                identifier,
+            )
+            continue
 
-    if not identifiers or not platforms:
         _LOGGER.debug(
-            "[%s] No eligible subentries to setup after filtering",  # noqa: G004
+            "[%s] Triggering setup for subentry '%s' across %d platforms (%s)",
             entry.entry_id,
+            identifier,
+            len(platforms),
+            ", ".join(_platform_names(platforms)),
         )
-        return
 
-    _LOGGER.debug(
-        "[%s] Triggering aggregated setup for %d subentries (%s) across %d platforms (state=%s)",  # noqa: G004
-        entry.entry_id,
-        len(identifiers),
-        ", ".join(identifiers),
-        len(platforms),
-        state_name,
-    )
+        setup_task = _invoke_with_optional_keyword(
+            forward,
+            (entry, list(platforms)),
+            "config_subentry_id",
+            identifier,
+        )
+        if inspect.isawaitable(setup_task):
+            setup_tasks.append(setup_task)
+            forwarded_subentries.append(subentry)
+        else:
+            # Legacy helpers may return ``None``; mimic the gather() flow for consistency
+            setup_tasks.append(asyncio.sleep(0, result=setup_task))
+            forwarded_subentries.append(subentry)
 
-    forward = getattr(hass.config_entries, "async_forward_entry_setups", None)
-    if not callable(forward):
+    if not setup_tasks:
         _LOGGER.debug(
-            "[%s] Home Assistant instance does not expose async_forward_entry_setups",
+            "[%s] No eligible subentries to set up after filtering",
             entry.entry_id,
         )
         return
 
     try:
-        result = forward(entry, tuple(platforms))
-        if isinstance(result, Awaitable):
-            await result
+        results = await asyncio.gather(*setup_tasks, return_exceptions=True)
+        for subentry, result in zip(forwarded_subentries, results, strict=False):
+            sub_id = _resolve_config_subentry_identifier(subentry) or "<unknown>"
+            if isinstance(result, BaseException):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                if isinstance(result, OperationNotAllowed):
+                    _LOGGER.error(
+                        "[%s] Setup for subentry '%s' blocked while entry state=%s: %s. "
+                        "This may indicate a Home Assistant Core timing issue.",
+                        entry.entry_id,
+                        sub_id,
+                        state_name,
+                        result,
+                    )
+                else:
+                    _LOGGER.exception(
+                        "[%s] Setup for subentry '%s' raised an unexpected error: %s",
+                        entry.entry_id,
+                        sub_id,
+                        result,
+                    )
+            elif result is False:
+                _LOGGER.warning(
+                    "[%s] One or more platforms failed to set up for subentry '%s'",
+                    entry.entry_id,
+                    sub_id,
+                )
     except asyncio.CancelledError:
-        raise
-    except ConfigEntryNotReady as err:
-        _LOGGER.warning(
-            "[%s] Aggregated subentry setup deferred for %s: %s",  # noqa: G004
-            entry.entry_id,
-            ", ".join(identifiers),
-            err,
-        )
-    except OperationNotAllowed as err:
-        _LOGGER.error(
-            "[%s] Aggregated subentry setup blocked while entry state=%s (subentries=%s, platforms=%s): %s",
-            entry.entry_id,
-            state_name,
-            ", ".join(identifiers),
-            ", ".join(_platform_names(platforms)),
-            err,
-        )
+        _LOGGER.info("[%s] Subentry setup was cancelled.", entry.entry_id)
         raise
     except Exception as err:  # noqa: BLE001 - defensive logging
         _LOGGER.exception(
-            "[%s] Aggregated subentry setup raised %s for %s",  # noqa: G004
+            "[%s] Aggregated subentry setup raised an unexpected error: %s",
             entry.entry_id,
-            type(err).__name__,
-            ", ".join(identifiers),
+            err,
         )
 
 

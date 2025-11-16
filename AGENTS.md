@@ -362,6 +362,13 @@ For any work that migrates entity-registry records during reload/startup flows, 
 4. **Multi-entry safety** — demonstrate that entities belonging to other config entries stay untouched by the migration helper.
 5. **Idempotence** — run the helper twice or on already-correct data to prove no extra registry updates occur.
 
+### 3.7 Device registry healing checklist
+
+1. **Trigger conditions.** Only heal when a registry lookup returns an existing `DeviceEntry` with an incorrect or missing `config_subentry_id`, name, or support flag. Read the latest object via `dev_reg.async_get_device` (or list iteration) immediately before scheduling the update so debug logs can reference the authoritative identifiers.
+2. **Apply updates via `async_update_device`.** Do not rely on `async_get_or_create` to mutate existing devices. Instead, call `dev_reg.async_update_device(device.id, config_subentry_id=..., **extra_fields)` and always capture the returned entry (the helper returns a *new* object). Treat the previous `device` reference as stale and overwrite it with the returned instance before continuing.
+3. **Bookkeeping and metrics.** Count each successful heal exactly once—after `async_update_device` returns—and log the `(entry_id, device_id, identifiers, config_subentry_id)` tuple at debug level. Surface aggregate counters in telemetry or diagnostics helpers when applicable so regression tests can assert how many devices were corrected.
+4. **`_heal_tracker_device_subentry` contract.** The helper returns a tuple `(device_entry, healed)` where `device_entry` is the freshest registry object (even if no heal occurred) and `healed` flags whether an update was applied. Always propagate the refreshed `device_entry` for downstream work (name updates, via-device clearing, identifier merges) and base counters/logs on the boolean flag so heals do not masquerade as extra creations.
+
 ---
 
 ## 4) **Token cache handling** (hard requirement; regression-prevention)

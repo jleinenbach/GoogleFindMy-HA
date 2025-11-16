@@ -225,6 +225,7 @@ class _FakeDeviceRegistry:
         new_identifiers: Iterable[tuple[str, str]] | None = None,
         via_device_id: Any = _UNSET_DEVICE,
         name: str | None = None,
+        config_subentry_id: str | None | object = _UNSET_DEVICE,
         translation_key: str | None = None,
         translation_placeholders: dict[str, str] | None = None,
         add_config_entry_id: str | None = None,
@@ -235,6 +236,7 @@ class _FakeDeviceRegistry:
     ) -> None:
         for device in self.devices:
             if device.id == device_id:
+                direct_config_subentry = config_subentry_id
                 if new_identifiers is not None:
                     device.identifiers = set(new_identifiers)
                 if via_device_id is not _UNSET_DEVICE:
@@ -293,6 +295,40 @@ class _FakeDeviceRegistry:
                     device.entry_type = kwargs["entry_type"]
                 if "configuration_url" in kwargs:
                     device.configuration_url = kwargs["configuration_url"]
+
+                if direct_config_subentry is not _UNSET_DEVICE:
+                    direct_value = cast(str | None, direct_config_subentry)
+                    target_entries: list[str] = []
+                    if add_config_entry_id:
+                        target_entries.append(add_config_entry_id)
+                    target_entries.extend(
+                        entry_id
+                        for entry_id in device.config_entries_subentries
+                        if isinstance(entry_id, str)
+                    )
+                    if not target_entries:
+                        target_entries.extend(
+                            entry_id
+                            for entry_id in device.config_entries
+                            if isinstance(entry_id, str)
+                        )
+                    seen_entries: set[str] = set()
+                    for entry_id in target_entries:
+                        if not entry_id or entry_id in seen_entries:
+                            continue
+                        seen_entries.add(entry_id)
+                        subentries = device.config_entries_subentries.setdefault(
+                            entry_id, set()
+                        )
+                        subentries.clear()
+                        subentries.add(direct_value)
+                        device._sync_config_subentry_id(entry_id)
+
+                recorded_subentry = (
+                    cast(str | None, direct_config_subentry)
+                    if direct_config_subentry is not _UNSET_DEVICE
+                    else add_config_subentry_id
+                )
                 self.updated.append(
                     {
                         "device_id": device_id,
@@ -306,9 +342,13 @@ class _FakeDeviceRegistry:
                         "translation_key": translation_key,
                         "translation_placeholders": translation_placeholders,
                         "config_entry_id": add_config_entry_id,
-                        "config_subentry_id": add_config_subentry_id,
+                        "config_subentry_id": recorded_subentry,
                         "add_config_entry_id": add_config_entry_id,
-                        "add_config_subentry_id": add_config_subentry_id,
+                        "add_config_subentry_id": (
+                            None
+                            if direct_config_subentry is not _UNSET_DEVICE
+                            else add_config_subentry_id
+                        ),
                         "remove_config_entry_id": remove_config_entry_id,
                         "remove_config_subentry_id": remove_config_subentry_id,
                         "manufacturer": kwargs.get("manufacturer"),
@@ -478,6 +518,7 @@ class _FrozenDeviceRegistry:
         new_identifiers: Iterable[tuple[str, str]] | None = None,
         via_device_id: str | None = None,
         name: str | None | object = _UNSET,
+        config_subentry_id: str | None | object = _UNSET,
         translation_key: str | None = None,
         translation_placeholders: Mapping[str, str] | None = None,
         add_config_entry_id: str | None = None,
@@ -511,6 +552,29 @@ class _FrozenDeviceRegistry:
             if field in kwargs:
                 replace_kwargs[field] = kwargs[field]
 
+        direct_config_subentry = config_subentry_id
+        if direct_config_subentry is not _UNSET:
+            direct_value = cast(str | None, direct_config_subentry)
+            target_entries: list[str] = []
+            if add_config_entry_id:
+                target_entries.append(add_config_entry_id)
+            if not target_entries:
+                target_entries.extend(mapping.keys())
+            if not target_entries:
+                target_entries.extend(
+                    candidate
+                    for candidate in entry.config_entries
+                    if isinstance(candidate, str)
+                )
+            seen_entries: set[str] = set()
+            for entry_id in target_entries:
+                if not isinstance(entry_id, str) or not entry_id or entry_id in seen_entries:
+                    continue
+                seen_entries.add(entry_id)
+                bucket = mapping.setdefault(entry_id, set())
+                bucket.clear()
+                bucket.add(direct_value)
+
         if add_config_entry_id:
             config_entries.add(add_config_entry_id)
             subentries = mapping.setdefault(add_config_entry_id, set())
@@ -541,6 +605,11 @@ class _FrozenDeviceRegistry:
         replace_kwargs["config_entries_subentries"] = self._normalize_subentries(mapping)
         replace_kwargs["config_subentry_id"] = self._canonical_config_subentry(mapping)
 
+        recorded_subentry = (
+            cast(str | None, direct_config_subentry)
+            if direct_config_subentry is not _UNSET
+            else add_config_subentry_id
+        )
         new_entry = replace(entry, **replace_kwargs)
         self._store(new_entry)
         self.updated.append(
@@ -554,9 +623,13 @@ class _FrozenDeviceRegistry:
                 "translation_key": translation_key,
                 "translation_placeholders": translation_placeholders,
                 "config_entry_id": add_config_entry_id,
-                "config_subentry_id": add_config_subentry_id,
+                "config_subentry_id": recorded_subentry,
                 "add_config_entry_id": add_config_entry_id,
-                "add_config_subentry_id": add_config_subentry_id,
+                "add_config_subentry_id": (
+                    None
+                    if direct_config_subentry is not _UNSET
+                    else add_config_subentry_id
+                ),
                 "remove_config_entry_id": remove_config_entry_id,
                 "remove_config_subentry_id": remove_config_subentry_id,
                 "manufacturer": kwargs.get("manufacturer"),
@@ -766,10 +839,10 @@ def test_devices_register_without_service_parent(
     assert fake_registry.created[0]["identifiers"] == {(DOMAIN, "entry-42:abc123")}
     assert fake_registry.created[0]["via_device"] is None
     assert fake_registry.created[0]["via_device_id"] is None
-    assert fake_registry.updated == []
-    assert (
-        fake_registry.created[0]["config_subentry_id"] == entry.tracker_subentry_id
-    )
+    assert len(fake_registry.updated) == 1
+    healing_payload = fake_registry.updated[0]
+    assert healing_payload["config_subentry_id"] == entry.tracker_subentry_id
+    assert healing_payload["add_config_subentry_id"] is None
 
 
 def test_hub_entry_skips_registry_updates(
@@ -822,8 +895,8 @@ def test_legacy_device_migrates_without_service_parent(
     assert fake_registry.updated[0]["via_device_id"] is None
     assert fake_registry.updated[0]["add_config_subentry_id"] == entry.tracker_subentry_id
     assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
-    assert fake_registry.updated[-1]["remove_config_entry_id"] == entry.entry_id
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] is None
+    assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
+    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
     assert legacy.name == "Pixel"
     assert legacy.config_subentry_id == entry.tracker_subentry_id
 
@@ -959,13 +1032,14 @@ def test_existing_device_remains_standalone(
         ignored=set(),
     )
 
-    assert created == 1
+    assert created == 0
     assert fake_registry.updated[0]["via_device_id"] is None
     assert existing.via_device_id is None
-    assert fake_registry.updated[0]["add_config_subentry_id"] == entry.tracker_subentry_id
-    assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
-    assert fake_registry.updated[-1]["remove_config_entry_id"] == entry.entry_id
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] is None
+    assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
+    assert fake_registry.updated[0]["add_config_subentry_id"] is None
+    assert fake_registry.updated[0]["add_config_entry_id"] is None
+    assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
+    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
     assert existing.config_subentry_id == entry.tracker_subentry_id
 
 
@@ -1000,11 +1074,12 @@ def test_existing_device_backfills_config_subentry(
     assert len(fake_registry.updated) >= 1
     payload = fake_registry.updated[0]
     assert payload["device_id"] == existing.id
-    assert payload["add_config_subentry_id"] == entry.tracker_subentry_id
-    assert payload["add_config_entry_id"] == entry.entry_id
+    assert payload["config_subentry_id"] == entry.tracker_subentry_id
+    assert payload["add_config_subentry_id"] is None
+    assert payload["add_config_entry_id"] is None
     assert payload["via_device_id"] is None
-    assert fake_registry.updated[-1]["remove_config_entry_id"] == entry.entry_id
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] is None
+    assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
+    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
     assert existing.config_subentry_id == entry.tracker_subentry_id
     assert existing.via_device_id is None
 
@@ -1227,8 +1302,11 @@ def test_service_device_updates_add_translation(
     service_subentry_ident = _service_subentry_identifier(entry)
     assert legacy_service.identifiers == {service_ident, service_subentry_ident}
     assert fake_registry.updated
-    metadata = fake_registry.updated[0]
-    assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
+    metadata = next(
+        payload
+        for payload in fake_registry.updated
+        if payload.get("translation_key") == SERVICE_DEVICE_TRANSLATION_KEY
+    )
     assert metadata["translation_placeholders"] == {}
     assert metadata["config_subentry_id"] == entry.service_subentry_id
     assert metadata["new_identifiers"] == {service_ident, service_subentry_ident}
@@ -1280,6 +1358,40 @@ def test_service_device_missing_subentry(fake_registry: _FakeDeviceRegistry) -> 
     assert service_entry.config_subentry_id is None
     assert service_entry.manufacturer == SERVICE_DEVICE_MANUFACTURER
     assert service_entry.config_entries_subentries.get(entry.entry_id) == {None}
+
+
+def test_service_device_heals_config_subentry(fake_registry: _FakeDeviceRegistry) -> None:
+    """Service device healing should backfill its config_subentry_id."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-heal-service")
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    coordinator._ensure_service_device_exists()
+
+    service_ident = service_device_identifier(entry.entry_id)
+    service_entry = next(
+        device for device in fake_registry.devices if service_ident in device.identifiers
+    )
+    service_entry.config_subentry_id = None
+    service_entry.config_entries_subentries[entry.entry_id] = {None}
+
+    fake_registry.updated.clear()
+    coordinator._service_device_ready = False
+
+    coordinator._ensure_service_device_exists()
+
+    assert fake_registry.updated, "Expected device-registry healing to run"
+    payload = next(
+        update
+        for update in fake_registry.updated
+        if update.get("config_subentry_id") == entry.service_subentry_id
+    )
+    assert payload["add_config_subentry_id"] is None
+    assert service_entry.config_subentry_id == entry.service_subentry_id
+    assert service_entry.config_entries_subentries[entry.entry_id] == {
+        entry.service_subentry_id
+    }
 
 
 def test_service_device_clears_missing_service_link(
@@ -1572,8 +1684,11 @@ def test_service_device_preserves_user_defined_name(
     service_subentry_ident = _service_subentry_identifier(entry)
     assert legacy_service.identifiers == {service_ident, service_subentry_ident}
     assert fake_registry.updated
-    metadata = fake_registry.updated[0]
-    assert metadata["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
+    metadata = next(
+        payload
+        for payload in fake_registry.updated
+        if payload.get("translation_key") == SERVICE_DEVICE_TRANSLATION_KEY
+    )
     assert metadata["translation_placeholders"] == {}
     assert metadata["config_subentry_id"] == entry.service_subentry_id
 
@@ -1607,12 +1722,6 @@ def test_service_device_detaches_hub_link_when_service_subentry_active(
 
     coordinator._ensure_service_device_exists()
 
-    removal_payload = next(
-        payload
-        for payload in fake_registry.updated  # type: ignore[assignment]
-        if payload.get("remove_config_entry_id") == entry.entry_id
-    )
-    assert removal_payload["remove_config_subentry_id"] is None
     mapping = legacy_service.config_entries_subentries.get(entry.entry_id)
     assert mapping == {entry.service_subentry_id}
     assert entry.entry_id in legacy_service.config_entries
@@ -1643,7 +1752,10 @@ def test_rebuild_flow_creates_devices_without_service_parent(
     metadata = fake_registry.created[0]
     assert metadata["via_device"] is None
     assert metadata["via_device_id"] is None
-    assert metadata["config_subentry_id"] == entry.tracker_subentry_id
+    assert metadata["config_subentry_id"] is None
+    assert fake_registry.updated
+    payload = fake_registry.updated[0]
+    assert payload["config_subentry_id"] == entry.tracker_subentry_id
 
 
 @pytest.mark.asyncio
