@@ -53,6 +53,7 @@ from collections.abc import (
 )
 from types import MappingProxyType, SimpleNamespace
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from weakref import WeakKeyDictionary
 
 from .ProtoDecoders import Common_pb2, DeviceUpdate_pb2, LocationReportsUpload_pb2
 
@@ -1931,6 +1932,8 @@ class RuntimeData:
     fcm_receiver: FcmReceiverHAType | None = None
     google_home_filter: GoogleHomeFilterProtocol | None = None
     entity_recovery_manager: EntityRecoveryManager | None = None
+    legacy_forwarded_platforms: set[str] | None = None
+    legacy_forward_notice: bool = False
 
     @property
     def cache(self) -> TokenCache:
@@ -4981,22 +4984,26 @@ def _platform_names(platforms: Iterable[Platform | str]) -> tuple[str, ...]:
 
     names: list[str] = []
     for platform in platforms:
-        candidate: str | None = None
-        if isinstance(platform, Platform):
-            candidate = getattr(platform, "value", None)
-            if not candidate:
-                candidate = str(platform)
-        elif isinstance(platform, str):
-            candidate = platform
-        else:
-            candidate = str(platform)
-
+        candidate = _platform_value(platform)
         if candidate:
             names.append(candidate)
 
     # Preserve ordering while deduplicating so repeated platform enums only
     # appear once in debug output.
     return tuple(dict.fromkeys(names))
+
+
+def _platform_value(platform: Platform | str) -> str:
+    """Return the string value for ``platform`` regardless of enum type."""
+
+    if isinstance(platform, Platform):
+        candidate = getattr(platform, "value", None)
+        if isinstance(candidate, str) and candidate:
+            return candidate
+        return str(platform)
+    if isinstance(platform, str):
+        return platform
+    return str(platform)
 
 
 def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> bool:
@@ -5104,6 +5111,42 @@ def _collect_entry_subentries(entry: ConfigEntry) -> tuple[Any, ...]:
 
     return tuple(ordered)
 
+_LEGACY_PLATFORM_TRACKERS: WeakKeyDictionary[ConfigEntry, set[str]] = WeakKeyDictionary()
+_LEGACY_NOTICE_TRACKER: WeakKeyDictionary[ConfigEntry, bool] = WeakKeyDictionary()
+
+
+def _legacy_forwarded_platforms(entry: ConfigEntry) -> set[str]:
+    """Return the cached parent-level platform set for legacy cores."""
+
+    runtime_data = getattr(entry, "runtime_data", None)
+    if isinstance(runtime_data, RuntimeData):
+        forwarded = getattr(runtime_data, "legacy_forwarded_platforms", None)
+        if isinstance(forwarded, set):
+            return forwarded
+        runtime_data.legacy_forwarded_platforms = set()
+        return runtime_data.legacy_forwarded_platforms
+
+    forwarded = _LEGACY_PLATFORM_TRACKERS.get(entry)
+    if forwarded is None:
+        forwarded = set()
+        _LEGACY_PLATFORM_TRACKERS[entry] = forwarded
+    return forwarded
+
+
+def _legacy_notice_logged(entry: ConfigEntry) -> bool:
+    runtime_data = getattr(entry, "runtime_data", None)
+    if isinstance(runtime_data, RuntimeData):
+        return bool(runtime_data.legacy_forward_notice)
+    return bool(_LEGACY_NOTICE_TRACKER.get(entry))
+
+
+def _mark_legacy_notice_logged(entry: ConfigEntry) -> None:
+    runtime_data = getattr(entry, "runtime_data", None)
+    if isinstance(runtime_data, RuntimeData):
+        runtime_data.legacy_forward_notice = True
+        return
+    _LEGACY_NOTICE_TRACKER[entry] = True
+
 
 async def _async_setup_legacy_child_subentry(
     hass: HomeAssistant, entry: MyConfigEntry
@@ -5199,9 +5242,34 @@ async def _async_setup_subentry(
         )
         return False
 
-    platforms = _determine_subentry_platforms(subentry)
-    forward = getattr(hass.config_entries, "async_forward_entry_setups", None)
-    if not callable(forward):
+    platforms = tuple(_determine_subentry_platforms(subentry))
+    if not platforms:
+        _LOGGER.debug(
+            "[%s] No platforms resolved for subentry '%s'",
+            entry.entry_id,
+            identifier,
+        )
+        return False
+
+    forward_setup = getattr(hass.config_entries, "async_forward_entry_setup", None)
+    if callable(forward_setup):
+        success = True
+        for platform in platforms:
+            platform_name = _platform_value(platform)
+            setup_result = _invoke_with_optional_keyword(
+                forward_setup,
+                (entry, platform_name),
+                "config_subentry_id",
+                identifier,
+            )
+            if inspect.isawaitable(setup_result):
+                setup_result = await setup_result
+            if isinstance(setup_result, bool):
+                success = success and setup_result
+        return success
+
+    forward_setups = getattr(hass.config_entries, "async_forward_entry_setups", None)
+    if not callable(forward_setups):
         _LOGGER.debug(
             "[%s] Home Assistant instance does not expose async_forward_entry_setups",
             entry.entry_id,
@@ -5209,7 +5277,7 @@ async def _async_setup_subentry(
         return False
 
     result = _invoke_with_optional_keyword(
-        forward,
+        forward_setups,
         (entry, list(platforms)),
         "config_subentry_id",
         identifier,
@@ -5259,11 +5327,14 @@ async def _async_ensure_subentries_are_setup(
         _LOGGER.debug("[%s] No subentries found to set up.", entry.entry_id)
         return
 
-    forward = getattr(hass.config_entries, "async_forward_entry_setups", None)
-    if not callable(forward):
+    # Subentries require the singular forward helper so each platform carries the
+    # correct ``config_subentry_id``. Home Assistant cores without this API are
+    # unsupported for config subentries.
+    forward_setup = getattr(hass.config_entries, "async_forward_entry_setup", None)
+    if not callable(forward_setup):
         _LOGGER.error(
-            "[%s] Home Assistant instance does not expose async_forward_entry_setups. "
-            "Subentry setup cannot proceed.",
+            "[%s] Home Assistant instance does not expose 'async_forward_entry_setup'. "
+            "Subentry setup cannot proceed. This may be an unsupported HA version.",
             entry.entry_id,
         )
         return
@@ -5291,7 +5362,7 @@ async def _async_ensure_subentries_are_setup(
             )
             continue
 
-        platforms = _determine_subentry_platforms(subentry)
+        platforms = tuple(_determine_subentry_platforms(subentry))
         if not platforms:
             _LOGGER.debug(
                 "[%s] No platforms determined for subentry '%s'; skipping.",
@@ -5308,19 +5379,22 @@ async def _async_ensure_subentries_are_setup(
             ", ".join(_platform_names(platforms)),
         )
 
-        setup_task = _invoke_with_optional_keyword(
-            forward,
-            (entry, list(platforms)),
-            "config_subentry_id",
-            identifier,
-        )
-        if inspect.isawaitable(setup_task):
-            setup_tasks.append(setup_task)
-            forwarded_subentries.append(subentry)
-        else:
-            # Legacy helpers may return ``None``; mimic the gather() flow for consistency
-            setup_tasks.append(asyncio.sleep(0, result=setup_task))
-            forwarded_subentries.append(subentry)
+        for platform in platforms:
+            platform_name = _platform_value(platform)
+
+            setup_task = _invoke_with_optional_keyword(
+                forward_setup,
+                (entry, platform_name),
+                "config_subentry_id",
+                identifier,
+            )
+            if inspect.isawaitable(setup_task):
+                setup_tasks.append(setup_task)
+                forwarded_subentries.append(subentry)
+            else:
+                # Legacy helpers may return ``None``; mimic the gather() flow for consistency
+                setup_tasks.append(asyncio.sleep(0, result=setup_task))
+                forwarded_subentries.append(subentry)
 
     if not setup_tasks:
         _LOGGER.debug(
@@ -6167,15 +6241,37 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 hass.config_entries, "async_forward_entry_unload", None
             )
             if isinstance(identifier, str) and identifier and callable(forward_unload):
-                result = _invoke_with_optional_keyword(
-                    forward_unload,
-                    (entry, tuple(platforms)),
-                    "config_subentry_id",
-                    identifier,
-                )
-                if isinstance(result, Awaitable):
-                    result = await result
-                return bool(result) if result is not None else True
+                all_unloaded = True
+                unload_awaitables: list[Awaitable[Any]] = []
+                for platform in platforms:
+                    platform_name = getattr(platform, "value", str(platform))
+                    result = _invoke_with_optional_keyword(
+                        forward_unload,
+                        (entry, platform_name),
+                        "config_subentry_id",
+                        identifier,
+                    )
+                    if inspect.isawaitable(result):
+                        unload_awaitables.append(result)
+                    else:
+                        all_unloaded = all_unloaded and (
+                            bool(result) if result is not None else True
+                        )
+
+                if unload_awaitables:
+                    gathered = await asyncio.gather(
+                        *unload_awaitables, return_exceptions=True
+                    )
+                    for outcome in gathered:
+                        if isinstance(outcome, BaseException):
+                            all_unloaded = False
+                            continue
+                        if isinstance(outcome, bool):
+                            all_unloaded = all_unloaded and outcome
+                        else:
+                            all_unloaded = all_unloaded and True
+
+                return all_unloaded
 
             entry_id = getattr(subentry, "entry_id", None)
             unload_child = getattr(hass.config_entries, "async_unload", None)

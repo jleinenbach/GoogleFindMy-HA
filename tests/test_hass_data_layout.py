@@ -138,7 +138,7 @@ class _StubConfigEntries:
     def __init__(self, entry: _StubConfigEntry) -> None:
         self._entries: list[_StubConfigEntry] = [entry]
         self.forward_calls: list[
-            tuple[_StubConfigEntry, tuple[str, ...], str | None]
+            tuple[_StubConfigEntry, str, str | None]
         ] = []
         self.reload_calls: list[str] = []
         self.added_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
@@ -168,15 +168,16 @@ class _StubConfigEntries:
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
         return list(self._entries)
 
-    async def async_forward_entry_setups(
+    async def async_forward_entry_setup(
         self,
         entry: _StubConfigEntry,
-        platforms: list[str],
+        platform: str,
         *,
         config_subentry_id: str | None = None,
         **_kwargs: Any,
     ) -> None:
-        self.forward_calls.append((entry, tuple(platforms), config_subentry_id))
+        platform_name = str(platform)
+        self.forward_calls.append((entry, platform_name, config_subentry_id))
         if config_subentry_id is not None:
             self.setup_calls.append(config_subentry_id)
 
@@ -811,18 +812,15 @@ def test_hass_data_layout(
             }
             assert len(expected_subentries) == len(entry.subentries)
 
-            assert len(hass.config_entries.forward_calls) == len(
-                entry.subentries
-            )
             forwarded_by_identifier: dict[str, set[str]] = {}
-            for forwarded_entry, forwarded_platforms, forwarded_subentry_id in (
+            for forwarded_entry, platform_name, forwarded_subentry_id in (
                 hass.config_entries.forward_calls
             ):
                 assert forwarded_entry is entry
                 assert isinstance(forwarded_subentry_id, str) and forwarded_subentry_id
-                forwarded_names = _platform_names(forwarded_platforms)
-                assert len(forwarded_names) == len(set(forwarded_names))
-                forwarded_by_identifier[forwarded_subentry_id] = set(forwarded_names)
+                forwarded_by_identifier.setdefault(
+                    forwarded_subentry_id, set()
+                ).add(platform_name)
 
             expected_platforms = {
                 integration._resolve_config_subentry_identifier(subentry): set(
@@ -1100,18 +1098,21 @@ async def test_async_setup_entry_propagates_subentry_registration(
     entry.unique_id = entry.entry_id
     hass = _StubHass(entry, loop)
 
-    forward_calls: list[tuple[str | None, tuple[object, ...]]] = []
+    forward_calls: list[tuple[str | None, str]] = []
 
-    async def _forward_entry_setups(
+    async def _forward_entry_setup(
         entry_obj: _StubConfigEntry,
-        platforms: list[object],
+        platform: object,
         *,
         config_subentry_id: str | None = None,
     ) -> None:
-        forward_calls.append((config_subentry_id, tuple(platforms)))
+        platform_name = getattr(platform, "value", None)
+        if not isinstance(platform_name, str):
+            platform_name = str(platform)
+        forward_calls.append((config_subentry_id, platform_name))
 
-    hass.config_entries.async_forward_entry_setups = (  # type: ignore[assignment]
-        _forward_entry_setups
+    hass.config_entries.async_forward_entry_setup = (  # type: ignore[assignment]
+        _forward_entry_setup
     )
 
     ConfigSubentry = importlib.import_module(
@@ -1154,11 +1155,9 @@ async def test_async_setup_entry_propagates_subentry_registration(
     assert len(created_subentries) == len(entry.subentries)
 
     forwarded_by_identifier: dict[str, set[str]] = {}
-    for forwarded_identifier, forwarded_platforms in forward_calls:
+    for forwarded_identifier, platform_name in forward_calls:
         assert isinstance(forwarded_identifier, str) and forwarded_identifier
-        forwarded_names = _platform_names(forwarded_platforms)
-        assert len(forwarded_names) == len(set(forwarded_names))
-        forwarded_by_identifier[forwarded_identifier] = set(forwarded_names)
+        forwarded_by_identifier.setdefault(forwarded_identifier, set()).add(platform_name)
 
     runtime_data = getattr(entry, "runtime_data", None)
     coordinator = getattr(runtime_data, "coordinator", None)

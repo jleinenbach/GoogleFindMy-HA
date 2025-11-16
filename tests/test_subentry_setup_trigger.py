@@ -170,40 +170,39 @@ async def test_async_ensure_subentries_are_setup_collects_all_sources() -> None:
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
 
-    calls: list[tuple[str | None, tuple[object, ...]]] = []
+    calls: list[tuple[str | None, str]] = []
 
     async def forward(
         entry_obj: FakeConfigEntry,
-        platforms: tuple[Platform, ...],
+        platform: Platform,
         *,
         config_subentry_id: str | None = None,
     ) -> None:
-        calls.append((config_subentry_id, tuple(platforms)))
+        if isinstance(platform, Platform):
+            platform_name = platform.value
+        else:
+            platform_name = str(platform)
+        calls.append((config_subentry_id, platform_name))
 
-    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
+    hass.config_entries.async_forward_entry_setup = forward  # type: ignore[attr-defined]
 
     await _async_ensure_subentries_are_setup(hass, entry)
 
     assert calls
-    assert len(calls) == 2
-    identifiers = {identifier for identifier, _ in calls}
-    assert identifiers == {"tracker-subentry", "service-subentry"}
-
-    for identifier, recorded_platforms in calls:
+    forwarded: dict[str, set[str]] = {}
+    for identifier, platform_name in calls:
         assert identifier is not None
-        if identifier == "tracker-subentry":
-            assert _platform_names(recorded_platforms) == TRACKER_FEATURE_PLATFORMS
-        elif identifier == "service-subentry":
-            assert _platform_names(recorded_platforms) == SERVICE_FEATURE_PLATFORMS
-        else:  # pragma: no cover - defensive guard for future test updates
-            pytest.fail(f"Unexpected subentry identifier forwarded: {identifier}")
+        forwarded.setdefault(identifier, set()).add(platform_name)
+
+    assert forwarded["tracker-subentry"] == set(TRACKER_FEATURE_PLATFORMS)
+    assert forwarded["service-subentry"] == set(SERVICE_FEATURE_PLATFORMS)
 
 
 @pytest.mark.asyncio
-async def test_async_ensure_subentries_are_setup_retries_keyword_probe(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_async_ensure_subentries_are_setup_requires_forward_helper(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Forwarding must still include identifiers if the signature probe fails."""
+    """Missing forward helpers should emit an error and abort setup."""
 
     tracker_subentry = SimpleNamespace(
         config_subentry_id="tracker-subentry",
@@ -224,31 +223,14 @@ async def test_async_ensure_subentries_are_setup_retries_keyword_probe(
 
     entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
     entry.runtime_data = runtime_data
-    entry.subentries[TRACKER_SUBENTRY_KEY] = tracker_subentry
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
+    hass.config_entries.async_forward_entry_setup = None  # type: ignore[attr-defined]
 
-    calls: list[tuple[str | None, tuple[object, ...]]] = []
+    with caplog.at_level("ERROR"):
+        await _async_ensure_subentries_are_setup(hass, entry)
 
-    async def forward(
-        entry_obj: FakeConfigEntry,
-        platforms: tuple[Platform, ...],
-        *,
-        config_subentry_id: str | None = None,
-    ) -> None:
-        calls.append((config_subentry_id, tuple(platforms)))
-        assert entry_obj is entry
-
-    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
-
-    monkeypatch.setattr(
-        "custom_components.googlefindmy._callable_accepts_keyword",
-        lambda *_: False,
-    )
-
-    await _async_ensure_subentries_are_setup(hass, entry)
-
-    assert calls == [("tracker-subentry", tuple(TRACKER_FEATURE_PLATFORMS))]
+    assert "does not expose 'async_forward_entry_setup'" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -275,10 +257,10 @@ async def test_async_ensure_subentries_are_setup_logs_config_entry_not_ready(cap
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
 
-    async def forward(*_: object) -> None:
+    async def forward(*_: object, **__kwargs: object) -> None:
         raise ConfigEntryNotReady("test")
 
-    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
+    hass.config_entries.async_forward_entry_setup = forward  # type: ignore[attr-defined]
 
     with caplog.at_level("WARNING"):
         await _async_ensure_subentries_are_setup(hass, entry)
