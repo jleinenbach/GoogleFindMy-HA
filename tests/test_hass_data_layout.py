@@ -811,18 +811,26 @@ def test_hass_data_layout(
             }
             assert len(expected_subentries) == len(entry.subentries)
 
-            assert len(hass.config_entries.forward_calls) == 1
-            forwarded_entry, forwarded_platforms, forwarded_subentry_id = (
-                hass.config_entries.forward_calls[0]
+            assert len(hass.config_entries.forward_calls) == len(
+                entry.subentries
             )
-            assert forwarded_entry is entry
-            assert forwarded_subentry_id is None
-            forwarded_names = _platform_names(forwarded_platforms)
-            assert len(forwarded_names) == len(set(forwarded_names))
-            expected_platforms = set(TRACKER_FEATURE_PLATFORMS) | set(
-                SERVICE_FEATURE_PLATFORMS
-            )
-            assert set(forwarded_names) == expected_platforms
+            forwarded_by_identifier: dict[str, set[str]] = {}
+            for forwarded_entry, forwarded_platforms, forwarded_subentry_id in (
+                hass.config_entries.forward_calls
+            ):
+                assert forwarded_entry is entry
+                assert isinstance(forwarded_subentry_id, str) and forwarded_subentry_id
+                forwarded_names = _platform_names(forwarded_platforms)
+                assert len(forwarded_names) == len(set(forwarded_names))
+                forwarded_by_identifier[forwarded_subentry_id] = set(forwarded_names)
+
+            expected_platforms = {
+                integration._resolve_config_subentry_identifier(subentry): set(
+                    subentry.data["features"]
+                )
+                for subentry in entry.subentries.values()
+            }
+            assert forwarded_by_identifier == expected_platforms
 
             domain_bucket = hass.data[DOMAIN]
             assert entry.entry_id not in domain_bucket
@@ -1145,27 +1153,36 @@ async def test_async_setup_entry_propagates_subentry_registration(
     }
     assert len(created_subentries) == len(entry.subentries)
 
-    assert len(forward_calls) == 1
-    forwarded_identifier, forwarded_platforms = forward_calls[0]
-    assert forwarded_identifier is None
-    forwarded_names = _platform_names(forwarded_platforms)
-    assert len(forwarded_names) == len(set(forwarded_names))
+    forwarded_by_identifier: dict[str, set[str]] = {}
+    for forwarded_identifier, forwarded_platforms in forward_calls:
+        assert isinstance(forwarded_identifier, str) and forwarded_identifier
+        forwarded_names = _platform_names(forwarded_platforms)
+        assert len(forwarded_names) == len(set(forwarded_names))
+        forwarded_by_identifier[forwarded_identifier] = set(forwarded_names)
 
     runtime_data = getattr(entry, "runtime_data", None)
     coordinator = getattr(runtime_data, "coordinator", None)
     assert getattr(coordinator, "first_refresh_calls", 0) == 1
 
-    expected_platforms: set[str] = set()
+    expected_platforms: dict[str, set[str]] = {}
     for key, subentry in entry.subentries.items():
+        identifier = integration._resolve_config_subentry_identifier(subentry)
+        assert isinstance(identifier, str) and identifier
         data_features = getattr(subentry, "data", {}).get("features")
         if isinstance(data_features, (list, tuple)):
-            expected_platforms.update(str(feature) for feature in data_features)
+            expected_platforms[identifier] = {
+                str(feature) for feature in data_features
+            }
         elif key == TRACKER_SUBENTRY_KEY:
-            expected_platforms.update(integration.TRACKER_FEATURE_PLATFORMS)
+            expected_platforms[identifier] = set(
+                integration.TRACKER_FEATURE_PLATFORMS
+            )
         else:
-            expected_platforms.update(integration.SERVICE_FEATURE_PLATFORMS)
+            expected_platforms[identifier] = set(
+                integration.SERVICE_FEATURE_PLATFORMS
+            )
 
-    assert set(forwarded_names) == expected_platforms
+    assert forwarded_by_identifier == expected_platforms
 
 
 def test_setup_entry_failure_does_not_register_cache(

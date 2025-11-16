@@ -41,6 +41,26 @@ if not _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE:
         "with homeassistant before running the test suite."
     )
 
+_CONST_MODULE = load_googlefindmy_const_module()
+_SERVICE_DEVICE_NAME: str = getattr(
+    _CONST_MODULE, "SERVICE_DEVICE_NAME", "Google Find My Integration"
+)
+_SERVICE_DEVICE_MODEL: str = getattr(
+    _CONST_MODULE, "SERVICE_DEVICE_MODEL", "Find My Device Integration"
+)
+_SERVICE_DEVICE_MANUFACTURER: str = getattr(
+    _CONST_MODULE, "SERVICE_DEVICE_MANUFACTURER", "BSkando"
+)
+_SERVICE_DEVICE_TRANSLATION_KEY: str = getattr(
+    _CONST_MODULE, "SERVICE_DEVICE_TRANSLATION_KEY", "google_find_hub_service"
+)
+_INTEGRATION_VERSION: str = getattr(
+    _CONST_MODULE, "INTEGRATION_VERSION", "0.0.0"
+)
+_SERVICE_DEVICE_IDENTIFIER: Callable[[str], tuple[str, str]] = getattr(
+    _CONST_MODULE, "service_device_identifier"
+)
+
 
 if _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE:
 
@@ -1507,6 +1527,52 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
             ) -> None:
                 self.subentry_manager = manager
                 self._manager_is_reload = is_reload
+                self._ensure_stub_service_device()
+
+            def _ensure_stub_service_device(self) -> None:
+                hass = getattr(self, "hass", None)
+                entry = getattr(self, "config_entry", None)
+                if hass is None or entry is None:
+                    return
+
+                entry_id = getattr(entry, "entry_id", None)
+                if not isinstance(entry_id, str) or not entry_id:
+                    return
+
+                from homeassistant.helpers import device_registry as dr
+
+                registry = dr.async_get(hass)
+                create_device = getattr(registry, "async_get_or_create", None)
+                if not callable(create_device):
+                    return
+                identifiers = {_SERVICE_DEVICE_IDENTIFIER(entry_id)}
+                raw_title = getattr(entry, "title", None)
+                if isinstance(raw_title, str) and raw_title.strip():
+                    base_name = raw_title.strip()
+                else:
+                    base_name = _SERVICE_DEVICE_NAME
+                service_name = f"{base_name} – Service"
+
+                create_kwargs: dict[str, Any] = {
+                    "config_entry_id": entry_id,
+                    "identifiers": identifiers,
+                    "manufacturer": _SERVICE_DEVICE_MANUFACTURER,
+                    "model": _SERVICE_DEVICE_MODEL,
+                    "sw_version": _INTEGRATION_VERSION,
+                    "entry_type": dr.DeviceEntryType.SERVICE,
+                    "name": service_name,
+                    "translation_key": _SERVICE_DEVICE_TRANSLATION_KEY,
+                    "translation_placeholders": {},
+                    "configuration_url": "https://github.com/BSkando/GoogleFindMy-HA",
+                }
+
+                try:
+                    create_device(**create_kwargs)
+                except TypeError:
+                    fallback_kwargs = dict(create_kwargs)
+                    fallback_kwargs.pop("translation_key", None)
+                    fallback_kwargs.pop("translation_placeholders", None)
+                    create_device(**fallback_kwargs)
 
         if methods:
             for name, method in methods.items():

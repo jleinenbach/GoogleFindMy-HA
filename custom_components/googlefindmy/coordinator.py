@@ -1980,6 +1980,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 device = get_device(identifiers=identifiers)
             except TypeError:
                 device = None
+
         def _refresh_service_device_entry(candidate: Any) -> Any:
             """Return a fresh copy of the service device entry when possible."""
 
@@ -1997,6 +1998,38 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return candidate
 
             return candidate if refreshed is None else refreshed
+
+        if (
+            device is not None
+            and service_config_subentry_id is not None
+            and getattr(device, "config_subentry_id", None) != service_config_subentry_id
+        ):
+            device_id = getattr(device, "id", None)
+            if isinstance(device_id, str) and device_id:
+                _LOGGER.debug(
+                    "[%s] Healing service device: correcting config_subentry_id from %s to %s",
+                    entry.entry_id,
+                    getattr(device, "config_subentry_id", None),
+                    service_config_subentry_id,
+                )
+                healed = self._call_device_registry_api(
+                    dev_reg.async_update_device,
+                    base_kwargs={
+                        "device_id": device_id,
+                        "config_subentry_id": service_config_subentry_id,
+                    },
+                )
+                device = _refresh_service_device_entry(healed or device)
+                if device is None:
+                    _LOGGER.error(
+                        "[%s] Failed to heal service device", entry.entry_id
+                    )
+                    raise HomeAssistantError("Failed to heal service device")
+            else:
+                _LOGGER.debug(
+                    "[%s] Service device missing identifier; unable to heal config_subentry_id",
+                    entry.entry_id,
+                )
 
         existing_name: str | None = None
         existing_user_name: str | None = None
@@ -2818,10 +2851,52 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return fallback
             return fallback if refreshed is None else refreshed
 
+        def _heal_tracker_device_subentry(
+            device: Any, *, device_label: str, device_id_hint: str | None
+        ) -> tuple[Any, bool]:
+            if (
+                device is None
+                or tracker_config_subentry_id is None
+                or not callable(update_device)
+            ):
+                return device, False
+            device_id = getattr(device, "id", None)
+            if not isinstance(device_id, str) or not device_id:
+                device_id = device_id_hint or None
+            if not isinstance(device_id, str) or not device_id:
+                return device, False
+            current_subentry_id = getattr(device, "config_subentry_id", None)
+            if current_subentry_id == tracker_config_subentry_id:
+                return device, False
+            _LOGGER.debug(
+                "[%s] Healing device '%s': correcting config_subentry_id from %s to %s",
+                entry_id,
+                device_label,
+                current_subentry_id,
+                tracker_config_subentry_id,
+            )
+            updated = self._call_device_registry_api(
+                update_device,
+                base_kwargs={
+                    "device_id": device_id,
+                    "config_subentry_id": tracker_config_subentry_id,
+                },
+            )
+            healed_device = _refresh_device_entry(device_id, updated or device)
+            if healed_device is None:
+                _LOGGER.error(
+                    "[%s] Failed to heal device %s", entry_id, device_label
+                )
+                return device, False
+            return healed_device, True
+
         for d in devices:
             dev_id = d.get("id")
             if not isinstance(dev_id, str) or dev_id in ignored:
                 continue
+
+            raw_label = (d.get("name") or "").strip()
+            device_label = raw_label or dev_id or "<unknown>"
 
             # Build identifiers
             ns_ident = (DOMAIN, f"{entry_id}:{dev_id}")
@@ -2907,10 +2982,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # Create if still missing
             if dev is None:
                 # Only set a real label; never write placeholders on cold boot
-                raw_name = (d.get("name") or "").strip()
                 use_name = (
-                    raw_name
-                    if raw_name and raw_name != "Google Find My Device"
+                    raw_label
+                    if raw_label and raw_label != "Google Find My Device"
                     else None
                 )
 
@@ -2920,12 +2994,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "manufacturer": "Google",
                     "model": "Find My Device",
                     "name": use_name,
-                    "config_subentry_id": tracker_config_subentry_id,
                 }
 
                 dev = self._call_device_registry_api(
                     async_get_or_create,
                     base_kwargs=create_kwargs,
+                )
+                dev, _ = _heal_tracker_device_subentry(
+                    dev,
+                    device_label=device_label,
+                    device_id_hint=dev_id,
                 )
                 if (
                     tracker_config_subentry_id is not None
@@ -2936,11 +3014,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     dev = _remove_hub_link(dev)
                 created_or_updated += 1
             else:
+                dev, _ = _heal_tracker_device_subentry(
+                    dev,
+                    device_label=device_label,
+                    device_id_hint=dev_id,
+                )
                 # Keep name fresh if not user-overridden and a new upstream label is available
-                raw_name = (d.get("name") or "").strip()
                 use_name = (
-                    raw_name
-                    if raw_name and raw_name != "Google Find My Device"
+                    raw_label
+                    if raw_label and raw_label != "Google Find My Device"
                     else None
                 )
 
