@@ -90,9 +90,12 @@ def _make_add_entities(
 
 @pytest.mark.asyncio
 async def test_entity_registry_subentry_alignment(
-    stub_coordinator_factory: Callable[..., type[Any]]
+    stub_coordinator_factory: Callable[..., type[Any]],
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """Platforms should register entities with the correct subentry identifiers."""
+
+    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
 
     loop = asyncio.get_running_loop()
     hass = HomeAssistant()

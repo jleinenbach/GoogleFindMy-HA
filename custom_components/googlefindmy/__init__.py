@@ -1944,7 +1944,9 @@ class RuntimeData:
 type MyConfigEntry = ConfigEntry
 
 
-SUBENTRY_FORWARD_HELPER_LOG_KEY = "_subentry_forward_helper_logs"
+SUBENTRY_FORWARD_HELPER_LOG_KEY: Literal[
+    "_subentry_forward_helper_logs"
+] = "_subentry_forward_helper_logs"
 
 class GoogleFindMyDomainData(TypedDict, total=False):
     """Typed container describing objects stored under ``hass.data[DOMAIN]``."""
@@ -1961,6 +1963,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     services_registered: bool
     providers_registered: bool
     views_registered: bool
+    _subentry_forward_helper_logs: set[str]
 
 
 def _domain_data(hass: HomeAssistant) -> GoogleFindMyDomainData:
