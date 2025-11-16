@@ -465,8 +465,9 @@ Home Assistant now performs subentry platform forwarding automatically. Tests
 must enforce the following contract:
 
 * ``__init__.py`` must **not** call ``async_forward_entry_setups`` (plural or
-  singular) for subentries. If a helper such as ``_async_ensure_subentries_are_setup``
-  exists, it should stay inert and never trigger manual forwarding.
+  singular) for subentries. The former ``_async_ensure_subentries_are_setup``
+  helper has been removed; tests should assume subentry platform scheduling is
+  driven solely by Home Assistant core.
 * Parent setup tests should assert that subentries are created and that setup
   returns ``True`` without attempting platform fan-out.
 * Platform tests should assert that Home Assistant invokes ``async_setup_entry``

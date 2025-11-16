@@ -805,15 +805,9 @@ def test_hass_data_layout(
             }
             assert len(expected_subentries) == len(entry.subentries)
 
-            assert hass.config_entries.forward_calls
-            recorded_entry, platform_names = hass.config_entries.forward_calls[0]
-            assert recorded_entry is entry
-            expected_order: list[str] = []
-            for subentry in entry.subentries.values():
-                for feature in subentry.data["features"]:
-                    if feature not in expected_order:
-                        expected_order.append(feature)
-            assert platform_names == tuple(expected_order)
+            # Home Assistant core forwards subentry platforms automatically; the
+            # parent entry must not manually forward subentry platforms.
+            assert hass.config_entries.forward_calls == []
 
             domain_bucket = hass.data[DOMAIN]
             assert entry.entry_id not in domain_bucket
@@ -1135,13 +1129,9 @@ async def test_async_setup_entry_propagates_subentry_registration(
     }
     assert len(created_subentries) == len(entry.subentries)
 
-    assert forward_calls
-    expected_order: list[str] = []
-    for subentry in entry.subentries.values():
-        for feature in subentry.data["features"]:
-            if feature not in expected_order:
-                expected_order.append(feature)
-    assert forward_calls[0] == tuple(expected_order)
+    # Home Assistant core forwards subentry platforms automatically; the parent
+    # setup must never call async_forward_entry_setups for child entries.
+    assert forward_calls == []
 
     runtime_data = getattr(entry, "runtime_data", None)
     coordinator = getattr(runtime_data, "coordinator", None)
