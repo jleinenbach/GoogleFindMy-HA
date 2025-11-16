@@ -5327,6 +5327,24 @@ async def _async_setup_subentry(
     return True
 
 
+async def _async_ensure_subentries_are_setup(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Compatibility shim that must remain inert.
+
+    Legacy tests imported this helper when subentry platforms were forwarded
+    manually. Subentry platform scheduling is now driven entirely by Home
+    Assistant; this shim simply logs and exits to keep imports working without
+    reintroducing manual forwarding.
+    """
+
+    _LOGGER.debug(
+        "[%s] _async_ensure_subentries_are_setup shim is a no-op; core handles"
+        " subentry platform scheduling",
+        getattr(entry, "entry_id", "<unknown>"),
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """Set up a config entry.
 
