@@ -4,7 +4,7 @@ This handbook captures the Home Assistant 2025.7+ contract for configuration sub
 
 ## Quick summary
 
-- **Global identifier handling:** Use `subentry.entry_id` for lifecycle helpers and fall back to `subentry.subentry_id` only when a freshly created child has not yet populated `entry_id`. Both attributes refer to the same ULID.
+- **Global identifier handling:** Use `subentry.entry_id` for lifecycle helpers whenever Home Assistant exposes it, but Core 2025.11 often omits the attribute entirely. Always fall back to `subentry.subentry_id` (or the identifier returned by `_resolve_config_subentry_identifier`) so runtime code keeps a stable ULID across all builds.
 - **Deferred lifecycle setup:** When a parent creates subentries in the same transaction, schedule `_async_ensure_subentries_are_setup` (or equivalent helpers) via `entry.async_create_background_task(hass, ...)` so Home Assistant can finish registering the children before setup begins while preserving ConfigEntry lifecycle error handling. See the inline race-condition commentary in `custom_components/googlefindmy/__init__.py` near the `_async_ensure_subentries_are_setup` scheduling block for the canonical implementation details.
 - **Device/registry repairs:** Follow Section VIII.D for orphan detection and rebuild workflows; always include the child `entry_id` when updating tracker/service devices.
 - **Style note for quick references:** When adding concise checklists or reminders inside a subsection, anchor them at the `####` level (for example, `#### Race-condition checklist`) beneath the owning `###` heading so the handbook's numbering remains stable and navigation panes keep related guidance grouped together.
@@ -186,13 +186,13 @@ Config subentries expose **two** identifiers. Misusing them leads to reload fail
 | Identifier | Scope | When to use |
 | ---------- | ----- | ----------- |
 | `subentry.subentry_id` | Key inside `parent_entry.subentries` | Iterating or mutating the parent mapping (for example, to look up a specific child in memory). |
-| `subentry.entry_id` | Global config entry registry key | **Every lifecycle helper** (`async_setup`, `async_reload`, `async_unload`, `async_remove_subentry`, etc.). |
+| `subentry.entry_id` | Global config entry registry key (removed in many Core 2025.11+ builds) | **Every lifecycle helper** (`async_setup`, `async_reload`, `async_unload`, `async_remove_subentry`, etc.). Guard access with `getattr` and fall back to `subentry.subentry_id`. |
 
 **Critical rule:** Always pass the subentry's global ULID to Home Assistant's config entry helpers. In steady state this is exposed via `subentry.entry_id`; when a child has just been created in the same transaction and Home Assistant has not yet populated `entry_id`, fall back to `subentry.subentry_id`. Passing a blank identifier or mixing in logical keys (for example, `core_tracking`) will raise `UnknownEntry` internally and prevent reload-driven rebuild services from completing.
 
 > **Attribute expectations (The Setup Race Condition)**
 >
-> * Home Assistant 2025.7+ guarantees that `ConfigSubentry` objects expose `entry_id` and `subentry_id`, both referencing the same global ULID.
+> * Home Assistant 2025.7 through 2025.10 exposed both `entry_id` and `subentry_id`, but Core 2025.11 removed `entry_id` from the runtime object. Treat `subentry.subentry_id` as the canonical ULID and only use `entry_id` when it exists.
 > * **CAUTION (Race Condition):** When a parent programmatically creates a subentry and immediately triggers setup in the same transaction, Home Assistant may not have populated `.entry_id` yet. The resulting `AttributeError` (or `None`) indicates that `.subentry_id` is currently the only reliable attribute holding the ULID.
 > * **CAUTION (Timing Race Condition):** Even if the ULID is retrieved (from `.entry_id` or `.subentry_id`), calling `hass.config_entries.async_setup(ULID)` in the *same transaction* may fail with `UnknownEntry` because Home Assistant Core has not finished registering the new child entry.
 > * **Implementation rule:** Parent workflows that call lifecycle helpers right after creating children (such as `_async_ensure_subentries_are_setup`) MUST (1) try `getattr(subentry, "entry_id")` first and fall back to `getattr(subentry, "subentry_id")` when the primary attribute is missing, and (2) defer the setup call (for example, using `entry.async_create_background_task(hass, ...)`) so the event loop can finish the registration before the helper runs and ConfigEntryNotReady handling stays attached to the entry lifecycle.
