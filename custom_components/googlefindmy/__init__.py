@@ -5297,51 +5297,37 @@ async def _async_setup_subentry(
         return False
 
     forward_setups = getattr(hass.config_entries, "async_forward_entry_setups", None)
-    if callable(forward_setups):
-        try:
-            await forward_setups(entry, platforms)
-        except OperationNotAllowed as err:
-            _LOGGER.error(
-                "[%s] Aggregated subentry setup blocked for '%s': %s",
+    if not callable(forward_setups):
+        if not _has_logged_missing_subentry_forward_helper(hass, entry):
+            _LOGGER.info(
+                "[%s] Home Assistant %s does not expose 'async_forward_entry_setups'; "
+                "subentry '%s' cannot be forwarded.",
                 entry.entry_id,
+                getattr(hass, "version", "core"),
                 identifier,
-                err,
             )
-            return False
-        except Exception as err:  # noqa: BLE001 - propagate context
-            _LOGGER.exception(
-                "[%s] Aggregated subentry setup raised an unexpected error for '%s': %s",
-                entry.entry_id,
-                identifier,
-                err,
-            )
-            return False
-        return True
+            _mark_missing_subentry_forward_helper_logged(hass, entry)
+        return False
 
-    forward_setup = getattr(hass.config_entries, "async_forward_entry_setup", None)
-    if callable(forward_setup):
-        success = True
-        for platform in platforms:
-            platform_name = _platform_value(platform)
-            setup_result = _invoke_with_optional_keyword(
-                forward_setup,
-                (entry, platform_name),
-                "config_subentry_id",
-                identifier,
-            )
-            if inspect.isawaitable(setup_result):
-                setup_result = await setup_result
-            if isinstance(setup_result, bool):
-                success = success and setup_result
-        return success
-
-    _LOGGER.error(
-        "[%s] Home Assistant instance does not expose async_forward_entry_setups; "
-        "subentry '%s' cannot be forwarded.",
-        entry.entry_id,
-        identifier,
-    )
-    return False
+    try:
+        await forward_setups(entry, platforms)
+    except OperationNotAllowed as err:
+        _LOGGER.error(
+            "[%s] Aggregated subentry setup blocked for '%s': %s",
+            entry.entry_id,
+            identifier,
+            err,
+        )
+        return False
+    except Exception as err:  # noqa: BLE001 - propagate context
+        _LOGGER.exception(
+            "[%s] Aggregated subentry setup raised an unexpected error for '%s': %s",
+            entry.entry_id,
+            identifier,
+            err,
+        )
+        return False
+    return True
 
 
 async def _async_ensure_subentries_are_setup(

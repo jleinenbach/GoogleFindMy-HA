@@ -100,8 +100,10 @@ async def test_async_setup_subentry_forwards_platforms_via_plural_helper() -> No
 
 
 @pytest.mark.asyncio
-async def test_async_setup_subentry_handles_legacy_forward_signature() -> None:
-    """Fallback when Home Assistant lacks async_forward_entry_setups."""
+async def test_async_setup_subentry_logs_when_forward_helper_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Missing forward helpers should be logged and skip setup."""
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager())
     entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
@@ -112,20 +114,15 @@ async def test_async_setup_subentry_handles_legacy_forward_signature() -> None:
         subentry_type=SUBENTRY_TYPE_TRACKER,
     )
 
-    platform_calls: list[str] = []
-
-    def forward(entry_obj: FakeConfigEntry, platform: object) -> bool:
-        assert entry_obj is entry
-        platform_calls.append(_platform_value(platform))
-        return True
-
     hass.config_entries.async_forward_entry_setups = None  # type: ignore[attr-defined]
-    hass.config_entries.async_forward_entry_setup = forward  # type: ignore[attr-defined]
 
-    result = await _async_setup_subentry(hass, entry, subentry)
+    with caplog.at_level("INFO"):
+        result = await _async_setup_subentry(hass, entry, subentry)
 
-    assert result is True
-    assert platform_calls == list(TRACKER_FEATURE_PLATFORMS)
+    assert result is False
+    assert "does not expose 'async_forward_entry_setups'" in caplog.text
+    logged = hass.data[DOMAIN].get(SUBENTRY_FORWARD_HELPER_LOG_KEY)
+    assert isinstance(logged, set) and entry.entry_id in logged
 
 
 @pytest.mark.asyncio

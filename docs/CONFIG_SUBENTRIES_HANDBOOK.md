@@ -549,11 +549,11 @@ The core issue was a flawed implementation of platform forwarding for config sub
 
 ### The Solution
 
-Home Assistant 2025.11 removed `async_forward_entry_setup`, so the integration now keeps platform forwarding entirely within each platform module. `_async_ensure_subentries_are_setup` simply yields to the event loop (to allow Home Assistant to finish registering subentries) and logs that modern cores no longer expose the singular helper. Per-platform modules (button, tracker, sensor, etc.) read the sanitized `config_subentry_id` directly from coordinator metadata and pass it to `async_add_entities`/registry helpers.
+Home Assistant 2025.11 removed `async_forward_entry_setup`, so the integration now keeps platform forwarding entirely within each platform module. `_async_setup_subentry` and `_async_ensure_subentries_are_setup` now bail out early when the plural helper is missing, logging the absence once instead of probing the removed singular API. Per-platform modules (button, tracker, sensor, etc.) read the sanitized `config_subentry_id` directly from coordinator metadata and pass it to `async_add_entities`/registry helpers.
 
 Key guardrails:
 
-1. `_async_ensure_subentries_are_setup` logs the helper's absence exactly once per entry so diagnostics still capture the runtime behavior.
+1. `_async_setup_subentry` and `_async_ensure_subentries_are_setup` log the helper's absence exactly once per entry and skip forwarding attempts so diagnostics capture unsupported cores without reintroducing the removed singular helper.
 2. Platforms call `ensure_config_subentry_id(...)` before creating entities or device registry entries. When the identifier is missing (for example, during the short window before Home Assistant attaches IDs), entity creation is skipped and a debug message explains the deferral.
 3. Device registry helpers (`_ensure_service_device`, `_ensure_tracker_device`, etc.) propagate the sanitized identifier through `config_subentry_id` / `add_config_subentry_id` kwargs so devices never appear in the "Geräte, die nicht zu einem Untereintrag gehören" bucket.
 4. `_unload_config_subentry` continues to call the registry helpers with explicit add/remove `config_subentry_id` parameters so device cleanup still honors the subentry boundaries even though platforms now unload per parent entry.
