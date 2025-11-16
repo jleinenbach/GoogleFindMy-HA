@@ -462,25 +462,25 @@ integration's factories to bind existing subentries.
 ### Subentry platform forwarding expectations
 
 Home Assistant now exposes ``config_subentry_id`` when forwarding platform
-setups, so ``_async_ensure_subentries_are_setup`` must call
-``async_forward_entry_setups`` **once per subentry** instead of aggregating the
-platform list. Update every test (and new additions) to expect:
+setups, so ``_async_ensure_subentries_are_setup`` must call the singular
+``async_forward_entry_setup`` **once per platform per subentry** instead of
+aggregating platform lists. Update every test (and new additions) to expect:
 
 * The helper still yields control to the event loop **once** before forwarding so
   newly created subentries finish registration and do not raise
   ``UnknownEntry`` during setup.
-* Each managed/metadata subentry triggers its **own** forward call, and the
-  helper must pass the subentry identifier via the ``config_subentry_id``
-  keyword argument every time.
-* Tests should assert that every call includes the correct identifier → platform
-  pairing (for example, tracker subentries only forward tracker platforms).
-  Disabled children or those lacking identifiers remain filtered before any
-  forwarding occurs.
+* Each managed/metadata subentry triggers its **own** set of forward calls, one
+  for each platform, and the helper must pass the subentry identifier via the
+  ``config_subentry_id`` keyword argument every time.
+* Tests should aggregate the recorded calls per identifier and assert that each
+  subentry only forwards its expected platforms (for example, tracker
+  subentries only forward tracker platforms). Disabled children or those
+  lacking identifiers remain filtered before any forwarding occurs.
 
 When parent-unload rollbacks are exercised (for example,
 ``tests/test_unload_subentry_cleanup.py::test_async_unload_entry_rolls_back_when_parent_unload_fails``),
-the helper now expects exactly one retry **per subentry** as part of the
-cleanup scheduling. Guard the total call count so regressions neither skip
+the helper now expects retries **per platform** as part of the cleanup
+scheduling. Guard the recorded platform set so regressions neither skip
 forwarding nor double-schedule retries.
 
 ## AST extraction helper
