@@ -475,7 +475,8 @@ of issuing per-subentry forward calls. Update tests accordingly:
   the metadata plumbing continues to provide sanitized identifiers.
 * When a regression needs deterministic ``config_subentry_id`` fallbacks without
   repeating monkeypatch boilerplate, depend on the
-  ``deterministic_config_subentry_id`` fixture from ``tests.conftest``.  Adding
+  ``deterministic_config_subentry_id`` fixture from
+  [`tests/conftest.py`](tests/conftest.py#L230-L275). Adding
   the fixture to a test function signature automatically patches the integration
   platforms (button, sensor, binary_sensor, device_tracker, and entity helpers)
   so they synthesize ``"<entry_id>:<platform>"`` identifiers whenever Home
