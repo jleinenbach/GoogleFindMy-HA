@@ -47,7 +47,12 @@ from .const import (
 )
 from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator, format_epoch_utc
-from .entity import GoogleFindMyEntity, resolve_coordinator
+from .entity import (
+    GoogleFindMyEntity,
+    ensure_config_subentry_id,
+    resolve_coordinator,
+    schedule_add_entities,
+)
 from .ha_typing import BinarySensorEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,13 +102,24 @@ async def async_setup_entry(
     service_subentry_identifier = coordinator.stable_subentry_identifier(
         key=service_subentry_key
     )
-    service_config_subentry_id = config_subentry_id or service_meta_config_id
+    service_config_subentry_id = ensure_config_subentry_id(
+        entry,
+        "binary_sensor",
+        config_subentry_id or service_meta_config_id,
+    )
 
     _LOGGER.debug(
         "Binary sensor setup: subentry_key=%s, config_subentry_id=%s",
         service_subentry_key,
         service_config_subentry_id,
     )
+
+    if service_config_subentry_id is None:
+        _LOGGER.debug(
+            "Binary sensor setup: awaiting config_subentry_id for key '%s'; skipping",
+            service_subentry_key,
+        )
+        return
 
     if (
         config_subentry_id
@@ -121,23 +137,15 @@ async def async_setup_entry(
         new_entities: Iterable[BinarySensorEntity],
         update_before_add: bool = True,
     ) -> None:
-        entity_list = list(new_entities)
-        if not entity_list:
-            return
-        try:
-            async_add_entities(
-                entity_list,
-                update_before_add=update_before_add,
-                config_subentry_id=service_config_subentry_id,
-            )
-        except TypeError as err:
-            if "config_subentry_id" not in str(err):
-                raise
-            _LOGGER.debug(
-                "Binary sensor setup: AddEntitiesCallback rejected config_subentry_id; retrying without (error=%s)",
-                err,
-            )
-            async_add_entities(entity_list, update_before_add=update_before_add)
+        schedule_add_entities(
+            coordinator.hass,
+            async_add_entities,
+            entities=new_entities,
+            update_before_add=update_before_add,
+            config_subentry_id=service_config_subentry_id,
+            log_owner="Binary sensor setup",
+            logger=_LOGGER,
+        )
 
     entities: list[BinarySensorEntity] = [
         GoogleFindMyPollingSensor(

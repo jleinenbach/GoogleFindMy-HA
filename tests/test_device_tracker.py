@@ -9,7 +9,7 @@ import asyncio
 import importlib
 from collections.abc import Coroutine
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -90,8 +90,11 @@ def test_find_tracker_entity_entry_uses_fallback(monkeypatch: pytest.MonkeyPatch
 
 def test_scanner_instantiates_tracker_for_known_registry_entry(
     monkeypatch: pytest.MonkeyPatch,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """The device tracker platform should hydrate a tracker even if the registry already has it."""
+
+    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
 
     device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
 
@@ -182,8 +185,12 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
         assert task.done()
 
 
-def test_initial_snapshot_hydrates_registry_tracker() -> None:
+def test_initial_snapshot_hydrates_registry_tracker(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
     """Startup population should still create a tracker entity when the registry already knows it."""
+
+    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
 
     device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
 

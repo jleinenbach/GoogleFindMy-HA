@@ -26,9 +26,13 @@ from custom_components.googlefindmy.discovery import (
 
 
 def test_scanner_triggers_cloud_discovery(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """The tracker scanner should invoke cloud discovery for new trackers."""
+
+    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
 
     device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
     triggered_calls: list[Mapping[str, Any]] = []

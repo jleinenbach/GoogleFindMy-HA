@@ -39,7 +39,13 @@ from .const import (
 )
 from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
-from .entity import GoogleFindMyDeviceEntity, GoogleFindMyEntity, resolve_coordinator
+from .entity import (
+    GoogleFindMyDeviceEntity,
+    GoogleFindMyEntity,
+    ensure_config_subentry_id,
+    resolve_coordinator,
+    schedule_add_entities,
+)
 from .ha_typing import RestoreSensor, SensorEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
@@ -192,6 +198,31 @@ async def async_setup_entry(
     if not tracker_config_subentry_id and matches_tracker:
         tracker_config_subentry_id = config_subentry_id
 
+    service_config_subentry_id = ensure_config_subentry_id(
+        entry,
+        "sensor_service",
+        service_config_subentry_id,
+    )
+    tracker_config_subentry_id = ensure_config_subentry_id(
+        entry,
+        "sensor_tracker",
+        tracker_config_subentry_id,
+    )
+
+    if service_config_subentry_id is None:
+        should_init_service = False
+    if tracker_config_subentry_id is None:
+        should_init_tracker = False
+
+    if not should_init_service:
+        _LOGGER.debug(
+            "Sensor setup: service metrics paused because config_subentry_id is unavailable",
+        )
+    if not should_init_tracker:
+        _LOGGER.debug(
+            "Sensor setup: tracker metrics paused because config_subentry_id is unavailable",
+        )
+
     service_entities: list[SensorEntity] = []
     tracker_entities: list[SensorEntity] = []
     known_ids: set[str] = set()
@@ -200,45 +231,29 @@ async def async_setup_entry(
         new_entities: Iterable[SensorEntity],
         update_before_add: bool = True,
     ) -> None:
-        entity_list = list(new_entities)
-        if not entity_list:
-            return
-        try:
-            async_add_entities(
-                entity_list,
-                update_before_add=update_before_add,
-                config_subentry_id=service_config_subentry_id,
-            )
-        except TypeError as err:
-            if "config_subentry_id" not in str(err):
-                raise
-            _LOGGER.debug(
-                "Sensor setup: AddEntitiesCallback rejected service config_subentry_id; retrying without (error=%s)",
-                err,
-            )
-            async_add_entities(entity_list, update_before_add=update_before_add)
+        schedule_add_entities(
+            coordinator.hass,
+            async_add_entities,
+            entities=new_entities,
+            update_before_add=update_before_add,
+            config_subentry_id=service_config_subentry_id,
+            log_owner="Sensor setup (service)",
+            logger=_LOGGER,
+        )
 
     def _schedule_tracker_entities(
         new_entities: Iterable[SensorEntity],
         update_before_add: bool = True,
     ) -> None:
-        entity_list = list(new_entities)
-        if not entity_list:
-            return
-        try:
-            async_add_entities(
-                entity_list,
-                update_before_add=update_before_add,
-                config_subentry_id=tracker_config_subentry_id,
-            )
-        except TypeError as err:
-            if "config_subentry_id" not in str(err):
-                raise
-            _LOGGER.debug(
-                "Sensor setup: AddEntitiesCallback rejected tracker config_subentry_id; retrying without (error=%s)",
-                err,
-            )
-            async_add_entities(entity_list, update_before_add=update_before_add)
+        schedule_add_entities(
+            coordinator.hass,
+            async_add_entities,
+            entities=new_entities,
+            update_before_add=update_before_add,
+            config_subentry_id=tracker_config_subentry_id,
+            log_owner="Sensor setup (tracker)",
+            logger=_LOGGER,
+        )
 
     def _schedule_recovered_entities(
         new_entities: Iterable[SensorEntity],

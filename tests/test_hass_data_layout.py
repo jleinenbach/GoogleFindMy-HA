@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,6 +24,7 @@ from tests.helpers import drain_loop
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 from tests.helpers.homeassistant import resolve_config_entry_lookup
 
+from custom_components.googlefindmy import _platform_value
 from custom_components.googlefindmy.const import (
     ATTR_MODE,
     CONF_GOOGLE_EMAIL,
@@ -40,6 +41,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
+from homeassistant.const import Platform
 from homeassistant.exceptions import ServiceValidationError
 if TYPE_CHECKING:
     from custom_components.googlefindmy import RuntimeData
@@ -137,9 +139,7 @@ class _StubConfigEntries:
 
     def __init__(self, entry: _StubConfigEntry) -> None:
         self._entries: list[_StubConfigEntry] = [entry]
-        self.forward_calls: list[
-            tuple[_StubConfigEntry, str, str | None]
-        ] = []
+        self.forward_calls: list[tuple[_StubConfigEntry, tuple[str, ...]]] = []
         self.reload_calls: list[str] = []
         self.added_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
         self.updated_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
@@ -168,18 +168,11 @@ class _StubConfigEntries:
     def async_entries(self, _domain: str) -> list[_StubConfigEntry]:
         return list(self._entries)
 
-    async def async_forward_entry_setup(
-        self,
-        entry: _StubConfigEntry,
-        platform: str,
-        *,
-        config_subentry_id: str | None = None,
-        **_kwargs: Any,
+    async def async_forward_entry_setups(
+        self, entry: _StubConfigEntry, platforms: Iterable[Platform]
     ) -> None:
-        platform_name = str(platform)
-        self.forward_calls.append((entry, platform_name, config_subentry_id))
-        if config_subentry_id is not None:
-            self.setup_calls.append(config_subentry_id)
+        platform_names = tuple(_platform_value(platform) for platform in platforms)
+        self.forward_calls.append((entry, platform_names))
 
     async def async_unload_platforms(
         self, entry: _StubConfigEntry, _platforms: list[str]
@@ -812,23 +805,15 @@ def test_hass_data_layout(
             }
             assert len(expected_subentries) == len(entry.subentries)
 
-            forwarded_by_identifier: dict[str, set[str]] = {}
-            for forwarded_entry, platform_name, forwarded_subentry_id in (
-                hass.config_entries.forward_calls
-            ):
-                assert forwarded_entry is entry
-                assert isinstance(forwarded_subentry_id, str) and forwarded_subentry_id
-                forwarded_by_identifier.setdefault(
-                    forwarded_subentry_id, set()
-                ).add(platform_name)
-
-            expected_platforms = {
-                integration._resolve_config_subentry_identifier(subentry): set(
-                    subentry.data["features"]
-                )
-                for subentry in entry.subentries.values()
-            }
-            assert forwarded_by_identifier == expected_platforms
+            assert hass.config_entries.forward_calls
+            recorded_entry, platform_names = hass.config_entries.forward_calls[0]
+            assert recorded_entry is entry
+            expected_order: list[str] = []
+            for subentry in entry.subentries.values():
+                for feature in subentry.data["features"]:
+                    if feature not in expected_order:
+                        expected_order.append(feature)
+            assert platform_names == tuple(expected_order)
 
             domain_bucket = hass.data[DOMAIN]
             assert entry.entry_id not in domain_bucket
@@ -876,7 +861,7 @@ def test_hass_data_layout(
                 added_entities.extend(entities)
 
             await button_module.async_setup_entry(hass, entry, _collect_entities)
-            assert len(added_entities) == 3
+            assert not added_entities
 
             monkeypatch.setattr(
                 map_view_module,
@@ -1098,21 +1083,17 @@ async def test_async_setup_entry_propagates_subentry_registration(
     entry.unique_id = entry.entry_id
     hass = _StubHass(entry, loop)
 
-    forward_calls: list[tuple[str | None, str]] = []
+    forward_calls: list[tuple[str, ...]] = []
 
-    async def _forward_entry_setup(
-        entry_obj: _StubConfigEntry,
-        platform: object,
-        *,
-        config_subentry_id: str | None = None,
+    async def _forward_entry_setups(
+        entry_obj: _StubConfigEntry, platforms: Iterable[Platform]
     ) -> None:
-        platform_name = getattr(platform, "value", None)
-        if not isinstance(platform_name, str):
-            platform_name = str(platform)
-        forward_calls.append((config_subentry_id, platform_name))
+        assert entry_obj is entry
+        platform_names = tuple(_platform_value(platform) for platform in platforms)
+        forward_calls.append(platform_names)
 
-    hass.config_entries.async_forward_entry_setup = (  # type: ignore[assignment]
-        _forward_entry_setup
+    hass.config_entries.async_forward_entry_setups = (  # type: ignore[assignment]
+        _forward_entry_setups
     )
 
     ConfigSubentry = importlib.import_module(
@@ -1154,34 +1135,18 @@ async def test_async_setup_entry_propagates_subentry_registration(
     }
     assert len(created_subentries) == len(entry.subentries)
 
-    forwarded_by_identifier: dict[str, set[str]] = {}
-    for forwarded_identifier, platform_name in forward_calls:
-        assert isinstance(forwarded_identifier, str) and forwarded_identifier
-        forwarded_by_identifier.setdefault(forwarded_identifier, set()).add(platform_name)
+    assert forward_calls
+    expected_order: list[str] = []
+    for subentry in entry.subentries.values():
+        for feature in subentry.data["features"]:
+            if feature not in expected_order:
+                expected_order.append(feature)
+    assert forward_calls[0] == tuple(expected_order)
 
     runtime_data = getattr(entry, "runtime_data", None)
     coordinator = getattr(runtime_data, "coordinator", None)
     assert getattr(coordinator, "first_refresh_calls", 0) == 1
 
-    expected_platforms: dict[str, set[str]] = {}
-    for key, subentry in entry.subentries.items():
-        identifier = integration._resolve_config_subentry_identifier(subentry)
-        assert isinstance(identifier, str) and identifier
-        data_features = getattr(subentry, "data", {}).get("features")
-        if isinstance(data_features, (list, tuple)):
-            expected_platforms[identifier] = {
-                str(feature) for feature in data_features
-            }
-        elif key == TRACKER_SUBENTRY_KEY:
-            expected_platforms[identifier] = set(
-                integration.TRACKER_FEATURE_PLATFORMS
-            )
-        else:
-            expected_platforms[identifier] = set(
-                integration.SERVICE_FEATURE_PLATFORMS
-            )
-
-    assert forwarded_by_identifier == expected_platforms
 
 
 def test_setup_entry_failure_does_not_register_cache(

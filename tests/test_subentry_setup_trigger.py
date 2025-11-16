@@ -11,6 +11,8 @@ from custom_components.googlefindmy import (
     RuntimeData,
     _async_ensure_subentries_are_setup,
     _async_setup_subentry,
+    _platform_value,
+    SUBENTRY_FORWARD_HELPER_LOG_KEY,
 )
 from custom_components.googlefindmy.const import (
     DOMAIN,
@@ -28,16 +30,7 @@ from tests.helpers.homeassistant import FakeConfigEntriesManager, FakeConfigEntr
 def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:
     """Return normalized platform names for assertions."""
 
-    names: list[str] = []
-    for platform in platforms:
-        if isinstance(platform, str):
-            names.append(platform)
-        else:
-            value = getattr(platform, "value", None)
-            if isinstance(value, str):
-                names.append(value)
-            else:
-                names.append(str(platform))
+    names = [_platform_value(platform) for platform in platforms]
     return tuple(names)
 
 
@@ -81,8 +74,8 @@ async def test_async_setup_subentry_inherits_parent_runtime_data() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_setup_subentry_forwards_config_subentry_id() -> None:
-    """Dataclass subentries should trigger platform forwarding with identifiers."""
+async def test_async_setup_subentry_forwards_platforms_via_plural_helper() -> None:
+    """Dataclass subentries should forward their required platforms once."""
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager())
     entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
@@ -93,27 +86,22 @@ async def test_async_setup_subentry_forwards_config_subentry_id() -> None:
         subentry_type=SUBENTRY_TYPE_SERVICE,
     )
 
-    calls: list[tuple[FakeConfigEntry, tuple[object, ...], str]] = []
+    calls: list[tuple[FakeConfigEntry, tuple[object, ...]]] = []
 
-    async def forward(entry_obj: FakeConfigEntry, platforms: list[Platform], *, config_subentry_id: str | None = None) -> None:
-        assert config_subentry_id is not None
-        calls.append((entry_obj, tuple(platforms), config_subentry_id))
+    async def forward(entry_obj: FakeConfigEntry, platforms: list[Platform]) -> None:
+        calls.append((entry_obj, tuple(platforms)))
 
     hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
 
     result = await _async_setup_subentry(hass, entry, subentry)
 
     assert result is True
-    assert calls
-    recorded_entry, recorded_platforms, recorded_identifier = calls[0]
-    assert recorded_entry is entry
-    assert recorded_identifier == "service-subentry"
-    assert _platform_names(recorded_platforms) == SERVICE_FEATURE_PLATFORMS
+    assert calls == [(entry, tuple(SERVICE_FEATURE_PLATFORMS))]
 
 
 @pytest.mark.asyncio
 async def test_async_setup_subentry_handles_legacy_forward_signature() -> None:
-    """Fallback when Home Assistant lacks config_subentry_id support."""
+    """Fallback when Home Assistant lacks async_forward_entry_setups."""
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager())
     entry = FakeConfigEntry(entry_id="parent", domain=DOMAIN)
@@ -124,18 +112,20 @@ async def test_async_setup_subentry_handles_legacy_forward_signature() -> None:
         subentry_type=SUBENTRY_TYPE_TRACKER,
     )
 
-    calls: list[tuple[FakeConfigEntry, tuple[object, ...]]] = []
+    platform_calls: list[str] = []
 
-    def forward(entry_obj: FakeConfigEntry, platforms: list[Platform]) -> bool:
-        calls.append((entry_obj, tuple(platforms)))
+    def forward(entry_obj: FakeConfigEntry, platform: object) -> bool:
+        assert entry_obj is entry
+        platform_calls.append(_platform_value(platform))
         return True
 
-    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
+    hass.config_entries.async_forward_entry_setups = None  # type: ignore[attr-defined]
+    hass.config_entries.async_forward_entry_setup = forward  # type: ignore[attr-defined]
 
     result = await _async_setup_subentry(hass, entry, subentry)
 
     assert result is True
-    assert calls == [(entry, tuple(TRACKER_FEATURE_PLATFORMS))]
+    assert platform_calls == list(TRACKER_FEATURE_PLATFORMS)
 
 
 @pytest.mark.asyncio
@@ -170,32 +160,23 @@ async def test_async_ensure_subentries_are_setup_collects_all_sources() -> None:
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
 
-    calls: list[tuple[str | None, str]] = []
+    calls: list[tuple[FakeConfigEntry, tuple[Platform, ...]]] = []
 
-    async def forward(
-        entry_obj: FakeConfigEntry,
-        platform: Platform,
-        *,
-        config_subentry_id: str | None = None,
-    ) -> None:
-        if isinstance(platform, Platform):
-            platform_name = platform.value
-        else:
-            platform_name = str(platform)
-        calls.append((config_subentry_id, platform_name))
+    async def forward(entry_obj: FakeConfigEntry, platforms: list[Platform]) -> None:
+        calls.append((entry_obj, tuple(platforms)))
 
-    hass.config_entries.async_forward_entry_setup = forward  # type: ignore[attr-defined]
+    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
 
     await _async_ensure_subentries_are_setup(hass, entry)
 
     assert calls
-    forwarded: dict[str, set[str]] = {}
-    for identifier, platform_name in calls:
-        assert identifier is not None
-        forwarded.setdefault(identifier, set()).add(platform_name)
-
-    assert forwarded["tracker-subentry"] == set(TRACKER_FEATURE_PLATFORMS)
-    assert forwarded["service-subentry"] == set(SERVICE_FEATURE_PLATFORMS)
+    recorded_entry, recorded_platforms = calls[0]
+    assert recorded_entry is entry
+    expected_order: list[str] = []
+    for name in (*TRACKER_FEATURE_PLATFORMS, *SERVICE_FEATURE_PLATFORMS):
+        if name not in expected_order:
+            expected_order.append(name)
+    assert _platform_names(recorded_platforms) == tuple(expected_order)
 
 
 @pytest.mark.asyncio
@@ -225,12 +206,14 @@ async def test_async_ensure_subentries_are_setup_requires_forward_helper(
     entry.runtime_data = runtime_data
 
     hass = FakeHass(config_entries=FakeConfigEntriesManager([entry]))
-    hass.config_entries.async_forward_entry_setup = None  # type: ignore[attr-defined]
+    hass.config_entries.async_forward_entry_setups = None  # type: ignore[attr-defined]
 
-    with caplog.at_level("ERROR"):
+    with caplog.at_level("INFO"):
         await _async_ensure_subentries_are_setup(hass, entry)
 
-    assert "does not expose 'async_forward_entry_setup'" in caplog.text
+    assert "does not expose 'async_forward_entry_setups'" in caplog.text
+    logged = hass.data[DOMAIN].get(SUBENTRY_FORWARD_HELPER_LOG_KEY)
+    assert isinstance(logged, set) and entry.entry_id in logged
 
 
 @pytest.mark.asyncio
@@ -260,12 +243,9 @@ async def test_async_ensure_subentries_are_setup_logs_config_entry_not_ready(cap
     async def forward(*_: object, **__kwargs: object) -> None:
         raise ConfigEntryNotReady("test")
 
-    hass.config_entries.async_forward_entry_setup = forward  # type: ignore[attr-defined]
+    hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("ERROR"):
         await _async_ensure_subentries_are_setup(hass, entry)
 
-    assert (
-        "Setup for subentry 'tracker-subentry' raised an unexpected error: test"
-        in caplog.text
-    )
+    assert "Aggregated subentry setup raised an unexpected error: test" in caplog.text

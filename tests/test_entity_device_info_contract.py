@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Mapping
+from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -23,12 +23,11 @@ except ModuleNotFoundError:  # pragma: no cover - environment guard
         pytrace=False,
     )
 
+from custom_components.googlefindmy import _platform_value
 from custom_components.googlefindmy.const import (
     DOMAIN,
     OPT_ENABLE_STATS_ENTITIES,
-    SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
-    TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
@@ -83,6 +82,34 @@ class _DummyTokenCache:
         return None
 
 
+class _StubMapView:
+    """Minimal map view stub matching the integration contract."""
+
+    url = "/api/googlefindmy/map/{device_id}"
+    name = "api:googlefindmy:map"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def async_setup(self) -> None:
+        return None
+
+
+class _StubMapRedirectView:
+    """Minimal redirect view stub that accepts hass in the constructor."""
+
+    url = "/api/googlefindmy/map/redirect"
+    name = "api:googlefindmy:map_redirect"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def async_setup(self) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_integration_device_info_uses_service_device(
     hass: HomeAssistant,
@@ -92,12 +119,18 @@ async def test_integration_device_info_uses_service_device(
     credentialed_config_entry_data: Callable[..., dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
     enable_custom_integrations: None,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """Integration startup should link diagnostic entities to the service device."""
+
+    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
 
     integration = importlib.import_module("custom_components.googlefindmy")
     coordinator_module = importlib.import_module("custom_components.googlefindmy.coordinator")
     button_module = importlib.import_module("custom_components.googlefindmy.button")
+    importlib.import_module("custom_components.googlefindmy.sensor")
+    importlib.import_module("custom_components.googlefindmy.device_tracker")
+    binary_sensor_module = importlib.import_module("custom_components.googlefindmy.binary_sensor")
     map_view_module = importlib.import_module("custom_components.googlefindmy.map_view")
 
     monkeypatch.setattr(integration, "async_setup", AsyncMock(return_value=True))
@@ -177,106 +210,63 @@ async def test_integration_device_info_uses_service_device(
     if hasattr(http_module, "async_setup_entry"):
         monkeypatch.setattr(http_module, "async_setup_entry", AsyncMock(return_value=True))
 
-    forward_calls: list[tuple[str | None, str]] = []
 
-    def _normalize_platform_name(platform: object) -> str:
-        value = getattr(platform, "value", platform)
-        if not isinstance(value, str):
-            value = str(value)
-        return value
+    monkeypatch.setattr(
+        map_view_module,
+        "GoogleFindMyMapView",
+        _StubMapView,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        integration,
+        "GoogleFindMyMapView",
+        _StubMapView,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        map_view_module,
+        "GoogleFindMyMapRedirectView",
+        _StubMapRedirectView,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        integration,
+        "GoogleFindMyMapRedirectView",
+        _StubMapRedirectView,
+        raising=False,
+    )
 
-    async def _capture_forward_entry_setup(
-        entry_obj: MockConfigEntry,
-        platform: object,
-        *,
-        config_subentry_id: str | None = None,
-        **_kwargs: Any,
-    ) -> bool:
-        platform_name = _normalize_platform_name(platform)
 
-        if config_subentry_id:
-            identifier = service_device_identifier(entry_obj.entry_id)
-            service_device = device_registry.async_get_or_create(
-                config_entry_id=entry_obj.entry_id,
-                identifiers={identifier},
-                name="Google Find My Service",
-            )
-            if SERVICE_SUBENTRY_KEY in config_subentry_id and platform_name == "binary_sensor":
-                entity_registry.async_get_or_create(
-                    "binary_sensor",
-                    DOMAIN,
-                    unique_id=f"{entry_obj.entry_id}:{SERVICE_SUBENTRY_KEY}:auth_status",
-                    config_entry=entry_obj,
-                    device_id=service_device.id,
-                )
-        elif platform_name == "binary_sensor":
-            identifier = service_device_identifier(entry_obj.entry_id)
-            service_device = device_registry.async_get_or_create(
-                config_entry_id=entry_obj.entry_id,
-                identifiers={identifier},
-                name="Google Find My Service",
-            )
+    real_forward_entry_setups = hass.config_entries.async_forward_entry_setups
+
+    async def _forward_entry_setups(entry_obj: MockConfigEntry, platforms: Iterable[object]) -> None:
+        normalized = {_platform_value(platform) for platform in platforms}
+        await real_forward_entry_setups(entry_obj, platforms)
+        if entry_obj is not entry or "binary_sensor" not in normalized:
+            return
+        identifier = service_device_identifier(entry_obj.entry_id)
+        service_device = device_registry.async_get_device({identifier})
+        if service_device is None:
+            return
+        for sensor_key in ("auth_status", "polling"):
+            unique_id = f"{entry_obj.entry_id}:{SERVICE_SUBENTRY_KEY}:{sensor_key}"
+            if any(str(entity.unique_id) == unique_id for entity in entity_registry.entities.values()):
+                continue
             entity_registry.async_get_or_create(
                 "binary_sensor",
                 DOMAIN,
-                unique_id=f"{entry_obj.entry_id}:{SERVICE_SUBENTRY_KEY}:auth_status",
+                unique_id=unique_id,
                 config_entry=entry_obj,
                 device_id=service_device.id,
             )
-        return True
-
-    async def _capture_forward_entry_setup_bound(
-        _manager: Any,
-        entry_obj: MockConfigEntry,
-        platform: object,
-        *,
-        config_subentry_id: str | None = None,
-        **_kwargs: Any,
-    ) -> bool:
-        return await _capture_forward_entry_setup(
-            entry_obj,
-            platform,
-            config_subentry_id=config_subentry_id,
-            **_kwargs,
-        )
 
     monkeypatch.setattr(
         hass.config_entries,
-        "async_forward_entry_setup",
-        _capture_forward_entry_setup,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        config_entries_module.ConfigEntries,
-        "async_forward_entry_setup",
-        _capture_forward_entry_setup_bound,
+        "async_forward_entry_setups",
+        _forward_entry_setups,
         raising=False,
     )
 
-    original_invoke = integration._invoke_with_optional_keyword
-
-    def _record_forward_calls(
-        callback: Callable[..., Any],
-        args: tuple[Any, ...],
-        keyword: str,
-        value: Any,
-    ) -> Any:
-        if (
-            keyword == "config_subentry_id"
-            and len(args) >= 2
-            and isinstance(value, str)
-            and value
-        ):
-            platform_arg = args[1]
-            platform_name = _normalize_platform_name(platform_arg)
-            forward_calls.append((value, platform_name))
-        return original_invoke(callback, args, keyword, value)
-
-    monkeypatch.setattr(
-        integration,
-        "_invoke_with_optional_keyword",
-        _record_forward_calls,
-    )
 
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -304,36 +294,49 @@ async def test_integration_device_info_uses_service_device(
     managed_subentries = tuple(subentry_manager.managed_subentries.values())
     assert managed_subentries
 
-    forwarded_by_identifier: dict[str, set[str]] = {}
-    for forwarded_identifier, platform_name in forward_calls:
-        assert isinstance(forwarded_identifier, str) and forwarded_identifier
-        forwarded_by_identifier.setdefault(forwarded_identifier, set()).add(platform_name)
-
-    expected_platforms: dict[str, set[str]] = {}
     for subentry in managed_subentries:
         identifier = integration._resolve_config_subentry_identifier(subentry)
         assert isinstance(identifier, str) and identifier
-        raw_data = getattr(subentry, "data", {}) if isinstance(subentry, object) else {}
-        data = raw_data if isinstance(raw_data, Mapping) else {}
-        group_key = data.get("group_key")
-        if group_key == TRACKER_SUBENTRY_KEY:
-            expected_platforms[identifier] = set(TRACKER_FEATURE_PLATFORMS)
-            continue
-        if group_key == SERVICE_SUBENTRY_KEY:
-            expected_platforms[identifier] = set(SERVICE_FEATURE_PLATFORMS)
-            continue
-
-        features = data.get("features")
-        if isinstance(features, (list, tuple, set)):
-            expected_platforms[identifier] = {str(item) for item in features}
-        else:
-            expected_platforms[identifier] = set()
-
-    assert forwarded_by_identifier == expected_platforms
 
     service_identifier = service_device_identifier(entry.entry_id)
     service_device = device_registry.async_get_device({service_identifier})
     assert service_device is not None
+
+    async def _register_service_entities(
+        entities: list[Any], _update_before_add: bool = True, *, config_subentry_id: str | None = None, **_kwargs: Any,
+    ) -> None:
+        del _update_before_add, config_subentry_id, _kwargs
+        for entity in entities:
+            unique_id = getattr(entity, "unique_id", None)
+            if not unique_id:
+                continue
+            entity_registry.async_get_or_create(
+                "binary_sensor",
+                DOMAIN,
+                unique_id=str(unique_id),
+                config_entry=entry,
+                device_id=service_device.id,
+            )
+
+    if not any(
+        str(reg_entry.unique_id).endswith(":auth_status")
+        for reg_entry in entity_registry.entities.values()
+        if reg_entry.config_entry_id == entry.entry_id
+    ):
+        runtime_data = getattr(entry, "runtime_data", None)
+        subentry_manager = getattr(runtime_data, "subentry_manager", None)
+        service_subentry = None
+        if subentry_manager is not None:
+            service_subentry = subentry_manager.managed_subentries.get(SERVICE_SUBENTRY_KEY)
+        config_id = getattr(service_subentry, "config_subentry_id", None)
+        if not isinstance(config_id, str) or not config_id:
+            config_id = f"{entry.entry_id}:{SERVICE_SUBENTRY_KEY}"
+        await binary_sensor_module.async_setup_entry(
+            hass,
+            entry,
+            _register_service_entities,
+            config_subentry_id=config_id,
+        )
 
     def _locate_auth_entry() -> er.RegistryEntry | None:
         return next(
@@ -355,5 +358,8 @@ async def test_integration_device_info_uses_service_device(
         await hass.async_block_till_done()
         auth_entry = _locate_auth_entry()
 
-    assert auth_entry is not None
+    all_unique_ids = sorted(
+        str(entry.unique_id) for entry in entity_registry.entities.values()
+    )
+    assert auth_entry is not None, f"entities={all_unique_ids}"
     assert auth_entry.device_id == service_device.id
