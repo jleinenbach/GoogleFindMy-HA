@@ -5,9 +5,35 @@ This handbook captures the Home Assistant 2025.7+ contract for configuration sub
 ## Quick summary
 
 - **Global identifier handling:** Use `subentry.entry_id` for lifecycle helpers whenever Home Assistant exposes it, but Core 2025.11 often omits the attribute entirely. Always fall back to `subentry.subentry_id` (or the identifier returned by `_resolve_config_subentry_identifier`) so runtime code keeps a stable ULID across all builds.
-- **Deferred lifecycle setup:** When a parent creates subentries in the same transaction, schedule `_async_ensure_subentries_are_setup` (or equivalent helpers) via `entry.async_create_background_task(hass, ...)` so Home Assistant can finish registering the children before setup begins while preserving ConfigEntry lifecycle error handling. See the inline race-condition commentary in `custom_components/googlefindmy/__init__.py` near the `_async_ensure_subentries_are_setup` scheduling block for the canonical implementation details.
+- **Parent setup responsibilities only:** The parent `async_setup_entry` should focus on coordinator/bootstrap wiring **and creating subentries**. After the children exist, return `True` and allow Home Assistant to perform the automatic platform forwarding per subentry. Manual calls to `async_forward_entry_setups` from the parent are both unnecessary and harmful because they omit `config_subentry_id`.
 - **Device/registry repairs:** Follow Section VIII.D for orphan detection and rebuild workflows; always include the child `entry_id` when updating tracker/service devices.
 - **Style note for quick references:** When adding concise checklists or reminders inside a subsection, anchor them at the `####` level (for example, `#### Race-condition checklist`) beneath the owning `###` heading so the handbook's numbering remains stable and navigation panes keep related guidance grouped together.
+
+### Quick SSoT probe: automatic platform scheduling
+
+Run this minimal probe against the installed Home Assistant package to see Core fan-out subentry platforms automatically and pass `config_subentry_id` into the platform's entity setup:
+
+```bash
+python - <<'PY'
+from importlib import import_module
+from itertools import islice
+from pathlib import Path
+
+mqtt_entity = import_module("homeassistant.components.mqtt.entity")
+lines = Path(mqtt_entity.__file__).read_text().splitlines()
+for line in islice(lines, 364, 408):
+    print(line)
+PY
+```
+
+Expected output (from `homeassistant/components/mqtt/entity.py`) shows the platform iterating `entry.subentries` and invoking `async_add_entities` with the subentry identifier, confirming that the per-subentry platform setup is scheduled by Home Assistant Core rather than by integration code:
+
+```python
+for config_subentry_id, subentry in entry.subentries.items():
+    subentry_data = cast(MqttSubentryData, subentry.data)
+    ...
+    async_add_entities(subentry_entities, config_subentry_id=config_subentry_id)
+```
 
 ## Section I: Architectural Mandate — Why Config Subentries Exist
 
@@ -250,7 +276,7 @@ The `hass.config_entries.async_get_subentries` helper referenced in older drafts
 1. Read `parent_entry_id = entry.parent_entry_id`.
 2. Retrieve the shared runtime data from `hass.data[DOMAIN]["entries"][parent_entry_id]`. If the key is missing, raise `ConfigEntryNotReady` to retry later so the parent can rebuild its shared container.
 3. Attach any subentry-specific runtime data (for example, `_async_setup_subentry` should assign `entry.runtime_data` from the parent's `entries` bucket before platforms load).
-4. Forward setup to the platforms with `await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)`.
+4. Return `True` and let Home Assistant automatically call each platform's `async_setup_entry` with the correct `config_subentry_id`. Subentry setup must not call `async_forward_entry_setups`.
 
 Avoid the obsolete lookup pattern `hass.data[DOMAIN][parent_entry_id]`. The direct dictionary path predates the shared `"entries"` bucket and will fail once multiple parents coexist under the integration namespace.
 
@@ -440,7 +466,7 @@ Use this list during reviews:
 - `async_setup_entry` routes parents versus children correctly.
 - Parents store shared runtime data in `hass.data[DOMAIN]["entries"][entry.entry_id]`.
 - Subentries raise `ConfigEntryNotReady` when `hass.data[DOMAIN]["entries"][parent_entry_id]` is unavailable.
-- Subentries forward platform setup with `async_forward_entry_setups`.
+- Subentry setup returns `True` and defers platform fan-out to Home Assistant so `config_subentry_id` stays intact.
 - Parent unload waits for child unload success before cleaning shared clients.
 - Platform entities pull runtime data from `entry.runtime_data` and bind devices to the subentry.
 
@@ -454,7 +480,7 @@ Use this list during reviews:
 ### C. Advanced pitfalls
 
 - Avoid synchronous I/O inside `async_setup_entry`; wrap blocking code with `hass.async_add_executor_job`.
-- Always use `async_forward_entry_setups` rather than `async_setup_platforms`.
+- Only call `async_forward_entry_setups` for the parent entry's own platforms. Subentries must not forward platforms manually; Home Assistant performs the fan-out and injects `config_subentry_id` automatically.
 - Register Home Assistant services in `async_setup` instead of `async_setup_entry` so automations remain valid when entries reload.
 - Use update listeners to reload children whenever parent options change, ensuring `hass.data[DOMAIN]["entries"]` is rebuilt before child setup resumes.
 
@@ -465,8 +491,9 @@ children fail to appear in the UI, refuse to unload, or leave orphaned registry 
 
 1. **Creation: verify parent linkage before platform setup.**
    - Ensure `_async_setup_subentry` loads its shared coordinator from `hass.data[DOMAIN]["entries"][entry.parent_entry_id]` and
-     assigns it to `entry.runtime_data` before calling `async_forward_entry_setups`. If the parent runtime data is unavailable,
-     raise `ConfigEntryNotReady`; Home Assistant will retry after the parent rebuilds the shared mapping.
+     assigns it to `entry.runtime_data` before returning `True`. Home Assistant will then perform the per-platform setup with a
+     valid `config_subentry_id`. If the parent runtime data is unavailable, raise `ConfigEntryNotReady`; Home Assistant will
+     retry after the parent rebuilds the shared mapping.
    - Confirm `entry.runtime_data` stores any per-subentry helpers that platforms need to bind the correct device identifiers.
     - Add regression tests that instantiate the flow, create the child entry, and assert the coordinator exposes
       `async_update_device_registry` or similar helpers. See `tests/test_coordinator_device_registry.py` for examples that validate
@@ -522,7 +549,7 @@ children fail to appear in the UI, refuse to unload, or leave orphaned registry 
 - Parent flow still collects broker details but now also exposes `{ "mqtt_device": MqttDeviceFlowFactory }`.
 - Subentry flow lets users configure MQTT devices manually through the UI.
 - Runtime discovery (for example, MQTT `homeassistant/.../config` topics) creates subentries programmatically when devices announce themselves.
-- Both manual and automatic paths converge on subentries that load through `_async_setup_subentry` and forward to the appropriate platforms.
+- Both manual and automatic paths converge on subentries that load through `_async_setup_subentry`, after which Home Assistant forwards them to the appropriate platforms automatically.
 
 ---
 
@@ -542,18 +569,15 @@ A regression was introduced that caused catastrophic loading failures (`ValueErr
 
 ### Root Cause Analysis
 
-The core issue was a flawed implementation of platform forwarding for config subentries in `__init__.py`.
-
-1. **Setup Failure:** The `_async_ensure_subentries_are_setup` function attempted to feature-detect the singular `async_forward_entry_setup` helper and fell back to the *plural* `async_forward_entry_setups` API whenever the attribute probe failed. When this fallback path executed (for example, on HA 2025.10.1), it repeated the original bug: the plural helper does not accept `config_subentry_id`, so `_invoke_with_optional_keyword` logged the rejection and re-ran the call without the ID. As a result, all platforms were registered on the **parent** entry, corrupting every child entry's registry state and eventually raising `ValueError: Config entry ... already been setup!` as soon as a second child reused the same platform.
-2. **Unload Failure:** The historical `_unload_config_subentry` helper mirrored the same mistake. It passed a tuple of platforms to the singular unload helper, causing Home Assistant to complain that subentries had never been loaded. This poisoned the entry lifecycle and left the parent stuck in `FAILED_UNLOAD` after the unload attempt.
+The integration manually re-forwarded subentry platforms from `__init__.py` via `_async_ensure_subentries_are_setup`, triggering a **second** setup pass that lacked the required `config_subentry_id` keyword. Home Assistant had already scheduled the correct per-subentry platform setups; the extra aggregated forwarding sent `config_subentry_id=None`, so the platforms bailed out and the parent accumulated orphaned registrations until `ValueError: Config entry ... already been setup!` surfaced.
 
 ### The Solution
 
-Home Assistant 2025.11 removed `async_forward_entry_setup`, so the integration now keeps platform forwarding entirely within each platform module. `_async_setup_subentry` and `_async_ensure_subentries_are_setup` now bail out early when the plural helper is missing, logging the absence once instead of probing the removed singular API. Per-platform modules (button, tracker, sensor, etc.) read the sanitized `config_subentry_id` directly from coordinator metadata and pass it to `async_add_entities`/registry helpers.
+Remove the manual forwarding entirely and let Home Assistant drive platform setup for each subentry. The parent `async_setup_entry` now limits itself to coordinator initialization plus subentry creation, then returns `True`. With `_async_ensure_subentries_are_setup` emptied/removed, Home Assistant passes the proper `config_subentry_id` into every platform's `async_setup_entry`, allowing entities and devices to register against their owning subentry without duplication.
 
 Key guardrails:
 
-1. `_async_setup_subentry` and `_async_ensure_subentries_are_setup` log the helper's absence exactly once per entry and skip forwarding attempts so diagnostics capture unsupported cores without reintroducing the removed singular helper.
+1. Parent setup should never call `async_forward_entry_setups` on behalf of subentries; any helper resembling `_async_ensure_subentries_are_setup` must remain inert.
 2. Platforms call `ensure_config_subentry_id(...)` before creating entities or device registry entries. When the identifier is missing (for example, during the short window before Home Assistant attaches IDs), entity creation is skipped and a debug message explains the deferral.
 3. Device registry helpers (`_ensure_service_device`, `_ensure_tracker_device`, etc.) propagate the sanitized identifier through `config_subentry_id` / `add_config_subentry_id` kwargs so devices never appear in the "Geräte, die nicht zu einem Untereintrag gehören" bucket.
 4. `_unload_config_subentry` continues to call the registry helpers with explicit add/remove `config_subentry_id` parameters so device cleanup still honors the subentry boundaries even though platforms now unload per parent entry.

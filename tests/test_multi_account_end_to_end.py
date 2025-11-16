@@ -474,11 +474,14 @@ def test_multi_account_end_to_end(
             assert await integration.async_setup(hass, {})
             assert await integration.async_setup_entry(hass, entry_one)
             assert await integration.async_setup_entry(hass, entry_two)
-            assert entry_one._background_tasks, "Subentry setup task was not scheduled"
-            assert entry_two._background_tasks, "Subentry setup task was not scheduled"
 
             if hass._tasks:
                 await asyncio.gather(*hass._tasks)
+
+            # Home Assistant core forwards subentry platforms automatically; the
+            # parent entry no longer schedules background forwarding tasks.
+            assert entry_one._background_tasks == []
+            assert entry_two._background_tasks == []
 
             locate_service = hass.services.registered[(DOMAIN, SERVICE_LOCATE_DEVICE)]
             play_service = hass.services.registered[(DOMAIN, SERVICE_PLAY_SOUND)]

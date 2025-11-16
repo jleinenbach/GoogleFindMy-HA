@@ -460,15 +460,9 @@ def test_async_unload_entry_rolls_back_when_parent_unload_fails(
     assert hass.config_entries.unload_platform_calls == [
         (entry, tuple(integration.PLATFORMS))
     ]
-    assert hass.config_entries.forward_setup_calls
-    recorded_entries = {call[0] for call in hass.config_entries.forward_setup_calls}
-    assert recorded_entries == {entry}
-    recorded_batches = [
-        _platform_names(platforms)
-        for _, platforms in hass.config_entries.forward_setup_calls
-    ]
-    flattened = {name for batch in recorded_batches for name in batch}
-    assert set(integration.TRACKER_FEATURE_PLATFORMS).issubset(flattened)
+    # Parent unload failures must not trigger manual subentry forwarding; Home
+    # Assistant will re-run subentry setup as needed.
+    assert hass.config_entries.forward_setup_calls == []
     # Runtime data is reattached to the bucket so the entry keeps running.
     assert hass.data[DOMAIN]["entries"][entry.entry_id] is runtime_data
     assert entry.runtime_data is runtime_data

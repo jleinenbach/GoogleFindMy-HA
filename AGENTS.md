@@ -838,6 +838,8 @@ If a patch fails validation with an error that implies a mismatch in API contrac
         .venv/bin/python -c "import inspect; from homeassistant.config_entries import ConfigEntries; print(inspect.signature(ConfigEntries.async_forward_entry_setups))"
         ```
 
+    * **SSoT reminder (Home Assistant 2025.11.2):** `ConfigEntries.async_forward_entry_setups` currently **does not** accept a `config_subentry_id` argument. Subentry platform setup must remain automated by core so that Home Assistant supplies the correct `config_subentry_id` when invoking each platform's `async_setup_entry`. A minimal probe that prints the MQTT platform's `entry.subentries` loop and its `async_add_entities(..., config_subentry_id=...)` call lives in [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](docs/CONFIG_SUBENTRIES_HANDBOOK.md#quick-ssot-probe-automatic-platform-scheduling) for quick validation against the installed Home Assistant package.
+
 4.  **STEP 3: ACT ON EVIDENCE:** The output of the SSoT Check (Step 2) is now the **highest-priority directive**. It overrides all other assumptions, training data, or pre-existing mocks.
     * **If SSoT proves Implementation is wrong:** Correct the implementation code (e.g., in `custom_components/googlefindmy/`).
     * **If SSoT proves Test Stubs are wrong:** Correct the mocks or stubs (e.g., in `tests/conftest.py` or the specific `tests/test_X.py` file) to match the SSoT. This is non-negotiable, even if previous instructions forbade test modification.
