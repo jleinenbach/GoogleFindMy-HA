@@ -461,18 +461,18 @@ integration's factories to bind existing subentries.
 
 ### Subentry platform forwarding expectations
 
-Home Assistant 2025.11 removed ``ConfigEntries.async_forward_entry_setup``. The
-integration now relies on platform-level ``config_subentry_id`` routing instead
-of issuing per-subentry forward calls. Update tests accordingly:
+Home Assistant now performs subentry platform forwarding automatically. Tests
+must enforce the following contract:
 
-* ``_async_ensure_subentries_are_setup`` still yields control to the loop **once**
-  so newly registered subentries finalize before platforms inspect metadata.
-* The helper must **not** attempt to call the removed helper; instead, it should
-  log the absence exactly once per entry and exit quietly. Tests should assert
-  the informational log is emitted when running against modern Home Assistant.
-* Platform tests should focus on verifying that entities/devices refuse to load
-  when ``config_subentry_id`` is missing (skipped creations, warnings) and that
-  the metadata plumbing continues to provide sanitized identifiers.
+* ``__init__.py`` must **not** call ``async_forward_entry_setups`` (plural or
+  singular) for subentries. If a helper such as ``_async_ensure_subentries_are_setup``
+  exists, it should stay inert and never trigger manual forwarding.
+* Parent setup tests should assert that subentries are created and that setup
+  returns ``True`` without attempting platform fan-out.
+* Platform tests should assert that Home Assistant invokes ``async_setup_entry``
+  with a populated ``config_subentry_id`` and that entities/devices refuse to
+  load when the identifier is missing (skipped creations, warnings) while
+  accepting valid IDs.
 * When a regression needs deterministic ``config_subentry_id`` fallbacks without
   repeating monkeypatch boilerplate, depend on the
   ``deterministic_config_subentry_id`` fixture from

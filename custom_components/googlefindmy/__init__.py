@@ -5254,7 +5254,11 @@ async def _async_setup_legacy_child_subentry(
     else:
         entry.runtime_data = coordinator
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    _LOGGER.debug(
+        "[%s] Legacy subentry setup complete, runtime data attached (Parent: %s)",
+        entry.entry_id,
+        parent_entry_id,
+    )
 
     return True
 
@@ -5264,200 +5268,63 @@ async def _async_setup_subentry(
     entry: MyConfigEntry,
     subentry: Any | None = None,
 ) -> bool:
-    """Forward setup for a config subentry to the integration platforms."""
+    """Attach parent runtime data during subentry setup.
+
+    NOTE: Home Assistant Core calls this function when setting up each config
+    subentry. It must not forward platforms itself. Manual platform forwarding
+    via ``ConfigEntries.async_forward_entry_setups`` cannot convey a
+    ``config_subentry_id`` (per the 2025.11.2 SSoT signature) and therefore
+    cannot be used for subentries. After this function returns ``True``, HA
+    drives platform setup for the subentry and injects the correct
+    ``config_subentry_id`` when invoking platform ``async_setup_entry``
+    handlers.
+    """
 
     if subentry is None:
         return await _async_setup_legacy_child_subentry(hass, entry)
 
-    identifier = _resolve_config_subentry_identifier(subentry)
-    if not isinstance(identifier, str) or not identifier:
-        _LOGGER.debug(
-            "[%s] Skipping setup for subentry lacking identifier: %s",
-            entry.entry_id,
-            subentry,
-        )
-        return False
-
-    disabled_by = getattr(subentry, "disabled_by", None)
-    if disabled_by is not None:
-        _LOGGER.debug(
-            "[%s] Skipping setup for disabled subentry '%s'",  # noqa: G004
-            entry.entry_id,
-            identifier,
-        )
-        return False
-
-    platforms = tuple(_determine_subentry_platforms(subentry))
-    if not platforms:
-        _LOGGER.debug(
-            "[%s] No platforms resolved for subentry '%s'",
-            entry.entry_id,
-            identifier,
-        )
-        return False
-
-    forward_setups = getattr(hass.config_entries, "async_forward_entry_setups", None)
-    if not callable(forward_setups):
-        if not _has_logged_missing_subentry_forward_helper(hass, entry):
-            _LOGGER.info(
-                "[%s] Home Assistant %s does not expose 'async_forward_entry_setups'; "
-                "subentry '%s' cannot be forwarded.",
-                entry.entry_id,
-                getattr(hass, "version", "core"),
-                identifier,
-            )
-            _mark_missing_subentry_forward_helper_logged(hass, entry)
-        return False
-
-    try:
-        await forward_setups(entry, platforms)
-    except OperationNotAllowed as err:
+    parent_entry_id = getattr(entry, "parent_entry_id", None)
+    if not parent_entry_id:
         _LOGGER.error(
-            "[%s] Aggregated subentry setup blocked for '%s': %s",
+            "[%s] Subentry setup failed: parent_entry_id is missing",
             entry.entry_id,
-            identifier,
-            err,
         )
         return False
-    except Exception as err:  # noqa: BLE001 - propagate context
-        _LOGGER.exception(
-            "[%s] Aggregated subentry setup raised an unexpected error for '%s': %s",
+
+    bucket = _domain_data(hass)
+    entries_bucket = _ensure_entries_bucket(bucket)
+
+    parent_runtime_data = entries_bucket.get(parent_entry_id)
+    if parent_runtime_data is None:
+        _LOGGER.warning(
+            "[%s] Parent runtime data bucket missing for %s; deferring setup",
             entry.entry_id,
-            identifier,
-            err,
+            parent_entry_id,
         )
-        return False
+        raise ConfigEntryNotReady(
+            f"Parent entry {parent_entry_id} not yet initialized"
+        )
+
+    coordinator = getattr(parent_runtime_data, "coordinator", None)
+    if coordinator is None:
+        _LOGGER.warning(
+            "[%s] Parent runtime data for %s is missing a ready coordinator; deferring setup",
+            entry.entry_id,
+            parent_entry_id,
+        )
+        raise ConfigEntryNotReady(
+            f"Parent entry {parent_entry_id} coordinator not ready"
+        )
+
+    entry.runtime_data = parent_runtime_data
+
+    _LOGGER.debug(
+        "[%s] Subentry setup complete, runtime data attached (Parent: %s)",
+        entry.entry_id,
+        parent_entry_id,
+    )
+
     return True
-
-
-async def _async_ensure_subentries_are_setup(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> None:
-    """Ensure programmatically created subentries are fully set up.
-
-    Home Assistant's config subentry handbook requires parent entries to trigger
-    setup for their child subentries after synchronizing them.
-
-    This helper iterates the managed subentries and forwards their setup to the
-    relevant platforms with the correct ``config_subentry_id`` so Home Assistant's
-    registries keep each child entry isolated.
-    """
-
-    # Yield once so Home Assistant finishes registering freshly created subentries
-    # before we request their setup; otherwise, ``async_setup`` can raise UnknownEntry.
-    await asyncio.sleep(0)
-
-    entry_state = getattr(entry, "state", None)
-    if isinstance(entry_state, ConfigEntryState):
-        state_name = entry_state.value
-    elif isinstance(entry_state, str):
-        state_name = entry_state
-    else:
-        state_name = "unknown"
-
-    _LOGGER.debug(
-        "[%s] ensure_subentries_setup invoked (state=%s)",
-        entry.entry_id,
-        state_name,
-    )
-
-    subentries = _collect_entry_subentries(entry)
-    if not subentries:
-        _LOGGER.debug("[%s] No subentries found to set up.", entry.entry_id)
-        return
-
-    forward_setups = getattr(hass.config_entries, "async_forward_entry_setups", None)
-    if not callable(forward_setups):
-        if not _has_logged_missing_subentry_forward_helper(hass, entry):
-            _LOGGER.info(
-                "[%s] Home Assistant %s does not expose 'async_forward_entry_setups'; "
-                "skipping aggregated subentry forwarding.",
-                entry.entry_id,
-                getattr(hass, "version", "core"),
-            )
-            _mark_missing_subentry_forward_helper_logged(hass, entry)
-        return
-
-    aggregated_platforms: list[Platform] = []
-    aggregated_names: list[str] = []
-    seen_platforms: set[str] = set()
-    per_subentry: dict[str, tuple[str, ...]] = {}
-
-    for subentry in subentries:
-        identifier = _resolve_config_subentry_identifier(subentry)
-        if not isinstance(identifier, str) or not identifier:
-            _LOGGER.debug(
-                "[%s] Skipping setup for subentry without identifier: %s",
-                entry.entry_id,
-                subentry,
-            )
-            continue
-
-        disabled_by = getattr(subentry, "disabled_by", None)
-        if disabled_by is not None:
-            _LOGGER.debug(
-                "[%s] Skipping setup for disabled subentry '%s' (%s)",
-                entry.entry_id,
-                identifier,
-                disabled_by,
-            )
-            continue
-
-        platforms = tuple(_determine_subentry_platforms(subentry))
-        if not platforms:
-            _LOGGER.debug(
-                "[%s] No platforms determined for subentry '%s'; skipping.",
-                entry.entry_id,
-                identifier,
-            )
-            continue
-
-        platform_names = _platform_names(platforms)
-        per_subentry[identifier] = platform_names
-        _LOGGER.debug(
-            "[%s] Subentry '%s' requires %s",
-            entry.entry_id,
-            identifier,
-            ", ".join(platform_names),
-        )
-
-        for platform in platforms:
-            platform_name = _platform_value(platform)
-            if platform_name in seen_platforms:
-                continue
-            seen_platforms.add(platform_name)
-            aggregated_platforms.append(platform)
-            aggregated_names.append(platform_name)
-
-    if not aggregated_platforms:
-        _LOGGER.debug("[%s] No eligible subentries to set up after filtering", entry.entry_id)
-        return
-
-    _LOGGER.debug(
-        "[%s] Aggregated subentry platforms (%d): %s",
-        entry.entry_id,
-        len(aggregated_platforms),
-        ", ".join(aggregated_names),
-    )
-
-    try:
-        await forward_setups(entry, tuple(aggregated_platforms))
-    except OperationNotAllowed as err:
-        _LOGGER.error(
-            "[%s] Aggregated subentry setup blocked while entry state=%s: %s",
-            entry.entry_id,
-            state_name,
-            err,
-        )
-    except asyncio.CancelledError:
-        _LOGGER.info("[%s] Subentry setup was cancelled.", entry.entry_id)
-        raise
-    except Exception as err:  # noqa: BLE001 - defensive logging
-        _LOGGER.exception(
-            "[%s] Aggregated subentry setup raised an unexpected error: %s",
-            entry.entry_id,
-            err,
-        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
@@ -5871,12 +5738,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # Owner-index scaffold (E2.5): coordinator will eventually claim canonical_ids
     _ensure_device_owner_index(domain_bucket)
 
-    # STEP 4: Load Platforms (AFTER the refresh has created the devices)
-    entry.async_create_background_task(
-        hass,
-        _async_ensure_subentries_are_setup(hass, entry),
-        name=f"{DOMAIN}.ensure_subentries_setup.{entry.entry_id}",
-    )
+    # STEP 4: Load Platforms
+    # Home Assistant Core will automatically set up subentry platforms after this
+    # coroutine returns. Manual forwarding (for example, via async_forward_entry_setups)
+    # must not be invoked here because the helper's 2025.11.2 SSoT signature does not
+    # accept config_subentry_id, which would strip subentry context.
 
     bucket = domain_bucket
 
@@ -6240,14 +6106,10 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         if not unload_parent_platforms:
             if runtime_data is not None:
                 entries_bucket[entry.entry_id] = runtime_data
-            try:
-                await _async_ensure_subentries_are_setup(hass, entry)
-            except Exception as err:  # noqa: BLE001 - defensive logging
-                _LOGGER.debug(
-                    "[%s] Failed to restore subentries after parent unload abort: %s",  # noqa: G004
-                    entry.entry_id,
-                    err,
-                )
+            _LOGGER.debug(
+                "[%s] Parent platform unload aborted; leaving subentries managed by HA",  # noqa: G004
+                entry.entry_id,
+            )
             return False
 
         async def _unload_config_subentry(subentry: Any) -> bool:
@@ -6336,12 +6198,10 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                     )
             if runtime_data is not None:
                 entries_bucket[entry.entry_id] = runtime_data
-            try:
-                await _async_ensure_subentries_are_setup(hass, entry)
-            except Exception as err:  # noqa: BLE001 - defensive logging
-                _LOGGER.debug(
-                    "Failed to restore subentries after unload failure: %s", err
-                )
+            _LOGGER.debug(
+                "[%s] Subentry unload failed; runtime data restored for HA retry",  # noqa: G004
+                entry.entry_id,
+            )
             return False
 
         if runtime_data is not None:
