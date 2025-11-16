@@ -5339,6 +5339,18 @@ async def _async_ensure_subentries_are_setup(
         )
         return
 
+    legacy_tracker: set[str] | None = None
+    if not callable(forward_setup) and callable(forward_setups):
+        if not _callable_accepts_keyword(forward_setups, "config_subentry_id"):
+            legacy_tracker = _legacy_forwarded_platforms(entry)
+            if not _legacy_notice_logged(entry):
+                _LOGGER.warning(
+                    "[%s] Legacy Home Assistant core detected; forwarding platforms once "
+                    "per parent entry until config_subentry_id support is available.",
+                    entry.entry_id,
+                )
+                _mark_legacy_notice_logged(entry)
+
     setup_tasks: list[Awaitable[Any]] = []
     forwarded_subentries: list[ConfigSubentry | dict[str, Any] | None] = []
 
@@ -5395,6 +5407,10 @@ async def _async_ensure_subentries_are_setup(
                 # Legacy helpers may return ``None``; mimic the gather() flow for consistency
                 setup_tasks.append(asyncio.sleep(0, result=setup_task))
                 forwarded_subentries.append(subentry)
+
+        if legacy_tracker is not None:
+            for platform in filtered_platforms:
+                legacy_tracker.add(_platform_value(platform))
 
     if not setup_tasks:
         _LOGGER.debug(
