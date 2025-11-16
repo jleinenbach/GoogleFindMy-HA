@@ -5594,152 +5594,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     )
     coordinator.config_entry = entry  # convenience for platforms
 
-    try:
-        await coordinator.async_config_entry_first_refresh()
-    except ConfigEntryAuthFailed:
-        raise
-    except Exception as err:  # noqa: BLE001 - wrap unexpected failures for HA retry
-        _LOGGER.error(
-            "[%s] Initial coordinator refresh failed: %s", entry.entry_id, err, exc_info=True
-        )
-        raise ConfigEntryNotReady(f"Initial refresh failed: {err}") from err
+    # --- BEGIN CORRECTED STARTUP ORDER ---
 
-    await _async_normalize_device_names(hass)
-
-    subentry_accessor = getattr(entry, "subentries", None)
-    hass_subentry_manager = getattr(hass.config_entries, "subentries", None)
-    if hass_subentry_manager is not None and not callable(
-        getattr(hass_subentry_manager, "async_add", None)
-    ):
-        hass_subentry_manager = None
-    if subentry_accessor is not None:
-        getter = getattr(subentry_accessor, "get_subentries", None)
-        if callable(getter):
-            try:
-                sub_entries = tuple(getter())
-            except Exception:  # noqa: BLE001 - defensive fallback
-                _LOGGER.debug(
-                    "[%s] Failed to enumerate subentries; assuming none exist.",
-                    entry.entry_id,
-                    exc_info=True,
-                )
-                sub_entries = ()
-        else:
-            values = getattr(subentry_accessor, "values", None)
-            if callable(values):
-                try:
-                    sub_entries = tuple(values())
-                except Exception:  # noqa: BLE001 - defensive fallback
-                    _LOGGER.debug(
-                        "[%s] subentries.values() raised; assuming no pre-existing subentries.",
-                        entry.entry_id,
-                        exc_info=True,
-                    )
-                    sub_entries = ()
-            elif isinstance(subentry_accessor, Mapping):
-                sub_entries = tuple(subentry_accessor.values())
-            else:
-                sub_entries = ()
-    else:
-        sub_entries = ()
-
-    has_service_sub = any(
-        getattr(subentry, "subentry_type", None) == SUBENTRY_TYPE_SERVICE
-        for subentry in sub_entries
-    )
-    has_tracker_sub = any(
-        getattr(subentry, "subentry_type", None) == SUBENTRY_TYPE_TRACKER
-        for subentry in sub_entries
-    )
-
-    if (
-        subentry_accessor is not None
-        and hass_subentry_manager is not None
-        and not has_service_sub
-    ):
-        _LOGGER.info(
-            "[%s] Service subentry missing, creating default...",
-            entry.entry_id,
-        )
-        try:
-            await hass_subentry_manager.async_add(
-                entry,
-                subentry_type=SUBENTRY_TYPE_SERVICE,
-                data={
-                    "group_key": SERVICE_SUBENTRY_KEY,
-                },
-                title="Service",
-                unique_id=f"{entry.unique_id}_service",
-            )
-        except AttributeError as err:
-            _LOGGER.error(
-                "Subentry manager API missing, cannot create default service subentry: %s",
-                err,
-            )
-        except Exception:  # noqa: BLE001 - defensive logging
-            _LOGGER.error(
-                "Failed to create default service subentry for %s",
-                entry.entry_id,
-                exc_info=True,
-            )
-
-    if (
-        subentry_accessor is not None
-        and hass_subentry_manager is not None
-        and not has_tracker_sub
-    ):
-        _LOGGER.info(
-            "[%s] Tracker subentry missing, creating default...",
-            entry.entry_id,
-        )
-        try:
-            await hass_subentry_manager.async_add(
-                entry,
-                subentry_type=SUBENTRY_TYPE_TRACKER,
-                data={
-                    "group_key": TRACKER_SUBENTRY_KEY,
-                },
-                title="Trackers",
-                unique_id=f"{entry.unique_id}_trackers",
-            )
-        except AttributeError as err:
-            _LOGGER.error(
-                "Subentry manager API missing, cannot create default tracker subentry: %s",
-                err,
-            )
-        except Exception:  # noqa: BLE001 - defensive logging
-            _LOGGER.error(
-                "Failed to create default tracker subentry for %s",
-                entry.entry_id,
-                exc_info=True,
-            )
-
-    # Performance metrics injection
-    try:
-        perf = getattr(coordinator, "performance_metrics", None)
-        if not isinstance(perf, dict):
-            perf = {}
-            setattr(coordinator, "performance_metrics", perf)
-        perf["setup_start_monotonic"] = pm_setup_start
-        perf["fcm_acquired_monotonic"] = pm_fcm_acquired
-    except Exception as err:
-        _LOGGER.debug("Failed to set performance metrics on coordinator: %s", err)
-
-    # Hand over the barrier without changing the coordinator's signature.
-    setattr(coordinator, "fcm_ready_event", fcm_ready_event)
-
-    # Register the coordinator with the shared FCM receiver
-    fcm.register_coordinator(coordinator)
-    entry.async_on_unload(lambda: fcm.unregister_coordinator(coordinator))
-
-    # Ensure FCM supervisor is running for background push updates (idempotent).
-    try:
-        await fcm._start_listening()  # noqa: SLF001
-    except AttributeError:
-        _LOGGER.debug(
-            "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
-        )
-
+    # STEP 1: Create Sub-Entry-Manager (as before)
     entry_state = getattr(entry, "state", None)
     reload_states: tuple[ConfigEntryState, ...] = (
         ConfigEntryState.SETUP_IN_PROGRESS,
@@ -5755,71 +5612,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
         is_reload = entry_state in reload_values
 
+    # Use the runtime-attached manager here
     runtime_subentry_manager = ConfigEntrySubEntryManager(hass, entry)
     coordinator.attach_subentry_manager(
         runtime_subentry_manager, is_reload=is_reload
     )
 
-    # Expose runtime object via the typed container (preferred access pattern)
-    entity_recovery_manager = EntityRecoveryManager(hass, entry, coordinator)
+    # STEP 2: Create and Synchronize Sub-Entries (RUNNING NOW)
+    # This is necessary so the coordinator knows the Sub-Entry-IDs in Step 3.
+    tracker_features = sorted(TRACKER_FEATURE_PLATFORMS)
+    service_features = sorted(SERVICE_FEATURE_PLATFORMS)
+    fcm_push_enabled = fcm is not None
 
-    runtime_data = RuntimeData(
-        coordinator=coordinator,
-        token_cache=cache,
-        subentry_manager=runtime_subentry_manager,
-        fcm_receiver=fcm,
-        entity_recovery_manager=entity_recovery_manager,
-    )
-    entry.runtime_data = runtime_data
-    entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
-    entries_bucket[entry.entry_id] = runtime_data
-
-    entity_registry = er.async_get(hass)
-    registry_entries_iterable: Iterable[Any] = _iter_config_entry_entities(
-        entity_registry, entry.entry_id
-    )
-
-    reactivated = 0
-    for entity_entry in registry_entries_iterable:
-        if (
-            entity_entry.domain == "button"
-            and entity_entry.platform == DOMAIN
-            and entity_entry.disabled_by == RegistryEntryDisabler.INTEGRATION
-        ):
-            entity_registry.async_update_entity(
-                entity_entry.entity_id, disabled_by=None
-            )
-            reactivated += 1
-
-    if reactivated:
-        _LOGGER.debug(
-            "Re-enabled %s button entities disabled by integration", reactivated
-        )
-
-    # Owner-index scaffold (E2.5): coordinator will eventually claim canonical_ids
-    _ensure_device_owner_index(domain_bucket)
-
-    # Optional: attach Google Home filter (options-first configuration)
     filter_cls = _resolve_google_home_filter_class()
+    google_home_filter_instance: GoogleHomeFilterProtocol | None = None
     if filter_cls is not None:
         try:
-            google_home_filter = cast(
+            google_home_filter_instance = cast(
                 GoogleHomeFilterProtocol, filter_cls(hass, _effective_config(entry))
             )
-            runtime_data.google_home_filter = google_home_filter
             _LOGGER.debug("Initialized Google Home filter (options-first)")
         except Exception as err:
             _LOGGER.debug("GoogleHomeFilter attach skipped due to: %s", err)
     else:
         _LOGGER.debug("GoogleHomeFilter not available; continuing without it")
 
-    tracker_features = sorted(TRACKER_FEATURE_PLATFORMS)
-    service_features = sorted(SERVICE_FEATURE_PLATFORMS)
-    fcm_push_enabled = runtime_data.fcm_receiver is not None
-    has_google_home_filter = runtime_data.google_home_filter is not None
-    entry_title = entry.title
-    # Use the runtime-attached manager here; the hass-level helper above only
-    # creates defaults when the API is available but does not drive runtime sync.
+    has_google_home_filter = google_home_filter_instance is not None
+    entry_title = entry.title or entry.data.get(CONF_GOOGLE_EMAIL, "Google Find My")
+
     await runtime_subentry_manager.async_sync(
         [
             ConfigEntrySubentryDefinition(
@@ -5851,21 +5671,94 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         ]
     )
 
-    # --- BEGIN RACE-CONDITION AND ERROR-HANDLING FIX ---
-    # Awaiting _async_ensure_subentries_are_setup immediately after creating the
-    # subentries can race with Home Assistant while it registers the new
-    # children, raising UnknownEntry/OperationNotAllowed. Schedule the helper in
-    # a config-entry-scoped background task instead so HA finalizes registration
-    # before the setup runs. entry.async_create_background_task keeps failure
-    # handling tied to the parent entry lifecycle while still deferring
-    # execution until registration completes. `_async_ensure_subentries_are_setup`
-    # yields once at the beginning to provide the final loop turn to HA.
+    # STEP 3: Run First Refresh (AFTER Sub-Entries exist)
+    # Now _ensure_registry_for_devices can find the correct Sub-Entry-IDs.
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except ConfigEntryAuthFailed:
+        raise
+    except Exception as err:  # noqa: BLE001 - wrap unexpected failures for HA retry
+        _LOGGER.error(
+            "[%s] Initial coordinator refresh failed: %s", entry.entry_id, err, exc_info=True
+        )
+        raise ConfigEntryNotReady(f"Initial refresh failed: {err}") from err
+
+    await _async_normalize_device_names(hass)
+
+    # --- END CORRECTED STARTUP ORDER ---
+
+    # Performance metrics injection
+    try:
+        perf = getattr(coordinator, "performance_metrics", None)
+        if not isinstance(perf, dict):
+            perf = {}
+            setattr(coordinator, "performance_metrics", perf)
+        perf["setup_start_monotonic"] = pm_setup_start
+        perf["fcm_acquired_monotonic"] = pm_fcm_acquired
+    except Exception as err:
+        _LOGGER.debug("Failed to set performance metrics on coordinator: %s", err)
+
+    # Hand over the barrier without changing the coordinator's signature.
+    setattr(coordinator, "fcm_ready_event", fcm_ready_event)
+
+    # Register the coordinator with the shared FCM receiver
+    fcm.register_coordinator(coordinator)
+    entry.async_on_unload(lambda: fcm.unregister_coordinator(coordinator))
+
+    # Ensure FCM supervisor is running for background push updates (idempotent).
+    try:
+        await fcm._start_listening()  # noqa: SLF001
+    except AttributeError:
+        _LOGGER.debug(
+            "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
+        )
+
+    # Expose runtime object via the typed container (preferred access pattern)
+    entity_recovery_manager = EntityRecoveryManager(hass, entry, coordinator)
+
+    runtime_data = RuntimeData(
+        coordinator=coordinator,
+        token_cache=cache,
+        subentry_manager=runtime_subentry_manager,
+        fcm_receiver=fcm,
+        entity_recovery_manager=entity_recovery_manager,
+        google_home_filter=google_home_filter_instance,
+    )
+    entry.runtime_data = runtime_data
+    entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
+    entries_bucket[entry.entry_id] = runtime_data
+
+    entity_registry = er.async_get(hass)
+    registry_entries_iterable: Iterable[Any] = _iter_config_entry_entities(
+        entity_registry, entry.entry_id
+    )
+
+    reactivated = 0
+    for entity_entry in registry_entries_iterable:
+        if (
+            entity_entry.domain == "button"
+            and entity_entry.platform == DOMAIN
+            and entity_entry.disabled_by == RegistryEntryDisabler.INTEGRATION
+        ):
+            entity_registry.async_update_entity(
+                entity_entry.entity_id, disabled_by=None
+            )
+            reactivated += 1
+
+    if reactivated:
+        _LOGGER.debug(
+            "Re-enabled %s button entities disabled by integration", reactivated
+        )
+
+    # Owner-index scaffold (E2.5): coordinator will eventually claim canonical_ids
+    _ensure_device_owner_index(domain_bucket)
+
+    # STEP 4: Load Platforms (AFTER the refresh has created the devices)
     entry.async_create_background_task(
         hass,
         _async_ensure_subentries_are_setup(hass, entry),
         name=f"{DOMAIN}.ensure_subentries_setup.{entry.entry_id}",
     )
-    # --- END RACE-CONDITION AND ERROR-HANDLING FIX ---
 
     bucket = domain_bucket
 
