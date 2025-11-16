@@ -42,6 +42,7 @@ from .entity import (
     GoogleFindMyDeviceEntity,
     ensure_config_subentry_id,
     resolve_coordinator,
+    schedule_add_entities,
 )
 from .ha_typing import ButtonEntity, callback
 from .util_services import register_entity_service
@@ -159,23 +160,15 @@ async def async_setup_entry(
         new_entities: Iterable[ButtonEntity],
         update_before_add: bool = True,
     ) -> None:
-        entity_list = list(new_entities)
-        if not entity_list:
-            return
-        try:
-            async_add_entities(
-                entity_list,
-                update_before_add=update_before_add,
-                config_subentry_id=tracker_config_subentry_id,
-            )
-        except TypeError as err:
-            if "config_subentry_id" not in str(err):
-                raise
-            _LOGGER.debug(
-                "Button setup: AddEntitiesCallback rejected config_subentry_id; retrying without (error=%s)",
-                err,
-            )
-            async_add_entities(entity_list, update_before_add=update_before_add)
+        schedule_add_entities(
+            coordinator.hass,
+            async_add_entities,
+            entities=new_entities,
+            update_before_add=update_before_add,
+            config_subentry_id=tracker_config_subentry_id,
+            log_owner="Button setup",
+            logger=_LOGGER,
+        )
 
     # Initial population from coordinator.data (if already available)
     for device in coordinator.get_subentry_snapshot(tracker_subentry_key):

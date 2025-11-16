@@ -46,6 +46,7 @@ from .entity import (
     GoogleFindMyDeviceEntity,
     ensure_config_subentry_id,
     resolve_coordinator,
+    schedule_add_entities,
     _entry_option,
 )
 from .ha_typing import RestoreEntity, TrackerEntity, callback
@@ -132,23 +133,15 @@ async def async_setup_entry(
         new_entities: Iterable[GoogleFindMyDeviceTracker],
         update_before_add: bool = True,
     ) -> None:
-        entity_list = list(new_entities)
-        if not entity_list:
-            return
-        try:
-            async_add_entities(
-                entity_list,
-                update_before_add=update_before_add,
-                config_subentry_id=tracker_config_subentry_id,
-            )
-        except TypeError as err:
-            if "config_subentry_id" not in str(err):
-                raise
-            _LOGGER.debug(
-                "Device tracker setup: AddEntitiesCallback rejected config_subentry_id; retrying without (error=%s)",
-                err,
-            )
-            async_add_entities(entity_list, update_before_add=update_before_add)
+        schedule_add_entities(
+            coordinator.hass,
+            async_add_entities,
+            entities=new_entities,
+            update_before_add=update_before_add,
+            config_subentry_id=tracker_config_subentry_id,
+            log_owner="Device tracker setup",
+            logger=_LOGGER,
+        )
 
     # Startup population from coordinator snapshot (if already present).
     # Pointer for maintainers: coordinator.py documents the "Subentry awareness"

@@ -44,6 +44,7 @@ from .entity import (
     GoogleFindMyEntity,
     ensure_config_subentry_id,
     resolve_coordinator,
+    schedule_add_entities,
 )
 from .ha_typing import RestoreSensor, SensorEntity, callback
 
@@ -230,45 +231,29 @@ async def async_setup_entry(
         new_entities: Iterable[SensorEntity],
         update_before_add: bool = True,
     ) -> None:
-        entity_list = list(new_entities)
-        if not entity_list:
-            return
-        try:
-            async_add_entities(
-                entity_list,
-                update_before_add=update_before_add,
-                config_subentry_id=service_config_subentry_id,
-            )
-        except TypeError as err:
-            if "config_subentry_id" not in str(err):
-                raise
-            _LOGGER.debug(
-                "Sensor setup: AddEntitiesCallback rejected service config_subentry_id; retrying without (error=%s)",
-                err,
-            )
-            async_add_entities(entity_list, update_before_add=update_before_add)
+        schedule_add_entities(
+            coordinator.hass,
+            async_add_entities,
+            entities=new_entities,
+            update_before_add=update_before_add,
+            config_subentry_id=service_config_subentry_id,
+            log_owner="Sensor setup (service)",
+            logger=_LOGGER,
+        )
 
     def _schedule_tracker_entities(
         new_entities: Iterable[SensorEntity],
         update_before_add: bool = True,
     ) -> None:
-        entity_list = list(new_entities)
-        if not entity_list:
-            return
-        try:
-            async_add_entities(
-                entity_list,
-                update_before_add=update_before_add,
-                config_subentry_id=tracker_config_subentry_id,
-            )
-        except TypeError as err:
-            if "config_subentry_id" not in str(err):
-                raise
-            _LOGGER.debug(
-                "Sensor setup: AddEntitiesCallback rejected tracker config_subentry_id; retrying without (error=%s)",
-                err,
-            )
-            async_add_entities(entity_list, update_before_add=update_before_add)
+        schedule_add_entities(
+            coordinator.hass,
+            async_add_entities,
+            entities=new_entities,
+            update_before_add=update_before_add,
+            config_subentry_id=tracker_config_subentry_id,
+            log_owner="Sensor setup (tracker)",
+            logger=_LOGGER,
+        )
 
     def _schedule_recovered_entities(
         new_entities: Iterable[SensorEntity],
