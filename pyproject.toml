@@ -52,7 +52,7 @@ extend-exclude = [
 ]
 
 [tool.pytest.ini_options]
-addopts = ["-q"]
+addopts = ["-q", "--cov-report=term"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
@@ -95,7 +95,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-show_missing = true
+show_missing = false
 skip_covered = true
 exclude_lines = [
     "if __name__ == \"__main__\":",

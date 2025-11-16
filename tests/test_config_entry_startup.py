@@ -4,7 +4,7 @@ import asyncio
 import functools
 import importlib
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -17,8 +17,11 @@ from tests.test_hass_data_layout import _prepare_async_setup_entry_harness
 async def test_device_trackers_populate_after_initial_refresh(
     monkeypatch: pytest.MonkeyPatch,
     stub_coordinator_factory,
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """Initial setup should create tracker entities once the first refresh succeeds."""
+
+    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
 
     loop = asyncio.get_running_loop()
 

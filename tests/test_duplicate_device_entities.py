@@ -6,8 +6,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 from types import SimpleNamespace
-from typing import Any
-from collections.abc import Callable, Iterable
+from typing import Any, Callable
+from collections.abc import Iterable
 
 from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
@@ -15,8 +15,12 @@ from custom_components.googlefindmy.const import (
 )
 
 
-def test_duplicate_devices_seed_only_once() -> None:
+def test_duplicate_devices_seed_only_once(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
     """Duplicate IDs in the coordinator snapshot create a single entity per platform."""
+
+    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
 
     device_tracker = importlib.import_module(
         "custom_components.googlefindmy.device_tracker"

@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 from tests.helpers import compile_class_method_from_module
 
@@ -204,8 +204,12 @@ def _load_can_request_location_impl() -> Any:
     )
 
 
-def test_blank_device_name_populates_buttons() -> None:
+def test_blank_device_name_populates_buttons(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
     """Buttons are added even when the device label is blank or missing."""
+
+    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
 
     _ensure_button_dependencies()
     button_module = importlib.import_module("custom_components.googlefindmy.button")

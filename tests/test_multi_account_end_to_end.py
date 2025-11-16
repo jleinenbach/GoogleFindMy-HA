@@ -9,10 +9,11 @@ import sys
 from dataclasses import dataclass, field
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 
 import pytest
 
+from custom_components.googlefindmy import _platform_value
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     DATA_SECRET_BUNDLE,
@@ -22,6 +23,7 @@ from custom_components.googlefindmy.const import (
 )
 from homeassistant.core import ServiceCall
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
+from homeassistant.const import Platform
 
 from tests.helpers import drain_loop
 from tests.helpers.homeassistant import resolve_config_entry_lookup
@@ -150,7 +152,7 @@ class _StubConfigEntries:
     """
     def __init__(self, entries: list[_StubConfigEntry]) -> None:
         self._entries: list[_StubConfigEntry] = entries
-        self.forward_calls: list[tuple[str, str, str | None]] = []
+        self.forward_calls: list[tuple[str, tuple[str, ...]]] = []
         self.added_subentries: list[tuple[str, ConfigSubentry]] = []
         self.updated_subentries: list[tuple[str, ConfigSubentry]] = []
         self.removed_subentries: list[tuple[str, str]] = []
@@ -172,16 +174,11 @@ class _StubConfigEntries:
             return []
         return list(entry.subentries.values())
 
-    async def async_forward_entry_setup(
-        self,
-        entry: _StubConfigEntry,
-        platform: str,
-        *,
-        config_subentry_id: str | None = None,
-        **_kwargs: Any,
+    async def async_forward_entry_setups(
+        self, entry: _StubConfigEntry, platforms: Iterable[Platform]
     ) -> None:
-        platform_name = str(platform)
-        self.forward_calls.append((entry.entry_id, platform_name, config_subentry_id))
+        platform_names = tuple(_platform_value(platform) for platform in platforms)
+        self.forward_calls.append((entry.entry_id, platform_names))
 
     async def async_unload_platforms(
         self, _entry: _StubConfigEntry, _platforms: list[str]

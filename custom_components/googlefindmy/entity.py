@@ -23,17 +23,32 @@ Highlights for contributors:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterable, Mapping, MutableMapping
+import inspect
 import logging
 import time
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
 from .ha_typing import CoordinatorEntity
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.entity import Entity
+else:  # pragma: no cover - fallback for environments with stubbed helpers
+    try:
+        from homeassistant.helpers.entity import Entity
+    except (ImportError, AttributeError):
+
+        class Entity:  # type: ignore[too-many-ancestors, override]
+            """Minimal stand-in for Home Assistant's Entity base class."""
+
+            __slots__ = ()
 
 from .const import (
     CONF_GOOGLE_EMAIL,
@@ -85,6 +100,68 @@ def _entry_option(entry: ConfigEntry | None, key: str, default: Any) -> Any:
     if isinstance(data, Mapping):
         return data.get(key, default)
     return default
+
+
+def ensure_config_subentry_id(
+    entry: ConfigEntry, platform: str, candidate: str | None
+) -> str | None:
+    """Return a sanitized config_subentry_id or log why it is unavailable."""
+
+    if isinstance(candidate, str):
+        normalized = candidate.strip()
+        if normalized:
+            return normalized
+
+    _LOGGER.warning(
+        "[%s] %s platform deferred because config_subentry_id is unavailable; "
+        "metadata may be stale or Home Assistant has not finished registering "
+        "subentries yet.",
+        getattr(entry, "entry_id", "<unknown>"),
+        platform,
+    )
+    return None
+
+
+def schedule_add_entities(
+    hass: HomeAssistant,
+    async_add_entities: AddEntitiesCallback,
+    *,
+    entities: Iterable[Entity],
+    update_before_add: bool = True,
+    config_subentry_id: str | None = None,
+    log_owner: str,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Call ``async_add_entities`` safely and await coroutine returns if needed."""
+
+    entity_list = list(entities)
+    if not entity_list:
+        return
+
+    kwargs: dict[str, Any] = {"update_before_add": update_before_add}
+    result: Any = None
+
+    if config_subentry_id is not None:
+        kwargs["config_subentry_id"] = config_subentry_id
+
+    try:
+        result = async_add_entities(entity_list, **kwargs)
+    except TypeError as err:
+        if config_subentry_id is None or "config_subentry_id" not in str(err):
+            raise
+        log = logger or _LOGGER
+        log.debug(
+            "%s: AddEntitiesCallback rejected config_subentry_id; retrying without (error=%s)",
+            log_owner,
+            err,
+        )
+        result = async_add_entities(
+            entity_list,
+            update_before_add=update_before_add,
+        )
+
+    if inspect.isawaitable(result):
+        hass.async_create_task(result)
 
 
 class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
