@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, is_dataclass
 from types import MappingProxyType, SimpleNamespace
@@ -13,7 +12,6 @@ import pytest
 from custom_components.googlefindmy import (
     ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
-    _async_ensure_subentries_are_setup,
     _resolve_config_subentry_identifier,
 )
 from custom_components.googlefindmy.const import DOMAIN
@@ -22,7 +20,6 @@ from tests.helpers.homeassistant import (
     FakeConfigEntriesManager,
     FakeConfigEntry,
     FakeHass,
-    deferred_subentry_entry_id_assignment,
 )
 
 
@@ -47,65 +44,28 @@ async def _build_runtime_manager(
 
 
 @pytest.mark.asyncio
-async def test_async_ensure_subentries_setup_handles_placeholder_objects() -> None:
-    """Retry with the resolved ULID when runtime data still holds a provisional child."""
+async def test_managed_key_lookup_populates_subentry_id_cache() -> None:
+    """Managed subentries should backfill the subentry-id cache when resolved later."""
 
-    child_entry_id = "child-resolved-ulid"
     parent_entry = FakeConfigEntry(entry_id="parent-entry", domain=DOMAIN)
-    resolved_child = SimpleNamespace(
-        entry_id=child_entry_id,
-        subentry_id="child-subentry-id",
-        unique_id="unique-child",
+    hass = FakeHass(config_entries=FakeConfigEntriesManager())
+    runtime_manager = ConfigEntrySubEntryManager(hass, parent_entry)
+
+    subentry_id = "child-subentry-id"
+    runtime_manager._managed["child-group"] = SimpleNamespace(  # type: ignore[attr-defined]
+        subentry_id=subentry_id,
         data={"group_key": "child-group"},
         subentry_type="tracker",
-        state=None,
-    )
-    manager = DeferredRegistryConfigEntriesManager(parent_entry, resolved_child)
-    hass = FakeHass(config_entries=manager)
-    forwarded_calls: list[tuple[FakeConfigEntry, tuple[Any, ...]]] = []
-
-    async def _capture_forwarded_subentry(
-        entry_obj: FakeConfigEntry, platforms: list[Any]
-    ) -> bool:
-        forwarded_calls.append((entry_obj, tuple(platforms)))
-        return True
-
-    setattr(manager, "async_forward_entry_setups", _capture_forwarded_subentry)
-    runtime_manager = await _build_runtime_manager(
-        hass=hass,
-        parent_entry=parent_entry,
-        resolved_child=resolved_child,
-        unique_id=resolved_child.unique_id,
+        title="Child",
+        unique_id="unique-child",
     )
 
-    provisional = manager.provisional_subentry
-    assert provisional is not None, "Expected provisional subentry from async_add_subentry"
-    provisional_id = f"provisional-{child_entry_id}"
-    setattr(provisional, "entry_id", provisional_id)
-    runtime_manager._managed[resolved_child.data["group_key"]] = provisional  # type: ignore[attr-defined]
-    parent_entry.runtime_data = SimpleNamespace(subentry_manager=runtime_manager)
+    assert subentry_id not in runtime_manager._managed_by_subentry_id
 
-    child_entry = FakeConfigEntry(entry_id=child_entry_id, domain=DOMAIN)
-    assign_task = asyncio.create_task(
-        deferred_subentry_entry_id_assignment(
-            provisional,
-            entry_id=child_entry_id,
-            manager=manager,
-            delay=0.01,
-            registered_entry=child_entry,
-        )
-    )
+    resolved_key = runtime_manager._managed_key_for_subentry_id(subentry_id)
 
-    try:
-        await _async_ensure_subentries_are_setup(hass, parent_entry)
-    finally:
-        await assign_task
-
-    expected_identifier = _resolve_config_subentry_identifier(resolved_child)
-    assert forwarded_calls
-    recorded_entry, _platforms = forwarded_calls[0]
-    assert recorded_entry is parent_entry
-    assert expected_identifier == resolved_child.subentry_id
+    assert resolved_key == "child-group"
+    assert runtime_manager._managed_by_subentry_id[subentry_id] == "child-group"
 
 
 @pytest.mark.asyncio
