@@ -36,7 +36,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
-from .ha_typing import CoordinatorEntity
+from .ha_typing import CoordinatorEntity, callback
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
@@ -188,6 +188,46 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
         super().__init__(coordinator)
         self._subentry_key = subentry_key
         self._subentry_identifier = subentry_identifier
+
+    async def async_added_to_hass(self) -> None:
+        """Register coordinator listener and publish the initial state."""
+
+        await super().async_added_to_hass()
+
+        handler = getattr(self, "_handle_coordinator_update", None)
+        if callable(handler):
+            handler()
+        else:
+            self.async_write_ha_state()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Bridge coordinator updates even when stubs omit the helper."""
+
+        parent_handler = getattr(super(), "_handle_coordinator_update", None)
+        if callable(parent_handler):
+            parent_handler()
+            return
+
+        self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        """Return coordinator availability with stub-friendly fallback."""
+
+        try:
+            return bool(getattr(super(), "available"))
+        except AttributeError:
+            pass
+        except Exception as err:  # pragma: no cover - defensive fallback
+            _LOGGER.debug("Coordinator availability probe failed for %s: %s", self.entity_id, err)
+
+        for attr in ("last_update_success", "_last_update_success"):
+            status = getattr(self.coordinator, attr, None)
+            if isinstance(status, bool):
+                return status
+
+        return True
 
     @property
     def entry_id(self) -> str | None:

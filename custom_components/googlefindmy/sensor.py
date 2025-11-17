@@ -538,8 +538,7 @@ class GoogleFindMyStatsSensor(GoogleFindMyEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Stats sensors stay available even when polling fails."""
-
-        return True
+        return bool(super().available)
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -627,6 +626,8 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
         Fallback: If coordinator presence is unavailable, consider the sensor available
         when we have at least a restored/known last_seen value.
         """
+        if not super().available:
+            return False
         dev_id = self._device_id
         if not dev_id:
             return False
