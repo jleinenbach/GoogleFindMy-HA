@@ -37,7 +37,7 @@ from .const import (
     TRACKER_SUBENTRY_KEY,
 )
 from . import EntityRecoveryManager
-from .coordinator import GoogleFindMyCoordinator
+from .coordinator import GoogleFindMyCoordinator, SubentryMetadata
 from .entity import (
     GoogleFindMyDeviceEntity,
     ensure_config_subentry_id,
@@ -90,6 +90,7 @@ LOCATE_DEVICE_DESCRIPTION = ButtonEntityDescription(
 )
 
 
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -108,128 +109,114 @@ async def async_setup_entry(
                 "trigger_device_refresh",
                 None,
                 "async_trigger_coordinator_refresh",
+        )
+
+    runtime_data = getattr(config_entry, "runtime_data", None)
+    manager = getattr(runtime_data, "subentry_manager", None)
+    managed = getattr(manager, "managed_subentries", {}) if manager is not None else {}
+
+    subentry_metas: list[Any] = []
+    if isinstance(managed, dict):
+        for key in managed:
+            meta = coordinator.get_subentry_metadata(key=key)
+            if meta is None or "button" not in getattr(meta, "features", ()):  # pragma: no cover - defensive
+                continue
+            subentry_metas.append(meta)
+
+    if not subentry_metas:
+        fallback_meta = coordinator.get_subentry_metadata(feature="button")
+        if fallback_meta is not None:
+            subentry_metas.append(fallback_meta)
+
+    if not subentry_metas:
+        synthesized_id = config_subentry_id or coordinator.stable_subentry_identifier(
+            key=TRACKER_SUBENTRY_KEY
+        )
+        _LOGGER.debug(
+            "Button setup: synthesizing metadata for subentry '%s' while cache warms",
+            synthesized_id,
+        )
+        subentry_metas.append(
+            SubentryMetadata(
+                key=TRACKER_SUBENTRY_KEY,
+                config_subentry_id=config_subentry_id,
+                features=("button",),
+                title=None,
+                poll_intervals={},
+                filters={},
+                feature_flags={},
+                visible_device_ids=(),
+                enabled_device_ids=(),
             )
+        )
 
-    tracker_meta = coordinator.get_subentry_metadata(feature="button")
-    tracker_subentry_key = (
-        tracker_meta.key if tracker_meta is not None else TRACKER_SUBENTRY_KEY
-    )
-    tracker_meta_config_id = (
-        getattr(tracker_meta, "config_subentry_id", None)
-        if tracker_meta is not None
-        else None
-    )
-    tracker_subentry_identifier = coordinator.stable_subentry_identifier(
-        key=tracker_subentry_key
-    )
-    tracker_config_subentry_id = ensure_config_subentry_id(
-        config_entry,
-        "button",
-        config_subentry_id or tracker_meta_config_id,
-    )
+    for tracker_meta in subentry_metas:
+        tracker_subentry_key = getattr(tracker_meta, "key", TRACKER_SUBENTRY_KEY)
+        tracker_meta_config_id = getattr(tracker_meta, "config_subentry_id", None)
 
-    _LOGGER.debug(
-        "Button setup: subentry_key=%s, config_subentry_id=%s",
-        tracker_subentry_key,
-        tracker_config_subentry_id,
-    )
+        candidate_subentry_id = tracker_meta_config_id or config_subentry_id
+        tracker_config_subentry_id = ensure_config_subentry_id(
+            config_entry,
+            "button",
+            candidate_subentry_id,
+        )
 
-    if tracker_config_subentry_id is None:
+        tracker_subentry_identifier = (
+            coordinator.stable_subentry_identifier(key=tracker_subentry_key)
+            or getattr(tracker_meta, "stable_identifier", lambda: None)()
+            or tracker_config_subentry_id
+        )
+        tracker_config_subentry_for_entities = tracker_config_subentry_id
+
         _LOGGER.debug(
-            "Button setup: awaiting config_subentry_id for key '%s'; deferring entity creation",
+            "Button setup: subentry_key=%s, config_subentry_id=%s",
             tracker_subentry_key,
-        )
-        return
-
-    if (
-        config_subentry_id
-        and tracker_meta_config_id
-        and config_subentry_id != tracker_meta_config_id
-    ):
-        _LOGGER.debug(
-            "Button setup ignored for unrelated subentry '%s' (expected '%s')",
-            config_subentry_id,
-            tracker_meta_config_id,
-        )
-        return
-
-    known_ids: set[str] = set()
-    entities: list[ButtonEntity] = []
-
-    def _schedule_button_entities(
-        new_entities: Iterable[ButtonEntity],
-        update_before_add: bool = True,
-    ) -> None:
-        schedule_add_entities(
-            coordinator.hass,
-            async_add_entities,
-            entities=new_entities,
-            update_before_add=update_before_add,
-            config_subentry_id=tracker_config_subentry_id,
-            log_owner="Button setup",
-            logger=_LOGGER,
+            tracker_config_subentry_id,
         )
 
-    # Initial population from coordinator.data (if already available)
-    for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
-        dev_id = device.get("id")
-        if not dev_id or dev_id in known_ids:
+        if tracker_config_subentry_for_entities is None:
+            _LOGGER.debug(
+                "Button setup: awaiting config_subentry_id for key '%s'; deferring entity creation",
+                tracker_subentry_key,
+            )
             continue
 
-        label = _derive_device_label(device)
-        entities.append(
-            GoogleFindMyPlaySoundButton(
-                coordinator,
-                device,
-                label,
-                subentry_key=tracker_subentry_key,
-                subentry_identifier=tracker_subentry_identifier,
+        if (
+            config_subentry_id
+            and tracker_meta_config_id
+            and config_subentry_id != tracker_meta_config_id
+        ):
+            _LOGGER.debug(
+                "Button setup ignored for unrelated subentry '%s' (expected '%s')",
+                config_subentry_id,
+                tracker_meta_config_id,
             )
-        )
-        entities.append(
-            GoogleFindMyStopSoundButton(
-                coordinator,
-                device,
-                label,
-                subentry_key=tracker_subentry_key,
-                subentry_identifier=tracker_subentry_identifier,
-            )
-        )
-        entities.append(
-            GoogleFindMyLocateButton(
-                coordinator,
-                device,
-                label,
-                subentry_key=tracker_subentry_key,
-                subentry_identifier=tracker_subentry_identifier,
-            )
-        )
-        known_ids.add(dev_id)
+            continue
 
-    if entities:
-        _LOGGER.debug("Adding %d initial button entity(ies)", len(entities))
-        _schedule_button_entities(entities, True)
+        known_ids: set[str] = set()
+        entities: list[ButtonEntity] = []
 
-    # Dynamically add buttons when new devices appear later
-    @callback
-    def _add_new_devices() -> None:
-        new_entities: list[ButtonEntity] = []
+        def _schedule_button_entities(
+            new_entities: Iterable[ButtonEntity],
+            update_before_add: bool = True,
+        ) -> None:
+            schedule_add_entities(
+                coordinator.hass,
+                async_add_entities,
+                entities=new_entities,
+                update_before_add=update_before_add,
+                config_subentry_id=tracker_config_subentry_for_entities,
+                log_owner="Button setup",
+                logger=_LOGGER,
+            )
+
         for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
-            dev_id = device.get("id") if isinstance(device, dict) else None
-            if not dev_id:
-                continue
-
-            if dev_id in known_ids:
-                _LOGGER.debug("Button setup: Skipping known dev_id '%s'", dev_id)
+            dev_id = device.get("id")
+            if not dev_id or dev_id in known_ids:
                 continue
 
             label = _derive_device_label(device)
-            _LOGGER.debug(
-                "Button setup: Adding new buttons for dev_id '%s' (label=%s)",
-                dev_id,
-                label,
-            )
-            new_entities.append(
+            entities.append(
                 GoogleFindMyPlaySoundButton(
                     coordinator,
                     device,
@@ -238,7 +225,7 @@ async def async_setup_entry(
                     subentry_identifier=tracker_subentry_identifier,
                 )
             )
-            new_entities.append(
+            entities.append(
                 GoogleFindMyStopSoundButton(
                     coordinator,
                     device,
@@ -247,7 +234,7 @@ async def async_setup_entry(
                     subentry_identifier=tracker_subentry_identifier,
                 )
             )
-            new_entities.append(
+            entities.append(
                 GoogleFindMyLocateButton(
                     coordinator,
                     device,
@@ -258,94 +245,142 @@ async def async_setup_entry(
             )
             known_ids.add(dev_id)
 
-        if new_entities:
-            _LOGGER.debug("Dynamically adding %d button entity(ies)", len(new_entities))
-            _schedule_button_entities(new_entities, True)
+        if entities:
+            _LOGGER.debug("Adding %d initial button entity(ies)", len(entities))
+            _schedule_button_entities(entities, True)
 
-    unsub = coordinator.async_add_listener(_add_new_devices)
-    config_entry.async_on_unload(unsub)
+        @callback
+        def _add_new_devices() -> None:
+            new_entities: list[ButtonEntity] = []
+            for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+                dev_id = device.get("id") if isinstance(device, dict) else None
+                if not dev_id:
+                    continue
 
-    runtime_data = getattr(config_entry, "runtime_data", None)
-    recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
+                if dev_id in known_ids:
+                    _LOGGER.debug("Button setup: Skipping known dev_id '%s'", dev_id)
+                    continue
 
-    if isinstance(recovery_manager, EntityRecoveryManager):
-        entry_id = getattr(config_entry, "entry_id", None)
-
-        def _is_visible(device_id: str) -> bool:
-            try:
-                return bool(
-                    coordinator.is_device_visible_in_subentry(
-                        tracker_subentry_key, device_id
+                label = _derive_device_label(device)
+                _LOGGER.debug(
+                    "Button setup: Adding new buttons for dev_id '%s' (label=%s)",
+                    dev_id,
+                    label,
+                )
+                new_entities.append(
+                    GoogleFindMyPlaySoundButton(
+                        coordinator,
+                        device,
+                        label,
+                        subentry_key=tracker_subentry_key,
+                        subentry_identifier=tracker_subentry_identifier,
                     )
                 )
-            except Exception:  # pragma: no cover - defensive best effort
-                return True
-
-        actions: dict[str, type[GoogleFindMyButtonEntity]] = {
-            "play_sound": GoogleFindMyPlaySoundButton,
-            "stop_sound": GoogleFindMyStopSoundButton,
-            "locate_device": GoogleFindMyLocateButton,
-        }
-
-        def _expected_unique_ids() -> set[str]:
-            if not isinstance(entry_id, str) or not entry_id:
-                return set()
-            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
-                return set()
-            expected: set[str] = set()
-            for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
-                dev_id = device.get("id")
-                if not isinstance(dev_id, str) or not dev_id:
-                    continue
-                if not _is_visible(dev_id):
-                    continue
-                for action in actions:
-                    expected.add(
-                        f"{DOMAIN}_{entry_id}_{tracker_subentry_identifier}_{dev_id}_{action}"
+                new_entities.append(
+                    GoogleFindMyStopSoundButton(
+                        coordinator,
+                        device,
+                        label,
+                        subentry_key=tracker_subentry_key,
+                        subentry_identifier=tracker_subentry_identifier,
                     )
-            return expected
-
-        def _build_entities(missing: set[str]) -> list[ButtonEntity]:
-            if not missing:
-                return []
-            built: list[ButtonEntity] = []
-            if not isinstance(entry_id, str) or not entry_id:
-                return built
-            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
-                return built
-            snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
-            for device in snapshot:
-                dev_id = device.get("id")
-                if not isinstance(dev_id, str) or not dev_id:
-                    continue
-                if not _is_visible(dev_id):
-                    continue
-                label = _derive_device_label(device)
-                for action, entity_cls in actions.items():
-                    unique_id = (
-                        f"{DOMAIN}_{entry_id}_{tracker_subentry_identifier}_{dev_id}_{action}"
+                )
+                new_entities.append(
+                    GoogleFindMyLocateButton(
+                        coordinator,
+                        device,
+                        label,
+                        subentry_key=tracker_subentry_key,
+                        subentry_identifier=tracker_subentry_identifier,
                     )
-                    if unique_id not in missing:
-                        continue
-                    built.append(
-                        entity_cls(
-                            coordinator,
-                            device,
-                            label,
-                            subentry_key=tracker_subentry_key,
-                            subentry_identifier=tracker_subentry_identifier,
+                )
+                known_ids.add(dev_id)
+
+            if new_entities:
+                _LOGGER.debug("Dynamically adding %d button entity(ies)", len(new_entities))
+                _schedule_button_entities(new_entities, True)
+
+        unsub = coordinator.async_add_listener(_add_new_devices)
+        config_entry.async_on_unload(unsub)
+
+        recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
+
+        if isinstance(recovery_manager, EntityRecoveryManager):
+            entry_id = getattr(config_entry, "entry_id", None)
+
+            def _is_visible(device_id: str) -> bool:
+                try:
+                    return bool(
+                        coordinator.is_device_visible_in_subentry(
+                            tracker_subentry_key, device_id
                         )
                     )
-            return built
+                except Exception:  # pragma: no cover - defensive best effort
+                    return True
 
-        recovery_manager.register_button_platform(
-            expected_unique_ids=_expected_unique_ids,
-            entity_factory=_build_entities,
-            add_entities=_schedule_button_entities,
-        )
+            actions: dict[str, type[GoogleFindMyButtonEntity]] = {
+                "play_sound": GoogleFindMyPlaySoundButton,
+                "stop_sound": GoogleFindMyStopSoundButton,
+                "locate_device": GoogleFindMyLocateButton,
+            }
 
+            def _expected_unique_ids() -> set[str]:
+                if not isinstance(entry_id, str) or not entry_id:
+                    return set()
+                if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
+                    return set()
+                expected: set[str] = set()
+                for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+                    dev_id = device.get("id")
+                    if not isinstance(dev_id, str) or not dev_id:
+                        continue
+                    if not _is_visible(dev_id):
+                        continue
+                    for action in actions:
+                        expected.add(
+                            f"{DOMAIN}_{entry_id}_{tracker_subentry_identifier}_{dev_id}_{action}"
+                        )
+                return expected
 
-# ----------------------------- Base class -----------------------------------
+            def _build_entities(missing: set[str]) -> list[ButtonEntity]:
+                if not missing:
+                    return []
+                built: list[ButtonEntity] = []
+                if not isinstance(entry_id, str) or not entry_id:
+                    return built
+                if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
+                    return built
+                snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
+                for device in snapshot:
+                    dev_id = device.get("id")
+                    if not isinstance(dev_id, str) or not dev_id:
+                        continue
+                    if not _is_visible(dev_id):
+                        continue
+                    label = _derive_device_label(device)
+                    for action, entity_cls in actions.items():
+                        unique_id = (
+                            f"{DOMAIN}_{entry_id}_{tracker_subentry_identifier}_{dev_id}_{action}"
+                        )
+                        if unique_id not in missing:
+                            continue
+                        built.append(
+                            entity_cls(
+                                coordinator,
+                                device,
+                                label,
+                                subentry_key=tracker_subentry_key,
+                                subentry_identifier=tracker_subentry_identifier,
+                            )
+                        )
+                return built
+
+            recovery_manager.register_button_platform(
+                expected_unique_ids=_expected_unique_ids,
+                entity_factory=_build_entities,
+                add_entities=_schedule_button_entities,
+            )
+
 class GoogleFindMyButtonEntity(GoogleFindMyDeviceEntity, ButtonEntity):
     """Common helpers for all per-device buttons."""
 

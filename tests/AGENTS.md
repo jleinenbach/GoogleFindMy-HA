@@ -461,27 +461,29 @@ integration's factories to bind existing subentries.
 
 ### Subentry platform forwarding expectations
 
-Home Assistant now performs subentry platform forwarding automatically. Tests
-must enforce the following contract:
+Core 2025.11.2 does **not** expose a ``config_subentry_id`` keyword on
+``async_forward_entry_setups``. Integration setup must therefore let Home
+Assistant schedule subentry platforms automatically after
+``_async_setup_subentry`` returns ``True``. Tests must enforce the following
+contract:
 
-* ``__init__.py`` must **not** call ``async_forward_entry_setups`` (plural or
-  singular) for subentries. The former ``_async_ensure_subentries_are_setup``
-  helper has been removed; tests should assume subentry platform scheduling is
-  driven solely by Home Assistant core.
-* Parent setup tests should assert that subentries are created and that setup
-  returns ``True`` without attempting platform fan-out.
-* Platform tests should assert that Home Assistant invokes ``async_setup_entry``
-  with a populated ``config_subentry_id`` and that entities/devices refuse to
-  load when the identifier is missing (skipped creations, warnings) while
-  accepting valid IDs.
+* Parent setup tests should assert that subentries are created and **not**
+  manually forwarded; any helper resembling ``_async_ensure_subentries_are_setup``
+  should remain inert.
+* Platform tests should continue to assert that Home Assistant invokes
+  ``async_setup_entry`` with a populated ``config_subentry_id`` (delivered by
+  Core) and that entities/devices refuse to load when the identifier is missing
+  while accepting valid IDs. Platform coverage should also verify that entity
+  factories iterate ``entry.runtime_data`` and pass ``config_subentry_id`` into
+  ``async_add_entities`` per child, matching the WAQI SSoT pattern.
 * When a regression needs deterministic ``config_subentry_id`` fallbacks without
   repeating monkeypatch boilerplate, depend on the
   ``deterministic_config_subentry_id`` fixture from
-  [`tests/conftest.py`](tests/conftest.py#L230-L275). Adding
-  the fixture to a test function signature automatically patches the integration
-  platforms (button, sensor, binary_sensor, device_tracker, and entity helpers)
-  so they synthesize ``"<entry_id>:<platform>"`` identifiers whenever Home
-  Assistant omits the value.
+  [`tests/conftest.py`](tests/conftest.py#L230-L275). Adding the fixture to a test
+  function signature automatically patches the integration platforms (button,
+  sensor, binary_sensor, device_tracker, and entity helpers) so they synthesize
+  ``"<entry_id>:<platform>"`` identifiers whenever Home Assistant omits the
+  value.
 
 When parent-unload rollbacks are exercised (for example,
 ``tests/test_unload_subentry_cleanup.py::test_async_unload_entry_rolls_back_when_parent_unload_fails``),

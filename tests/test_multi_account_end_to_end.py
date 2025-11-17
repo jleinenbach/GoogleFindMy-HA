@@ -175,7 +175,9 @@ class _StubConfigEntries:
         return list(entry.subentries.values())
 
     async def async_forward_entry_setups(
-        self, entry: _StubConfigEntry, platforms: Iterable[Platform]
+        self,
+        entry: _StubConfigEntry,
+        platforms: Iterable[Platform],
     ) -> None:
         platform_names = tuple(_platform_value(platform) for platform in platforms)
         self.forward_calls.append((entry.entry_id, platform_names))

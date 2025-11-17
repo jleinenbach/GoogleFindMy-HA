@@ -1077,14 +1077,15 @@ async def test_async_setup_entry_propagates_subentry_registration(
     entry.unique_id = entry.entry_id
     hass = _StubHass(entry, loop)
 
-    forward_calls: list[tuple[str, ...]] = []
+    forward_calls: list[tuple[tuple[str, ...]]] = []
 
     async def _forward_entry_setups(
-        entry_obj: _StubConfigEntry, platforms: Iterable[Platform]
+        entry_obj: _StubConfigEntry,
+        platforms: Iterable[Platform],
     ) -> None:
         assert entry_obj is entry
         platform_names = tuple(_platform_value(platform) for platform in platforms)
-        forward_calls.append(platform_names)
+        forward_calls.append((platform_names,))
 
     hass.config_entries.async_forward_entry_setups = (  # type: ignore[assignment]
         _forward_entry_setups
@@ -1129,8 +1130,6 @@ async def test_async_setup_entry_propagates_subentry_registration(
     }
     assert len(created_subentries) == len(entry.subentries)
 
-    # Home Assistant core forwards subentry platforms automatically; the parent
-    # setup must never call async_forward_entry_setups for child entries.
     assert forward_calls == []
 
     runtime_data = getattr(entry, "runtime_data", None)

@@ -5314,7 +5314,38 @@ async def _async_setup_subentry(
         )
         raise ConfigEntryNotReady(
             f"Parent entry {parent_entry_id} coordinator not ready"
-        )
+    )
+
+    runtime_manager = getattr(parent_runtime_data, "subentry_manager", None)
+    coordinator = getattr(parent_runtime_data, "coordinator", None)
+
+    if runtime_manager is not None:
+        try:
+            runtime_manager._refresh_from_entry()  # noqa: SLF001 - internal sync for new subentries
+        except Exception as err:  # pragma: no cover - defensive refresh guard
+            _LOGGER.debug(
+                "[%s] Failed to refresh subentry manager during setup: %s",
+                entry.entry_id,
+                err,
+            )
+
+    if coordinator is not None:
+        try:
+            coordinator._refresh_subentry_index()  # noqa: SLF001 - keep metadata aligned
+        except Exception as err:  # pragma: no cover - defensive refresh guard
+            _LOGGER.debug(
+                "[%s] Coordinator subentry index refresh deferred: %s",
+                entry.entry_id,
+                err,
+            )
+        try:
+            await coordinator.async_request_refresh()
+        except Exception as err:  # pragma: no cover - defensive refresh guard
+            _LOGGER.debug(
+                "[%s] Coordinator refresh after subentry setup skipped: %s",
+                entry.entry_id,
+                err,
+            )
 
     entry.runtime_data = parent_runtime_data
 
@@ -5785,6 +5816,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _LOGGER.debug("Failed to set setup_end_monotonic: %s", err)
 
     _register_instance(entry.entry_id, cache)
+
+    # Home Assistant will fan out platform setup per subentry after this returns
+    # (see docs/CONFIG_SUBENTRIES_HANDBOOK.md). Forwarding here would drop the
+    # subentry context and block the subsequent per-subentry setup calls.
+    _LOGGER.debug(
+        "[%s] Skipping parent platform forward; waiting for Home Assistant to schedule subentry platforms",
+        entry.entry_id,
+    )
 
     return True
 

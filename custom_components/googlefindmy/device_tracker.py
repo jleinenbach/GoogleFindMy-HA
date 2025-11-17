@@ -41,7 +41,7 @@ from .const import (
     OPT_MIN_ACCURACY_THRESHOLD,
     TRACKER_SUBENTRY_KEY,
 )
-from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
+from .coordinator import GoogleFindMyCoordinator, SubentryMetadata, _as_ha_attributes
 from .entity import (
     GoogleFindMyDeviceEntity,
     ensure_config_subentry_id,
@@ -83,122 +83,128 @@ async def async_setup_entry(
     """
     coordinator = resolve_coordinator(config_entry)
 
-    tracker_meta = coordinator.get_subentry_metadata(feature="device_tracker")
-    tracker_subentry_key = (
-        tracker_meta.key if tracker_meta is not None else TRACKER_SUBENTRY_KEY
-    )
-    tracker_meta_config_id = (
-        getattr(tracker_meta, "config_subentry_id", None)
-        if tracker_meta is not None
-        else None
-    )
-    tracker_subentry_identifier = coordinator.stable_subentry_identifier(
-        key=tracker_subentry_key
-    )
-    tracker_config_subentry_id = ensure_config_subentry_id(
-        config_entry,
-        "device_tracker",
-        config_subentry_id or tracker_meta_config_id,
-    )
+    runtime_data = getattr(config_entry, "runtime_data", None)
+    manager = getattr(runtime_data, "subentry_manager", None)
+    managed = getattr(manager, "managed_subentries", {}) if manager is not None else {}
 
-    _LOGGER.debug(
-        "Device tracker setup: subentry_key=%s, config_subentry_id=%s",
-        tracker_subentry_key,
-        tracker_config_subentry_id,
-    )
+    subentry_metas: list[Any] = []
+    if isinstance(managed, dict):
+        for key in managed:
+            meta = coordinator.get_subentry_metadata(key=key)
+            if meta is None or "device_tracker" not in getattr(meta, "features", ()):  # pragma: no cover - defensive
+                continue
+            subentry_metas.append(meta)
 
-    if tracker_config_subentry_id is None:
+    if not subentry_metas:
+        fallback_meta = coordinator.get_subentry_metadata(feature="device_tracker")
+        if fallback_meta is not None:
+            subentry_metas.append(fallback_meta)
+
+    if not subentry_metas:
+        synthesized_id = config_subentry_id or coordinator.stable_subentry_identifier(
+            key=TRACKER_SUBENTRY_KEY
+        )
         _LOGGER.debug(
-            "Device tracker setup: awaiting config_subentry_id for key '%s'; skipping",
+            "Device tracker setup: synthesizing metadata for subentry '%s' while cache warms",
+            synthesized_id,
+        )
+        subentry_metas.append(
+            SubentryMetadata(
+                key=TRACKER_SUBENTRY_KEY,
+                config_subentry_id=config_subentry_id,
+                features=("device_tracker",),
+                title=None,
+                poll_intervals={},
+                filters={},
+                feature_flags={},
+                visible_device_ids=(),
+                enabled_device_ids=(),
+            )
+        )
+
+    for tracker_meta in subentry_metas:
+        tracker_subentry_key = getattr(tracker_meta, "key", TRACKER_SUBENTRY_KEY)
+        tracker_meta_config_id = getattr(tracker_meta, "config_subentry_id", None)
+
+        candidate_subentry_id = tracker_meta_config_id or config_subentry_id
+        tracker_config_subentry_id = (
+            ensure_config_subentry_id(
+                config_entry,
+                "device_tracker",
+                candidate_subentry_id,
+            )
+            if candidate_subentry_id is not None
+            else None
+        )
+
+        tracker_subentry_identifier = (
+            tracker_config_subentry_id
+            or getattr(tracker_meta, "stable_identifier", lambda: None)()
+            or coordinator.stable_subentry_identifier(key=tracker_subentry_key)
+            or candidate_subentry_id
+        )
+        tracker_config_subentry_for_entities = (
+            tracker_config_subentry_id or tracker_subentry_identifier
+        )
+
+        _LOGGER.debug(
+            "Device tracker setup: subentry_key=%s, config_subentry_id=%s",
             tracker_subentry_key,
-        )
-        return
-
-    if (
-        config_subentry_id
-        and tracker_meta_config_id
-        and config_subentry_id != tracker_meta_config_id
-    ):
-        _LOGGER.debug(
-            "Device tracker setup ignored for unrelated subentry '%s' (expected '%s')",
-            config_subentry_id,
-            tracker_meta_config_id,
-        )
-        return
-
-    entities: list[GoogleFindMyDeviceTracker] = []
-    known_ids: set[str] = set()
-
-    def _schedule_tracker_entities(
-        new_entities: Iterable[GoogleFindMyDeviceTracker],
-        update_before_add: bool = True,
-    ) -> None:
-        schedule_add_entities(
-            coordinator.hass,
-            async_add_entities,
-            entities=new_entities,
-            update_before_add=update_before_add,
-            config_subentry_id=tracker_config_subentry_id,
-            log_owner="Device tracker setup",
-            logger=_LOGGER,
+            tracker_config_subentry_id,
         )
 
-    # Startup population from coordinator snapshot (if already present).
-    # Pointer for maintainers: coordinator.py documents the "Subentry awareness"
-    # section (see GoogleFindMyCoordinator._refresh_subentry_index /
-    # _store_subentry_snapshots) that drives this scanner's snapshot source.
-    initial_snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
-    for device in initial_snapshot:
-        dev_id = device.get("id")
-        name = device.get("name")
-        if not dev_id or not name:
-            _LOGGER.debug("Skipping device without id/name: %s", device)
-            continue
-        if dev_id in known_ids:
-            _LOGGER.debug("Ignoring duplicate device id %s in startup snapshot", dev_id)
-            continue
-        existing_entry = coordinator.find_tracker_entity_entry(dev_id)
-        if existing_entry is not None:
+        if tracker_config_subentry_for_entities is None:
             _LOGGER.debug(
-                "Startup: registry already contains tracker entity %s (unique_id=%s) for %s (device_id=%s); creating canonical tracker entity for subentry '%s'.",
-                existing_entry.entity_id,
-                existing_entry.unique_id,
-                name,
-                dev_id,
-                tracker_subentry_identifier,
+                "Device tracker setup: awaiting config_subentry_id for key '%s'; skipping",
+                tracker_subentry_key,
             )
-        known_ids.add(dev_id)
-        entities.append(
-            GoogleFindMyDeviceTracker(
-                coordinator,
-                device,
-                subentry_key=tracker_subentry_key,
-                subentry_identifier=tracker_subentry_identifier,
+            continue
+
+        if (
+            config_subentry_id
+            and tracker_meta_config_id
+            and config_subentry_id != tracker_meta_config_id
+        ):
+            _LOGGER.debug(
+                "Device tracker setup ignored for unrelated subentry '%s' (expected '%s')",
+                config_subentry_id,
+                tracker_meta_config_id,
             )
-        )
+            continue
 
-    if entities:
-        _schedule_tracker_entities(entities, True)
+        entities: list[GoogleFindMyDeviceTracker] = []
+        known_ids: set[str] = set()
 
-    # Dynamically add new trackers when the coordinator learns about more devices
-    @callback
-    def _scan_available_trackers_from_coordinator() -> None:
-        snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
-        if not snapshot:
-            return
+        def _schedule_tracker_entities(
+            new_entities: Iterable[GoogleFindMyDeviceTracker],
+            update_before_add: bool = True,
+        ) -> None:
+            schedule_add_entities(
+                coordinator.hass,
+                async_add_entities,
+                entities=new_entities,
+                update_before_add=update_before_add,
+                config_subentry_id=tracker_config_subentry_for_entities,
+                log_owner="Device tracker setup",
+                logger=_LOGGER,
+            )
 
-        to_add: list[GoogleFindMyDeviceTracker] = []
-        for device in snapshot:
+        initial_snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
+        for device in initial_snapshot:
             dev_id = device.get("id")
             name = device.get("name")
             if not dev_id or not name:
+                _LOGGER.debug("Skipping device without id/name: %s", device)
                 continue
             if dev_id in known_ids:
+                _LOGGER.debug(
+                    "Ignoring duplicate device id %s in startup snapshot", dev_id
+                )
                 continue
             existing_entry = coordinator.find_tracker_entity_entry(dev_id)
             if existing_entry is not None:
                 _LOGGER.debug(
-                    "Dynamic scan: registry already contains tracker entity %s (unique_id=%s) for %s (device_id=%s); creating canonical tracker entity for subentry '%s'.",
+                    "Startup: registry already contains tracker entity %s (unique_id=%s) for %s (device_id=%s); creating canonical tracker entity for subentry '%s'.",
                     existing_entry.entity_id,
                     existing_entry.unique_id,
                     name,
@@ -206,7 +212,7 @@ async def async_setup_entry(
                     tracker_subentry_identifier,
                 )
             known_ids.add(dev_id)
-            to_add.append(
+            entities.append(
                 GoogleFindMyDeviceTracker(
                     coordinator,
                     device,
@@ -215,106 +221,35 @@ async def async_setup_entry(
                 )
             )
 
-        if to_add:
-            _LOGGER.info("Adding %d newly discovered Find My tracker(s)", len(to_add))
-            _schedule_tracker_entities(to_add, True)
+        if entities:
+            _schedule_tracker_entities(entities, True)
 
-            email = _extract_email_from_entry(config_entry) or None
-            token = config_entry.data.get(CONF_OAUTH_TOKEN)
-            token_value = token if isinstance(token, str) and token else None
-            secrets_raw = config_entry.data.get(DATA_SECRET_BUNDLE)
-            secrets_bundle: Mapping[str, Any] | None
-            if isinstance(secrets_raw, Mapping):
-                secrets_bundle = secrets_raw
-            else:
-                secrets_bundle = None
+        @callback
+        def _scan_available_trackers_from_coordinator() -> None:
+            snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
+            if not snapshot:
+                return
 
-            discovery_ns = f"{CLOUD_DISCOVERY_NAMESPACE}.{config_entry.entry_id}" if config_entry.entry_id else CLOUD_DISCOVERY_NAMESPACE
-            stable_key = _cloud_discovery_stable_key(
-                email,
-                token_value,
-                secrets_bundle,
-            )
-
-            async def _async_trigger_cloud_scan(new_count: int) -> None:
-                triggered = await _trigger_cloud_discovery(
-                    hass,
-                    email=email,
-                    token=token_value,
-                    secrets_bundle=secrets_bundle,
-                    discovery_ns=discovery_ns,
-                    discovery_stable_key=stable_key,
-                    source="cloud_scanner",
-                )
-                account_ref = _redact_account_for_log(email, stable_key)
-                if triggered:
-                    _LOGGER.info(
-                        "Cloud tracker scanner queued discovery for %s after %d newly available tracker(s)",
-                        account_ref,
-                        new_count,
-                    )
-                else:
+            to_add: list[GoogleFindMyDeviceTracker] = []
+            for device in snapshot:
+                dev_id = device.get("id")
+                name = device.get("name")
+                if not dev_id or not name:
+                    continue
+                if dev_id in known_ids:
+                    continue
+                existing_entry = coordinator.find_tracker_entity_entry(dev_id)
+                if existing_entry is not None:
                     _LOGGER.debug(
-                        "Cloud tracker scanner deduplicated discovery for %s", account_ref
+                        "Dynamic scan: registry already contains tracker entity %s (unique_id=%s) for %s (device_id=%s); creating canonical tracker entity for subentry '%s'.",
+                        existing_entry.entity_id,
+                        existing_entry.unique_id,
+                        name,
+                        dev_id,
+                        tracker_subentry_identifier,
                     )
-
-            hass.async_create_task(_async_trigger_cloud_scan(len(to_add)))
-
-    unsub = coordinator.async_add_listener(_scan_available_trackers_from_coordinator)
-    config_entry.async_on_unload(unsub)
-    _scan_available_trackers_from_coordinator()  # run once after registration to catch races
-
-    runtime_data = getattr(config_entry, "runtime_data", None)
-    recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
-
-    if isinstance(recovery_manager, EntityRecoveryManager):
-        entry_id = getattr(config_entry, "entry_id", None)
-
-        def _is_visible(device_id: str) -> bool:
-            try:
-                return bool(
-                    coordinator.is_device_visible_in_subentry(
-                        tracker_subentry_key, device_id
-                    )
-                )
-            except Exception:  # pragma: no cover - defensive best effort
-                return True
-
-        def _expected_unique_ids() -> set[str]:
-            if not isinstance(entry_id, str) or not entry_id:
-                return set()
-            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
-                return set()
-            expected: set[str] = set()
-            for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
-                dev_id = device.get("id")
-                if not isinstance(dev_id, str) or not dev_id:
-                    continue
-                if not _is_visible(dev_id):
-                    continue
-                expected.add(
-                    f"{entry_id}:{tracker_subentry_identifier}:{dev_id}"
-                )
-            return expected
-
-        def _build_entities(missing: set[str]) -> list[GoogleFindMyDeviceTracker]:
-            if not missing:
-                return []
-            built: list[GoogleFindMyDeviceTracker] = []
-            if not isinstance(entry_id, str) or not entry_id:
-                return built
-            if not isinstance(tracker_subentry_identifier, str) or not tracker_subentry_identifier:
-                return built
-            for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
-                dev_id = device.get("id")
-                if not isinstance(dev_id, str) or not dev_id:
-                    continue
-                if not _is_visible(dev_id):
-                    continue
-                uid = f"{entry_id}:{tracker_subentry_identifier}:{dev_id}"
-                if uid not in missing:
-                    continue
-                built.append(
+                known_ids.add(dev_id)
+                to_add.append(
                     GoogleFindMyDeviceTracker(
                         coordinator,
                         device,
@@ -322,13 +257,131 @@ async def async_setup_entry(
                         subentry_identifier=tracker_subentry_identifier,
                     )
                 )
-            return built
 
-        recovery_manager.register_device_tracker_platform(
-            expected_unique_ids=_expected_unique_ids,
-            entity_factory=_build_entities,
-            add_entities=_schedule_tracker_entities,
+            if to_add:
+                _LOGGER.info("Adding %d newly discovered Find My tracker(s)", len(to_add))
+                _schedule_tracker_entities(to_add, True)
+
+                email = _extract_email_from_entry(config_entry) or None
+                token = config_entry.data.get(CONF_OAUTH_TOKEN)
+                token_value = token if isinstance(token, str) and token else None
+                secrets_raw = config_entry.data.get(DATA_SECRET_BUNDLE)
+                secrets_bundle: Mapping[str, Any] | None
+                if isinstance(secrets_raw, Mapping):
+                    secrets_bundle = secrets_raw
+                else:
+                    secrets_bundle = None
+
+                discovery_ns = f"{CLOUD_DISCOVERY_NAMESPACE}.{config_entry.entry_id}" if config_entry.entry_id else CLOUD_DISCOVERY_NAMESPACE
+                stable_key = _cloud_discovery_stable_key(
+                    email,
+                    token_value,
+                    secrets_bundle,
+                )
+
+                async def _async_trigger_cloud_scan(new_count: int) -> None:
+                    triggered = await _trigger_cloud_discovery(
+                        hass,
+                        email=email,
+                        token=token_value,
+                        secrets_bundle=secrets_bundle,
+                        discovery_ns=discovery_ns,
+                        discovery_stable_key=stable_key,
+                        source="cloud_scanner",
+                    )
+                    account_ref = _redact_account_for_log(email, stable_key)
+                    if triggered:
+                        _LOGGER.info(
+                            "Cloud tracker scanner queued discovery for %s after %d newly available tracker(s)",
+                            account_ref,
+                            new_count,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Cloud tracker scanner deduplicated discovery for %s", account_ref
+                        )
+
+                hass.async_create_task(_async_trigger_cloud_scan(len(to_add)))
+
+        unsub = coordinator.async_add_listener(
+            _scan_available_trackers_from_coordinator
         )
+        config_entry.async_on_unload(unsub)
+        _scan_available_trackers_from_coordinator()
+
+        runtime_data = getattr(config_entry, "runtime_data", None)
+        recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
+
+        if isinstance(recovery_manager, EntityRecoveryManager):
+            entry_id = getattr(config_entry, "entry_id", None)
+
+            def _is_visible(device_id: str) -> bool:
+                try:
+                    return bool(
+                        coordinator.is_device_visible_in_subentry(
+                            tracker_subentry_key, device_id
+                        )
+                    )
+                except Exception:  # pragma: no cover - defensive best effort
+                    return True
+
+            def _expected_unique_ids() -> set[str]:
+                if not isinstance(entry_id, str) or not entry_id:
+                    return set()
+                if not isinstance(
+                    tracker_subentry_identifier, str
+                ) or not tracker_subentry_identifier:
+                    return set()
+                expected: set[str] = set()
+                for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
+                    dev_id = device.get("id")
+                    if not isinstance(dev_id, str) or not dev_id:
+                        continue
+                    if not _is_visible(dev_id):
+                        continue
+                    expected.add(
+                        f"{entry_id}:{tracker_subentry_identifier}:{dev_id}"
+                    )
+                return expected
+
+            def _build_entities(
+                missing: set[str],
+            ) -> list[GoogleFindMyDeviceTracker]:
+                if not missing:
+                    return []
+                built: list[GoogleFindMyDeviceTracker] = []
+                if not isinstance(entry_id, str) or not entry_id:
+                    return built
+                if not isinstance(
+                    tracker_subentry_identifier, str
+                ) or not tracker_subentry_identifier:
+                    return built
+                for device in coordinator.get_subentry_snapshot(
+                    tracker_subentry_key
+                ):
+                    dev_id = device.get("id")
+                    if not isinstance(dev_id, str) or not dev_id:
+                        continue
+                    if not _is_visible(dev_id):
+                        continue
+                    uid = f"{entry_id}:{tracker_subentry_identifier}:{dev_id}"
+                    if uid not in missing:
+                        continue
+                    built.append(
+                        GoogleFindMyDeviceTracker(
+                            coordinator,
+                            device,
+                            subentry_key=tracker_subentry_key,
+                            subentry_identifier=tracker_subentry_identifier,
+                        )
+                    )
+                return built
+
+            recovery_manager.register_device_tracker_platform(
+                expected_unique_ids=_expected_unique_ids,
+                entity_factory=_build_entities,
+                add_entities=_schedule_tracker_entities,
+            )
 
 
 # ---------------------------------------------------------------------------
