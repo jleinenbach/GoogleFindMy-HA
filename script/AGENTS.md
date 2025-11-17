@@ -11,6 +11,9 @@ These conventions apply to every file within this directory tree.
   execution in the `if __name__ == "__main__":` guard via `raise SystemExit`.
 * Prefer `argparse.ArgumentParser` for option handling. Document default
   values in the `help` strings so the command remains self-documenting.
+* When generating or applying large patches, prefer the `quiet_apply_patch.py`
+  wrapper in this directory to truncate diff echoes and keep interactive
+  sessions responsive.
 * Print human-facing summaries with `print()` using UTF-8–safe f-strings.
   Avoid manual string concatenation when formatting values from multiple
   sources.

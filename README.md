@@ -15,7 +15,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Continuous integration status](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml/badge.svg)](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
 >[!CAUTION]
->**Home Assistant Core 2025.7 or newer is required.** This integration depends on the new per-entry **service / tracker** subentry UI and the `config_subentry_id`-aware device-grouping features added in 2025.7, so older Home Assistant cores are **not supported**.
+>**Home Assistant Core 2025.10 or newer is required.** The integration relies on Core-managed config subentry scheduling and device-registry hooks introduced alongside the 2025.10 cycle. Older builds lack the platform-loading behavior and registry keywords exercised by the tracker/service subentries and are **not supported**.
 
 ### Continuous integration checks
 
@@ -174,6 +174,8 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 ## Subentries and feature groups
 
 Home Assistant's config-entry **subentries** let the integration organize devices and helper entities into feature groups. The coordinator deterministically provisions two subentries—`SERVICE_SUBENTRY_KEY` and `TRACKER_SUBENTRY_KEY`—and recreates them after reloads or restarts so entity grouping stays stable across updates. Both subentries persist alongside the config entry, storing options, `visible_device_ids`, and diagnostics based on their constant identifiers.
+
+Home Assistant 2025.11+ handles subentry platform scheduling automatically. The parent `async_setup_entry` forwards the platform list **once** (no `config_subentry_id` allowed). Each platform then iterates the subentry coordinators on `entry.runtime_data` and calls `async_add_entities(..., config_subentry_id=<subentry_id>)` so devices and entities attach to the correct child entry. This pattern prevents orphaned tracker devices and avoids the silent failure caused by manual per-subentry forwarding.
 
 ### Service hub subentry
 
