@@ -16,12 +16,14 @@ from custom_components.googlefindmy.coordinator import (
     GoogleFindMyCoordinator,
     _FCM_FALLBACK_POLL_AFTER_S,
 )
+from custom_components.googlefindmy.binary_sensor import GoogleFindMyPollingSensor
 from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     DOMAIN,
     EVENT_AUTH_OK,
     ISSUE_AUTH_EXPIRED_KEY,
+    SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
     issue_id_for,
 )
@@ -334,6 +336,59 @@ def test_push_updated_keeps_known_name_for_blank_snapshots(
     assert entity._attr_name == "Pixel 9"
     assert entity.subentry_key == TRACKER_SUBENTRY_KEY
     assert subentry_identifier in entity.unique_id
+
+
+def test_device_tracker_respects_coordinator_unavailability(
+    coordinator: GoogleFindMyCoordinator,
+) -> None:
+    """Availability should mirror coordinator health before device checks."""
+
+    coordinator.is_device_visible_in_subentry = lambda *_args, **_kwargs: True
+    coordinator.get_device_location_data_for_subentry = (
+        lambda *_args, **_kwargs: {"latitude": 0.0, "longitude": 0.0}
+    )
+    coordinator.is_device_present = lambda _dev_id: True
+
+    subentry_identifier = coordinator.stable_subentry_identifier(
+        key=TRACKER_SUBENTRY_KEY
+    )
+    tracker = GoogleFindMyDeviceTracker(
+        coordinator,
+        {"id": "dev-1", "name": "Pixel 9"},
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier=subentry_identifier,
+    )
+    tracker.hass = coordinator.hass
+    tracker.entity_id = "device_tracker.googlefindmy_dev_1"
+
+    coordinator._last_update_success = False
+    assert tracker.available is False
+
+    coordinator._last_update_success = True
+    assert tracker.available is True
+
+
+def test_polling_sensor_inherits_coordinator_availability(
+    coordinator: GoogleFindMyCoordinator,
+) -> None:
+    """Diagnostic polling sensor availability follows the coordinator."""
+
+    subentry_identifier = coordinator.stable_subentry_identifier(
+        key=SERVICE_SUBENTRY_KEY
+    )
+    polling = GoogleFindMyPollingSensor(
+        coordinator,
+        _DummyEntry(),
+        subentry_key=SERVICE_SUBENTRY_KEY,
+        subentry_identifier=subentry_identifier,
+    )
+    polling.hass = coordinator.hass
+
+    coordinator._last_update_success = False
+    assert polling.available is False
+
+    coordinator._last_update_success = True
+    assert polling.available is True
 
 
 def test_poll_snapshot_reuses_cached_name_for_blank_payload(

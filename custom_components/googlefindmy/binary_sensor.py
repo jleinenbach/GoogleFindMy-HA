@@ -269,7 +269,13 @@ class GoogleFindMyPollingSensor(GoogleFindMyEntity, BinarySensorEntity):
     def available(self) -> bool:
         """Polling diagnostic sensor stays online to expose status information."""
 
-        return True
+        return bool(super().available)
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Refresh Home Assistant state when coordinator data changes."""
+
+        self.async_write_ha_state()
 
     @property
     def device_info(self) -> DeviceInfo:

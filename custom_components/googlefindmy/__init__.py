@@ -2311,20 +2311,34 @@ async def _async_stop_receiver_if_possible(receiver: object | None) -> None:
 
 
 def _normalize_device_identifier(device: dr.DeviceEntry | Any, ident: str) -> str:
-    """Return canonical identifier, stripping entry namespace when applicable."""
+    """Return the Google device id portion used throughout the coordinator.
+
+    Registry identifiers may be namespaced with the config entry ID and/or a
+    subentry identifier (for example, ``<entry_id>:<subentry_id>:<device_id>``).
+    The coordinator and ignore lists track devices by their Google-provided
+    ``device_id`` alone, so we strip any entry/subentry prefixes and return the
+    final segment when present. Service-device identifiers (for example,
+    ``integration_<entry_id>``) are preserved as-is because they do not contain
+    path separators.
+    """
+
+    if not ident:
+        return ident
 
     if ":" not in ident:
         return ident
 
+    parts = ident.split(":")
+
     config_entries: Collection[str] | None = getattr(device, "config_entries", None)
-    if not config_entries:
-        return ident
+    if config_entries:
+        while len(parts) > 1 and parts[0] in config_entries:
+            parts = parts[1:]
 
-    prefix, canonical = ident.split(":", 1)
-    if canonical and prefix in config_entries:
-        return canonical
-
-    return ident
+    # Prefer the final segment so trackers with entry/subentry prefixes resolve
+    # to the same canonical device_id used by the coordinator and ignore list.
+    last = parts[-1]
+    return last or ident
 
 
 def _iter_config_entry_entities(
@@ -6132,6 +6146,10 @@ async def async_remove_config_entry_device(
 
         alias_sources: list[list[str] | None] = []
         name_sources: list[list[str] | None] = []
+
+        if raw_ident and raw_ident != canonical_id:
+            alias_sources.append([raw_ident])
+
         for meta in (canonical_meta, legacy_meta):
             if not isinstance(meta, Mapping):
                 continue

@@ -61,6 +61,17 @@ should consult that cached instance before calling
 `entity_registry.async_get(...)` so recovery logic inspects the same
 registry object as the fixture.
 
+### CoordinatorEntity stub overrides
+
+The suite replaces `homeassistant.helpers.update_coordinator.CoordinatorEntity`
+with a minimal stub in `tests/conftest.py` (see
+`install_homeassistant_core_stubs`). The override removes availability
+helpers such as `_handle_coordinator_update` and `_async_write_ha_state`
+to keep tests independent of Home Assistant internals. When integration
+code relies on those helpers, add explicit guards or local fallbacks so
+entities remain importable under the stub; otherwise, `AttributeError`
+failures will surface before the real coordinator features are present.
+
 ### Config-entry mutation tracking lists
 
 Config-entry manager doubles (for example, the `_ConfigEntries` stub in

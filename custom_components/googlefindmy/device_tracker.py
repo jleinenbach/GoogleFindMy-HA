@@ -542,6 +542,8 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         longer present in the Google list (TTL-smoothed by the coordinator),
         the entity becomes unavailable and the user may delete it via HA UI.
         """
+        if not super().available:
+            return False
         if not self.coordinator_has_device():
             return False
         # Prefer coordinator presence; fall back to previous behavior if API is missing.

@@ -101,7 +101,10 @@ def test_async_remove_config_entry_device_normalizes_identifier(monkeypatch) -> 
 
     device_entry = SimpleNamespace(
         config_entries={entry.entry_id},
-        identifiers={(DOMAIN, "entry-1:device-123")},
+        identifiers=(
+            (DOMAIN, "entry-1:tracker:device-123"),
+            (DOMAIN, "entry-1:device-123"),
+        ),
         name_by_user=None,
         name="Device Name",
     )
@@ -124,6 +127,7 @@ def test_async_remove_config_entry_device_normalizes_identifier(monkeypatch) -> 
     ignored = updated_options[OPT_IGNORED_DEVICES]
     assert "device-123" in ignored
     assert "entry-1:device-123" not in ignored
+    assert "entry-1:tracker:device-123" in ignored["device-123"]["aliases"]
 
     metadata = ignored["device-123"]
     assert metadata["name"] == "Device Name"
