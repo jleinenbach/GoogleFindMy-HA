@@ -36,10 +36,9 @@ async def test_async_setup_subentry_inherits_parent_runtime_data() -> None:
 
     forward_called = False
 
-    async def forward(*_: object, **__: object) -> None:
+    async def forward(*_: object) -> None:
         nonlocal forward_called
         forward_called = True
-        raise AssertionError("Subentry setup must not forward platforms manually")
 
     hass.config_entries.async_forward_entry_setups = forward  # type: ignore[attr-defined]
 
@@ -47,6 +46,7 @@ async def test_async_setup_subentry_inherits_parent_runtime_data() -> None:
         entry_id="child-entry",
         data={"group_key": "child"},
         parent_entry_id=parent_entry_id,
+        config_subentry_id="child-subentry",
         subentry_type="tracker",
         runtime_data=None,
     )
