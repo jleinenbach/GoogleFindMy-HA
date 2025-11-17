@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -22,7 +23,12 @@ import pytest
 
 from tests.helpers import drain_loop
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
-from tests.helpers.homeassistant import resolve_config_entry_lookup
+from tests.helpers.homeassistant import (
+    FakeDeviceEntry,
+    FakeDeviceRegistry,
+    FakeEntityRegistry,
+    resolve_config_entry_lookup,
+)
 
 from custom_components.googlefindmy import _platform_value
 from custom_components.googlefindmy.const import (
@@ -35,10 +41,12 @@ from custom_components.googlefindmy.const import (
     SERVICE_REBUILD_REGISTRY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SERVICE_SUBENTRY_TRANSLATION_KEY,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_TRANSLATION_KEY,
 )
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.const import Platform
@@ -1130,12 +1138,229 @@ async def test_async_setup_entry_propagates_subentry_registration(
     }
     assert len(created_subentries) == len(entry.subentries)
 
+    expected_setup_targets = [
+        getattr(subentry, "entry_id", subentry.subentry_id)
+        for subentry in entry.subentries.values()
+    ]
+
+    assert hass.config_entries.setup_calls == expected_setup_targets
     assert forward_calls == []
 
     runtime_data = getattr(entry, "runtime_data", None)
     coordinator = getattr(runtime_data, "coordinator", None)
     assert getattr(coordinator, "first_refresh_calls", 0) == 1
 
+
+@pytest.mark.asyncio
+async def test_programmatic_subentry_creation_triggers_setup_and_entities(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """Programmatic subentries should trigger setup and create tracker entities."""
+
+    loop = asyncio.get_running_loop()
+
+    def _metadata(
+        self: Any, *, key: str | None = None, feature: str | None = None
+        ) -> Any:
+            resolved_key = key or feature or getattr(self, "_subentry_key", TRACKER_SUBENTRY_KEY)
+            device_ids = tuple(device.get("id") for device in getattr(self, "data", ()))
+            return SimpleNamespace(
+                key=resolved_key,
+                config_subentry_id=None,
+                features=(feature,) if feature else ("device_tracker",),
+            stable_identifier=lambda: resolved_key,
+            title=None,
+            poll_intervals={},
+            filters={},
+            feature_flags={},
+            visible_device_ids=device_ids,
+            enabled_device_ids=device_ids,
+        )
+
+    def _stable_identifier(
+        self: Any, *, key: str | None = None, feature: str | None = None
+    ) -> str:
+        return key or feature or getattr(self, "_subentry_key", TRACKER_SUBENTRY_KEY)
+
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch,
+        functools.partial(
+            stub_coordinator_factory,
+            methods={
+                "get_subentry_metadata": _metadata,
+                "stable_subentry_identifier": _stable_identifier,
+            },
+        ),
+        loop,
+    )
+
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    device_registry = FakeDeviceRegistry()
+    entity_registry = FakeEntityRegistry()
+    monkeypatch.setattr(integration.dr, "async_get", lambda _hass: device_registry)
+    monkeypatch.setattr(integration.er, "async_get", lambda _hass: entity_registry)
+
+    import custom_components.googlefindmy.device_tracker as device_tracker
+
+    added_entities: list[tuple[Any, str | None]] = []
+
+    async def _async_add_entities(
+        entities: Iterable[Any],
+        update_before_add: bool = False,
+        *,
+        config_subentry_id: str | None = None,
+    ) -> None:
+        del update_before_add
+        for entity in entities:
+            added_entities.append((entity, config_subentry_id))
+            entity_registry.entities[entity.entity_id] = SimpleNamespace(
+                entity_id=entity.entity_id,
+                config_entry_id=entry.entry_id,
+                config_subentry_id=config_subentry_id,
+            )
+            device_registry.add_device(
+                FakeDeviceEntry(
+                    id=entity.device_info.id,
+                    identifiers=set(entity.device_info.identifiers),
+                    config_entries={entry.entry_id},
+                    config_subentry_id=config_subentry_id,
+                )
+            )
+
+    def _schedule_add_entities(
+        hass_obj: _StubHass,
+        async_add: Callable[..., Awaitable[None]],
+        *,
+        entities: Iterable[Any],
+        update_before_add: bool,
+        config_subentry_id: str | None,
+        log_owner: str,
+        logger: Any,
+    ) -> None:
+        del log_owner, logger
+        hass_obj.async_create_task(
+            async_add(
+                list(entities),
+                update_before_add=update_before_add,
+                config_subentry_id=config_subentry_id,
+            ),
+            name=f"{DOMAIN}.add_entities.{config_subentry_id}",
+        )
+
+    class _StubDeviceTracker:
+        def __init__(
+            self,
+            coordinator: Any,
+            device: dict[str, Any],
+            *,
+            subentry_key: str,
+            subentry_identifier: str,
+        ) -> None:
+            del subentry_key
+            device_id = device.get("id", "device")
+            self.entity_id = f"device_tracker.{device_id}"
+            self._attr_unique_id = (
+                f"{coordinator.config_entry.entry_id}:{subentry_identifier}:{device_id}"
+            )
+            self._device_info = SimpleNamespace(
+                id=f"{coordinator.config_entry.entry_id}:{device_id}",
+                identifiers={(DOMAIN, f"{coordinator.config_entry.entry_id}:{device_id}")},
+                config_entries={coordinator.config_entry.entry_id},
+                config_subentry_id=subentry_identifier,
+            )
+
+        @property
+        def unique_id(self) -> str:
+            return self._attr_unique_id
+
+        @property
+        def device_info(self) -> Any:
+            return self._device_info
+
+    monkeypatch.setattr(device_tracker, "schedule_add_entities", _schedule_add_entities)
+    monkeypatch.setattr(device_tracker, "GoogleFindMyDeviceTracker", _StubDeviceTracker)
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry)
+
+    if hass._tasks:
+        await asyncio.gather(*hass._tasks)
+
+    initial_subentries = set(entry.subentries)
+
+    tracker_definition = integration.ConfigEntrySubentryDefinition(
+        key=TRACKER_SUBENTRY_KEY,
+        title="Google Find My devices",
+        data={
+            "features": sorted(TRACKER_FEATURE_PLATFORMS),
+            "fcm_push_enabled": False,
+            "has_google_home_filter": False,
+            "entry_title": entry.title,
+        },
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+        translation_key=TRACKER_SUBENTRY_TRANSLATION_KEY,
+    )
+
+    service_definition = integration.ConfigEntrySubentryDefinition(
+        key=SERVICE_SUBENTRY_KEY,
+        title="Google Find Hub Service",
+        data={
+            "features": sorted(SERVICE_FEATURE_PLATFORMS),
+            "fcm_push_enabled": False,
+            "has_google_home_filter": False,
+            "entry_title": entry.title,
+        },
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+        translation_key=SERVICE_SUBENTRY_TRANSLATION_KEY,
+    )
+
+    new_tracker_definition = integration.ConfigEntrySubentryDefinition(
+        key="dynamic",  # programmatic tracker group created at runtime
+        title="Dynamic tracker group",
+        data={
+            "features": ["device_tracker"],
+            "fcm_push_enabled": False,
+            "has_google_home_filter": False,
+            "entry_title": entry.title,
+        },
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        unique_id=f"{entry.entry_id}-dynamic",
+    )
+
+    await entry.runtime_data.subentry_manager.async_sync(
+        [tracker_definition, service_definition, new_tracker_definition]
+    )
+
+    created_subentries = set(entry.subentries) - initial_subentries
+    assert created_subentries
+    new_subentry_id = next(iter(created_subentries))
+
+    assert new_subentry_id in hass.config_entries.setup_calls
+
+    await device_tracker.async_setup_entry(
+        hass,
+        entry,
+        _async_add_entities,
+        config_subentry_id=new_subentry_id,
+    )
+
+    if hass._tasks:
+        await asyncio.gather(*hass._tasks)
+
+    assert added_entities
+    entity_entry = next(iter(entity_registry.entities.values()))
+    assert entity_entry.config_entry_id == entry.entry_id
+    assert entity_entry.config_subentry_id == new_subentry_id
+
+    registry_entry = next(iter(device_registry.devices.values()))
+    assert registry_entry.config_subentry_id == new_subentry_id
+    assert entry.entry_id in registry_entry.config_entries
 
 
 def test_setup_entry_failure_does_not_register_cache(

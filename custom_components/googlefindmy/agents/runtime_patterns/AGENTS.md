@@ -15,8 +15,13 @@ Runtime contracts, platform forwarding rules, and HA lifecycle helper usage for 
   * Each platform must iterate the subentry coordinators stored on `entry.runtime_data` and add entities per child via `async_add_entities(..., config_subentry_id=subentry_id)`. Validate the identifier before emitting entities and log a debug deferral when Home Assistant omits it.
   * Leave a short inline comment explaining which pattern you chose whenever platform lists move between parent and subentry paths.
   * The legacy `RuntimeData.legacy_forwarded_platforms`/`legacy_forward_notice` tracking remains in the codebase for historical builds but should stay dormant on modern Home Assistant releases.
+  * Use the shared `_async_setup_new_subentries` helper whenever subentries are created (during parent setup **and** at runtime) so every child receives a setup pass and Core can forward platforms with the correct `config_subentry_id`.
 * Home Assistant's subentry helpers (`async_add_subentry`, `async_update_subentry`, `async_remove_subentry`) may return a `ConfigSubentry`, a sentinel boolean/`None`, or an awaitable yielding one of those values. Always normalize results through the shared `_await_subentry_result` helper (or an equivalent `inspect.isawaitable` guard) so asynchronous responses update the manager cache correctly.
 * **Race-condition mitigation:** When programmatically creating subentries, immediately yield control back to the event loop (for example, `await asyncio.sleep(0)`) before invoking `hass.config_entries.async_setup(...)`. This prevents `homeassistant.config_entries.UnknownEntry` errors while the config-entry registry finalizes the new child entry. Leave a short inline comment describing the yield so future contributors retain the guard.
+
+### Regression note
+
+An earlier fix removed manual platform forwarding but missed programmatic subentry creation after startup, leaving late tracker groups uninitialized. The `_async_setup_new_subentries` helper (and accompanying regression tests) closes that gap by ensuring every new subentry is explicitly set up so Core can forward platforms with the correct `config_subentry_id`.
 
 ## Subentry lifecycle references
 
