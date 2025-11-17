@@ -412,6 +412,13 @@ def _stub_homeassistant() -> None:
     ha_pkg = sys.modules.setdefault("homeassistant", ModuleType("homeassistant"))
     ha_pkg.__path__ = getattr(ha_pkg, "__path__", [])  # mark as package
 
+    try:
+        from homeassistant.util import dt as dt_util  # type: ignore[import-not-found]
+
+        dt_util.DEFAULT_TIME_ZONE = dt_util.UTC
+    except Exception:  # pragma: no cover - defensive guard when HA is absent
+        pass
+
     config_entries = ModuleType("homeassistant.config_entries")
     config_entries.SOURCE_DISCOVERY = "discovery"
     config_entries.SOURCE_RECONFIGURE = "reconfigure"
@@ -683,12 +690,61 @@ def _stub_homeassistant() -> None:
         async def async_get_last_state(self):  # pragma: no cover - stub behaviour
             return None
 
+    class RestoreStateData:  # pragma: no cover - storage shim
+        def __init__(self) -> None:
+            self.last_states: list[Any] | None = None
+
+        async def async_setup(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def async_dump_states(self) -> None:
+            return None
+
+        async def async_setup_dump(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def async_save_persistent_states(self) -> None:
+            return None
+
+        async def async_load(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def async_get_stored_states(self) -> list[Any]:
+            return []
+
+        async def async_restore_entity_added(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def async_restore_entity_removed(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
     restore_state_module.RestoreEntity = RestoreEntity
+    restore_state_module.RestoreStateData = RestoreStateData
+
+    async def _restore_state_start(*_args: Any, **_kwargs: Any) -> RestoreStateData:
+        return RestoreStateData()
+
+    _restore_state_start.async_at_start = True
+
+    restore_state_module.start = _restore_state_start
     sys.modules["homeassistant.helpers.restore_state"] = restore_state_module
     setattr(helpers_pkg, "restore_state", restore_state_module)
 
     issue_registry_module = sys.modules["homeassistant.helpers.issue_registry"]
     issue_registry_module.IssueSeverity = SimpleNamespace(ERROR="error", INFO="info")
+
+    if not hasattr(issue_registry_module, "IssueRegistryStore"):
+        class IssueRegistryStore:  # pragma: no cover - storage shim
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.data: dict[str, Any] | None = None
+
+            async def async_load(self) -> dict[str, Any] | None:
+                return self.data
+
+            async def async_save(self, data: dict[str, Any]) -> None:
+                self.data = data
+
+        issue_registry_module.IssueRegistryStore = IssueRegistryStore
 
     class _IssueRegistry:
         """Minimal in-memory Repairs issue registry used by tests."""
@@ -808,6 +864,19 @@ def _stub_homeassistant() -> None:
             SERVICE = "service"
 
         device_registry_module.DeviceEntryType = DeviceEntryType
+
+    if not hasattr(device_registry_module, "DeviceRegistryStore"):
+        class DeviceRegistryStore:  # pragma: no cover - storage shim
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.data: dict[str, Any] | None = None
+
+            async def async_load(self) -> dict[str, Any] | None:
+                return self.data
+
+            async def async_save(self, data: dict[str, Any]) -> None:
+                self.data = data
+
+        device_registry_module.DeviceRegistryStore = DeviceRegistryStore
 
     class _StubDeviceEntry:
         """In-memory device entry capturing registry metadata."""
@@ -1087,6 +1156,16 @@ def _stub_homeassistant() -> None:
         async def async_load(self) -> dict[str, object] | None:
             return self._data
 
+        async def _async_load(self) -> dict[str, object] | None:
+            """Alias used by HA storage helpers."""
+
+            return await self.async_load()
+
+        async def _async_write_data(self, _path: str, data: dict[str, object]) -> None:
+            """Persist storage payloads during tests."""
+
+            self._data = data
+
         def async_delay_save(self, *_args, **_kwargs) -> None:
             return None
 
@@ -1158,6 +1237,14 @@ def _stub_homeassistant() -> None:
         return None
 
     event_module.async_call_later = _async_call_later
+
+    def _async_track_time_interval(
+        hass: Any, action: Callable[[Any], Any], _interval: timedelta, *_args: Any, **_kwargs: Any
+    ) -> Callable[[], None]:
+        del hass, action, _interval, _args, _kwargs
+        return lambda: None
+
+    event_module.async_track_time_interval = _async_track_time_interval
     sys.modules["homeassistant.helpers.event"] = event_module
     setattr(helpers_pkg, "event", event_module)
 
@@ -1167,6 +1254,19 @@ def _stub_homeassistant() -> None:
     setattr(helpers_pkg, "network", network_module)
 
     entity_registry_module = sys.modules["homeassistant.helpers.entity_registry"]
+
+    if not hasattr(entity_registry_module, "EntityRegistryStore"):
+        class EntityRegistryStore:  # pragma: no cover - storage shim
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.data: dict[str, Any] | None = None
+
+            async def async_load(self) -> dict[str, Any] | None:
+                return self.data
+
+            async def async_save(self, data: dict[str, Any]) -> None:
+                self.data = data
+
+        entity_registry_module.EntityRegistryStore = EntityRegistryStore
 
     class _StubEntityRegistryEntry:
         """Entity registry entry capturing subentry assignments for assertions."""
