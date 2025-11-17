@@ -454,6 +454,12 @@ Integrations can create subentries programmatically when runtime discovery finds
 2. Locate the parent config entry and enumerate existing subentries via `list(parent_entry.subentries.values())` (or inspect the `parent_entry.subentries` mapping directly).
 3. Create a new subentry if one does not already exist and call `hass.config_entries.async_setup(subentry.entry_id)` to let Core load the child platforms. Avoid manual forwarding, since the helper cannot carry a `config_subentry_id` keyword on this release.
 
+**Mandatory follow-up after programmatic creation:**
+
+- Always `await hass.config_entries.async_setup(subentry.entry_id)` for every new child. Simply attaching a `ConfigSubentry` to `entry.subentries` (or calling `async_add_subentry`) is not enough—Core only forwards platforms after the subentry setup routine runs.
+- The setup call ensures `_async_setup_subentry` binds the child to the parent runtime data and that Core injects `config_subentry_id` when forwarding platforms. Without it, trackers remain present in memory but never surface entities (`N present / 0 enabled`).
+- Yield once to the event loop (for example, `await asyncio.sleep(0)`) before triggering setup so the registry has time to publish the new subentry identifier and avoid transient `UnknownEntry` errors.
+
 ## Section VIII: Peer-Review Checklist and Troubleshooting
 
 ### A. Checklist

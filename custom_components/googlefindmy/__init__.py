@@ -953,6 +953,26 @@ def _feature_name_from_platform(platform: Platform) -> str:
 CleanupCallback = Callable[[], Awaitable[None] | None]
 
 
+def _subentry_entry_id(subentry: Any) -> str | None:
+    """Return the identifier Home Assistant uses to track ``subentry``.
+
+    The ConfigSubentry API exposes both ``entry_id`` and ``subentry_id`` across
+    core releases. This helper normalizes either attribute to a stable string so
+    callers can trigger setup for newly created subentries. Keep this in sync
+    with the handbook references in docs/CONFIG_SUBENTRIES_HANDBOOK.md.
+    """
+
+    subentry_entry_id = getattr(subentry, "entry_id", None)
+    if isinstance(subentry_entry_id, str) and subentry_entry_id:
+        return subentry_entry_id
+
+    subentry_id = getattr(subentry, "subentry_id", None)
+    if isinstance(subentry_id, str) and subentry_id:
+        return subentry_id
+
+    return None
+
+
 @dataclass(slots=True)
 class ConfigEntrySubentryDefinition:
     """Desired state for a managed configuration subentry."""
@@ -1049,6 +1069,7 @@ class ConfigEntrySubEntryManager:
             return False
 
         return True
+
 
     def _managed_key_for_subentry_id(self, subentry_id: str) -> str | None:
         """Return the managed key associated with ``subentry_id`` when present."""
@@ -1592,6 +1613,8 @@ class ConfigEntrySubEntryManager:
         for definition in definitions:
             desired[definition.key] = definition
 
+        created_subentries: list[ConfigSubentry] = []
+
         try:
             await self._deduplicate_subentries()
         except Exception as err:  # pragma: no cover - defensive warning
@@ -1789,6 +1812,7 @@ class ConfigEntrySubEntryManager:
                     )
 
                     self._index_managed_subentry(key, stored)
+                    created_subentries.append(stored)
                     break
 
                 _LOGGER.debug(
@@ -1887,6 +1911,11 @@ class ConfigEntrySubEntryManager:
         for key in stale_keys:
             await self.async_remove(key)
 
+        if created_subentries:
+            await _async_setup_new_subentries(
+                self._hass, self._entry, created_subentries
+            )
+
     async def async_remove(self, key: str) -> None:
         """Remove a managed subentry and run its cleanup callback."""
 
@@ -1970,6 +1999,58 @@ def _domain_data(hass: HomeAssistant) -> GoogleFindMyDomainData:
     """Return the typed domain data bucket, creating it on first access."""
 
     return cast(GoogleFindMyDomainData, hass.data.setdefault(DOMAIN, {}))
+
+
+async def _async_setup_new_subentries(
+    hass: HomeAssistant,
+    parent_entry: MyConfigEntry,
+    subentries: Iterable[ConfigSubentry | Any],
+) -> None:
+    """Trigger Home Assistant setup for newly created subentries.
+
+    Home Assistant does not automatically set up subentries when they are added
+    programmatically. After creating a ConfigSubentry (via async_sync or other
+    helpers), the integration must call ``hass.config_entries.async_setup`` for
+    each new entry id so Core can run ``_async_setup_subentry`` and forward
+    platforms with the correct ``config_subentry_id`` context. See
+    docs/CONFIG_SUBENTRIES_HANDBOOK.md for the canonical lifecycle.
+    """
+
+    setup_targets: list[str] = []
+    for subentry in subentries:
+        subentry_entry_id = _subentry_entry_id(subentry)
+        if subentry_entry_id is None:
+            continue
+        setup_targets.append(subentry_entry_id)
+
+    if not setup_targets:
+        return
+
+    # Yield to the event loop so Home Assistant can finish publishing the
+    # subentry into the registry before setup runs (race guard documented in
+    # agents/runtime_patterns/AGENTS.md).
+    await asyncio.sleep(0)
+
+    config_entries = getattr(hass, "config_entries", None)
+    if config_entries is None:
+        _LOGGER.debug(
+            "[%s] async_setup_entry: Skipping subentry setup because manager missing",
+            parent_entry.entry_id,
+        )
+        return
+
+    get_entry = getattr(config_entries, "async_get_entry", lambda _entry_id: None)
+
+    for target in setup_targets:
+        entry_obj = get_entry(target)
+        state = getattr(entry_obj, "state", None)
+        if isinstance(state, ConfigEntryState) and state in (
+            ConfigEntryState.SETUP_IN_PROGRESS,
+            ConfigEntryState.LOADED,
+        ):
+            continue
+
+        await hass.config_entries.async_setup(target)
 
 
 def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
@@ -5816,6 +5897,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _LOGGER.debug("Failed to set setup_end_monotonic: %s", err)
 
     _register_instance(entry.entry_id, cache)
+
+    # After the parent runtime bucket exists, explicitly set up all known subentries.
+    # Home Assistant will handle per-subentry platform forwarding automatically;
+    # the integration must only trigger config entry setup here and after
+    # programmatic creation (see docs/CONFIG_SUBENTRIES_HANDBOOK.md).
+    await _async_setup_new_subentries(hass, entry, entry.subentries.values())
 
     # Home Assistant will fan out platform setup per subentry after this returns
     # (see docs/CONFIG_SUBENTRIES_HANDBOOK.md). Forwarding here would drop the
