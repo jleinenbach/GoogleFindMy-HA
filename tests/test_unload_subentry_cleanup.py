@@ -86,7 +86,7 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self.removed_subentries: list[str] = []
         self.unloaded_subentries: list[str] = []
         self.setup_calls: list[str] = []
-        self.forward_unload_calls: list[tuple[_EntryStub, tuple[object, ...], str | None]] = []
+        self.forward_unload_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
         self.unload_platform_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
         self.forward_setup_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
         self.parent_unload_invocations = 0
@@ -112,19 +112,19 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self,
         entry: _EntryStub,
         platforms: object,
-        *,
-        config_subentry_id: str | None = None,
     ) -> bool:
         assert entry is self._entry
         if isinstance(platforms, (list, tuple, set)):
             payload = tuple(platforms)
         else:
             payload = (platforms,)
-        self.forward_unload_calls.append((entry, payload, config_subentry_id))
+        self.forward_unload_calls.append((entry, payload))
         return True
 
     async def async_forward_entry_setups(
-        self, entry: _EntryStub, platforms: Sequence[object]
+        self,
+        entry: _EntryStub,
+        platforms: Sequence[object],
     ) -> bool:
         assert entry is self._entry
         self.forward_setup_calls.append((entry, tuple(platforms)))
@@ -222,7 +222,7 @@ class _SubentryConfigEntriesHelper:
 
     def __init__(self) -> None:
         self.unload_platform_calls: list[tuple[Any, tuple[object, ...]]] = []
-        self.forward_unload_calls: list[tuple[Any, tuple[object, ...], str | None]] = []
+        self.forward_unload_calls: list[tuple[Any, tuple[object, ...]]] = []
 
     async def async_unload_platforms(
         self, entry: Any, platforms: list[object]
@@ -234,14 +234,12 @@ class _SubentryConfigEntriesHelper:
         self,
         entry: Any,
         platforms: object,
-        *,
-        config_subentry_id: str | None = None,
     ) -> bool:  # noqa: FBT001 - Home Assistant signature
         if isinstance(platforms, (list, tuple, set)):
             payload = tuple(platforms)
         else:
             payload = (platforms,)
-        self.forward_unload_calls.append((entry, payload, config_subentry_id))
+        self.forward_unload_calls.append((entry, payload))
         return True
 
 
@@ -334,14 +332,11 @@ def test_async_unload_entry_removes_subentries_and_registries(
     assert device_registry.removals == [first.subentry_id, second.subentry_id]
     assert not entry.subentries
     calls = hass.config_entries.forward_unload_calls
-    assert calls
-    grouped: dict[str, set[str]] = {}
-    for recorded_entry, platforms, identifier in calls:
+    aggregated: set[str] = set()
+    for recorded_entry, platforms in calls:
         assert recorded_entry is entry
-        assert identifier in {first.subentry_id, second.subentry_id}
-        grouped.setdefault(identifier or "", set()).update(_platform_names(platforms))
-    assert grouped.get(first.subentry_id) == set(integration.TRACKER_FEATURE_PLATFORMS)
-    assert grouped.get(second.subentry_id) == set(integration.TRACKER_FEATURE_PLATFORMS)
+        aggregated.update(_platform_names(platforms))
+    assert aggregated == set(integration.TRACKER_FEATURE_PLATFORMS)
     assert hass.config_entries.parent_unload_invocations == 1
     assert hass.config_entries.unload_platform_calls == [
         (entry, tuple(integration.PLATFORMS))

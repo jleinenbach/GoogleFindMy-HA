@@ -239,9 +239,14 @@ async def test_integration_device_info_uses_service_device(
 
     real_forward_entry_setups = hass.config_entries.async_forward_entry_setups
 
-    async def _forward_entry_setups(entry_obj: MockConfigEntry, platforms: Iterable[object]) -> None:
+    async def _forward_entry_setups(
+        entry_obj: MockConfigEntry,
+        platforms: Iterable[object],
+    ) -> None:
         normalized = {_platform_value(platform) for platform in platforms}
-        await real_forward_entry_setups(entry_obj, platforms)
+        await real_forward_entry_setups(
+            entry_obj, platforms
+        )
         if entry_obj is not entry or "binary_sensor" not in normalized:
             return
         identifier = service_device_identifier(entry_obj.entry_id)
