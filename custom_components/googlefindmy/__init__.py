@@ -2195,38 +2195,54 @@ async def _async_setup_new_subentries(
     retry_missing_registrations = False
 
     for target, fallback_target in setup_targets:
-        if target not in parent_subentry_ids:
-            # HA subentries must be created via async_add_subentry before
-            # scheduling setup (see developers.home-assistant.io guidance).
-            _LOGGER.error(
-                "[%s] Subentry %s not registered in parent entry before scheduling",
-                parent_entry.entry_id,
-                target,
-            )
-            raise HomeAssistantError(
-                f"Subentry {target} not found in config entry {parent_entry.entry_id}"
-            )
-
-        for candidate in (target, fallback_target):
-            if candidate is None:
-                continue
-
-            if not registered_subentry_ids or candidate not in registered_subentry_ids:
+        missing_parent_membership = [
+            candidate
+            for candidate in (target, fallback_target)
+            if candidate is not None and candidate not in parent_subentry_ids
+        ]
+        if missing_parent_membership:
+            for candidate in missing_parent_membership:
+                # HA subentries must be created via async_add_subentry before
+                # scheduling setup (see developers.home-assistant.io guidance).
                 _LOGGER.error(
-                    "[%s] Config subentry %s not registered; cannot schedule setup",
+                    "[%s] Subentry %s not registered in parent entry before scheduling",
                     parent_entry.entry_id,
                     candidate,
                 )
-                missing_registrations.add(candidate)
+
+            raise HomeAssistantError(
+                "; ".join(
+                    (
+                        "Subentry "
+                        f"{candidate} not found in config entry {parent_entry.entry_id}"
+                        for candidate in missing_parent_membership
+                    )
+                )
+            )
+
+        for registration_candidate in (target, fallback_target):
+            if registration_candidate is None:
+                continue
+
+            if (
+                not registered_subentry_ids
+                or registration_candidate not in registered_subentry_ids
+            ):
+                _LOGGER.error(
+                    "[%s] Config subentry %s not registered; cannot schedule setup",
+                    parent_entry.entry_id,
+                    registration_candidate,
+                )
+                missing_registrations.add(registration_candidate)
                 retry_missing_registrations = retry_missing_registrations or not registered_subentry_ids
                 continue
 
             _LOGGER.warning(
                 "[%s] Scheduling setup for config subentry '%s'",  # noqa: G004
                 parent_entry.entry_id,
-                candidate,
+                registration_candidate,
             )
-            entry_obj = get_entry(candidate)
+            entry_obj = get_entry(registration_candidate)
             state = getattr(entry_obj, "state", None)
             if isinstance(state, ConfigEntryState) and state in (
                 ConfigEntryState.SETUP_IN_PROGRESS,
@@ -2235,26 +2251,26 @@ async def _async_setup_new_subentries(
                 break
 
             try:
-                await hass.config_entries.async_setup(candidate)
+                await hass.config_entries.async_setup(registration_candidate)
                 _LOGGER.debug(
                     "[%s] Scheduled setup for config subentry '%s'",
                     parent_entry.entry_id,
-                    candidate,
+                    registration_candidate,
                 )
             except UnknownEntry:
                 _LOGGER.error(
                     "[%s] Config subentry %s not registered; cannot set up",
                     parent_entry.entry_id,
-                    candidate,
+                    registration_candidate,
                 )
-                missing_registrations.add(candidate)
+                missing_registrations.add(registration_candidate)
                 retry_missing_registrations = True
                 continue
             except Exception as err:  # pragma: no cover - defensive logging
                 _LOGGER.debug(
                     "[%s] async_setup_entry: Subentry '%s' setup raised: %s",
                     parent_entry.entry_id,
-                    candidate,
+                    registration_candidate,
                     err,
                 )
                 continue
