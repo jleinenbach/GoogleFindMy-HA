@@ -21,6 +21,8 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, `mypy --strict`, and `pytest -q --cov` on Python 3.13 to protect code quality before merges.
 
+For the quickest way to bootstrap Home Assistant test stubs before running `pytest -q`, see the Environment verification bullets in [AGENTS.md](AGENTS.md#environment-verification) (they call out `make test-stubs`).
+
 #### Local verification commands
 
 - `mypy --strict` — run the full strict type-checker locally to mirror CI expectations before opening a pull request.
