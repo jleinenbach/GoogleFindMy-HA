@@ -12,18 +12,12 @@ import asyncio
 import binascii
 import logging
 import os
-from typing import Any
 from collections.abc import Awaitable, Callable
+from importlib import import_module
+from typing import Any
+
 from aiohttp import ClientSession
 
-from custom_components.googlefindmy.NovaApi.nova_request import async_nova_request
-from custom_components.googlefindmy.NovaApi.scopes import NOVA_LIST_DEVICES_API_SCOPE
-from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
-from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
-from custom_components.googlefindmy.ProtoDecoders.decoder import (
-    get_canonic_ids,
-    parse_device_list_protobuf,
-)
 from custom_components.googlefindmy.Auth.token_cache import (
     TokenCache,  # entry-scoped cache
     get_cache_for_entry,
@@ -32,6 +26,14 @@ from custom_components.googlefindmy.Auth.token_cache import (
 from custom_components.googlefindmy.exceptions import (
     MissingNamespaceError,
     MissingTokenCacheError,
+)
+from custom_components.googlefindmy.NovaApi.nova_request import async_nova_request
+from custom_components.googlefindmy.NovaApi.scopes import NOVA_LIST_DEVICES_API_SCOPE
+from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
+from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
+from custom_components.googlefindmy.ProtoDecoders.decoder import (
+    get_canonic_ids,
+    parse_device_list_protobuf,
 )
 
 AsyncCacheGetter = Callable[[str], Awaitable[Any]]
@@ -63,7 +65,7 @@ def create_device_list_request() -> str:
     return hex_payload
 
 
-async def async_request_device_list(
+async def async_request_device_list(  # noqa: PLR0913
     username: str | None = None,
     *,
     session: ClientSession | None = None,
@@ -75,7 +77,7 @@ async def async_request_device_list(
     cache_set: AsyncCacheSetter | None = None,
     refresh_override: Callable[[], Awaitable[str | None]] | None = None,
     namespace: str | None = None,
-) -> str:
+) -> str:  # noqa: PLR0913
     """Asynchronously request the device list via Nova.
 
     This is the primary function for fetching the device list within Home Assistant,
@@ -212,9 +214,7 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
             available = ", ".join(sorted(entry_ids)) or "<none>"
             raise RuntimeError(
                 "Multiple token caches registered. Provide the ConfigEntry ID via "
-                "the CLI argument or set GOOGLEFINDMY_ENTRY_ID. Available IDs: {avail}.".format(
-                    avail=available
-                )
+                f"the CLI argument or set GOOGLEFINDMY_ENTRY_ID. Available IDs: {available}."
             )
         raise MissingTokenCacheError()
 
@@ -225,9 +225,7 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
     except KeyError as err:
         available = ", ".join(sorted(entry_ids)) or "<none>"
         raise RuntimeError(
-            "Unknown entry_id '{entry}'. Available entry IDs: {avail}.".format(
-                entry=normalized, avail=available
-            )
+            f"Unknown entry_id '{normalized}'. Available entry IDs: {available}."
         ) from err
 
     return cache, normalized
@@ -251,9 +249,10 @@ async def _async_cli_main(entry_id: str | None = None) -> None:
 
     # Maintain side-effect helpers for Spot custom trackers.
     # NOTE: These imports are CLI-only to avoid heavy HA startup imports.
-    from custom_components.googlefindmy.SpotApi.UploadPrecomputedPublicKeyIds.upload_precomputed_public_key_ids import (  # noqa: E501
-        refresh_custom_trackers,
+    refresh_module = import_module(
+        "custom_components.googlefindmy.SpotApi.UploadPrecomputedPublicKeyIds.upload_precomputed_public_key_ids"
     )
+    refresh_custom_trackers = refresh_module.refresh_custom_trackers
 
     refresh_custom_trackers(device_list)
     canonic_ids = get_canonic_ids(device_list)
@@ -279,9 +278,9 @@ async def _async_cli_main(entry_id: str | None = None) -> None:
         def _register_esp32_cli() -> None:
             """Synchronous helper to register a new ESP32 device."""
             # Lazy import to avoid touching spot token logic at HA startup
-            from custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device import (
-                register_esp32,
-            )
+            register_esp32 = import_module(
+                "custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device"
+            ).register_esp32
 
             register_esp32()
 
@@ -295,9 +294,9 @@ async def _async_cli_main(entry_id: str | None = None) -> None:
         print("Fetching location...")
 
         # Lazy import: only needed for the CLI branch
-        from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (  # noqa: E501
-            get_location_data_for_device,
-        )
+        get_location_data_for_device = import_module(
+            "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request"
+        ).get_location_data_for_device
 
         await get_location_data_for_device(
             selected_canonic_id,
