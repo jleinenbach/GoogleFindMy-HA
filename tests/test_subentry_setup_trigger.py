@@ -1,19 +1,28 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from custom_components.googlefindmy import RuntimeData, _async_setup_subentry
+from custom_components.googlefindmy import (
+    RuntimeData,
+    _async_setup_new_subentries,
+    _async_setup_subentry,
+)
 from custom_components.googlefindmy.const import (
     DOMAIN,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
 )
 
-from tests.helpers.homeassistant import FakeConfigEntriesManager, FakeHass
+from tests.helpers.homeassistant import (
+    FakeConfigEntriesManager,
+    FakeConfigEntry,
+    FakeHass,
+)
 
 
 @pytest.mark.asyncio
@@ -125,3 +134,68 @@ async def test_async_setup_legacy_subentry_attaches_bucket_runtime_data() -> Non
 
     assert await _async_setup_subentry(hass, child_entry) is True
     assert child_entry.runtime_data is runtime_data
+
+
+@pytest.mark.asyncio
+async def test_async_setup_subentry_errors_when_unregistered(caplog: pytest.LogCaptureFixture) -> None:
+    """Modern subentry setup should fail loudly if the subentry is unknown."""
+
+    async def _async_refresh() -> None:
+        return None
+
+    caplog.set_level(logging.ERROR)
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    hass = FakeHass(config_entries=config_entries)
+
+    bucket = hass.data.setdefault(DOMAIN, {})
+    entries_bucket = bucket.setdefault("entries", {})
+    runtime_data = RuntimeData(
+        coordinator=SimpleNamespace(
+            _refresh_subentry_index=lambda: None,
+            async_request_refresh=_async_refresh,
+        ),  # type: ignore[arg-type]
+        token_cache=object(),  # type: ignore[arg-type]
+        subentry_manager=SimpleNamespace(_refresh_from_entry=lambda: None),  # type: ignore[arg-type]
+        fcm_receiver=None,
+    )
+    entries_bucket[parent_entry.entry_id] = runtime_data
+
+    subentry = SimpleNamespace(
+        entry_id="child-entry",
+        parent_entry_id=parent_entry.entry_id,
+        config_subentry_id="child-entry",
+        data={"features": TRACKER_FEATURE_PLATFORMS},
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+
+    with pytest.raises(ConfigEntryNotReady):
+        await _async_setup_subentry(hass, subentry, subentry)
+
+    assert "not registered under parent" in " ".join(caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_async_setup_new_subentries_logs_and_retries_unknown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Subentry setup scheduling should log and record transient UnknownEntry races."""
+
+    caplog.set_level(logging.WARNING)
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    subentry = SimpleNamespace(
+        entry_id="child-entry",
+        subentry_id="child-entry",
+        unique_id="child-entry",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+    parent_entry.subentries[subentry.subentry_id] = subentry
+
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    config_entries.set_transient_unknown_entry(subentry.entry_id, setup_failures=1)
+    hass = FakeHass(config_entries=config_entries)
+
+    await _async_setup_new_subentries(hass, parent_entry, [subentry])
+
+    assert subentry.entry_id in config_entries.setup_calls
+    assert any("Config subentry" in message for message in caplog.messages)
