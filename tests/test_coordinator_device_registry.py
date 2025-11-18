@@ -247,6 +247,13 @@ class _FakeDeviceRegistry:
                     device.translation_key = translation_key
                 if translation_placeholders is not None:
                     device.translation_placeholders = translation_placeholders
+                if (
+                    direct_config_subentry is not _UNSET_DEVICE
+                    and add_config_entry_id is None
+                ):
+                    raise AssertionError(
+                        "config_subentry_id provided without add_config_entry_id"
+                    )
                 if add_config_entry_id:
                     device.config_entries.add(add_config_entry_id)
                     subentries = device.config_entries_subentries.setdefault(
@@ -816,6 +823,29 @@ def _prepare_coordinator_for_registry(
         add_warning=lambda **kwargs: None,
         remove_warning=lambda *args, **kwargs: None,
     )
+
+
+def test_fake_registry_requires_parent_entry_for_subentry(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Stub registry mirrors HA guard against orphaned subentries."""
+
+    entry_id = "entry-guard"
+    device = fake_registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry_id,
+        identifiers={(DOMAIN, "entry-guard:device-1")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Existing Device",
+        config_subentry_id=None,
+    )
+
+    with pytest.raises(
+        AssertionError, match="config_subentry_id provided without add_config_entry_id"
+    ):
+        fake_registry.async_update_device(  # type: ignore[attr-defined]
+            device_id=device.id, config_subentry_id="tracker-subentry"
+        )
 
 
 def test_devices_register_without_service_parent(
