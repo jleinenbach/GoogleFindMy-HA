@@ -91,7 +91,19 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Probe brands endpoint
+        id: brands_probe
+        run: |
+          set -u
+          if curl -sSfL https://brands.home-assistant.io/domains.json >/dev/null; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning ::brands.home-assistant.io unavailable; skipping HACS validation to avoid false negatives."
+          fi
+
       - name: Run HACS validation
+        if: steps.brands_probe.outputs.available == 'true'
         uses: hacs/action@main
         with:
           category: integration
