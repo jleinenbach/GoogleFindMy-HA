@@ -62,9 +62,9 @@ import logging
 import math
 import random
 import time
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, cast
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -129,8 +129,8 @@ else:
 
 _LOGGER = logging.getLogger(__name__)
 
-JSONDict: TypeAlias = dict[str, Any]
-MutableJSONMapping: TypeAlias = MutableMapping[str, Any]
+type JSONDict = dict[str, Any]
+type MutableJSONMapping = MutableMapping[str, Any]
 
 _T = TypeVar("_T")
 
@@ -140,7 +140,7 @@ async def _call_in_executor(func: Callable[..., _T], /, *args: Any) -> _T:
 
     to_thread_obj = getattr(asyncio, "to_thread", None)
     if to_thread_obj is not None:
-        to_thread = cast("Callable[..., Awaitable[_T]]", to_thread_obj)
+        to_thread = cast(Callable[..., Awaitable[_T]], to_thread_obj)
         return await to_thread(func, *args)
 
     try:
@@ -394,7 +394,7 @@ class FcmReceiverHA:
 
     async def _start_supervisor_for_entry(
         self, entry_id: str, cache: TokenCache | None
-    ) -> None:
+    ) -> None:  # noqa: PLR0915, PLR0912
         """Start the supervisor loop for the given entry if not running."""
         if entry_id in self.supervisors and not self.supervisors[entry_id].done():
             return
@@ -661,7 +661,7 @@ class FcmReceiverHA:
         payload: Mapping[str, Any],
         persistent_id: str | None,
         context: Any | None,
-    ) -> None:
+    ) -> None:  # noqa: PLR0912
         """Handle incoming FCM notification (sync callback from per-entry client).
 
         Args:

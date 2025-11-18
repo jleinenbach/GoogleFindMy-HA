@@ -46,8 +46,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, cast
 from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, cast
 
 import gpsoauth
 
@@ -125,23 +125,18 @@ def _is_non_retryable_auth(err: Exception) -> bool:
     if isinstance(err, InvalidAasTokenError):
         return True
     text = _clip(err)
-    # Typical shapes to consider non-retryable
-    if "BadAuthentication" in text:
-        return True
     low = text.lower()
-    if "invalid_grant" in low:
-        return True
-    if "missing 'auth' in gpsoauth response" in text:
-        # Most often wraps {"Error": "..."} from gpsoauth; treat as non-retryable
-        return True
-    if "neither 'token' nor 'auth' found" in low:
-        return True
-    if "missing 'token'/'auth' in gpsoauth response" in low:
+    signals = (
+        "badauthentication",
+        "invalid_grant",
+        "missing 'auth' in gpsoauth response",
+        "neither 'token' nor 'auth' found",
+        "missing 'token'/'auth' in gpsoauth response",
+    )
+    if any(signal in low for signal in signals):
         return True
     # Treat obvious HTTP-style auth denials as non-retryable as well
-    if "401" in low or "403" in low or "unauthorized" in low or "forbidden" in low:
-        return True
-    return False
+    return "401" in low or "403" in low or "unauthorized" in low or "forbidden" in low
 
 
 async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
@@ -266,7 +261,7 @@ async def async_get_adm_token(
     retries: int = 2,
     backoff: float = 1.0,
     cache: TokenCache,
-) -> str:
+) -> str:  # noqa: PLR0912, PLR0915
     """
     Return a cached ADM token or generate a new one (async-first API).
 
@@ -532,7 +527,7 @@ async def async_get_adm_token_isolated(
     cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
     retries: int = 1,
     backoff: float = 1.0,
-) -> str:
+) -> str:  # noqa: PLR0913, PLR0912
     """
     Perform a *real* AAS→ADM exchange **without touching the global cache**.
     This function is required by the config flow for credential validation.
