@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
 from collections.abc import Callable
+from importlib import import_module
+from typing import Any, cast
 
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -16,16 +17,16 @@ def _resolve_receiver_provider() -> Callable[[], Any] | None:
 
     candidate_modules: list[Any] = []
     try:
-        from custom_components.googlefindmy import api as api_module  # noqa: PLC0415
+        api_module = import_module("custom_components.googlefindmy.api")
 
         candidate_modules.append(api_module)
     except Exception:  # pragma: no cover - optional import
         candidate_modules.append(None)
 
     try:
-        from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
-            location_request as location_module,
-        )  # noqa: PLC0415
+        location_module = import_module(
+            "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request"
+        )
 
         candidate_modules.append(location_module)
     except Exception:  # pragma: no cover - optional import
@@ -34,9 +35,13 @@ def _resolve_receiver_provider() -> Callable[[], Any] | None:
     for module in candidate_modules:
         if module is None:
             continue
-        getter = cast(
-            Callable[[], Any] | None, getattr(module, "_FCM_ReceiverGetter", None)
-        )
+        state = getattr(module, "_fcm_receiver_state", None)
+        if isinstance(state, dict):
+            getter = cast(Callable[[], Any] | None, state.get("getter"))
+        else:
+            getter = cast(
+                Callable[[], Any] | None, getattr(module, "_FCM_ReceiverGetter", None)
+            )
         if getter is not None and callable(getter):
             return getter
     return None

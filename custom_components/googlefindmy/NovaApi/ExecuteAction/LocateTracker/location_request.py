@@ -6,37 +6,18 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import logging
+import time
 import traceback
-from typing import (
-    Protocol,
-    runtime_checkable,
-    Any,
-    cast,
-)
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from importlib import import_module
+from types import ModuleType
+from typing import Any, Protocol, cast, runtime_checkable
 
 import aiohttp
 
 # Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
-from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
-    create_action_request,
-    serialize_action_request,
-)
-from custom_components.googlefindmy.NovaApi.nova_request import (
-    async_nova_request,
-    NovaAuthError,
-    NovaRateLimitError,
-    NovaHTTPError,
-)
-from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
-from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
-from custom_components.googlefindmy.example_data_provider import get_example_data
-from custom_components.googlefindmy.exceptions import (
-    MissingNamespaceError,
-    MissingTokenCacheError,
-)
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.const import (
     CACHE_KEY_CONTRIBUTOR_MODE,
     CACHE_KEY_LAST_MODE_SWITCH,
@@ -45,7 +26,23 @@ from custom_components.googlefindmy.const import (
     DEFAULT_CONTRIBUTOR_MODE,
     LOCATION_REQUEST_TIMEOUT_S,
 )
-from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.example_data_provider import get_example_data
+from custom_components.googlefindmy.exceptions import (
+    MissingNamespaceError,
+    MissingTokenCacheError,
+)
+from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
+    create_action_request,
+    serialize_action_request,
+)
+from custom_components.googlefindmy.NovaApi.nova_request import (
+    NovaAuthError,
+    NovaHTTPError,
+    NovaRateLimitError,
+    async_nova_request,
+)
+from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
+from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,7 +73,41 @@ class FcmReceiverProtocol(Protocol):
     async def async_unregister_for_location_updates(self, device_id: str) -> None: ...
 
 
-_FCM_ReceiverGetter: Callable[[], FcmReceiverProtocol] | None = None
+def _import_deviceupdate_pb2() -> ModuleType:
+    return cast(
+        ModuleType,
+        import_module("custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2"),
+    )
+
+
+def _import_decoder_module() -> ModuleType:
+    return cast(
+        ModuleType,
+        import_module("custom_components.googlefindmy.ProtoDecoders.decoder"),
+    )
+
+
+def _import_decrypt_locations_module() -> ModuleType:
+    return cast(
+        ModuleType,
+        import_module(
+            "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations"
+        ),
+    )
+
+
+def _import_eid_info_module() -> ModuleType:
+    return cast(
+        ModuleType,
+        import_module(
+            "custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request"
+        ),
+    )
+
+
+_fcm_receiver_state: dict[str, Callable[[], FcmReceiverProtocol] | None] = {
+    "getter": None
+}
 
 
 def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
@@ -89,14 +120,12 @@ def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) ->
     Args:
         getter: A callable that returns the singleton FCM receiver instance.
     """
-    global _FCM_ReceiverGetter
-    _FCM_ReceiverGetter = getter
+    _fcm_receiver_state["getter"] = getter
 
 
 def unregister_fcm_receiver_provider() -> None:
     """Unregister the FCM receiver provider (called on integration unload)."""
-    global _FCM_ReceiverGetter
-    _FCM_ReceiverGetter = None
+    _fcm_receiver_state["getter"] = None
 
 
 def create_location_request(
@@ -122,9 +151,7 @@ def create_location_request(
     Returns:
         A hex-encoded string representing the serialized protobuf message.
     """
-    from custom_components.googlefindmy.ProtoDecoders import (
-        DeviceUpdate_pb2,
-    )  # lazy import
+    device_update_pb2 = _import_deviceupdate_pb2()
 
     normalized_mode = _normalize_contributor_mode(contributor_mode)
     if last_mode_switch is None or last_mode_switch <= 0:
@@ -139,12 +166,12 @@ def create_location_request(
     )
 
     proto_mode_map = {
-        CONTRIBUTOR_MODE_HIGH_TRAFFIC: DeviceUpdate_pb2.SpotContributorType.FMDN_HIGH_TRAFFIC,
-        CONTRIBUTOR_MODE_IN_ALL_AREAS: DeviceUpdate_pb2.SpotContributorType.FMDN_ALL_LOCATIONS,
+        CONTRIBUTOR_MODE_HIGH_TRAFFIC: device_update_pb2.SpotContributorType.FMDN_HIGH_TRAFFIC,
+        CONTRIBUTOR_MODE_IN_ALL_AREAS: device_update_pb2.SpotContributorType.FMDN_ALL_LOCATIONS,
     }
     action_request.action.locateTracker.contributorType = proto_mode_map.get(
         normalized_mode,
-        DeviceUpdate_pb2.SpotContributorType.FMDN_ALL_LOCATIONS,
+        device_update_pb2.SpotContributorType.FMDN_ALL_LOCATIONS,
     )
 
     # Convert to hex string
@@ -177,7 +204,7 @@ class _CallbackContext:
         self.data: list[dict[str, Any]] | None = None
 
 
-def _make_location_callback(
+def _make_location_callback(  # noqa: PLR0915
     *,
     name: str,
     canonic_device_id: str,
@@ -206,7 +233,9 @@ def _make_location_callback(
         A callback function suitable for the FCM receiver.
     """
 
-    def location_callback(response_canonic_id: str, hex_response: str) -> None:
+    def location_callback(  # noqa: PLR0915
+        response_canonic_id: str, hex_response: str
+    ) -> None:
         """Processes the location update received via FCM."""
         try:
             _LOGGER.info("FCM callback triggered for %s, processing response...", name)
@@ -214,20 +243,44 @@ def _make_location_callback(
 
             # Lazy imports inside callback (avoid protobuf import side effects during HA startup)
             try:
-                from custom_components.googlefindmy.ProtoDecoders.decoder import (
-                    parse_device_update_protobuf,
-                )
-                from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
-                    async_decrypt_location_response_locations,
-                    DecryptionError,
-                    StaleOwnerKeyError,
-                )
-                from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
-                    SpotApiEmptyResponseError,
-                )
+                decoder_module = _import_decoder_module()
+                decrypt_module = _import_decrypt_locations_module()
+                eid_info_module = _import_eid_info_module()
             except ImportError as import_error:
                 _LOGGER.error(
                     "Failed to import decoder/decrypt functions in callback for %s: %s",
+                    name,
+                    import_error,
+                )
+                ctx.data = cast(list[dict[str, Any]], [])
+                ctx.event.set()
+                return
+
+            try:
+                parse_device_update_protobuf = cast(
+                    Callable[[str], Any],
+                    getattr(decoder_module, "parse_device_update_protobuf"),
+                )
+                async_decrypt_location_response_locations = cast(
+                    Callable[[Any], Awaitable[list[dict[str, Any]]]],
+                    getattr(
+                        decrypt_module,
+                        "async_decrypt_location_response_locations",
+                    ),
+                )
+                DecryptionError = cast(
+                    type[Exception], getattr(decrypt_module, "DecryptionError")
+                )
+                StaleOwnerKeyError = cast(
+                    type[Exception], getattr(decrypt_module, "StaleOwnerKeyError")
+                )
+                SpotApiEmptyResponseError = cast(
+                    type[Exception],
+                    getattr(eid_info_module, "SpotApiEmptyResponseError"),
+                )
+            except AttributeError as import_error:
+                _LOGGER.error(
+                    "Failed to load decoder/decrypt attributes in callback for %s: %s",
                     name,
                     import_error,
                 )
@@ -314,7 +367,7 @@ def _make_location_callback(
 # -----------------------------------------------------------------------------
 # Public API
 # -----------------------------------------------------------------------------
-async def get_location_data_for_device(
+async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0915
     canonic_device_id: str,
     name: str,
     session: aiohttp.ClientSession | None = None,
@@ -364,9 +417,11 @@ async def get_location_data_for_device(
     _LOGGER.info("Requesting location data for %s...", name)
 
     # Fail hard on missing/misconfigured provider: this is a programming/config error.
-    if _FCM_ReceiverGetter is None:
+    fcm_getter = _fcm_receiver_state["getter"]
+
+    if fcm_getter is None:
         raise RuntimeError("FCM receiver provider has not been registered.")
-    fcm_receiver = _FCM_ReceiverGetter()
+    fcm_receiver = fcm_getter()
     if fcm_receiver is None:
         raise RuntimeError("FCM receiver provider returned None.")
 
