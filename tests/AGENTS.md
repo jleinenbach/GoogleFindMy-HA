@@ -72,6 +72,10 @@ code relies on those helpers, add explicit guards or local fallbacks so
 entities remain importable under the stub; otherwise, `AttributeError`
 failures will surface before the real coordinator features are present.
 
+When adding or adjusting tests, normalize imports with
+`python -m ruff check --select I --fix` so `I001` findings resolve without
+manual resorting.
+
 ### Config-entry mutation tracking lists
 
 Config-entry manager doubles (for example, the `_ConfigEntries` stub in
