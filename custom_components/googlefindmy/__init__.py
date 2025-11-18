@@ -2171,10 +2171,6 @@ async def _async_setup_new_subentries(
     # agents/runtime_patterns/AGENTS.md).
     await asyncio.sleep(0)
 
-    block_till_done = getattr(hass, "async_block_till_done", None)
-    if callable(block_till_done):
-        await block_till_done()
-
     config_entries = getattr(hass, "config_entries", None)
     if config_entries is None:
         _LOGGER.debug(
