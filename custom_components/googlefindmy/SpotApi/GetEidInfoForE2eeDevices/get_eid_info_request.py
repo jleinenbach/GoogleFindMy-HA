@@ -28,14 +28,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
-from custom_components.googlefindmy.SpotApi.spot_request import (
-    SpotTrailersOnlyError,
-    async_spot_request,
-    spot_request,
-)
+from custom_components.googlefindmy.SpotApi import spot_request as spot_request_module
+from custom_components.googlefindmy.SpotApi.spot_request import SpotTrailersOnlyError
 from google.protobuf.message import DecodeError  # parse-time error type for protobufs
 
 if TYPE_CHECKING:
@@ -78,16 +75,12 @@ async def _spot_call_async(scope: str, payload: bytes, *, cache: TokenCache) -> 
         RuntimeError: on other underlying request errors.
     """
     # Try native async helper first
-    try:
-        async_helper = async_spot_request
-    except Exception as import_error:  # pragma: no cover - defensive
-        raise RuntimeError(
-            "Async SPOT request helper is unavailable; update integration dependencies."
-        ) from import_error
+    async_helper = getattr(spot_request_module, "async_spot_request", None)
 
     if callable(async_helper):
         try:
-            return await async_helper(scope, payload, cache=cache)
+            response_bytes = await async_helper(scope, payload, cache=cache)
+            return cast(bytes, response_bytes)
         except SpotTrailersOnlyError as e:
             # Map to integration-level error expected by callers
             raise SpotApiEmptyResponseError(
@@ -101,7 +94,7 @@ async def _spot_call_async(scope: str, payload: bytes, *, cache: TokenCache) -> 
     loop = asyncio.get_running_loop()
 
     def _call_sync() -> bytes:
-        return spot_request(scope, payload)
+        return spot_request_module.spot_request(scope, payload)
 
     try:
         response_bytes = await loop.run_in_executor(None, _call_sync)
@@ -191,7 +184,9 @@ def get_eid_info() -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesResponse:
         pass
 
     serialized_request = _build_request_bytes()
-    response_bytes = spot_request("GetEidInfoForE2eeDevices", serialized_request)
+    response_bytes = spot_request_module.spot_request(
+        "GetEidInfoForE2eeDevices", serialized_request
+    )
 
     if not response_bytes:
         _LOGGER.warning(

@@ -1,18 +1,18 @@
-# custom_components/googlefindmy/FMDNCrypto/eid_generator.py
-#
-#  GoogleFindMyTools - A set of tools to interact with the Google Find My API
-#  Copyright © 2024 Leon Böttger. All rights reserved.
 #
 from typing import cast
 
 from Cryptodome.Cipher import AES
-from ecdsa import SECP160r1
 
+from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
+    CurveParametersProtocol,
+    load_curve,
+)
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
 # Constants
 K = 10
 ROTATION_PERIOD = 1024  # 2^K seconds
+_CURVE: CurveParametersProtocol = load_curve()
 
 
 def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
@@ -20,8 +20,9 @@ def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
     r = calculate_r(identity_key, timestamp)
 
     # Compute R = r * G
-    curve = SECP160r1
-    R = r * curve.generator
+    curve = _CURVE
+    generator = curve.generator
+    R = r * generator
 
     # Return the x coordinate of R as the EID
     return cast(bytes, R.x().to_bytes(20, "big"))
@@ -49,7 +50,7 @@ def calculate_r(identity_key: bytes, timestamp: int) -> int:
     r_dash_int = int.from_bytes(r_dash, byteorder="big", signed=False)
 
     # SECP160R1 parameters
-    curve = SECP160r1
+    curve = _CURVE
     curve_order: int = int(curve.order)
 
     # r' is now projected to the finite field Fp by calculating r = r' mod n

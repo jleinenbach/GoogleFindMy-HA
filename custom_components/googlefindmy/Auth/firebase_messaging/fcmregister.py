@@ -309,7 +309,8 @@ class FcmRegister:
             msg = MessageToJson(acir, indent=4)
             _logger.debug("GCM check-in response (raw):\n%s", msg)
 
-        return cast(JSONDict, MessageToDict(acir))
+        parsed_response: JSONDict = MessageToDict(acir)
+        return parsed_response
 
     # ---------------------------------------------------------------------
     # GCM Register (token)

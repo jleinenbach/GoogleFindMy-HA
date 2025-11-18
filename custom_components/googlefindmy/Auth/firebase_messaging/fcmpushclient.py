@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import random
@@ -40,13 +41,12 @@ from base64 import urlsafe_b64decode
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Callable, Generic, cast
 
 from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 from google.protobuf.json_format import MessageToJson
-from http_ece import decrypt as http_decrypt
 
 from google.protobuf.message import Message as RuntimeMessage
 
@@ -54,6 +54,8 @@ if TYPE_CHECKING:
     from custom_components.googlefindmy.protobuf_typing import MessageProto
 else:
     MessageProto = RuntimeMessage
+
+http_decrypt = cast(Callable[..., bytes], importlib.import_module("http_ece").decrypt)
 
 from ._typing import (
     CredentialsUpdatedCallable,
@@ -158,7 +160,7 @@ class FcmPushClientConfig:  # pylint:disable=too-many-instance-attributes
     writer_close_timeout: float = 2.0
 
 
-class FcmPushClient:  # pylint:disable=too-many-instance-attributes
+class FcmPushClient(Generic[NotificationContextT]):  # pylint:disable=too-many-instance-attributes
     """Worker-only FCM client.
     - Establishes a single connection with initial retry.
     - Listens for messages until an error occurs or stop() is called.
@@ -225,7 +227,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     def _msg_str(self, msg: MessageProto) -> str:
         if self.config.log_debug_verbose:
-            pretty_json = cast(str, MessageToJson(msg, indent=4))
+            pretty_json = MessageToJson(cast(RuntimeMessage, msg), indent=4)
             return f"{type(msg).__name__}\n{pretty_json}"
         return type(msg).__name__
 
@@ -453,16 +455,13 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         privkey = load_der_private_key(
             der_data, password=None, backend=default_backend()
         )
-        decrypted = cast(
-            bytes,
-            http_decrypt(
-                raw_data,
-                salt=salt,
-                private_key=privkey,
-                dh=crypto_key,
-                version="aesgcm",
-                auth_secret=secret,
-            ),
+        decrypted = http_decrypt(
+            raw_data,
+            salt=salt,
+            private_key=privkey,
+            dh=crypto_key,
+            version="aesgcm",
+            auth_secret=secret,
         )
         return decrypted
 
