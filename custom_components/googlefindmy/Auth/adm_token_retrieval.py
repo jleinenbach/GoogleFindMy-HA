@@ -52,15 +52,15 @@ from typing import Any, cast
 import gpsoauth
 
 # Prefer relative imports inside the package for robustness
+from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN, DATA_AUTH_METHOD
+from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
+from .token_cache import TokenCache
 from .token_retrieval import (
     InvalidAasTokenError,
-    async_request_token,
     _extract_android_id_from_credentials,
+    async_request_token,
 )
-from .token_cache import TokenCache
 from .username_provider import async_get_username, username_string
-from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
-from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN, DATA_AUTH_METHOD
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -255,13 +255,13 @@ async def _resolve_android_id_for_isolated_flow(
     return android_id
 
 
-async def async_get_adm_token(
+async def async_get_adm_token(  # noqa: PLR0912,PLR0915
     username: str | None = None,
     *,
     retries: int = 2,
     backoff: float = 1.0,
     cache: TokenCache,
-) -> str:  # noqa: PLR0912, PLR0915
+) -> str:
     """
     Return a cached ADM token or generate a new one (async-first API).
 
@@ -518,7 +518,7 @@ async def _perform_oauth_with_provided_aas(
         raise
 
 
-async def async_get_adm_token_isolated(
+async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
     username: str,
     *,
     aas_token: str | None = None,
@@ -527,7 +527,7 @@ async def async_get_adm_token_isolated(
     cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
     retries: int = 1,
     backoff: float = 1.0,
-) -> str:  # noqa: PLR0913, PLR0912
+) -> str:
     """
     Perform a *real* AAS→ADM exchange **without touching the global cache**.
     This function is required by the config flow for credential validation.

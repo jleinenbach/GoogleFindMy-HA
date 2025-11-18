@@ -43,9 +43,9 @@ from typing import Any
 
 import gpsoauth
 
+from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 from .token_cache import TokenCache
 from .username_provider import username_string
-from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 
 _LOGGER = logging.getLogger(__name__)
 

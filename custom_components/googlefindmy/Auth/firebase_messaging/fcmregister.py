@@ -36,15 +36,21 @@ import secrets
 import time
 import uuid
 from base64 import b64encode, urlsafe_b64encode
-from dataclasses import dataclass
-from typing import Any, cast
 from collections.abc import Mapping
+from dataclasses import dataclass
+from http import HTTPStatus
+from typing import Any, cast
 
 from aiohttp import ClientSession, ClientTimeout
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from google.protobuf.json_format import MessageToDict, MessageToJson
 
+from ._typing import (
+    CredentialsUpdatedCallable,
+    JSONDict,
+    MutableJSONMapping,
+)
 from .const import (
     AUTH_VERSION,
     FCM_INSTALLATION,
@@ -64,11 +70,6 @@ from .proto.android_checkin_pb2 import (
 from .proto.checkin_pb2 import (
     AndroidCheckinRequest,
     AndroidCheckinResponse,
-)
-from ._typing import (
-    CredentialsUpdatedCallable,
-    JSONDict,
-    MutableJSONMapping,
 )
 
 _logger = logging.getLogger(__name__)
@@ -263,7 +264,7 @@ class FcmRegister:
                     timeout=self.CLIENT_TIMEOUT,
                 ) as resp:
                     status = resp.status
-                    if status == 200:
+                    if status == HTTPStatus.OK:
                         content = await resp.read()
                         break
 
@@ -313,7 +314,7 @@ class FcmRegister:
     # ---------------------------------------------------------------------
     # GCM Register (token)
     # ---------------------------------------------------------------------
-    async def gcm_register(
+    async def gcm_register(  # noqa: PLR0912,PLR0915
         self,
         options: dict[str, Any],
         retries: int = 8,
@@ -458,7 +459,7 @@ class FcmRegister:
                 response_text
             )
 
-            if status == 404 or html_like:
+            if status == HTTPStatus.NOT_FOUND or html_like:
                 snippet = response_text[:200]
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
                 fallback_triggered = False
@@ -486,11 +487,10 @@ class FcmRegister:
                             f"HTTP {status}", endpoint_index, next_index
                         )
                         endpoint_index = next_index
-                    else:
-                        if self._log_debug_verbose:
-                            _logger.debug(
-                                "GCM register resetting endpoint rotation after HTML/404 sender fallback"
-                            )
+                    elif self._log_debug_verbose:
+                        _logger.debug(
+                            "GCM register resetting endpoint rotation after HTML/404 sender fallback"
+                        )
                     await asyncio.sleep(1 if fallback_triggered else 0.5)
                 else:
                     _logger.warning(
@@ -651,7 +651,7 @@ class FcmRegister:
             json=payload,
             timeout=self.CLIENT_TIMEOUT,
         ) as resp:
-            if resp.status == 200:
+            if resp.status == HTTPStatus.OK:
                 fcm_install = cast(JSONDict, await resp.json())
                 return {
                     "token": fcm_install["authToken"]["token"],
@@ -712,7 +712,7 @@ class FcmRegister:
             json=payload,
             timeout=self.CLIENT_TIMEOUT,
         ) as resp:
-            if resp.status == 200:
+            if resp.status == HTTPStatus.OK:
                 fcm_refresh = cast(JSONDict, await resp.json())
                 return {
                     "token": fcm_refresh["token"],
@@ -807,7 +807,7 @@ class FcmRegister:
                     timeout=self.CLIENT_TIMEOUT,
                 ) as resp:
                     status = resp.status
-                    if status == 200:
+                    if status == HTTPStatus.OK:
                         fcm = cast(JSONDict, await resp.json())
                         return fcm
                     else:
