@@ -2118,6 +2118,9 @@ async def _async_setup_new_subentries(
             identifier = _resolve_config_subentry_identifier(subentry)
             if isinstance(identifier, str) and identifier:
                 parent_subentry_ids.add(identifier)
+            entry_identifier = getattr(subentry, "entry_id", None)
+            if isinstance(entry_identifier, str) and entry_identifier:
+                parent_subentry_ids.add(entry_identifier)
     resolved_subentries: list[ConfigSubentry | Any] = []
     for subentry in subentries:
         resolved = subentry
