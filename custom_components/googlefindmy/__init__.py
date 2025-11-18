@@ -1912,8 +1912,16 @@ class ConfigEntrySubEntryManager:
             await self.async_remove(key)
 
         if created_subentries:
+            state = getattr(self._entry, "state", None)
+            is_initial_setup = isinstance(state, ConfigEntryState) and state in (
+                ConfigEntryState.SETUP_IN_PROGRESS,
+                ConfigEntryState.SETUP_RETRY,
+            )
             await _async_setup_new_subentries(
-                self._hass, self._entry, created_subentries
+                self._hass,
+                self._entry,
+                created_subentries,
+                enforce_registration=is_initial_setup,
             )
 
     async def async_remove(self, key: str) -> None:
@@ -2016,10 +2024,66 @@ def _subentry_setup_tracker(
     return tracker
 
 
+def _registered_subentry_ids(
+    hass: HomeAssistant, parent_entry: MyConfigEntry | str | None
+) -> set[str]:
+    """Return identifiers for subentries currently registered on ``parent_entry``.
+
+    Home Assistant raises ``UnknownSubEntry`` when a subentry setup is triggered
+    before the subentry is registered. To catch that early, gather every
+    identifier the parent entry advertises so callers can log and abort before
+    scheduling setup attempts.
+    """
+
+    config_entries = getattr(hass, "config_entries", None)
+    if config_entries is None:
+        return set()
+
+    parent: Any | None
+    if isinstance(parent_entry, str):
+        get_entry = getattr(config_entries, "async_get_entry", lambda _entry_id: None)
+        parent = get_entry(parent_entry)
+    elif parent_entry is None:
+        parent = None
+    else:
+        parent = parent_entry
+
+    if parent is None and hasattr(parent_entry, "entry_id"):
+        parent = parent_entry
+
+    if parent is None:
+        return set()
+
+    registered: set[str] = set()
+    registered.update(
+        {registered_id for registered_id in getattr(parent, "_registered_subentry_ids", set()) if isinstance(registered_id, str)}
+    )
+    parent_subentries = getattr(parent, "subentries", None)
+    if isinstance(parent_subentries, Mapping):
+        for subentry_id, subentry in parent_subentries.items():
+            if isinstance(subentry_id, str) and subentry_id:
+                registered.add(subentry_id)
+
+            identifier = _resolve_config_subentry_identifier(subentry)
+            if identifier:
+                registered.add(identifier)
+
+    async_get_subentries = getattr(config_entries, "async_get_subentries", None)
+    if callable(async_get_subentries):
+        for subentry in async_get_subentries(parent.entry_id):
+            identifier = _resolve_config_subentry_identifier(subentry)
+            if identifier:
+                registered.add(identifier)
+
+    return registered
+
+
 async def _async_setup_new_subentries(
     hass: HomeAssistant,
     parent_entry: MyConfigEntry,
     subentries: Iterable[ConfigSubentry | Any],
+    *,
+    enforce_registration: bool = False,
 ) -> None:
     """Trigger Home Assistant setup for newly created subentries.
 
@@ -2094,12 +2158,41 @@ async def _async_setup_new_subentries(
         return
 
     get_entry = getattr(config_entries, "async_get_entry", lambda _entry_id: None)
+    registered_subentry_ids = _registered_subentry_ids(hass, parent_entry)
+    if not registered_subentry_ids:
+        _LOGGER.warning(
+            "[%s] No registered config subentries visible before scheduling",  # noqa: G004
+            parent_entry.entry_id,
+        )
+    else:
+        _LOGGER.debug(
+            "[%s] Registered config subentries available before scheduling: %s",
+            parent_entry.entry_id,
+            sorted(registered_subentry_ids),
+        )
+
+    missing_registrations: set[str] = set()
 
     for target, fallback_target in setup_targets:
         for candidate in (target, fallback_target):
             if candidate is None:
                 continue
 
+            if not registered_subentry_ids or candidate not in registered_subentry_ids:
+                _LOGGER.error(
+                    "[%s] Config subentry %s not registered; cannot schedule setup",
+                    parent_entry.entry_id,
+                    candidate,
+                )
+                if enforce_registration:
+                    missing_registrations.add(candidate)
+                continue
+
+            _LOGGER.warning(
+                "[%s] Scheduling setup for config subentry '%s'",  # noqa: G004
+                parent_entry.entry_id,
+                candidate,
+            )
             entry_obj = get_entry(candidate)
             state = getattr(entry_obj, "state", None)
             if isinstance(state, ConfigEntryState) and state in (
@@ -2111,11 +2204,13 @@ async def _async_setup_new_subentries(
             try:
                 await hass.config_entries.async_setup(candidate)
             except UnknownEntry:
-                _LOGGER.debug(
-                    "[%s] async_setup_entry: Subentry '%s' not registered; skipping setup attempt",
+                _LOGGER.error(
+                    "[%s] Config subentry %s not registered; cannot set up",
                     parent_entry.entry_id,
                     candidate,
                 )
+                if enforce_registration:
+                    missing_registrations.add(candidate)
                 continue
             except Exception as err:  # pragma: no cover - defensive logging
                 _LOGGER.debug(
@@ -2126,7 +2221,13 @@ async def _async_setup_new_subentries(
                 )
                 continue
 
-            break
+    if enforce_registration and missing_registrations:
+        raise ConfigEntryNotReady(
+            "; ".join(
+                f"Config subentry {candidate} missing before setup"
+                for candidate in sorted(missing_registrations)
+            )
+        )
 
 
 def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
@@ -5462,6 +5563,43 @@ async def _async_setup_subentry(
         )
         return False
 
+    config_entries = getattr(hass, "config_entries", None)
+    if config_entries is None:
+        _LOGGER.error(
+            "[%s] Subentry setup failed: hass.config_entries is unavailable",
+            entry.entry_id,
+        )
+        raise ConfigEntryNotReady("config_entries manager unavailable")
+
+    parent_entry = getattr(config_entries, "async_get_entry", lambda _entry_id: None)(
+        parent_entry_id
+    )
+    if parent_entry is None:
+        _LOGGER.error(
+            "[%s] Subentry setup failed: parent entry %s not registered",  # noqa: G004
+            entry.entry_id,
+            parent_entry_id,
+        )
+        raise ConfigEntryNotReady(f"Parent entry {parent_entry_id} missing")
+
+    subentry_identifier = _resolve_config_subentry_identifier(subentry) or getattr(
+        entry, "config_subentry_id", None
+    )
+    if subentry_identifier is None:
+        subentry_identifier = entry.entry_id
+
+    registered_ids = _registered_subentry_ids(hass, parent_entry)
+    if not registered_ids or subentry_identifier not in registered_ids:
+        _LOGGER.error(
+            "[%s] Config subentry %s not registered under parent %s; aborting setup",  # noqa: G004
+            entry.entry_id,
+            subentry_identifier,
+            parent_entry_id,
+        )
+        raise ConfigEntryNotReady(
+            f"Config subentry {subentry_identifier} is not registered"
+        )
+
     bucket = _domain_data(hass)
     entries_bucket = _ensure_entries_bucket(bucket)
 
@@ -5485,7 +5623,7 @@ async def _async_setup_subentry(
         )
         raise ConfigEntryNotReady(
             f"Parent entry {parent_entry_id} coordinator not ready"
-    )
+        )
 
     runtime_manager = getattr(parent_runtime_data, "subentry_manager", None)
     coordinator = getattr(parent_runtime_data, "coordinator", None)
@@ -5994,7 +6132,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # Home Assistant will handle per-subentry platform forwarding automatically;
     # the integration must only trigger config entry setup here and after
     # programmatic creation (see docs/CONFIG_SUBENTRIES_HANDBOOK.md).
-    await _async_setup_new_subentries(hass, entry, entry.subentries.values())
+    await _async_setup_new_subentries(
+        hass,
+        entry,
+        entry.subentries.values(),
+        enforce_registration=True,
+    )
 
     # Home Assistant will fan out platform setup per subentry after this returns
     # (see docs/CONFIG_SUBENTRIES_HANDBOOK.md). Forwarding here would drop the
