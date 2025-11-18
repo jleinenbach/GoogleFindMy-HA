@@ -2191,47 +2191,33 @@ async def _async_setup_new_subentries(
             sorted(registered_subentry_ids),
         )
 
-    missing_registrations: set[str] = set()
-    retry_missing_registrations = False
-
     for target, fallback_target in setup_targets:
-        for candidate in (target, fallback_target):
-            if candidate is None:
-                continue
-            if candidate not in parent_subentry_ids:
-                _LOGGER.error(
-                    "[%s] Subentry %s not registered for entry %s",  # noqa: G004
-                    parent_entry.entry_id,
-                    candidate,
-                    parent_entry.entry_id,
-                )
-                raise HomeAssistantError(
-                    f"Subentry {candidate} not found in config entry"
-                )
-
         for registration_candidate in (target, fallback_target):
             if registration_candidate is None:
                 continue
 
-            if (
-                not registered_subentry_ids
-                or registration_candidate not in registered_subentry_ids
-            ):
-                _LOGGER.error(
-                    "[%s] Config subentry %s not registered; cannot schedule setup",
+            if registration_candidate not in parent_subentry_ids:
+                _LOGGER.warning(
+                    "[%s] Subentry %s not registered for entry %s",  # noqa: G004
+                    parent_entry.entry_id,
+                    registration_candidate,
+                    parent_entry.entry_id,
+                )
+                if enforce_registration:
+                    _LOGGER.debug(
+                        "[%s] Registration enforcement enabled; skipping setup for %s",  # noqa: G004
+                        parent_entry.entry_id,
+                        registration_candidate,
+                    )
+                    continue
+
+            if registered_subentry_ids and registration_candidate not in registered_subentry_ids:
+                _LOGGER.warning(
+                    "[%s] Config subentry %s not registered; waiting for registry update",  # noqa: G004
                     parent_entry.entry_id,
                     registration_candidate,
                 )
-                missing_registrations.add(registration_candidate)
-                retry_missing_registrations = retry_missing_registrations or not registered_subentry_ids
-                if not registered_subentry_ids:
-                    raise ConfigEntryNotReady(
-                        f"Config subentry {registration_candidate} not registered"
-                    )
-
-                raise HomeAssistantError(
-                    f"Config subentry {registration_candidate} missing from registry"
-                )
+                continue
 
             _LOGGER.debug(
                 "[%s] Scheduling setup for config subentry '%s'",  # noqa: G004
@@ -2254,13 +2240,11 @@ async def _async_setup_new_subentries(
                     registration_candidate,
                 )
             except UnknownEntry:
-                _LOGGER.error(
-                    "[%s] Config subentry %s not registered; cannot set up",
+                _LOGGER.warning(
+                    "[%s] Config subentry %s not yet registered; will retry when available",  # noqa: G004
                     parent_entry.entry_id,
                     registration_candidate,
                 )
-                missing_registrations.add(registration_candidate)
-                retry_missing_registrations = True
                 continue
             except Exception as err:  # pragma: no cover - defensive logging
                 _LOGGER.debug(
@@ -2271,19 +2255,7 @@ async def _async_setup_new_subentries(
                 )
                 continue
 
-    if missing_registrations:
-        message = "; ".join(
-            (
-                "Config subentry "
-                f"{candidate} missing for parent {parent_entry.entry_id}"
-                for candidate in sorted(missing_registrations)
-            )
-        )
-
-        if retry_missing_registrations:
-            raise ConfigEntryNotReady(message)
-
-        raise HomeAssistantError(message)
+            break
 
 
 def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
