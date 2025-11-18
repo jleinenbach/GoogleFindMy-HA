@@ -185,6 +185,9 @@ Home Assistant's config-entry **subentries** let the integration organize device
 
 Home Assistant 2025.11+ handles subentry platform scheduling automatically. The parent `async_setup_entry` forwards the platform list **once** (no `config_subentry_id` allowed). Each platform then iterates the subentry coordinators on `entry.runtime_data` and calls `async_add_entities(..., config_subentry_id=<subentry_id>)` so devices and entities attach to the correct child entry. This pattern prevents orphaned tracker devices and avoids the silent failure caused by manual per-subentry forwarding.
 
+- **Parent–child enforcement:** Each child is a `ConfigEntry` whose `parent_entry_id` links it to the owning parent. Device Registry entries attach to the parent or a specific child—never both—and subentry `unique_id` values only need to be unique within the parent scope.
+- **Lifecycle guardrail:** Leave `async_setup(hass, config)` for domain-level helpers only. Instance work lives in `async_setup_entry`, which receives the populated entry and iterates `entry.subentries` so the parent and every child load without triggering `homeassistant.config_entries.UnknownEntry` during startup or reloads.
+
 ### Service hub subentry
 
 The service hub subentry, identified by `SERVICE_SUBENTRY_KEY`, represents the account-level hub device for the integration.

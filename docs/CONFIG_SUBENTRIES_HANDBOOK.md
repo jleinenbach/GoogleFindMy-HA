@@ -10,6 +10,30 @@ This handbook captures the Home Assistant 2025.7+ contract for configuration sub
 - **Device/registry repairs:** Follow Section VIII.D for orphan detection and rebuild workflows; always include the child `entry_id` when updating tracker/service devices.
 - **Style note for quick references:** When adding concise checklists or reminders inside a subsection, anchor them at the `####` level (for example, `#### Race-condition checklist`) beneath the owning `###` heading so the handbook's numbering remains stable and navigation panes keep related guidance grouped together.
 
+## Section 0: Architectural evolution and lifecycle guardrails (2024–2025)
+
+### A. Why subentries replaced ad-hoc options packs
+
+The 2025 subentry architecture formalizes a parent–child hierarchy so a single authenticated session (for example, a cloud API key or MQTT broker connection) can power multiple logical configurations. Before subentries, developers either duplicated config entries—re-entering the same credentials for every AI agent, weather location, or topic subscription—or stuffed arrays of child data into `ConfigEntry.options`, which lacked lifecycle hooks and could not be aggregated across integrations. Subentries eliminate that redundancy by letting a parent entry own many children that inherit the shared connection while maintaining their own setup, disable/enable flags, and device/entity registry records.
+
+### B. Parent–child enforcement and identifier scope
+
+Each child is a `ConfigEntry` whose `parent_entry_id` links it to the owning parent. Home Assistant enforces a strict ownership model: removing or disabling the parent cascades to its children, and Device Registry entries attach to either the parent or a specific child—never both. Subentry `unique_id` values only need to be unique within a single parent entry, which allows concise identifiers like city names or prompt titles without colliding with other integrations or other parents of the same domain.
+
+### C. ConfigSubentryFlow API rename (March 2025)
+
+Home Assistant replaced `_reconfigure_entry_id`/`_get_reconfigure_entry()` with `_entry_id`/`_get_entry()` so subentry flows can access the parent entry during both creation and reconfiguration. Custom flows must adopt the new helpers to avoid `AttributeError` failures when users add or edit child entries on modern Core builds.
+
+### D. async_setup is legacy; async_setup_entry drives instances
+
+`async_setup(hass, config)` still exists for global, domain-level tasks (for example, legacy YAML parsing or registering a cross-entry service) but must not inspect specific config entries. Attempting to grab `ConfigEntry` objects during bootstrap risks `homeassistant.config_entries.UnknownEntry` when the registry has not finished loading, especially during reloads. All instance-specific work—including bootstrapping subentries—belongs in `async_setup_entry`, which runs once per entry and is guaranteed to receive the populated `ConfigEntry` object. Parent `async_setup_entry` should initialize shared clients, iterate `entry.subentries` to load existing children, and rely on Home Assistant to forward platforms after each `_async_setup_subentry` returns `True`.
+
+### E. Practical patterns and case studies
+
+- **Generative AI agents:** Store the API key in the parent entry and model each system prompt as a subentry so users can enable, disable, or tweak prompts without touching credentials.
+- **Hub-and-spoke services (MQTT, KNX, notification contacts):** Keep the broker/bus/authorization in the parent and represent each subscription, device, or contact as a subentry for granular lifecycle control.
+- **Per-location data (weather, WAQI):** Parent entries hold the API token, while each city is a subentry that can be added or removed without reauthenticating.
+
 ### Quick SSoT probe: per-subentry platform forwarding
 
 Run this minimal probe against the installed Home Assistant package to confirm the `async_forward_entry_setups` signature on the installed Core build:
