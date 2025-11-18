@@ -18,6 +18,7 @@ NotificationContextT_contra = TypeVar(
     "NotificationContextT_contra",
     contravariant=True,
 )
+NotificationContextT = TypeVar("NotificationContextT")
 CredentialsMappingT_contra = TypeVar(
     "CredentialsMappingT_contra",
     bound=MutableMapping[str, Any],
@@ -51,6 +52,7 @@ __all__ = [
     "CredentialsUpdatedCallable",
     "JSONDict",
     "MutableJSONMapping",
+    "NotificationContextT",
     "NotificationContextT_contra",
     "NotificationPayloadT_contra",
     "OnNotificationCallable",

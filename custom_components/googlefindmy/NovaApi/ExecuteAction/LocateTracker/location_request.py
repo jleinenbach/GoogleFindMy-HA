@@ -47,6 +47,11 @@ from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 _LOGGER = logging.getLogger(__name__)
 
 
+class _DecryptLocationsCallable(Protocol):
+    async def __call__(self, device_update: Any, *, cache: TokenCache) -> list[dict[str, Any]]:
+        """Decrypt and normalize location updates."""
+
+
 def _normalize_contributor_mode(mode: str | None) -> str:
     """Return a sanitized contributor mode string."""
 
@@ -74,40 +79,29 @@ class FcmReceiverProtocol(Protocol):
 
 
 def _import_deviceupdate_pb2() -> ModuleType:
-    return cast(
-        ModuleType,
-        import_module("custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2"),
-    )
+    return import_module("custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2")
 
 
 def _import_decoder_module() -> ModuleType:
-    return cast(
-        ModuleType,
-        import_module("custom_components.googlefindmy.ProtoDecoders.decoder"),
-    )
+    return import_module("custom_components.googlefindmy.ProtoDecoders.decoder")
 
 
 def _import_decrypt_locations_module() -> ModuleType:
-    return cast(
-        ModuleType,
-        import_module(
-            "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations"
-        ),
+    return import_module(
+        "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations"
     )
 
 
 def _import_eid_info_module() -> ModuleType:
-    return cast(
-        ModuleType,
-        import_module(
-            "custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request"
-        ),
+    return import_module(
+        "custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request"
     )
 
 
 _fcm_receiver_state: dict[str, Callable[[], FcmReceiverProtocol] | None] = {
     "getter": None
 }
+_FCM_ReceiverGetter: Callable[[], FcmReceiverProtocol] | None = None
 
 
 def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
@@ -262,7 +256,7 @@ def _make_location_callback(  # noqa: PLR0915
                     getattr(decoder_module, "parse_device_update_protobuf"),
                 )
                 async_decrypt_location_response_locations = cast(
-                    Callable[[Any], Awaitable[list[dict[str, Any]]]],
+                    _DecryptLocationsCallable,
                     getattr(
                         decrypt_module,
                         "async_decrypt_location_response_locations",
@@ -417,7 +411,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
     _LOGGER.info("Requesting location data for %s...", name)
 
     # Fail hard on missing/misconfigured provider: this is a programming/config error.
-    fcm_getter = _fcm_receiver_state["getter"]
+    fcm_getter = _FCM_ReceiverGetter or _fcm_receiver_state["getter"]
 
     if fcm_getter is None:
         raise RuntimeError("FCM receiver provider has not been registered.")

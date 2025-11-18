@@ -1,18 +1,52 @@
-# custom_components/googlefindmy/chrome_driver.py
-#  GoogleFindMyTools - A set of tools to interact with the Google Find My API
-#  Copyright © 2024 Leon Böttger. All rights reserved.
-#
-
+import importlib
 import logging
 import os
 import platform
 import shutil
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
-import undetected_chromedriver as uc
 from selenium.webdriver.chrome.webdriver import WebDriver
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _load_uc() -> Any:
+    """Import undetected-chromedriver with a stub fallback.
+
+    GitHub runners remove ``distutils`` from the standard library, which breaks
+    ``undetected_chromedriver`` imports. Rather than failing at module import
+    time, fall back to a lightweight stub that raises a descriptive error when
+    used. Tests can monkeypatch the stub as needed.
+    """
+
+    try:
+        return importlib.import_module("undetected_chromedriver")
+    except Exception as err:  # noqa: BLE001 - preserve original import failure
+        LOGGER.debug(
+            "undetected_chromedriver is unavailable; falling back to stub: %s", err
+        )
+        error = err
+
+        class _StubChromeOptions:
+            def __init__(self) -> None:
+                self.arguments: list[str] = []
+                self.binary_location: str | None = None
+
+            def add_argument(self, argument: str) -> None:
+                self.arguments.append(argument)
+
+        def _stub_chrome(*, options: object) -> WebDriver:
+            raise RuntimeError(
+                "undetected_chromedriver could not be imported; install its runtime "
+                "dependencies (including setuptools' distutils module)"
+            ) from error
+
+        return SimpleNamespace(ChromeOptions=_StubChromeOptions, Chrome=_stub_chrome)
+
+
+uc = cast(Any, _load_uc())
+type ChromeOptions = Any
 
 
 def find_chrome() -> str | None:
@@ -25,10 +59,10 @@ def find_chrome() -> str | None:
     """
 
     possible_paths = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        r"C:\ProgramData\chocolatey\bin\chrome.exe",
-        r"C:\Users\%USERNAME%\AppData\Local\Google\Chrome\Application\chrome.exe",
+        r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        r"C:\\ProgramData\\chocolatey\\bin\\chrome.exe",
+        r"C:\\Users\\%USERNAME%\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe",
         "/usr/bin/google-chrome",
         "/usr/local/bin/google-chrome",
         "/opt/google/chrome/chrome",
@@ -55,7 +89,7 @@ def find_chrome() -> str | None:
     return None
 
 
-def get_options(*, headless: bool = False) -> uc.ChromeOptions:
+def get_options(*, headless: bool = False) -> ChromeOptions:
     """Create Chrome options that match the integration's requirements.
 
     Parameters
@@ -81,60 +115,50 @@ def get_options(*, headless: bool = False) -> uc.ChromeOptions:
     return chrome_options
 
 
-def create_driver(*, headless: bool = False) -> WebDriver:
-    """Create an undetected Chrome WebDriver configured for authentication flows.
+def get_driver(chrome_path: str | None, *, headless: bool = False) -> WebDriver:
+    """Initialize and return an undetected Chrome driver.
 
     Parameters
     ----------
+    chrome_path: str
+        Path to the Chrome executable.
     headless: bool
-        Whether the browser session should avoid rendering a visible window.
+        Whether to run the browser in headless mode.
 
     Returns
     -------
     WebDriver
-        An active Selenium WebDriver instance.
-
-    Raises
-    ------
-    RuntimeError
-        If a compatible Chrome binary cannot be located or the driver fails to start.
+        Configured Chrome WebDriver instance.
     """
 
+    options = get_options(headless=headless)
+    if chrome_path:
+        options.binary_location = chrome_path
+
+    return cast(WebDriver, uc.Chrome(options=options))
+
+
+def create_driver(chrome_path: str | None = None, *, headless: bool = False) -> WebDriver:
+    """Backward-compatible wrapper for driver creation."""
     try:
-        chrome_options = get_options(headless=headless)
-        driver = cast(WebDriver, uc.Chrome(options=chrome_options))
-        LOGGER.info("ChromeDriver started with bundled binary")
-        return driver
-    except Exception:  # pragma: no cover - relies on external binary availability
-        LOGGER.warning(
-            "Default ChromeDriver startup failed; attempting to locate a system Chrome binary",
-        )
+        return get_driver(chrome_path, headless=headless)
+    except Exception as err:  # noqa: BLE001
+        LOGGER.warning("Default ChromeDriver startup failed: %s", err)
 
-        chrome_path = find_chrome()
-        if chrome_path:
-            chrome_options = get_options(headless=headless)
-            chrome_options.binary_location = chrome_path
-            try:
-                driver = cast(WebDriver, uc.Chrome(options=chrome_options))
-                LOGGER.info(
-                    "ChromeDriver started using system binary at %s", chrome_path
-                )
-                return driver
-            except (
-                Exception
-            ):  # pragma: no cover - depends on external binary availability
-                LOGGER.exception(
-                    "ChromeDriver failed using system binary at %s",
-                    chrome_path,
-                )
-        else:
-            LOGGER.error("Chrome executable not found in known paths")
+        fallback_path = chrome_path or find_chrome()
+        if fallback_path is None:
+            raise FileNotFoundError(
+                "Chrome binary not found; install Chrome or provide chrome_path"
+            ) from err
 
-        raise RuntimeError(
-            "Failed to start ChromeDriver. A compatible Chrome installation was not detected. "
-            "Update Chrome to the latest version or configure the binary path manually."
-        )
-
-
-if __name__ == "__main__":
-    create_driver()
+        fallback_options = get_options(headless=headless)
+        fallback_options.binary_location = fallback_path
+        try:
+            return cast(WebDriver, uc.Chrome(options=fallback_options))
+        except Exception as fallback_err:  # noqa: BLE001
+            LOGGER.warning(
+                "ChromeDriver failed using system binary: %s", fallback_err
+            )
+            raise RuntimeError(
+                "Chrome driver startup failed using bundled and system binaries"
+            ) from fallback_err

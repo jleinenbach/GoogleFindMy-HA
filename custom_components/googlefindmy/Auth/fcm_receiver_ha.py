@@ -69,12 +69,10 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
-    decrypt_location_response_locations,
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
+    decrypt_locations as decrypt_locations_module,
 )
-from custom_components.googlefindmy.ProtoDecoders.decoder import (
-    parse_device_update_protobuf,
-)
+from custom_components.googlefindmy.ProtoDecoders import decoder as decoder_module
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -208,7 +206,7 @@ class FcmReceiverHA:
         self.creds: dict[
             str, MutableJSONMapping | None
         ] = {}  # entry_id -> credentials dict
-        self.pcs: dict[str, FcmPushClient] = {}  # entry_id -> FcmPushClient
+        self.pcs: dict[str, FcmPushClient[Any]] = {}  # entry_id -> FcmPushClient
         self.supervisors: dict[
             str, asyncio.Task[None]
         ] = {}  # entry_id -> supervisor task
@@ -337,7 +335,7 @@ class FcmReceiverHA:
 
     async def _ensure_client_for_entry(
         self, entry_id: str, cache: TokenCache | None
-    ) -> FcmPushClient | None:
+    ) -> FcmPushClient[Any] | None:
         """Create or return the FCM client for the given entry (idempotent)."""
         if cache is not None:
             self._ensure_cache_entry_id(cache, entry_id)
@@ -1004,7 +1002,7 @@ class FcmReceiverHA:
     def _extract_canonic_id_from_response(self, hex_response: str) -> str | None:
         """Extract canonical id via the decoder."""
         try:
-            device_update = parse_device_update_protobuf(hex_response)
+            device_update = decoder_module.parse_device_update_protobuf(hex_response)
             if device_update.HasField("deviceMetadata"):
                 ids = device_update.deviceMetadata.identifierInformation.canonicIds.canonicId
                 if ids:
@@ -1131,7 +1129,7 @@ class FcmReceiverHA:
     def _decode_background_location(self, entry_id: str, hex_string: str) -> JSONDict:
         """Decode background location using protobuf decoders (CPU-bound)."""
         try:
-            device_update = parse_device_update_protobuf(hex_string)
+            device_update = decoder_module.parse_device_update_protobuf(hex_string)
             cache = self._entry_caches.get(entry_id)
             if cache is None:
                 _LOGGER.error(
@@ -1140,7 +1138,7 @@ class FcmReceiverHA:
                 )
                 return {}
 
-            raw_locations = decrypt_location_response_locations(
+            raw_locations = decrypt_locations_module.decrypt_location_response_locations(
                 device_update, cache=cache
             )
             locations: list[JSONDict] = (

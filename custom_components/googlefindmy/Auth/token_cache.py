@@ -148,9 +148,11 @@ class TokenCache:
 
     async def _migrate_legacy_file(self, legacy_path: str) -> None:
         """Migrate an old JSON file to the Store (merge) and remove it once, process-wide."""
-        if _STATE["legacy_migration_done"]:
+        if _STATE["legacy_migration_done"] != _LEGACY_MIGRATION_DONE:
+            _set_legacy_migration_flag(_LEGACY_MIGRATION_DONE)
+        if _legacy_migration_done():
             return
-        _STATE["legacy_migration_done"] = True
+        _set_legacy_migration_flag(True)
 
         def _read_legacy() -> Mapping[str, Any] | None:
             if not os.path.exists(legacy_path):
@@ -373,6 +375,21 @@ class TokenCache:
 
 _INSTANCES: dict[str, TokenCache] = {}
 _STATE: _GlobalState = {"legacy_migration_done": False, "default_entry_id": None}
+# Legacy migration sentinel retained for backward compatibility with older tests.
+_LEGACY_MIGRATION_DONE: bool = False
+
+
+def _legacy_migration_done() -> bool:
+    """Return the in-memory flag indicating whether migration has run once."""
+
+    return bool(_STATE["legacy_migration_done"] or _LEGACY_MIGRATION_DONE)
+
+
+def _set_legacy_migration_flag(done: bool) -> None:
+    """Synchronize the legacy migration sentinel and shared state flag."""
+
+    _STATE["legacy_migration_done"] = done
+    globals()["_LEGACY_MIGRATION_DONE"] = done
 
 
 def _register_instance(entry_id: str, instance: TokenCache) -> None:

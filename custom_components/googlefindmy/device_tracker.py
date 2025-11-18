@@ -32,7 +32,7 @@ from homeassistant.const import (
     ATTR_LONGITUDE,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import EntityRecoveryManager, _extract_email_from_entry
@@ -408,7 +408,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     # should not have a suffix and will track the device name.
     _attr_has_entity_name = False
     _attr_source_type = SourceType.GPS
-    _attr_entity_category = None  # ensure tracker is not diagnostic
+    _attr_entity_category: EntityCategory | None = None  # ensure tracker is not diagnostic
     # Default to enabled in the registry for per-device trackers
     _attr_entity_registry_enabled_default = True
     _attr_translation_key = "device"
