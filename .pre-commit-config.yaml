@@ -4,18 +4,12 @@ ci:
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.1
+    rev: v0.7.1
     hooks:
       - id: ruff
         args:
           - --fix
-          - --exit-non-zero-on-fix
-  - repo: https://github.com/asottile/pyupgrade
-    rev: v3.17.0
-    hooks:
-      - id: pyupgrade
-        args:
-          - --py312-plus
+      - id: ruff-format
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
@@ -31,15 +25,6 @@ repos:
         entry: python script/precommit_hooks/update_doctoc.py
         language: python
         files: ^AGENTS\.md$
-      - id: ruff-format
-        name: ruff-format
-        entry: python script/precommit_hooks/ruff_format.py
-        language: python
-        types_or:
-          - python
-          - pyi
-        additional_dependencies:
-          - ruff==0.14.1
       - id: translations-sync-check
         name: Ensure translations are up to date
         entry: python script/sync_translations.py --check

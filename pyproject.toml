@@ -51,6 +51,22 @@ extend-exclude = [
     "custom_components/googlefindmy/Auth/firebase_messaging/proto",
 ]
 
+[tool.ruff.lint]
+select = [
+    "F",
+    "E",
+    "W",
+    "I",
+    "UP",
+    "PL",
+]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
 [tool.pytest.ini_options]
 addopts = ["-q", "--cov-report=term"]
 testpaths = ["tests"]
@@ -62,10 +78,12 @@ filterwarnings = [
 [tool.mypy]
 python_version = "3.13"
 warn_unused_ignores = true
-ignore_missing_imports = true
 show_error_codes = true
 mypy_path = ["."]
 explicit_package_bases = true
+strict = true
+local_partial_types = true
+warn_return_any = true
 files = [
     "custom_components/googlefindmy",
 ]
