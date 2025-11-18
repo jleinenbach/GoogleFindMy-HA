@@ -1,3 +1,4 @@
+# tests/test_subentry_setup_trigger.py
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
+from homeassistant.exceptions import ConfigEntryNotReady
 
 from custom_components.googlefindmy import (
     RuntimeData,
