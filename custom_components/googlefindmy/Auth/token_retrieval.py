@@ -8,16 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import gpsoauth
-
-# Use the async-first API; the legacy sync wrapper is intentionally unsupported.
 from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
-
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -230,7 +227,7 @@ def request_token(
     )
 
 
-async def async_request_token(
+async def async_request_token(  # noqa: PLR0913
     username: str,
     scope: str,
     play_services: bool = False,

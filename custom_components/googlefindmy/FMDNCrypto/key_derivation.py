@@ -10,7 +10,6 @@ import logging
 
 from custom_components.googlefindmy.FMDNCrypto.sha import calculate_truncated_sha256
 
-
 _LOGGER = logging.getLogger(__name__)
 
 

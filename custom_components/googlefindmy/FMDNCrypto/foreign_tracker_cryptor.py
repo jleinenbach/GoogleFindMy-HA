@@ -28,22 +28,23 @@ import secrets
 from binascii import unhexlify
 
 from Cryptodome.Cipher import AES
-from ecdsa import SECP160r1
-from ecdsa.ellipticcurve import CurveFp, Point
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from ecdsa import SECP160r1
+from ecdsa.ellipticcurve import CurveFp, Point
 
-from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
-    generate_eid,
-    calculate_r,
-)
 from custom_components.googlefindmy.example_data_provider import get_example_data
+from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
+    calculate_r,
+    generate_eid,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 # AES-EAX authenticates with a 16-byte tag by default in PyCryptodome.
+_AES_KEY_LEN: int = 32
 _AES_TAG_LEN: int = 16
 # SECP160r1 coordinate length in bytes (160 bits)
 _COORD_LEN: int = 20
@@ -122,7 +123,7 @@ def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> tuple[bytes, bytes
     Raises:
         ValueError: If key/nonce lengths are invalid.
     """
-    if len(key) != 32:
+    if len(key) != _AES_KEY_LEN:
         raise ValueError("Key must be 32 bytes (AES-256).")
     if len(nonce) != _NONCE_LEN:
         raise ValueError("Nonce must be 16 bytes for this construction.")
@@ -147,7 +148,7 @@ def decrypt_aes_eax(data: bytes, tag: bytes, nonce: bytes, key: bytes) -> bytes:
     Raises:
         ValueError: If key/nonce/tag lengths are invalid or tag verification fails.
     """
-    if len(key) != 32:
+    if len(key) != _AES_KEY_LEN:
         raise ValueError("Key must be 32 bytes (AES-256).")
     if len(nonce) != _NONCE_LEN:
         raise ValueError("Nonce must be 16 bytes for this construction.")

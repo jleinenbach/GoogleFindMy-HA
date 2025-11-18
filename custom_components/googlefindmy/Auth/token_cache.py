@@ -26,8 +26,8 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Mapping, TypedDict, TypeVar, cast
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, TypedDict, TypeVar, cast
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -39,6 +39,11 @@ _LOGGER = logging.getLogger(__name__)
 
 CacheState = dict[str, Any]
 _ValueT = TypeVar("_ValueT")
+
+
+class _GlobalState(TypedDict):
+    legacy_migration_done: bool
+    default_entry_id: str | None
 
 
 class CacheData(TypedDict, total=False):
@@ -143,10 +148,9 @@ class TokenCache:
 
     async def _migrate_legacy_file(self, legacy_path: str) -> None:
         """Migrate an old JSON file to the Store (merge) and remove it once, process-wide."""
-        global _LEGACY_MIGRATION_DONE
-        if _LEGACY_MIGRATION_DONE:
+        if _STATE["legacy_migration_done"]:
             return
-        _LEGACY_MIGRATION_DONE = True
+        _STATE["legacy_migration_done"] = True
 
         def _read_legacy() -> Mapping[str, Any] | None:
             if not os.path.exists(legacy_path):
@@ -295,7 +299,7 @@ class TokenCache:
         self._data.clear()
         self._per_key_locks.clear()
         self._closed = True
-    
+
     # ------------------------------ Utilities --------------------------------
 
     @staticmethod
@@ -368,8 +372,7 @@ class TokenCache:
 # -------------------------- Global registry & facade --------------------------
 
 _INSTANCES: dict[str, TokenCache] = {}
-_DEFAULT_ENTRY_ID: str | None = None
-_LEGACY_MIGRATION_DONE: bool = False
+_STATE: _GlobalState = {"legacy_migration_done": False, "default_entry_id": None}
 
 
 def _register_instance(entry_id: str, instance: TokenCache) -> None:
@@ -412,28 +415,27 @@ def _register_instance(entry_id: str, instance: TokenCache) -> None:
 
 def _unregister_instance(entry_id: str) -> TokenCache | None:
     """Unregister and return the TokenCache instance for a config entry ID (internal)."""
-    global _DEFAULT_ENTRY_ID
-    if _DEFAULT_ENTRY_ID == entry_id:
-        _DEFAULT_ENTRY_ID = None
+    if _STATE["default_entry_id"] == entry_id:
+        _STATE["default_entry_id"] = None
     return _INSTANCES.pop(entry_id, None)
 
 
 def _set_default_entry_id(entry_id: str) -> None:
     """Set the default entry for facade calls (only for single-entry scenarios)."""
-    global _DEFAULT_ENTRY_ID
-    if len(_INSTANCES) > 1 and _DEFAULT_ENTRY_ID != entry_id:
+    if len(_INSTANCES) > 1 and _STATE["default_entry_id"] != entry_id:
         # Immediately disallow ambiguous facade usage in multi-entry setups.
-        _DEFAULT_ENTRY_ID = None
+        _STATE["default_entry_id"] = None
         _LOGGER.warning(
             "Multiple config entries are active. Global cache calls are ambiguous and will fail."
         )
     else:
-        _DEFAULT_ENTRY_ID = entry_id
+        _STATE["default_entry_id"] = entry_id
 
 
 def _get_default_cache() -> TokenCache:
     """Return the default cache instance or raise if ambiguous/missing."""
-    if _DEFAULT_ENTRY_ID and (cache := _INSTANCES.get(_DEFAULT_ENTRY_ID)):
+    default_entry_id = _STATE["default_entry_id"]
+    if default_entry_id and (cache := _INSTANCES.get(default_entry_id)):
         return cache
     if not _INSTANCES:
         raise RuntimeError(

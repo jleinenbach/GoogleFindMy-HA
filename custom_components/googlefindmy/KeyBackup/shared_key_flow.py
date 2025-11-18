@@ -14,13 +14,13 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.support.ui import WebDriverWait
 
+from custom_components.googlefindmy.chrome_driver import create_driver
 from custom_components.googlefindmy.KeyBackup.response_parser import (
     get_fmdn_shared_key,
 )
 from custom_components.googlefindmy.KeyBackup.shared_key_request import (
     get_security_domain_request_url,
 )
-from custom_components.googlefindmy.chrome_driver import create_driver
 
 if TYPE_CHECKING:
     from selenium.webdriver.remote.webdriver import WebDriver
