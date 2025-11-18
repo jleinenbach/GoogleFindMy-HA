@@ -1703,18 +1703,6 @@ class ConfigEntrySubEntryManager:
                             if translation_key is not None:
                                 constructor_kwargs["translation_key"] = translation_key
 
-                            placeholder_subentry_id = "-".join(
-                                (
-                                    self._entry.entry_id,
-                                    key,
-                                    "provisional",
-                                )
-                            )
-                            constructor_kwargs.setdefault(
-                                "subentry_id",
-                                placeholder_subentry_id,
-                            )
-
                             new_subentry = None
                             for drop_translation in (False, True):
                                 try:
@@ -1807,8 +1795,6 @@ class ConfigEntrySubEntryManager:
                         fallback_subentry_id = getattr(resolved_add, "subentry_id", None)
                     else:
                         stored = new_subentry
-                        if new_subentry is not None:
-                            fallback_subentry_id = getattr(new_subentry, "subentry_id", None)
 
                     stored = self._resolve_registered_subentry(
                         key=key,
