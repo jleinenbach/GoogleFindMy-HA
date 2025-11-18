@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from binascii import unhexlify
 
 from Cryptodome.Cipher import AES
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from custom_components.googlefindmy.example_data_provider import get_example_data
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
     CurveFpProtocol,
     CurveParametersProtocol,
@@ -37,7 +37,6 @@ from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
     load_curve_fp_class,
     load_point_class,
 )
-from custom_components.googlefindmy.example_data_provider import get_example_data
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     calculate_r,
     generate_eid,
@@ -249,12 +248,11 @@ def decrypt(
     # R and S points
     Rx = generate_eid(identity_key, beacon_time_counter)
     R = int.from_bytes(Rx, byteorder="big")
-    Ry = rx_to_ry(R, curve.curve)
+    _ = rx_to_ry(R, curve.curve)
     Sx_int = int.from_bytes(Sx, byteorder="big")
     Sy = rx_to_ry(Sx_int, curve.curve)
 
     curve_fp: CurveFpProtocol = curve.curve
-    R_point = Point(curve_fp, R, Ry)
     S = Point(curve_fp, Sx_int, Sy)
 
     # Derive AES-256 key via HKDF-SHA256 over (r·S).x (20 bytes)

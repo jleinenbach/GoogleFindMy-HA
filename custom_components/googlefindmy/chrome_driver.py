@@ -3,12 +3,12 @@ import logging
 import os
 import platform
 import shutil
-from typing import Any, TypeAlias, cast
+from typing import Any, cast
 
 from selenium.webdriver.chrome.webdriver import WebDriver
 
 uc = cast(Any, importlib.import_module("undetected_chromedriver"))
-ChromeOptions: TypeAlias = Any
+type ChromeOptions = Any
 
 LOGGER = logging.getLogger(__name__)
 

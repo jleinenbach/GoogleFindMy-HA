@@ -1,13 +1,12 @@
-#
 from typing import cast
 
 from Cryptodome.Cipher import AES
 
+from custom_components.googlefindmy.example_data_provider import get_example_data
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
     CurveParametersProtocol,
     load_curve,
 )
-from custom_components.googlefindmy.example_data_provider import get_example_data
 
 # Constants
 K = 10

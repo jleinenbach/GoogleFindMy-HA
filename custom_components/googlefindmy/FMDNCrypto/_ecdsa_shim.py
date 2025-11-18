@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Typed runtime shims for importing ecdsa primitives without stubs."""
+
+from __future__ import annotations
 
 from importlib import import_module
 from typing import Any, Protocol, cast
