@@ -23,6 +23,12 @@ Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS
 
 For the quickest way to bootstrap Home Assistant test stubs before running `pytest -q`, see the Environment verification bullets in [AGENTS.md](AGENTS.md#environment-verification) (they call out `make test-stubs`).
 
+#### Quickstart checks
+
+- **Clean caches**: Run `make clean` (or the equivalent `find … '__pycache__' -prune` command from [AGENTS.md](AGENTS.md#environment-verification)) after test runs to avoid stale bytecode interfering with CI results.
+- **Connectivity probe**: Capture a quick HTTP/HTTPS check (for example, `python -m pip install --dry-run --no-deps pip`) before longer installs so summaries document network status.
+- **Home Assistant stubs**: Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` right before `pytest -q` when you want the fastest path to a green suite without the full toolchain.
+
 #### Local verification commands
 
 - `mypy --strict` — run the full strict type-checker locally to mirror CI expectations before opening a pull request.
