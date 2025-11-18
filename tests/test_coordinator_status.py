@@ -9,15 +9,10 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
 
-from custom_components.googlefindmy.coordinator import (
-    ApiStatus,
-    FcmStatus,
-    GoogleFindMyCoordinator,
-    _FCM_FALLBACK_POLL_AFTER_S,
-)
 from custom_components.googlefindmy.binary_sensor import GoogleFindMyPollingSensor
-from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     DOMAIN,
@@ -27,9 +22,13 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     issue_id_for,
 )
-from homeassistant.helpers import issue_registry as ir
-from homeassistant.exceptions import ConfigEntryAuthFailed
-
+from custom_components.googlefindmy.coordinator import (
+    _FCM_FALLBACK_POLL_AFTER_S,
+    ApiStatus,
+    FcmStatus,
+    GoogleFindMyCoordinator,
+)
+from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
 from tests.helpers import drain_loop
 
 

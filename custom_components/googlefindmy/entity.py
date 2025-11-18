@@ -23,19 +23,21 @@ Highlights for contributors:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, MutableMapping
 import inspect
 import logging
 import time
+from collections.abc import Iterable, Mapping, MutableMapping
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
+
 from .ha_typing import CoordinatorEntity, callback
 
 if TYPE_CHECKING:

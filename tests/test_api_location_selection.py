@@ -11,7 +11,6 @@ from aiohttp import ClientSession
 
 import custom_components.googlefindmy.api as api_module
 from custom_components.googlefindmy.api import GoogleFindMyAPI
-
 from tests.helpers import drain_loop
 
 

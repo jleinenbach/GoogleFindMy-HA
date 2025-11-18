@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant.core import ServiceCall
 
 from custom_components.googlefindmy import services
 from custom_components.googlefindmy.const import (
@@ -17,8 +18,6 @@ from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
-from homeassistant.core import ServiceCall
-
 from tests.helpers import (
     FakeConfigEntriesManager,
     FakeConfigEntry,
@@ -27,6 +26,8 @@ from tests.helpers import (
     device_registry_async_entries_for_config_entry,
     service_device_stub,
 )
+
+UPDATED_COUNT = 2
 
 
 async def _register_rebuild_service(hass: FakeHass, ctx: dict[str, Any]) -> Any:
@@ -217,7 +218,9 @@ async def test_rebuild_registry_detaches_orphaned_tracker(
                 if entry_id in device.config_entries
             )
 
-        def async_update_device(self, device_id: str, **changes: Any) -> None:
+        def async_update_device(  # noqa: PLR0912
+            self, device_id: str, **changes: Any
+        ) -> None:
             device = self._devices[device_id]
             if "remove_config_entry_id" in changes:
                 entry_to_remove = changes["remove_config_entry_id"]
@@ -309,7 +312,7 @@ async def test_rebuild_registry_detaches_orphaned_tracker(
 
     await services.async_rebuild_device_registry(hass, ServiceCall({}))
 
-    assert len(registry.updated) == 2
+    assert len(registry.updated) == UPDATED_COUNT
     assert (
         "service-device",
         {
@@ -394,7 +397,9 @@ async def test_rebuild_registry_detaches_redundant_hub_link(
                 if entry_id in device.config_entries
             )
 
-        def async_update_device(self, device_id: str, **changes: Any) -> None:
+        def async_update_device(  # noqa: PLR0912
+            self, device_id: str, **changes: Any
+        ) -> None:
             device = self._devices[device_id]
             if "remove_config_entry_id" in changes:
                 entry_to_remove = changes["remove_config_entry_id"]
@@ -486,7 +491,7 @@ async def test_rebuild_registry_detaches_redundant_hub_link(
 
     await services.async_rebuild_device_registry(hass, ServiceCall({}))
 
-    assert len(registry.updated) == 2
+    assert len(registry.updated) == UPDATED_COUNT
     assert (
         "service-device",
         {
@@ -574,7 +579,9 @@ async def test_rebuild_registry_handles_legacy_remove_config_subentry_kwarg(
         def async_get(self, device_id: str) -> Any | None:
             return self._devices.get(device_id)
 
-        def async_update_device(self, device_id: str, **changes: Any) -> None:
+        def async_update_device(  # noqa: PLR0912
+            self, device_id: str, **changes: Any
+        ) -> None:
             self.calls.append((device_id, dict(changes)))
             if "remove_config_subentry_id" in changes:
                 raise TypeError(

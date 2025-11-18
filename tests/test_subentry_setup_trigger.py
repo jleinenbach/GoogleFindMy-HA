@@ -4,11 +4,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterable
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
-
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from custom_components.googlefindmy import (
@@ -17,13 +16,12 @@ from custom_components.googlefindmy import (
     _async_setup_subentry,
     _subentry_setup_tracker,
 )
-from custom_components.googlefindmy.entity import schedule_add_entities
 from custom_components.googlefindmy.const import (
     DOMAIN,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
 )
-
+from custom_components.googlefindmy.entity import schedule_add_entities
 from tests.helpers.homeassistant import (
     FakeConfigEntriesManager,
     FakeConfigEntry,

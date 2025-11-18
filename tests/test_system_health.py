@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import HomeAssistant
 
 from custom_components.googlefindmy import system_health
 from custom_components.googlefindmy.const import (
@@ -14,14 +16,14 @@ from custom_components.googlefindmy.const import (
     DATA_SECRET_BUNDLE,
     DOMAIN,
 )
-from homeassistant.core import HomeAssistant
+
+EXPECTED_DEVICE_COUNT = 2
+
 
 class _FakeConfigEntry:
     """Minimal ConfigEntry stub for system health tests."""
 
     def __init__(self) -> None:
-        from homeassistant.config_entries import ConfigEntryState
-
         self.entry_id = "entry-test"
         self.domain = DOMAIN
         self.title = "Google Find My (user@example.com)"
@@ -72,7 +74,7 @@ class _FakeCoordinator:
 
     def __init__(self) -> None:
         self.data = [{"id": "device-1"}, {"id": "device-2"}]
-        self.last_update_success_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        self.last_update_success_time = datetime(2024, 1, 1, tzinfo=UTC)
         self.stats = {"background_updates": 3, "polled_updates": 2}
         self.fcm_status = SimpleNamespace(
             state="connected", reason=None, changed_at=123.0
@@ -144,7 +146,7 @@ async def test_async_get_system_health_info_redacts_email() -> None:
 
     payload = info["entries"][0]
     assert payload["entry_id"] == "entry-test"
-    assert payload["devices_loaded"] == 2
+    assert payload["devices_loaded"] == EXPECTED_DEVICE_COUNT
     assert (
         payload["last_successful_update"]
         == coordinator.last_update_success_time.isoformat()

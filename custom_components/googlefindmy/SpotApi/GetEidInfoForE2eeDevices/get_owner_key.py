@@ -30,7 +30,8 @@ from __future__ import annotations
 import base64
 import logging
 import re
-from binascii import Error as BinasciiError, unhexlify
+from binascii import Error as BinasciiError
+from binascii import unhexlify
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -51,12 +52,15 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_inf
     SpotApiEmptyResponseError,
     async_get_eid_info,
 )
-from custom_components.googlefindmy.typing_utils import run_in_executor as _run_in_executor
+from custom_components.googlefindmy.typing_utils import (
+    run_in_executor as _run_in_executor,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 # Cache key base for owner keys. We migrate from legacy "owner_key" to per-user keys.
 _OWNER_KEY_CACHE_PREFIX = "owner_key"
+_OWNER_KEY_LENGTH = 32
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +333,7 @@ async def async_get_owner_key(
             await cache.set(_user_cache_key(user), key_bytes.hex())
 
     # 3) Final validation: the owner key must be exactly 32 bytes long
-    if len(key_bytes) != 32:
+    if len(key_bytes) != _OWNER_KEY_LENGTH:
         _LOGGER.error(
             "Owner key for user '%s' has an invalid length: %d bytes (expected 32). "
             "Clear credentials and re-authenticate if this persists.",

@@ -6,6 +6,8 @@ from __future__ import annotations
 import time
 from types import MappingProxyType, SimpleNamespace
 
+from homeassistant.config_entries import ConfigSubentry
+
 from custom_components.googlefindmy.button import GoogleFindMyPlaySoundButton
 from custom_components.googlefindmy.const import (
     DOMAIN,
@@ -20,7 +22,6 @@ from custom_components.googlefindmy.coordinator import (
     SubentryMetadata,
 )
 from custom_components.googlefindmy.sensor import GoogleFindMyLastSeenSensor
-from homeassistant.config_entries import ConfigSubentry
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:

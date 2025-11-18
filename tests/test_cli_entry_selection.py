@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy.NovaApi.ListDevices import nbe_list_devices
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
+from custom_components.googlefindmy.NovaApi.ListDevices import nbe_list_devices
 
 
 class _DummyCache:

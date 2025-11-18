@@ -1,17 +1,20 @@
 # tests/test_coordinator_device_registry.py
+# ruff: noqa: PLR0913, PLR0912, PLR0915
 """Regression tests for coordinator device registry linkage."""
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType, SimpleNamespace
-from typing import Any, Mapping, cast
-from collections.abc import Iterable
+from typing import Any, cast
 
 import pytest
+from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.googlefindmy import _async_relink_subentry_entities
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.const import (
     DOMAIN,
     INTEGRATION_VERSION,
@@ -19,15 +22,13 @@ from custom_components.googlefindmy.const import (
     SERVICE_DEVICE_MODEL,
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_SUBENTRY_KEY,
-    TRACKER_SUBENTRY_KEY,
+    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
-    SUBENTRY_TYPE_HUB,
+    TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
-from homeassistant.config_entries import ConfigSubentry
-from homeassistant.helpers import device_registry as dr, entity_registry as er
-
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers import service_device_stub
 
 

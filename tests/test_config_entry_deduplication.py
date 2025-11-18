@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib import import_module
 from typing import Any
 
 import pytest
-
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import ServiceCall
 
@@ -172,13 +171,13 @@ async def test_coalesce_handles_unknown_credentials(
         "first",
         "offline@example.com",
         version=3,
-        created_at=datetime(2022, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2022, 1, 1, tzinfo=UTC),
     )
     second = _entry_with_email(
         "second",
         "offline@example.com",
         version=3,
-        created_at=datetime(2023, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2023, 1, 1, tzinfo=UTC),
     )
 
     manager = _StubConfigEntriesManager([first, second])

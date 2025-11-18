@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-
 import logging
 import time
 from datetime import datetime, timedelta
@@ -13,13 +12,10 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from aiohttp import web
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
-
-from .ha_typing import HomeAssistantView
 
 from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -30,6 +26,7 @@ from .const import (
     map_token_hex_digest,
     map_token_secret_seed,
 )
+from .ha_typing import HomeAssistantView
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -6,12 +6,15 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from collections.abc import Awaitable, Callable, Iterable
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
+from homeassistant.const import Platform
+from homeassistant.core import ServiceCall
 
 from custom_components.googlefindmy import _platform_value
 from custom_components.googlefindmy.const import (
@@ -21,10 +24,6 @@ from custom_components.googlefindmy.const import (
     SERVICE_LOCATE_DEVICE,
     SERVICE_PLAY_SOUND,
 )
-from homeassistant.core import ServiceCall
-from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
-from homeassistant.const import Platform
-
 from tests.helpers import drain_loop
 from tests.helpers.homeassistant import resolve_config_entry_lookup
 
@@ -123,12 +122,12 @@ class _StubConfigEntry:
     def async_on_unload(self, callback: Callable[[], None]) -> None:
         self._unload_callbacks.append(callback)
 
-    def _attach_hass(self, hass: "_StubHass") -> None:
+    def _attach_hass(self, hass: _StubHass) -> None:
         self._hass = hass
 
     def async_create_background_task(
         self,
-        hass: "_StubHass",
+        hass: _StubHass,
         target: Awaitable[Any],
         *,
         name: str | None = None,

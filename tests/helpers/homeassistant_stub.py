@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
     from pytest import MonkeyPatch

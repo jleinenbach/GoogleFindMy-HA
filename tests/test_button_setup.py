@@ -7,9 +7,10 @@ import asyncio
 import importlib
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 from tests.helpers import compile_class_method_from_module
 

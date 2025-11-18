@@ -9,27 +9,26 @@ import asyncio
 import datetime
 import logging
 import random
+from email.utils import parsedate_to_datetime
 from typing import cast
 
 import httpx
 
-from custom_components.googlefindmy.Auth.username_provider import async_get_username
-from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
-from custom_components.googlefindmy.SpotApi.grpc_parser import GrpcParser
-from custom_components.googlefindmy.const import DATA_AAS_TOKEN
-
-from custom_components.googlefindmy.Auth.spot_token_retrieval import (
-    async_get_spot_token,
-)
 from custom_components.googlefindmy.Auth.adm_token_retrieval import (
     async_get_adm_token as async_get_adm_token_api,
 )
-
+from custom_components.googlefindmy.Auth.spot_token_retrieval import (
+    async_get_spot_token,
+)
 from custom_components.googlefindmy.Auth.token_cache import (
     # Optional: entry-scoped cache object (when available at call sites)
     TokenCache,
 )
+from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
+from custom_components.googlefindmy.Auth.username_provider import async_get_username
+from custom_components.googlefindmy.const import DATA_AAS_TOKEN
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
+from custom_components.googlefindmy.SpotApi.grpc_parser import GrpcParser
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,8 +78,6 @@ def _compute_delay(attempt: int, retry_after: str | None) -> float:
         try:
             delay = float(retry_after)
         except ValueError:
-            from email.utils import parsedate_to_datetime
-
             try:
                 retry_dt = parsedate_to_datetime(retry_after)
                 delay = max(
@@ -193,7 +190,7 @@ async def async_spot_request(
     payload: bytes,
     *,
     cache: TokenCache,
-) -> bytes:
+) -> bytes:  # noqa: PLR0912, PLR0915
     """
     Perform a SPOT gRPC unary request over HTTP/2 (async, preferred in HA).
 

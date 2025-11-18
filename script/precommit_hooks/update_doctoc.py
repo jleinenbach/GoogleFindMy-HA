@@ -6,8 +6,8 @@ from __future__ import annotations
 import argparse
 import re
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 from urllib.parse import quote
 
 START_MARKER = "<!-- START doctoc generated TOC please keep comment here to allow auto update -->"

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-
 from dataclasses import dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
+
+from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers import frame
 
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import (
@@ -16,8 +18,6 @@ from custom_components.googlefindmy.const import (
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
-from homeassistant.config_entries import ConfigSubentry
-from homeassistant.helpers import frame
 from tests.helpers.config_flow import prepare_flow_hass_config_entries
 
 
@@ -43,7 +43,7 @@ class _ManagerStub:
         assert entry is self.entry
         entry.data = data
 
-    def async_update_subentry(
+    def async_update_subentry(  # noqa: PLR0913
         self,
         entry: _EntryStub,
         subentry: ConfigSubentry,

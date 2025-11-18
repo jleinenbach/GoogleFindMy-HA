@@ -4,12 +4,11 @@
 from __future__ import annotations
 
 # tests/test_device_tracker.py
-
 import asyncio
 import importlib
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 

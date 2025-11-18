@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from tests.test_map_view_unique_id_resolution import _load_map_view_module
@@ -15,7 +15,7 @@ def test_generate_map_html_escapes_dynamic_content(monkeypatch) -> None:
     map_view = _load_map_view_module(monkeypatch)
     view = map_view.GoogleFindMyMapView(SimpleNamespace())
 
-    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
     html_content = view._generate_map_html(
         "<script>alert(1)</script>",
         [

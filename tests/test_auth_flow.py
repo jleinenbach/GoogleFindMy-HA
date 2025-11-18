@@ -1,8 +1,8 @@
 # tests/test_auth_flow.py
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
-
 
 try:  # pragma: no cover - defensive import shim for optional dependency
     import undetected_chromedriver  # type: ignore[unused-ignore]  # noqa: F401

@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 import pytest
 
@@ -20,7 +21,6 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
 )
 from tests.helpers.config_flow import attach_config_entries_flow_manager
-
 
 _ValueT = TypeVar("_ValueT")
 

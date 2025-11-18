@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from types import SimpleNamespace
-
 import asyncio
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,7 +34,7 @@ class _DummyState:
         }
         if extra_attrs:
             self.attributes.update(extra_attrs)
-        self.last_updated = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        self.last_updated = datetime(2024, 1, 1, tzinfo=UTC)
 
 
 class _DummyStates:
@@ -107,7 +106,7 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
     assert entry["accuracy"] == pytest.approx(5.0)
     assert entry["status"] == "Using current state"
     assert entry["last_seen"] == pytest.approx(
-        int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp())
+        int(datetime(2024, 1, 1, tzinfo=UTC).timestamp())
     )
 
 
@@ -222,7 +221,7 @@ def test_history_helper_preserves_last_seen(monkeypatch: pytest.MonkeyPatch) -> 
             "gps_accuracy": 25.0,
             "last_seen": iso_seen,
         },
-        last_updated=datetime(2024, 2, 6, tzinfo=timezone.utc),
+        last_updated=datetime(2024, 2, 6, tzinfo=UTC),
     )
 
     def _fake_get_last_state_changes(hass, limit, entity_ids):

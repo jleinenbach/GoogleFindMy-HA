@@ -30,10 +30,13 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
+from custom_components.googlefindmy.SpotApi.spot_request import (
+    SpotTrailersOnlyError,
+    async_spot_request,
+    spot_request,
+)
 from google.protobuf.message import DecodeError  # parse-time error type for protobufs
-
-from custom_components.googlefindmy.ProtoDecoders import Common_pb2
-from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -76,19 +79,15 @@ async def _spot_call_async(scope: str, payload: bytes, *, cache: TokenCache) -> 
     """
     # Try native async helper first
     try:
-        from custom_components.googlefindmy.SpotApi.spot_request import (
-            SpotTrailersOnlyError,
-            async_spot_request,
-            spot_request,
-        )
+        async_helper = async_spot_request
     except Exception as import_error:  # pragma: no cover - defensive
         raise RuntimeError(
             "Async SPOT request helper is unavailable; update integration dependencies."
         ) from import_error
 
-    if callable(async_spot_request):
+    if callable(async_helper):
         try:
-            return await async_spot_request(scope, payload, cache=cache)
+            return await async_helper(scope, payload, cache=cache)
         except SpotTrailersOnlyError as e:
             # Map to integration-level error expected by callers
             raise SpotApiEmptyResponseError(
@@ -190,10 +189,6 @@ def get_eid_info() -> DeviceUpdate_pb2.GetEidInfoForE2eeDevicesResponse:
     except RuntimeError:
         # No running loop -> OK for CLI usage
         pass
-
-    # Keep the historical synchronous behavior (used by CLI/dev tools),
-    # but the integration should migrate to the async API.
-    from custom_components.googlefindmy.SpotApi.spot_request import spot_request
 
     serialized_request = _build_request_bytes()
     response_bytes = spot_request("GetEidInfoForE2eeDevices", serialized_request)

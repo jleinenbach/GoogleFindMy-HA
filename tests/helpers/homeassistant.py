@@ -10,6 +10,9 @@ from dataclasses import FrozenInstanceError, dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import ServiceCall
+
 from custom_components.googlefindmy import UnknownEntry
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
@@ -17,8 +20,6 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
     service_device_identifier,
 )
-from homeassistant.config_entries import ConfigEntryState
-from homeassistant.core import ServiceCall
 
 from .config_flow import attach_config_entries_flow_manager
 
@@ -496,7 +497,6 @@ class DeferredRegistryConfigEntriesManager(FakeConfigEntriesManager):
         if isinstance(resolved_entry_id, str) and resolved_entry_id:
             registered.add(resolved_entry_id)
         self._defer_publication = True
-        return None
 
     def async_get_entry(self, entry_id: str) -> Any | None:
         """Delay lookups until the resolved child becomes visible."""

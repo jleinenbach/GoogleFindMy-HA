@@ -6,9 +6,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine, Iterable, Mapping
 from types import SimpleNamespace
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 
 import pytest
 
@@ -38,7 +38,7 @@ def test_scanner_triggers_cloud_discovery(
     triggered_calls: list[Mapping[str, Any]] = []
     scheduled: list[asyncio.Task[Any]] = []
 
-    async def _fake_trigger(
+    async def _fake_trigger(  # noqa: PLR0913
         hass,
         *,
         email,

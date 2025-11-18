@@ -7,14 +7,16 @@ import asyncio
 import json
 import sys
 from importlib import import_module
-from types import ModuleType
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 
 from custom_components.googlefindmy.Auth import token_cache
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
+
+EXPECTED_STORE_COUNT = 2
 
 
 class _CapturingCache:
@@ -169,7 +171,7 @@ async def test_token_cache_migration_runs_only_once(
 
     second_cache = await TokenCache.create(hass, "entry-second", str(legacy_second))
     assert legacy_second.exists()
-    assert len(stores) == 2
+    assert len(stores) == EXPECTED_STORE_COUNT
     second_store = stores[1]
     assert second_store.saved_snapshots == []
 

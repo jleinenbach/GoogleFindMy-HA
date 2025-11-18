@@ -1,13 +1,19 @@
 # google/protobuf/internal/containers.pyi
 from __future__ import annotations
 
+from collections.abc import Iterable as _Iterable
+from collections.abc import Iterator as _Iterator
+from collections.abc import MutableSequence as _MutableSequence
 from typing import (
     Any as _Any,
+)
+from typing import (
     Generic as _Generic,
-    Iterable as _Iterable,
-    Iterator as _Iterator,
-    MutableSequence as _MutableSequence,
+)
+from typing import (
     TypeVar as _TypeVar,
+)
+from typing import (
     overload as _overload,
 )
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from selenium.webdriver.remote.webdriver import WebDriver
@@ -34,7 +34,7 @@ def _cookie_value(cookie: Mapping[str, Any] | None) -> str | None:
         return None
 
     value = cookie.get("value")
-    return cast(Optional[str], value)
+    return cast(str | None, value)
 
 
 def main() -> None:

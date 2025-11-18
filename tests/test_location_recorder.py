@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -20,7 +20,7 @@ def test_get_location_history_prefers_last_seen() -> None:
     recorder = LocationRecorder(hass)  # type: ignore[arg-type]
     entity_id = "device_tracker.pixel"
 
-    last_changed = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    last_changed = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     last_seen_iso = "2024-01-01T00:05:00Z"
     state = FakeState(
         "home",
@@ -53,7 +53,7 @@ def test_get_location_history_prefers_last_seen() -> None:
 
     assert len(results) == 1
     entry = results[0]
-    expected_ts = datetime(2024, 1, 1, 0, 5, tzinfo=timezone.utc).timestamp()
+    expected_ts = datetime(2024, 1, 1, 0, 5, tzinfo=UTC).timestamp()
 
     assert entry["timestamp"] == pytest.approx(expected_ts)
     assert entry["last_seen"] == pytest.approx(expected_ts)
@@ -68,7 +68,7 @@ def test_get_location_history_fallbacks_to_last_changed() -> None:
     recorder = LocationRecorder(hass)  # type: ignore[arg-type]
     entity_id = "device_tracker.tablet"
 
-    last_changed = datetime.now(tz=timezone.utc) - timedelta(minutes=10)
+    last_changed = datetime.now(tz=UTC) - timedelta(minutes=10)
     state = FakeState(
         "not_home",
         {
@@ -99,7 +99,7 @@ def test_get_best_location_prefers_newer_last_seen() -> None:
 
     hass = SimpleNamespace()
     recorder = LocationRecorder(hass)  # type: ignore[arg-type]
-    now = datetime(2024, 1, 1, 2, 0, tzinfo=timezone.utc).timestamp()
+    now = datetime(2024, 1, 1, 2, 0, tzinfo=UTC).timestamp()
 
     older = {
         "timestamp": now - 3600,

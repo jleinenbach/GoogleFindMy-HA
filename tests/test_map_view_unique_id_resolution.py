@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
-from datetime import datetime, timezone
 import importlib
 import importlib.util
 import sys
+from collections import OrderedDict
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -173,18 +173,18 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setitem(sys.modules, "homeassistant", homeassistant_pkg)
 
     dt_module = ModuleType("homeassistant.util.dt")
-    dt_module.utcnow = lambda: datetime.now(timezone.utc)
+    dt_module.utcnow = lambda: datetime.now(UTC)
     dt_module.as_local = lambda value: value
-    dt_module.UTC = timezone.utc
+    dt_module.UTC = UTC
     dt_module.as_utc = (
         lambda value: value
         if value.tzinfo is not None
-        else value.replace(tzinfo=timezone.utc)
+        else value.replace(tzinfo=UTC)
     )
 
     def _parse_datetime(value: Any) -> datetime | None:
         if isinstance(value, datetime):
-            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return value if value.tzinfo else value.replace(tzinfo=UTC)
         if not isinstance(value, str):
             return None
         try:
@@ -192,7 +192,7 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
         except ValueError:
             return None
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
         return parsed
 
     dt_module.parse_datetime = _parse_datetime
@@ -359,7 +359,7 @@ def test_map_view_uses_iso_last_seen_for_timeline(
                 "last_seen": iso_old,
                 "gps_accuracy": 5,
             },
-            last_updated=datetime(2024, 7, 1, tzinfo=timezone.utc),
+            last_updated=datetime(2024, 7, 1, tzinfo=UTC),
             state="one",
         ),
         SimpleNamespace(
@@ -369,7 +369,7 @@ def test_map_view_uses_iso_last_seen_for_timeline(
                 "last_seen": iso_new,
                 "gps_accuracy": 10,
             },
-            last_updated=datetime(2024, 5, 1, tzinfo=timezone.utc),
+            last_updated=datetime(2024, 5, 1, tzinfo=UTC),
             state="two",
         ),
         SimpleNamespace(
@@ -379,7 +379,7 @@ def test_map_view_uses_iso_last_seen_for_timeline(
                 "last_seen": iso_new,
                 "gps_accuracy": 15,
             },
-            last_updated=datetime(2024, 8, 1, tzinfo=timezone.utc),
+            last_updated=datetime(2024, 8, 1, tzinfo=UTC),
             state="duplicate",
         ),
     ]
@@ -444,8 +444,8 @@ def test_map_view_html_uses_iso_conversion(monkeypatch: pytest.MonkeyPatch) -> N
     hass = _StubHass()
     view = map_view.GoogleFindMyMapView(hass)
 
-    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    end = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 2, tzinfo=UTC)
     locations = [
         {
             "lat": 10.0,

@@ -11,20 +11,18 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
+from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.coordinator import (
     FcmStatus,
     GoogleFindMyCoordinator,
 )
-from custom_components.googlefindmy.const import DOMAIN
-
+from tests.helpers import drain_loop
 from tests.test_coordinator_status import (
     _DummyAPI,
     _DummyCache,
     _DummyEntry,
     _DummyHass,
 )
-
-from tests.helpers import drain_loop
 
 
 @pytest.fixture

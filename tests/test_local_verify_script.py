@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 import pytest
 

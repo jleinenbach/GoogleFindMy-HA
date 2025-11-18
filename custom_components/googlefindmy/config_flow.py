@@ -39,19 +39,18 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Iterable as CollIterable
+from collections.abc import Mapping as CollMapping
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import lru_cache
-from copy import deepcopy
 from importlib import import_module
-from collections.abc import Iterable as CollIterable, Mapping as CollMapping
 from types import MappingProxyType, ModuleType
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
-    Callable,
     ClassVar,
-    Mapping,
     Protocol,
     TypeAlias,
     TypeVar,
@@ -59,58 +58,58 @@ from typing import (
 )
 
 import voluptuous as vol
-
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
-    # Core domain & credential keys
-    DOMAIN,
-    CONFIG_ENTRY_VERSION,
-    CONF_OAUTH_TOKEN,
     CONF_GOOGLE_EMAIL,
-    DATA_AUTH_METHOD,
+    CONF_OAUTH_TOKEN,
+    CONFIG_ENTRY_VERSION,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DATA_AAS_TOKEN,
+    DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
     DATA_SUBENTRY_KEY,
+    DEFAULT_CONTRIBUTOR_MODE,
+    DEFAULT_DELETE_CACHES_ON_REMOVE,
+    DEFAULT_DEVICE_POLL_DELAY,
+    DEFAULT_ENABLE_STATS_ENTITIES,
+    # Defaults
+    DEFAULT_LOCATION_POLL_INTERVAL,
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_MIN_ACCURACY_THRESHOLD,
+    DEFAULT_OPTIONS,
+    # Core domain & credential keys
+    DOMAIN,
+    OPT_ALLOW_HISTORY_FALLBACK,
+    OPT_CONTRIBUTOR_MODE,
+    OPT_DELETE_CACHES_ON_REMOVE,
+    OPT_DEVICE_POLL_DELAY,
+    OPT_ENABLE_STATS_ENTITIES,
+    OPT_IGNORED_DEVICES,
     # Options (non-secret runtime settings)
     OPT_LOCATION_POLL_INTERVAL,
-    OPT_DEVICE_POLL_DELAY,
-    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MIN_POLL_INTERVAL,
-    OPT_IGNORED_DEVICES,
-    OPT_CONTRIBUTOR_MODE,
-    OPT_ENABLE_STATS_ENTITIES,
-    OPT_DELETE_CACHES_ON_REMOVE,
-    OPT_ALLOW_HISTORY_FALLBACK,
+    OPT_OPTIONS_SCHEMA_VERSION,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SERVICE_SUBENTRY_TRANSLATION_KEY,
-    SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_HUB,
+    SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
     TRACKER_SUBENTRY_TRANSLATION_KEY,
-    # Defaults
-    DEFAULT_LOCATION_POLL_INTERVAL,
-    DEFAULT_DEVICE_POLL_DELAY,
-    DEFAULT_MIN_ACCURACY_THRESHOLD,
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_DELETE_CACHES_ON_REMOVE,
-    DEFAULT_CONTRIBUTOR_MODE,
-    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
-    CONTRIBUTOR_MODE_IN_ALL_AREAS,
-    OPT_OPTIONS_SCHEMA_VERSION,
     coerce_ignored_mapping,
-    DEFAULT_OPTIONS,
-    DEFAULT_ENABLE_STATS_ENTITIES,
     service_device_identifier,
 )
 from .email import normalize_email, normalize_email_or_default, unique_account_id
@@ -603,7 +602,7 @@ def _register_dependency_error(
 
 
 @lru_cache(maxsize=1)
-def _import_api() -> type["GoogleFindMyAPI"]:
+def _import_api() -> type[GoogleFindMyAPI]:
     """Import the API lazily so config flows load without optional deps."""
 
     try:
@@ -622,7 +621,7 @@ def _import_api() -> type["GoogleFindMyAPI"]:
     return cast(type["GoogleFindMyAPI"], api_cls)
 
 
-async def _async_import_api(hass: HomeAssistant) -> type["GoogleFindMyAPI"]:
+async def _async_import_api(hass: HomeAssistant) -> type[GoogleFindMyAPI]:
     """Import the API in an executor to avoid blocking the event loop."""
 
     executor = getattr(hass, "async_add_executor_job", None)
@@ -655,7 +654,7 @@ LEGACY_DISCOVERY_UPDATE_SOURCE = "discovery_update"
 OPT_MOVEMENT_THRESHOLD: str | None
 DEFAULT_MOVEMENT_THRESHOLD: int | None
 try:
-    from .const import OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD
+    from .const import DEFAULT_MOVEMENT_THRESHOLD, OPT_MOVEMENT_THRESHOLD
 except Exception:  # noqa: BLE001
     OPT_MOVEMENT_THRESHOLD = None
     DEFAULT_MOVEMENT_THRESHOLD = None
@@ -666,10 +665,10 @@ DEFAULT_GOOGLE_HOME_FILTER_ENABLED: bool | None
 DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS: str | None
 try:
     from .const import (
-        OPT_GOOGLE_HOME_FILTER_ENABLED,
-        OPT_GOOGLE_HOME_FILTER_KEYWORDS,
         DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
         DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
+        OPT_GOOGLE_HOME_FILTER_ENABLED,
+        OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     )
 except Exception:  # noqa: BLE001
     OPT_GOOGLE_HOME_FILTER_ENABLED = None
@@ -1193,7 +1192,7 @@ def _extract_oauth_candidates_from_secrets(
 # API probing helpers (signature-robust)
 # ---------------------------
 async def _try_probe_devices(
-    api: "GoogleFindMyAPI", *, email: str, token: str
+    api: GoogleFindMyAPI, *, email: str, token: str
 ) -> list[dict[str, Any]]:
     """Call the API to fetch a basic device list using defensive signatures."""
     caller = cast(
@@ -1221,7 +1220,7 @@ async def _async_new_api_for_probe(
     token: str,
     *,
     secrets_bundle: dict[str, Any] | None = None,
-) -> "GoogleFindMyAPI":
+) -> GoogleFindMyAPI:
     """Create a fresh, ephemeral API instance for pre-flight validation."""
     factory = cast(Callable[..., "GoogleFindMyAPI"], await _async_import_api(hass))
     try:
@@ -2822,7 +2821,7 @@ class ConfigFlow(
         )
 
     # ------------------ Shared: build API for final probe ------------------
-    async def _async_build_api_and_username(self) -> tuple["GoogleFindMyAPI", str, str]:
+    async def _async_build_api_and_username(self) -> tuple[GoogleFindMyAPI, str, str]:
         """Construct an ephemeral API client from transient flow credentials."""
         email = self._auth_data.get(CONF_GOOGLE_EMAIL)
         oauth = self._auth_data.get(CONF_OAUTH_TOKEN)
@@ -4143,7 +4142,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
 
         await ConfigFlow._async_clear_cached_aas_token(self, entry)
 
-    async def _async_build_api_from_entry(self, entry: ConfigEntry) -> "GoogleFindMyAPI":
+    async def _async_build_api_from_entry(self, entry: ConfigEntry) -> GoogleFindMyAPI:
         """Construct API object from the live entry context (cache-first)."""
         cache = self._get_entry_cache(entry)
         if cache is not None:

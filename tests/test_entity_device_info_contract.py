@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from types import SimpleNamespace
-from typing import Any, Callable
-
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 try:
     from pytest_homeassistant_custom_component.common import MockConfigEntry

@@ -4,13 +4,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
+from collections.abc import Awaitable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from collections.abc import Awaitable
 from unittest.mock import AsyncMock
-
-import importlib
 
 import pytest
 
@@ -53,7 +52,6 @@ def test_trigger_cloud_discovery_uses_helper(
 
     async def _helper(*args, **kwargs):
         captured.append((args, kwargs))
-        return None
 
     monkeypatch.setattr(config_flow, "async_create_discovery_flow", _helper)
 
@@ -107,7 +105,6 @@ def test_trigger_cloud_discovery_sanitizes_context_source(
 
     async def _helper(*args, **kwargs):
         captured.append((args, kwargs))
-        return None
 
     monkeypatch.setattr(config_flow, "async_create_discovery_flow", _helper)
 
@@ -176,7 +173,6 @@ def test_trigger_cloud_discovery_injects_fallback_key(
 
     async def _helper(*_args: object, **kwargs: object) -> None:
         captured["kwargs"] = kwargs
-        return None
 
     monkeypatch.setattr(config_flow, "async_create_discovery_flow", _helper)
     monkeypatch.delattr(config_flow, "DiscoveryKey", raising=False)
@@ -363,7 +359,6 @@ def test_results_append_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _helper(*args, **kwargs):
         calls.append(kwargs.get("data") or args[3])
         await gate_holder[0].wait()
-        return None
 
     monkeypatch.setattr(config_flow, "async_create_discovery_flow", _helper)
 

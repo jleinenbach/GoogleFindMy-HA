@@ -6,6 +6,8 @@ from __future__ import annotations
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
+from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers import device_registry as dr
 
 from custom_components.googlefindmy.const import (
     DOMAIN,
@@ -15,8 +17,6 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from homeassistant.config_entries import ConfigSubentry
-from homeassistant.helpers import device_registry as dr
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:

@@ -1,10 +1,10 @@
 # google/protobuf/message.pyi
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from custom_components.googlefindmy.protobuf_typing import MessageProto
-
 
 class Message(MessageProto):
     DESCRIPTOR: Any

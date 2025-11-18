@@ -5,20 +5,19 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from collections.abc import Awaitable
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from .test_button_setup import _ensure_button_dependencies
 from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
-
 from tests.helpers import GoogleFindMyConfigEntryStub, drain_loop
+
+from .test_button_setup import _ensure_button_dependencies
 
 
 class _StubHass:

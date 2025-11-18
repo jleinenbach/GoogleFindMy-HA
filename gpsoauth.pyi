@@ -12,7 +12,6 @@ from __future__ import annotations
 from types import ModuleType
 from typing import Any
 
-
 class AuthError(Exception):
     """Raised when the gpsoauth library signals an authentication failure."""
 

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Iterator
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Callable, Sequence
-
 import importlib.util
+from collections import defaultdict
+from collections.abc import Callable, Iterator, Sequence
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -59,8 +58,8 @@ def use_real_homeassistant_modules() -> Iterator[None]:
 
 @pytest.mark.asyncio
 async def test_entity_recovery_manager_recovers_missing_entities(
-    hass: "HomeAssistant",
-    entity_registry: "er.EntityRegistry",
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
     enable_custom_integrations: None,
 ) -> None:
     """The manager should recover missing entities across all registered platforms."""
@@ -84,9 +83,9 @@ async def test_entity_recovery_manager_recovers_missing_entities(
     )
     from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
     from custom_components.googlefindmy.sensor import (
+        STATS_DESCRIPTIONS,
         GoogleFindMyLastSeenSensor,
         GoogleFindMyStatsSensor,
-        STATS_DESCRIPTIONS,
     )
 
     tracker_devices = [

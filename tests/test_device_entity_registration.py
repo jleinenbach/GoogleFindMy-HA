@@ -3,16 +3,16 @@ from __future__ import annotations
 import importlib
 import os
 import time
+from collections.abc import Iterable
 from types import SimpleNamespace
-from typing import Any, Iterable
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-
 from homeassistant.config_entries import ConfigEntryState
-
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from custom_components.googlefindmy.const import (
@@ -47,7 +47,7 @@ def _force_utc_timezone() -> Iterable[None]:
     dt_util.DEFAULT_TIME_ZONE = dt_util.UTC
 
 
-async def _patch_integration_runtime(
+async def _patch_integration_runtime(  # noqa: PLR0915
     hass: HomeAssistant,
     *,
     monkeypatch: pytest.MonkeyPatch,
@@ -175,7 +175,6 @@ async def _patch_integration_runtime(
 
     async def _forward_entry_setups(entry_obj: MockConfigEntry, platforms: Iterable[object]) -> None:
         await _fake_async_get_integration(hass, entry_obj.domain)
-        return None
 
     monkeypatch.setattr(
         hass.config_entries,
@@ -197,7 +196,7 @@ async def _patch_integration_runtime(
 
 
 @pytest.mark.asyncio
-async def test_devices_and_entities_registered(
+async def test_devices_and_entities_registered(  # noqa: PLR0913, PLR0915
     hass: HomeAssistant,
     device_registry: dr.DeviceRegistry,
     entity_registry: er.EntityRegistry,

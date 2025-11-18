@@ -6,13 +6,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import pytest
 
+MAX_INITIAL_CALLS = 2
+UNAUTHORIZED_STATUS = 401
+SUCCESS_STATUS = 200
+EXPECTED_RETRY_COUNT = 2
+
+from custom_components.googlefindmy.api import _EphemeralCache
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
+from custom_components.googlefindmy.Auth.username_provider import username_string
+from custom_components.googlefindmy.const import DATA_AAS_TOKEN
 from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (
     async_request_device_list,
 )
@@ -21,9 +29,6 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     async_nova_request,
 )
-from custom_components.googlefindmy.api import _EphemeralCache
-from custom_components.googlefindmy.const import DATA_AAS_TOKEN
-from custom_components.googlefindmy.Auth.username_provider import username_string
 
 
 class _DummyResponse:
@@ -213,7 +218,7 @@ def test_async_nova_request_refreshes_token_after_initial_401(
     assert adm_calls == ["user@example.com"]
     assert len(refresh_calls) == 1
     assert len(on_401_calls) == 1
-    assert len(session.calls) == 2
+    assert len(session.calls) == EXPECTED_RETRY_COUNT
     second_headers = session.calls[1]["kwargs"].get("headers", {})
     assert second_headers.get("Authorization") == "Bearer adm-new"
 
@@ -234,7 +239,7 @@ class _CoordinatedSession:
 
         if auth == "Bearer initial-token":
             self._initial_calls += 1
-            if self._initial_calls >= 2:
+            if self._initial_calls >= MAX_INITIAL_CALLS:
                 self._allow_refresh.set()
             status, body = 401, b"unauthorized"
         elif auth == "Bearer refreshed-token":
@@ -323,9 +328,11 @@ def test_async_nova_request_reuses_cached_token_after_recent_refresh(
     assert refreshes == 1
 
     statuses = [call["status"] for call in calls]
-    assert statuses.count(401) == 2
-    assert statuses.count(200) == 2
-    successful_auths = [call["auth"] for call in calls if call["status"] == 200]
+    assert statuses.count(UNAUTHORIZED_STATUS) == EXPECTED_RETRY_COUNT
+    assert statuses.count(SUCCESS_STATUS) == EXPECTED_RETRY_COUNT
+    successful_auths = [
+        call["auth"] for call in calls if call["status"] == SUCCESS_STATUS
+    ]
     assert successful_auths == ["Bearer refreshed-token", "Bearer refreshed-token"]
 
 
@@ -401,10 +408,10 @@ def test_device_list_namespace_override_does_not_double_prefix(
     assert f"{namespace}:adm_token_issued_at_{username}" in set_keys
 
 
-def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:
+def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:  # noqa: PLR0915
     """401 refresh clears stale token keys without resetting startup probe counters."""
 
-    async def _run() -> None:
+    async def _run() -> None:  # noqa: PLR0915
         hass = _FakeHass()
         cache = await TokenCache.create(hass, "entry-refresh")
         try:
@@ -728,7 +735,7 @@ def test_async_nova_request_preserves_existing_aas_when_username_missing(
     assert result == "face"
     assert calls and calls[0]["username"] == "user@example.com"
     assert calls[0]["cache"] is cache
-    assert calls[0]["retries"] == 2
+    assert calls[0]["retries"] == EXPECTED_RETRY_COUNT
     assert calls[0]["backoff"] == 1.0
     assert final_aas == "cached-aas-token"
     assert session.calls

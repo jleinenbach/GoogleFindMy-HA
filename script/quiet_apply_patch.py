@@ -13,8 +13,8 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 
 def _read_patch(patch_file: Path | None) -> str:

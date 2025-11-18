@@ -38,10 +38,6 @@ import logging
 import os
 import socket
 import time
-from contextlib import suppress
-from datetime import datetime
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, TypeGuard, cast
 from collections import defaultdict
 from collections.abc import (
     Awaitable,
@@ -51,14 +47,19 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from contextlib import suppress
+from dataclasses import dataclass, field
+from datetime import datetime
 from types import MappingProxyType, SimpleNamespace
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard, TypeVar, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
-from .ProtoDecoders import Common_pb2, DeviceUpdate_pb2, LocationReportsUpload_pb2
-
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
+
+from .ProtoDecoders import Common_pb2, DeviceUpdate_pb2, LocationReportsUpload_pb2
+
 try:  # pragma: no cover - ConfigEntryDisabler introduced in HA 2023.12
     from homeassistant.config_entries import ConfigEntryDisabler as _ConfigEntryDisabler
 except ImportError:  # pragma: no cover - legacy Home Assistant builds
@@ -69,9 +70,9 @@ except ImportError:  # pragma: no cover - legacy Home Assistant builds
     _ConfigUnknownEntry = None
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
-    Platform,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
+    Platform,
 )
 from homeassistant.core import Event, HomeAssistant
 
@@ -97,9 +98,14 @@ from homeassistant.exceptions import (
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import (
     device_registry as dr,
+)
+from homeassistant.helpers import (
     entity_registry as er,
+)
+from homeassistant.helpers import (
     issue_registry as ir,
 )
+
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
 else:  # pragma: no cover - test environments without full Home Assistant
@@ -115,6 +121,9 @@ else:  # pragma: no cover - test environments without full Home Assistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.storage import Store
 
+# Eagerly import diagnostics to prevent blocking calls on-demand
+from . import diagnostics  # noqa: F401
+
 # Token cache (entry-scoped HA Store-backed cache + registry/facade)
 from .Auth.token_cache import (
     TokenCache,
@@ -124,31 +133,29 @@ from .Auth.token_cache import (
 
 # Username key normalization
 from .Auth.username_provider import username_string
-
-# Shared FCM provider (HA-managed singleton)
-from .NovaApi.ExecuteAction.LocateTracker.location_request import (
-    register_fcm_receiver_provider as loc_register_fcm_provider,
-    unregister_fcm_receiver_provider as loc_unregister_fcm_provider,
-)
 from .const import (
+    CACHE_KEY_CONTRIBUTOR_MODE,
+    CACHE_KEY_LAST_MODE_SWITCH,
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
-    CONFIG_ENTRY_VERSION as CONFIG_ENTRY_VERSION,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
+    DEFAULT_CONTRIBUTOR_MODE,
+    DEFAULT_DELETE_CACHES_ON_REMOVE,
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DEFAULT_MIN_ACCURACY_THRESHOLD,
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
-    DEFAULT_DELETE_CACHES_ON_REMOVE,
     DOMAIN,
-    OPTION_KEYS,
-    OPT_DELETE_CACHES_ON_REMOVE,
-    OPT_CONTRIBUTOR_MODE,
+    LEGACY_SERVICE_IDENTIFIER,
     OPT_ALLOW_HISTORY_FALLBACK,
+    OPT_CONTRIBUTOR_MODE,
+    OPT_DELETE_CACHES_ON_REMOVE,
     OPT_DEVICE_POLL_DELAY,
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
@@ -156,15 +163,12 @@ from .const import (
     OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
-    DEFAULT_CONTRIBUTOR_MODE,
-    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
-    CONTRIBUTOR_MODE_IN_ALL_AREAS,
-    CACHE_KEY_CONTRIBUTOR_MODE,
-    CACHE_KEY_LAST_MODE_SWITCH,
+    OPTION_KEYS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SERVICE_SUBENTRY_TRANSLATION_KEY,
-    LEGACY_SERVICE_IDENTIFIER,
+    STORAGE_KEY,
+    STORAGE_VERSION,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
@@ -172,13 +176,19 @@ from .const import (
     TRACKER_SUBENTRY_TRANSLATION_KEY,
     coerce_ignored_mapping,
     service_device_identifier,
-    STORAGE_KEY,
-    STORAGE_VERSION,
+)
+from .const import (
+    CONFIG_ENTRY_VERSION as CONFIG_ENTRY_VERSION,
 )
 from .email import normalize_email, unique_account_id
 
-# Eagerly import diagnostics to prevent blocking calls on-demand
-from . import diagnostics  # noqa: F401
+# Shared FCM provider (HA-managed singleton)
+from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+    register_fcm_receiver_provider as loc_register_fcm_provider,
+)
+from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+    unregister_fcm_receiver_provider as loc_unregister_fcm_provider,
+)
 
 try:  # pragma: no cover - OperationNotAllowed introduced alongside HA subentry retries
     from homeassistant.config_entries import OperationNotAllowed as _OperationNotAllowed
@@ -240,26 +250,40 @@ if TYPE_CHECKING:
         RegistryEntryDisabler as RegistryEntryDisablerType,
     )
 
-    from .NovaApi.ExecuteAction.LocateTracker.location_request import (
-        FcmReceiverProtocol as NovaFcmReceiverProtocol,
-    )
     from .api import (
         FcmReceiverProtocol as ApiFcmReceiverProtocol,
+    )
+    from .api import (
         register_fcm_receiver_provider as ApiRegisterFcmProviderType,
+    )
+    from .api import (
         unregister_fcm_receiver_provider as ApiUnregisterFcmProviderType,
     )
     from .Auth.fcm_receiver_ha import FcmReceiverHA as FcmReceiverHAType
     from .coordinator import GoogleFindMyCoordinator as GoogleFindMyCoordinatorType
     from .discovery import (
         DiscoveryManager as DiscoveryManagerType,
-        async_initialize_discovery_runtime as AsyncInitializeDiscoveryRuntimeType,
+    )
+    from .discovery import (
         _cloud_discovery_runtime as cloud_discovery_runtime_impl,
+    )
+    from .discovery import (
         _redact_account_for_log as redact_account_for_log_impl,
+    )
+    from .discovery import (
         _trigger_cloud_discovery as trigger_cloud_discovery_impl,
+    )
+    from .discovery import (
+        async_initialize_discovery_runtime as AsyncInitializeDiscoveryRuntimeType,
     )
     from .map_view import (
         GoogleFindMyMapRedirectView as GoogleFindMyMapRedirectViewType,
+    )
+    from .map_view import (
         GoogleFindMyMapView as GoogleFindMyMapViewType,
+    )
+    from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+        FcmReceiverProtocol as NovaFcmReceiverProtocol,
     )
     from .services import async_register_services as AsyncRegisterServicesType
 
@@ -281,8 +305,8 @@ if TYPE_CHECKING:
         TriggerCloudDiscoveryCallable, trigger_cloud_discovery_impl
     )
 else:
-    from typing import Any as RegistryEntryDisablerType
     from typing import Any as FcmReceiverHAType
+    from typing import Any as RegistryEntryDisablerType
 
     NovaFcmReceiverProtocol = FcmReceiverHAType
     ApiFcmReceiverProtocol = FcmReceiverHAType
@@ -392,6 +416,8 @@ def _ensure_runtime_imports() -> None:
 
     from .api import (  # noqa: E402
         register_fcm_receiver_provider as _api_register_fcm_provider,
+    )
+    from .api import (
         unregister_fcm_receiver_provider as _api_unregister_fcm_provider,
     )
     from .coordinator import (  # noqa: E402
@@ -399,13 +425,23 @@ def _ensure_runtime_imports() -> None:
     )
     from .discovery import (  # noqa: E402
         DiscoveryManager as _DiscoveryManager,
-        async_initialize_discovery_runtime as _async_initialize_discovery_runtime,
+    )
+    from .discovery import (
         _cloud_discovery_runtime as _cloud_discovery_runtime_fn,
+    )
+    from .discovery import (
         _redact_account_for_log as _redact_account_for_log_fn,
+    )
+    from .discovery import (
         _trigger_cloud_discovery as _trigger_cloud_discovery_fn,
+    )
+    from .discovery import (
+        async_initialize_discovery_runtime as _async_initialize_discovery_runtime,
     )
     from .map_view import (  # noqa: E402
         GoogleFindMyMapRedirectView as _GoogleFindMyMapRedirectView,
+    )
+    from .map_view import (
         GoogleFindMyMapView as _GoogleFindMyMapView,
     )
     from .services import (  # noqa: E402
@@ -785,7 +821,7 @@ async def _async_assess_entry_health(
                     secrets_bundle=secrets_bundle,
                 )
                 await try_probe(api, email=normalized_email, token=token)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             unknown_reason = "timeout"
             continue
         except Exception as err:  # noqa: BLE001 - deliberate broad guard
@@ -1272,13 +1308,8 @@ class ConfigEntrySubEntryManager:
             else:
                 candidate_descriptor = "<unset>"
             context = (
-                "unique_id={unique_id!r}, key={key!r}, fallback_id={fallback!r},"
-                " candidate_ref={candidate!r}"
-            ).format(
-                unique_id=unique_id,
-                key=key,
-                fallback=fallback_subentry_id,
-                candidate=candidate_descriptor,
+                f"unique_id={unique_id!r}, key={key!r}, fallback_id={fallback_subentry_id!r},"
+                f" candidate_ref={candidate_descriptor!r}"
             )
             _LOGGER.error(
                 "[%s] async_sync: Unable to locate registered subentry for %s after"
@@ -5763,7 +5794,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         """Flush deferred saves on Home Assistant stop."""
         try:
             await cache.flush()
-        except (HomeAssistantError, ValueError, asyncio.TimeoutError) as err:
+        except (TimeoutError, HomeAssistantError, ValueError) as err:
             _LOGGER.debug("Cache flush on stop raised: %s", err)
 
     entry.async_on_unload(

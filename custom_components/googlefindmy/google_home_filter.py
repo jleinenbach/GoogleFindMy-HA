@@ -38,14 +38,15 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any, cast
-from collections.abc import Callable as TypingCallable
 from collections.abc import Callable, Mapping
+from collections.abc import Callable as TypingCallable
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.components.zone import DOMAIN as ZONE_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
-from homeassistant.core import Event, HomeAssistant, State, callback as ha_callback
+from homeassistant.core import Event, HomeAssistant, State
+from homeassistant.core import callback as ha_callback
 from homeassistant.helpers import entity_registry as er
 
 from .const import (
@@ -62,6 +63,8 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_registry import EntityRegistry
     from homeassistant.helpers.event import (
         CALLBACK_TYPE as _CallbackType,
+    )
+    from homeassistant.helpers.event import (
         async_track_state_change_event as _AsyncTrackStateChangeEvent,
     )
 else:

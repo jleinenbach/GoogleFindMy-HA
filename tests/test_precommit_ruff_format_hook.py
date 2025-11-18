@@ -7,6 +7,8 @@ import pytest
 
 from script.precommit_hooks import ruff_format
 
+EXPECTED_EXIT_CODE = 7
+
 
 def test_main_injects_force_exclude(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force-exclude should be appended when not explicitly disabled."""
@@ -72,4 +74,4 @@ def test_main_propagates_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ruff_format, "_run_ruff", _fake_run)
 
-    assert ruff_format.main(["config.py"]) == 7
+    assert ruff_format.main(["config.py"]) == EXPECTED_EXIT_CODE

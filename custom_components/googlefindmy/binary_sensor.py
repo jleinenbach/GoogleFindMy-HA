@@ -28,24 +28,24 @@ import logging
 from collections.abc import Callable, Iterable
 
 from homeassistant.components.binary_sensor import (
-    BinarySensorEntityDescription,
     BinarySensorDeviceClass,
+    BinarySensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers import issue_registry as ir
 
+from . import EntityRecoveryManager
 from .const import (
     DOMAIN,
-    SERVICE_SUBENTRY_KEY,
-    TRANSLATION_KEY_AUTH_STATUS,
     EVENT_AUTH_ERROR,
     EVENT_AUTH_OK,
+    SERVICE_SUBENTRY_KEY,
+    TRANSLATION_KEY_AUTH_STATUS,
     issue_id_for,
 )
-from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator, format_epoch_utc
 from .entity import (
     GoogleFindMyEntity,

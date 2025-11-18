@@ -8,21 +8,21 @@ import secrets
 import time
 
 from custom_components.googlefindmy.const import MICRO
-from custom_components.googlefindmy.FMDNCrypto.key_derivation import FMDNOwnerOperations
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     generate_eid,
 )
+from custom_components.googlefindmy.FMDNCrypto.key_derivation import FMDNOwnerOperations
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import encrypt_aes_gcm
 from custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2 import (
     DeviceComponentInformation,
-    SpotDeviceType,
-    RegisterBleDeviceRequest,
     PublicKeyIdList,
+    RegisterBleDeviceRequest,
+    SpotDeviceType,
 )
 from custom_components.googlefindmy.SpotApi.CreateBleDevice.config import (
-    mcu_fast_pair_model_id,
     max_truncated_eid_seconds_server,
+    mcu_fast_pair_model_id,
 )
 from custom_components.googlefindmy.SpotApi.CreateBleDevice.util import flip_bits
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (

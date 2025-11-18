@@ -12,6 +12,9 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
 )
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
 
+ALTITUDE_METERS = 1337
+ACCURACY_METERS = 5.0
+
 
 def test_async_decrypt_location_response_locations_allows_future_owner_timestamp(
     monkeypatch: pytest.MonkeyPatch,
@@ -63,5 +66,5 @@ def test_async_decrypt_location_response_locations_allows_future_owner_timestamp
     entry = result[0]
     assert entry["last_seen"] == owner_timestamp
     assert entry["is_own_report"] is True
-    assert entry["altitude"] == 1337
-    assert entry["accuracy"] == 5.0
+    assert entry["altitude"] == ALTITUDE_METERS
+    assert entry["accuracy"] == ACCURACY_METERS

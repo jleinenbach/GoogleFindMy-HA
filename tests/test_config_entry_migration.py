@@ -6,7 +6,6 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 import pytest
-
 from homeassistant.config_entries import ConfigEntryState
 
 from custom_components.googlefindmy.const import (
@@ -15,7 +14,6 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
     OPT_MIN_POLL_INTERVAL,
 )
-
 
 if TYPE_CHECKING:
     from tests.conftest import IssueRegistryCapture
@@ -37,7 +35,7 @@ class _MigrationTestEntry:
 
     domain: str = DOMAIN
 
-    def add_to_hass(self, hass: "_MigrationHass") -> None:
+    def add_to_hass(self, hass: _MigrationHass) -> None:
         hass.config_entries.add_entry(self)
 
 

@@ -39,7 +39,7 @@ def _extract_placeholders(data: Any) -> dict[tuple[str, ...], set[str]]:
     return placeholders
 
 
-def test_translation_placeholders() -> None:
+def test_translation_placeholders() -> None:  # noqa: PLR0915
     translations_dir = (
         Path(__file__).resolve().parent.parent
         / "custom_components"

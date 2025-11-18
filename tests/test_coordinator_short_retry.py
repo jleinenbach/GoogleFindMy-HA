@@ -5,15 +5,14 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any
 from collections.abc import Callable, Coroutine
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.const import DOMAIN
-
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers import drain_loop
 
 
