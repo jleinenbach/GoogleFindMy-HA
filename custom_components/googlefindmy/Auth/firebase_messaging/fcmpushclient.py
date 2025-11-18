@@ -38,30 +38,22 @@ import struct
 import time
 import traceback
 from base64 import urlsafe_b64decode
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Generic, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
+
 from google.protobuf.json_format import MessageToJson
-
 from google.protobuf.message import Message as RuntimeMessage
-
-if TYPE_CHECKING:
-    from custom_components.googlefindmy.protobuf_typing import MessageProto
-else:
-    MessageProto = RuntimeMessage
-
-http_decrypt = cast(Callable[..., bytes], importlib.import_module("http_ece").decrypt)
 
 from ._typing import (
     CredentialsUpdatedCallable,
     JSONDict,
     MutableJSONMapping,
-    NotificationContextT,
     OnNotificationCallable,
 )
 from .const import (
@@ -82,6 +74,13 @@ from .proto.mcs_pb2 import (  # pylint: disable=no-name-in-module
     SelectiveAck,
     StreamErrorStanza,
 )
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.protobuf_typing import MessageProto
+else:
+    MessageProto = RuntimeMessage
+
+http_decrypt = cast(Callable[..., bytes], importlib.import_module("http_ece").decrypt)
 
 _logger = logging.getLogger(__name__)
 
@@ -160,7 +159,7 @@ class FcmPushClientConfig:  # pylint:disable=too-many-instance-attributes
     writer_close_timeout: float = 2.0
 
 
-class FcmPushClient(Generic[NotificationContextT]):  # pylint:disable=too-many-instance-attributes
+class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-attributes
     """Worker-only FCM client.
     - Establishes a single connection with initial retry.
     - Listens for messages until an error occurs or stop() is called.
