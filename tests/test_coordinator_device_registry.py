@@ -247,6 +247,13 @@ class _FakeDeviceRegistry:
                     device.translation_key = translation_key
                 if translation_placeholders is not None:
                     device.translation_placeholders = translation_placeholders
+                if (
+                    direct_config_subentry is not _UNSET_DEVICE
+                    and add_config_entry_id is None
+                ):
+                    raise AssertionError(
+                        "config_subentry_id provided without add_config_entry_id"
+                    )
                 if add_config_entry_id:
                     device.config_entries.add(add_config_entry_id)
                     subentries = device.config_entries_subentries.setdefault(
@@ -818,6 +825,29 @@ def _prepare_coordinator_for_registry(
     )
 
 
+def test_fake_registry_requires_parent_entry_for_subentry(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Stub registry mirrors HA guard against orphaned subentries."""
+
+    entry_id = "entry-guard"
+    device = fake_registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry_id,
+        identifiers={(DOMAIN, "entry-guard:device-1")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Existing Device",
+        config_subentry_id=None,
+    )
+
+    with pytest.raises(
+        AssertionError, match="config_subentry_id provided without add_config_entry_id"
+    ):
+        fake_registry.async_update_device(  # type: ignore[attr-defined]
+            device_id=device.id, config_subentry_id="tracker-subentry"
+        )
+
+
 def test_devices_register_without_service_parent(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:
@@ -843,6 +873,7 @@ def test_devices_register_without_service_parent(
     healing_payload = fake_registry.updated[0]
     assert healing_payload["config_subentry_id"] == entry.tracker_subentry_id
     assert healing_payload["add_config_subentry_id"] is None
+    assert healing_payload["add_config_entry_id"] == entry.entry_id
 
 
 def test_hub_entry_skips_registry_updates(
@@ -1037,7 +1068,7 @@ def test_existing_device_remains_standalone(
     assert existing.via_device_id is None
     assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
     assert fake_registry.updated[0]["add_config_subentry_id"] is None
-    assert fake_registry.updated[0]["add_config_entry_id"] is None
+    assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
     assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
     assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
     assert existing.config_subentry_id == entry.tracker_subentry_id
@@ -1076,7 +1107,7 @@ def test_existing_device_backfills_config_subentry(
     assert payload["device_id"] == existing.id
     assert payload["config_subentry_id"] == entry.tracker_subentry_id
     assert payload["add_config_subentry_id"] is None
-    assert payload["add_config_entry_id"] is None
+    assert payload["add_config_entry_id"] == entry.entry_id
     assert payload["via_device_id"] is None
     assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
     assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
@@ -1388,6 +1419,7 @@ def test_service_device_heals_config_subentry(fake_registry: _FakeDeviceRegistry
         if update.get("config_subentry_id") == entry.service_subentry_id
     )
     assert payload["add_config_subentry_id"] is None
+    assert payload["add_config_entry_id"] == entry.entry_id
     assert service_entry.config_subentry_id == entry.service_subentry_id
     assert service_entry.config_entries_subentries[entry.entry_id] == {
         entry.service_subentry_id

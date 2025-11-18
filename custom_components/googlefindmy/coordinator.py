@@ -2017,6 +2017,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     base_kwargs={
                         "device_id": device_id,
                         "config_subentry_id": service_config_subentry_id,
+                        "add_config_entry_id": entry.entry_id,
                     },
                 )
                 device = _refresh_service_device_entry(healed or device)
@@ -2880,6 +2881,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 base_kwargs={
                     "device_id": device_id,
                     "config_subentry_id": tracker_config_subentry_id,
+                    "add_config_entry_id": entry_id,
                 },
             )
             healed_device = _refresh_device_entry(device_id, updated or device)
