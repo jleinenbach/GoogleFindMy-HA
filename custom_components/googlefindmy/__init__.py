@@ -1762,9 +1762,12 @@ class ConfigEntrySubEntryManager:
                                     "Failed to instantiate ConfigSubentry fallback"
                                 )
 
-                            # Create config subentry through HA's API so Core assigns
-                            # a stable subentry_id and will later call async_setup_entry
-                            # for the child (see developers.home-assistant.io docs).
+                            # Create a config subentry through HA's API so Core assigns
+                            # a stable subentry_id and will later call async_setup_entry.
+                            # According to the Home Assistant subentry model, subentries
+                            # are created via async_add_subentry and set up via
+                            # async_setup_entry to ensure platform callbacks receive the
+                            # config_subentry_id context.
                             add_result = self._hass.config_entries.async_add_subentry(
                                 self._entry, new_subentry
                             )
@@ -2198,30 +2201,19 @@ async def _async_setup_new_subentries(
     retry_missing_registrations = False
 
     for target, fallback_target in setup_targets:
-        missing_parent_membership = [
-            candidate
-            for candidate in (target, fallback_target)
-            if candidate is not None and candidate not in parent_subentry_ids
-        ]
-        if missing_parent_membership:
-            for candidate in missing_parent_membership:
-                # HA subentries must be created via async_add_subentry before
-                # scheduling setup (see developers.home-assistant.io guidance).
+        for candidate in (target, fallback_target):
+            if candidate is None:
+                continue
+            if candidate not in parent_subentry_ids:
                 _LOGGER.error(
-                    "[%s] Subentry %s not registered in parent entry before scheduling",
+                    "[%s] Subentry %s not registered for entry %s",  # noqa: G004
                     parent_entry.entry_id,
                     candidate,
+                    parent_entry.entry_id,
                 )
-
-            raise HomeAssistantError(
-                "; ".join(
-                    (
-                        "Subentry "
-                        f"{candidate} not found in config entry {parent_entry.entry_id}"
-                        for candidate in missing_parent_membership
-                    )
+                raise HomeAssistantError(
+                    f"Subentry {candidate} not found in config entry"
                 )
-            )
 
         for registration_candidate in (target, fallback_target):
             if registration_candidate is None:
@@ -2238,9 +2230,16 @@ async def _async_setup_new_subentries(
                 )
                 missing_registrations.add(registration_candidate)
                 retry_missing_registrations = retry_missing_registrations or not registered_subentry_ids
-                continue
+                if not registered_subentry_ids:
+                    raise ConfigEntryNotReady(
+                        f"Config subentry {registration_candidate} not registered"
+                    )
 
-            _LOGGER.warning(
+                raise HomeAssistantError(
+                    f"Config subentry {registration_candidate} missing from registry"
+                )
+
+            _LOGGER.debug(
                 "[%s] Scheduling setup for config subentry '%s'",  # noqa: G004
                 parent_entry.entry_id,
                 registration_candidate,

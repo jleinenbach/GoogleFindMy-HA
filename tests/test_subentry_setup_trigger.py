@@ -213,7 +213,7 @@ async def test_async_setup_new_subentries_logs_and_retries_unknown(
 async def test_async_setup_new_subentries_enforces_registered_subentries(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Subentry scheduling should raise when registration never appears."""
+    """Subentry scheduling should raise when the parent entry lacks the subentry."""
 
     caplog.set_level(logging.ERROR)
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
@@ -236,7 +236,45 @@ async def test_async_setup_new_subentries_enforces_registered_subentries(
         )
 
     assert config_entries.setup_calls == []
-    assert "not registered in parent entry" in " ".join(caplog.messages)
+    assert any(
+        "Subentry child-entry not registered for entry" in message
+        for message in caplog.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_setup_new_subentries_requires_registered_subentries(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing registry visibility should raise even when enforcement is enabled."""
+
+    caplog.set_level(logging.ERROR)
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    hass = FakeHass(config_entries=config_entries)
+
+    orphan_subentry = SimpleNamespace(
+        entry_id="child-entry",
+        subentry_id="child-entry",
+        unique_id="child-entry",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+    parent_entry.subentries[orphan_subentry.subentry_id] = orphan_subentry
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy._registered_subentry_ids", lambda *_: set()
+    )
+
+    with pytest.raises(ConfigEntryNotReady):
+        await _async_setup_new_subentries(
+            hass,
+            parent_entry,
+            [orphan_subentry],
+            enforce_registration=True,
+        )
+
+    assert config_entries.setup_calls == []
+    assert "not registered; cannot schedule setup" in " ".join(caplog.messages)
 
 
 @pytest.mark.asyncio
