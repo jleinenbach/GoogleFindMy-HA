@@ -15,6 +15,7 @@ from custom_components.googlefindmy import (
     RuntimeData,
     _async_setup_new_subentries,
     _async_setup_subentry,
+    _subentry_setup_tracker,
 )
 from custom_components.googlefindmy.entity import schedule_add_entities
 from custom_components.googlefindmy.const import (
@@ -184,10 +185,10 @@ async def test_async_setup_subentry_errors_when_unregistered(caplog: pytest.LogC
 
 
 @pytest.mark.asyncio
-async def test_async_setup_new_subentries_logs_and_retries_unknown(
+async def test_async_setup_new_subentries_retries_unknown_and_clears_tracker(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Subentry setup scheduling should log and record transient UnknownEntry races."""
+    """UnknownEntry should clear the tracker so setup can retry once registered."""
 
     caplog.set_level(logging.WARNING)
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
@@ -203,9 +204,25 @@ async def test_async_setup_new_subentries_logs_and_retries_unknown(
     config_entries.set_transient_unknown_entry(subentry.entry_id, setup_failures=1)
     hass = FakeHass(config_entries=config_entries)
 
-    await _async_setup_new_subentries(hass, parent_entry, [subentry])
+    with pytest.raises(ConfigEntryNotReady):
+        await _async_setup_new_subentries(
+            hass,
+            parent_entry,
+            [subentry],
+            enforce_registration=True,
+        )
 
-    assert subentry.entry_id in config_entries.setup_calls
+    tracker = _subentry_setup_tracker(hass, parent_entry)
+    assert subentry.entry_id not in tracker
+
+    await _async_setup_new_subentries(
+        hass,
+        parent_entry,
+        [subentry],
+        enforce_registration=True,
+    )
+
+    assert config_entries.setup_calls == [subentry.entry_id, subentry.entry_id]
     assert any("not yet registered" in message for message in caplog.messages)
 
 

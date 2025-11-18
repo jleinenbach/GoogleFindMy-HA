@@ -2154,11 +2154,8 @@ async def _async_setup_new_subentries(
         if subentry_entry_id is None:
             subentry_entry_id = fallback_entry_id
 
-        if subentry_entry_id is None or subentry_entry_id in setup_tracker:
+        if subentry_entry_id is None:
             continue
-        setup_tracker.add(subentry_entry_id)
-        if fallback_entry_id is not None:
-            setup_tracker.add(fallback_entry_id)
         setup_targets.append((subentry_entry_id, fallback_entry_id))
 
     if not setup_targets:
@@ -2194,6 +2191,9 @@ async def _async_setup_new_subentries(
     for target, fallback_target in setup_targets:
         for registration_candidate in (target, fallback_target):
             if registration_candidate is None:
+                continue
+
+            if registration_candidate in setup_tracker:
                 continue
 
             if registration_candidate not in parent_subentry_ids:
@@ -2232,6 +2232,10 @@ async def _async_setup_new_subentries(
             ):
                 break
 
+            setup_tracker.add(registration_candidate)
+            if fallback_target is not None:
+                setup_tracker.add(fallback_target)
+
             try:
                 await hass.config_entries.async_setup(registration_candidate)
                 _LOGGER.debug(
@@ -2240,11 +2244,19 @@ async def _async_setup_new_subentries(
                     registration_candidate,
                 )
             except UnknownEntry:
+                setup_tracker.discard(registration_candidate)
+                if fallback_target is not None:
+                    setup_tracker.discard(fallback_target)
+
                 _LOGGER.warning(
                     "[%s] Config subentry %s not yet registered; will retry when available",  # noqa: G004
                     parent_entry.entry_id,
                     registration_candidate,
                 )
+                if enforce_registration:
+                    raise ConfigEntryNotReady(
+                        "Config subentry %s not yet registered" % registration_candidate
+                    ) from None
                 continue
             except Exception as err:  # pragma: no cover - defensive logging
                 _LOGGER.debug(
