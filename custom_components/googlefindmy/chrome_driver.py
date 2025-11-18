@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import importlib
 import logging
 import os
@@ -22,7 +24,7 @@ def _load_uc() -> Any:
 
     try:
         return importlib.import_module("undetected_chromedriver")
-    except Exception as err:  # noqa: BLE001 - preserve original import failure
+    except ImportError as err:
         LOGGER.debug(
             "undetected_chromedriver is unavailable; falling back to stub: %s", err
         )
