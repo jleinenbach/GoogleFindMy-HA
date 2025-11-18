@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Iterable
+from typing import Any
 from types import SimpleNamespace
 
 import pytest
 
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 
 from custom_components.googlefindmy import (
     RuntimeData,
     _async_setup_new_subentries,
     _async_setup_subentry,
 )
+from custom_components.googlefindmy.entity import schedule_add_entities
 from custom_components.googlefindmy.const import (
     DOMAIN,
     SUBENTRY_TYPE_TRACKER,
@@ -21,6 +25,9 @@ from custom_components.googlefindmy.const import (
 from tests.helpers.homeassistant import (
     FakeConfigEntriesManager,
     FakeConfigEntry,
+    FakeDeviceEntry,
+    FakeDeviceRegistry,
+    FakeEntityRegistry,
     FakeHass,
 )
 
@@ -202,9 +209,12 @@ async def test_async_setup_new_subentries_logs_and_retries_unknown(
 
 
 @pytest.mark.asyncio
-async def test_async_setup_new_subentries_enforces_registered_subentries() -> None:
+async def test_async_setup_new_subentries_enforces_registered_subentries(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Subentry scheduling should raise when registration never appears."""
 
+    caplog.set_level(logging.ERROR)
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
     config_entries = FakeConfigEntriesManager([parent_entry])
     hass = FakeHass(config_entries=config_entries)
@@ -216,7 +226,7 @@ async def test_async_setup_new_subentries_enforces_registered_subentries() -> No
         subentry_type=SUBENTRY_TYPE_TRACKER,
     )
 
-    with pytest.raises(ConfigEntryNotReady):
+    with pytest.raises(HomeAssistantError):
         await _async_setup_new_subentries(
             hass,
             parent_entry,
@@ -225,6 +235,7 @@ async def test_async_setup_new_subentries_enforces_registered_subentries() -> No
         )
 
     assert config_entries.setup_calls == []
+    assert "not registered in parent entry" in " ".join(caplog.messages)
 
 
 @pytest.mark.asyncio
@@ -251,3 +262,97 @@ async def test_async_setup_new_subentries_requires_registration_when_enforced() 
     )
 
     assert registered_subentry.entry_id in config_entries.setup_calls
+
+
+@pytest.mark.asyncio
+async def test_async_setup_new_subentries_links_entities_and_devices(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Schedule setup for registered subentries and propagate config_subentry_id."""
+
+    caplog.set_level(logging.DEBUG)
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    registered_subentry = SimpleNamespace(
+        entry_id="child-entry",
+        subentry_id="child-entry",
+        unique_id="child-entry",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+    parent_entry.subentries[registered_subentry.subentry_id] = registered_subentry
+
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    hass = SimpleNamespace(
+        config_entries=config_entries,
+        data={},
+        async_create_task=lambda coro, name=None: asyncio.create_task(coro),
+    )
+
+    device_registry = FakeDeviceRegistry(
+        [
+            FakeDeviceEntry(
+                id="device-id",
+                identifiers={(DOMAIN, "device-id")},
+                config_entries={parent_entry.entry_id},
+            )
+        ]
+    )
+    entity_registry = FakeEntityRegistry()
+
+    async def _async_add_entities(
+        entities: Iterable[Any],
+        update_before_add: bool = True,
+        *,
+        config_subentry_id: str | None = None,
+    ) -> None:
+        del update_before_add
+        for entity in entities:
+            entity_registry.entities[entity.entity_id] = SimpleNamespace(
+                entity_id=entity.entity_id,
+                config_entry_id=parent_entry.entry_id,
+                config_subentry_id=config_subentry_id,
+            )
+            device_registry.async_update_device(
+                entity.device_info.id,
+                config_subentry_id=config_subentry_id,
+            )
+
+    class _StubEntity:
+        def __init__(self, entity_id: str) -> None:
+            self.entity_id = entity_id
+            self._device_info = SimpleNamespace(
+                id="device-id",
+                identifiers={(DOMAIN, "device-id")},
+                config_entries={parent_entry.entry_id},
+            )
+
+        @property
+        def device_info(self) -> Any:
+            return self._device_info
+
+    await _async_setup_new_subentries(
+        hass,
+        parent_entry,
+        [registered_subentry],
+        enforce_registration=True,
+    )
+
+    schedule_add_entities(
+        hass,
+        _async_add_entities,
+        entities=[_StubEntity("sensor.child")],
+        update_before_add=True,
+        config_subentry_id=registered_subentry.subentry_id,
+        log_owner="Subentry schedule test",
+        logger=logging.getLogger(__name__),
+    )
+    await asyncio.sleep(0)
+
+    entity_entry = entity_registry.entities.get("sensor.child")
+    device_entry = device_registry.devices.get("device-id")
+
+    assert registered_subentry.entry_id in config_entries.setup_calls
+    assert entity_entry is not None
+    assert entity_entry.config_subentry_id == registered_subentry.subentry_id
+    assert device_entry is not None
+    assert device_entry.config_subentry_id == registered_subentry.subentry_id
+    assert any("Scheduled setup for config subentry" in message for message in caplog.messages)

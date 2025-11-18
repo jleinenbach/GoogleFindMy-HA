@@ -1762,6 +1762,9 @@ class ConfigEntrySubEntryManager:
                                     "Failed to instantiate ConfigSubentry fallback"
                                 )
 
+                            # Create config subentry through HA's API so Core assigns
+                            # a stable subentry_id and will later call async_setup_entry
+                            # for the child (see developers.home-assistant.io docs).
                             add_result = self._hass.config_entries.async_add_subentry(
                                 self._entry, new_subentry
                             )
@@ -1809,6 +1812,15 @@ class ConfigEntrySubEntryManager:
                         unique_id=unique_id,
                         candidate=stored,
                         fallback_subentry_id=fallback_subentry_id,
+                    )
+
+                    resolved_id = _subentry_entry_id(stored)
+                    _LOGGER.debug(
+                        "[%s] Added subentry %s (unique_id=%s) to config entry %s",
+                        self._entry.entry_id,
+                        resolved_id,
+                        unique_id,
+                        self._entry.entry_id,
                     )
 
                     self._index_managed_subentry(key, stored)
@@ -2098,6 +2110,14 @@ async def _async_setup_new_subentries(
     setup_tracker = _subentry_setup_tracker(hass, parent_entry)
 
     parent_subentries = getattr(parent_entry, "subentries", None)
+    parent_subentry_ids: set[str] = set()
+    if isinstance(parent_subentries, Mapping):
+        for key, subentry in parent_subentries.items():
+            if isinstance(key, str) and key:
+                parent_subentry_ids.add(key)
+            identifier = _resolve_config_subentry_identifier(subentry)
+            if isinstance(identifier, str) and identifier:
+                parent_subentry_ids.add(identifier)
     resolved_subentries: list[ConfigSubentry | Any] = []
     for subentry in subentries:
         resolved = subentry
@@ -2174,6 +2194,18 @@ async def _async_setup_new_subentries(
     missing_registrations: set[str] = set()
 
     for target, fallback_target in setup_targets:
+        if target not in parent_subentry_ids:
+            # HA subentries must be created via async_add_subentry before
+            # scheduling setup (see developers.home-assistant.io guidance).
+            _LOGGER.error(
+                "[%s] Subentry %s not registered in parent entry before scheduling",
+                parent_entry.entry_id,
+                target,
+            )
+            raise HomeAssistantError(
+                f"Subentry {target} not found in config entry {parent_entry.entry_id}"
+            )
+
         for candidate in (target, fallback_target):
             if candidate is None:
                 continue
@@ -2203,6 +2235,11 @@ async def _async_setup_new_subentries(
 
             try:
                 await hass.config_entries.async_setup(candidate)
+                _LOGGER.debug(
+                    "[%s] Scheduled setup for config subentry '%s'",
+                    parent_entry.entry_id,
+                    candidate,
+                )
             except UnknownEntry:
                 _LOGGER.error(
                     "[%s] Config subentry %s not registered; cannot set up",
