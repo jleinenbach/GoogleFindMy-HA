@@ -1,4 +1,4 @@
-.PHONY: bootstrap-base-deps clean clean-wheelhouse install-ha-stubs lint test-ha wheelhouse
+.PHONY: bootstrap-base-deps clean clean-wheelhouse install-ha-stubs lint test-ha test-stubs wheelhouse
 
 VENV ?= .venv
 PYTHON ?= python3
@@ -33,6 +33,10 @@ clean-wheelhouse:
 install-ha-stubs:
 	@echo "[make install-ha-stubs] Installing Home Assistant pytest dependencies"
 	@$(PYTHON) -m pip install --upgrade -r requirements-ha-stubs.txt
+
+test-stubs:
+	@echo "[make test-stubs] Installing Home Assistant test dependencies"
+	@$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
 
 bootstrap-base-deps: $(BOOTSTRAP_SENTINEL)
 	@echo "[make bootstrap-base-deps] Home Assistant base dependencies are ready"
