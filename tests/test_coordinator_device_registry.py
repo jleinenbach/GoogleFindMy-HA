@@ -843,6 +843,7 @@ def test_devices_register_without_service_parent(
     healing_payload = fake_registry.updated[0]
     assert healing_payload["config_subentry_id"] == entry.tracker_subentry_id
     assert healing_payload["add_config_subentry_id"] is None
+    assert healing_payload["add_config_entry_id"] == entry.entry_id
 
 
 def test_hub_entry_skips_registry_updates(
@@ -1037,7 +1038,7 @@ def test_existing_device_remains_standalone(
     assert existing.via_device_id is None
     assert fake_registry.updated[0]["config_subentry_id"] == entry.tracker_subentry_id
     assert fake_registry.updated[0]["add_config_subentry_id"] is None
-    assert fake_registry.updated[0]["add_config_entry_id"] is None
+    assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
     assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
     assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
     assert existing.config_subentry_id == entry.tracker_subentry_id
@@ -1076,7 +1077,7 @@ def test_existing_device_backfills_config_subentry(
     assert payload["device_id"] == existing.id
     assert payload["config_subentry_id"] == entry.tracker_subentry_id
     assert payload["add_config_subentry_id"] is None
-    assert payload["add_config_entry_id"] is None
+    assert payload["add_config_entry_id"] == entry.entry_id
     assert payload["via_device_id"] is None
     assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
     assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
@@ -1388,6 +1389,7 @@ def test_service_device_heals_config_subentry(fake_registry: _FakeDeviceRegistry
         if update.get("config_subentry_id") == entry.service_subentry_id
     )
     assert payload["add_config_subentry_id"] is None
+    assert payload["add_config_entry_id"] == entry.entry_id
     assert service_entry.config_subentry_id == entry.service_subentry_id
     assert service_entry.config_entries_subentries[entry.entry_id] == {
         entry.service_subentry_id
