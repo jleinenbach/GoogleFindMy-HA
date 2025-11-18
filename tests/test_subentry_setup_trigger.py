@@ -202,7 +202,8 @@ async def test_async_setup_new_subentries_logs_and_retries_unknown(
     config_entries.set_transient_unknown_entry(subentry.entry_id, setup_failures=1)
     hass = FakeHass(config_entries=config_entries)
 
-    await _async_setup_new_subentries(hass, parent_entry, [subentry])
+    with pytest.raises(ConfigEntryNotReady):
+        await _async_setup_new_subentries(hass, parent_entry, [subentry])
 
     assert subentry.entry_id in config_entries.setup_calls
     assert any("Config subentry" in message for message in caplog.messages)

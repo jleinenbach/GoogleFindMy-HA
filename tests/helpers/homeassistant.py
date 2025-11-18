@@ -241,6 +241,7 @@ class FakeConfigEntry:
     title: str | None = None
     subentries: dict[str, Any] = field(default_factory=dict)
     runtime_data: Any | None = None
+    _registered_subentry_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -474,6 +475,11 @@ class DeferredRegistryConfigEntriesManager(FakeConfigEntriesManager):
     ) -> None:
         """Stage a provisional subentry and defer registry visibility."""
 
+        registered = getattr(entry, "_registered_subentry_ids", None)
+        if not isinstance(registered, set):
+            registered = set()
+            entry._registered_subentry_ids = registered
+
         self.provisional_subentry = subentry
         _assign_if_present(subentry, "entry_id", None)
         _assign_if_present(
@@ -482,6 +488,13 @@ class DeferredRegistryConfigEntriesManager(FakeConfigEntriesManager):
             getattr(self._resolved_child, "subentry_id", None),
         )
         entry.subentries[self._resolved_child.subentry_id] = self._resolved_child
+        resolved_subentry_id = getattr(self._resolved_child, "subentry_id", None)
+        if isinstance(resolved_subentry_id, str) and resolved_subentry_id:
+            registered.add(resolved_subentry_id)
+
+        resolved_entry_id = getattr(self._resolved_child, "entry_id", None)
+        if isinstance(resolved_entry_id, str) and resolved_entry_id:
+            registered.add(resolved_entry_id)
         self._defer_publication = True
         return None
 
