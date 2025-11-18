@@ -1703,6 +1703,18 @@ class ConfigEntrySubEntryManager:
                             if translation_key is not None:
                                 constructor_kwargs["translation_key"] = translation_key
 
+                            subentry_signature = inspect.signature(ConfigSubentry)
+                            subentry_id_param = subentry_signature.parameters.get(
+                                "subentry_id"
+                            )
+                            if (
+                                subentry_id_param is not None
+                                and subentry_id_param.default
+                                is inspect.Signature.empty
+                                and "subentry_id" not in constructor_kwargs
+                            ):
+                                constructor_kwargs["subentry_id"] = None
+
                             new_subentry = None
                             for drop_translation in (False, True):
                                 try:
