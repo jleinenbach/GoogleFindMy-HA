@@ -3,13 +3,20 @@
 **Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
 
 - [AGENTS.md — Operating Contract for `googlefindmy` (Home Assistant custom integration)](#agentsmd--operating-contract-for-googlefindmy-home-assistant-custom-integration)
+      - [Quick reminder — path headers vs. future imports](#quick-reminder--path-headers-vs-future-imports)
+  - [Linting reminders](#linting-reminders)
   - [Scoped guidance index](#scoped-guidance-index)
+    - [Home Assistant helper signature changelog](#home-assistant-helper-signature-changelog)
+    - [Documentation quick links](#documentation-quick-links)
+      - [Deprecations & migrations](#deprecations--migrations)
     - [Runtime vs. type-checking import quick reference](#runtime-vs-type-checking-import-quick-reference)
   - [Environment verification](#environment-verification)
+    - [Quickstart checks (fast path before `pytest -q`)](#quickstart-checks-fast-path-before-pytest--q)
     - [Module invocation primer](#module-invocation-primer)
   - [1) What must be in **every** PR (lean checklist)](#1-what-must-be-in-every-pr-lean-checklist)
   - [Home Assistant version & dependencies](#home-assistant-version--dependencies)
   - [Maintenance mode](#maintenance-mode)
+    - [Config subentry maintenance helper](#config-subentry-maintenance-helper)
   - [2) Roles (right-sized)](#2-roles-right-sized)
     - [2.1 Contributor (implementation) — **accountable for features/fixes/refactors**](#21-contributor-implementation--accountable-for-featuresfixesrefactors)
     - [2.2 Reviewer (maintainer/agent) — **accountable for correctness**](#22-reviewer-maintaineragent--accountable-for-correctness)
@@ -21,16 +28,19 @@
     - [3.4 Definition of Done for tests](#34-definition-of-done-for-tests)
     - [3.5 Temporary coverage dips](#35-temporary-coverage-dips)
     - [3.6 Entity-registry migration checklist (reload-centric fixes)](#36-entity-registry-migration-checklist-reload-centric-fixes)
+    - [3.7 Device registry healing checklist](#37-device-registry-healing-checklist)
   - [4) **Token cache handling** (hard requirement; regression-prevention)](#4-token-cache-handling-hard-requirement-regression-prevention)
   - [5) Security & privacy guards](#5-security--privacy-guards)
   - [6) Expected **test types & coverage focus**](#6-expected-test-types--coverage-focus)
   - [7) Quality scale (practical, non-blocking)](#7-quality-scale-practical-non-blocking)
   - [8) Deprecation check (concise, per PR)](#8-deprecation-check-concise-per-pr)
+    - [Deprecation shim checklist (Home Assistant)](#deprecation-shim-checklist-home-assistant)
   - [9) Docs & i18n (minimal but strict)](#9-docs--i18n-minimal-but-strict)
   - [10) Local commands (VERIFY)](#10-local-commands-verify)
     - [10.1 Type-checking policy — mypy strict on edited Python files](#101-type-checking-policy--mypy-strict-on-edited-python-files)
   - [11) Clean & Secure Coding Standard (Python 3.13 + Home Assistant 2025.10)](#11-clean--secure-coding-standard-python-313--home-assistant-202510)
     - [11.1 Language & style (self-documenting)](#111-language--style-self-documenting)
+      - [Logging formatting (ruff G004)](#logging-formatting-ruff-g004)
     - [11.2 Security baseline (OWASP / NIST / BSI)](#112-security-baseline-owasp--nist--bsi)
     - [11.3 Async, concurrency & cancellation](#113-async-concurrency--cancellation)
     - [11.4 File system & I/O (safe & gentle)](#114-file-system--io-safe--gentle)
@@ -52,6 +62,8 @@
     - [1. High-confidence mode (≥ 90 %)](#1-high-confidence-mode-%E2%89%A5-90-%25)
     - [2. Mandatory evidence](#2-mandatory-evidence)
     - [3. Workflow for code changes](#3-workflow-for-code-changes)
+      - [Home Assistant regression helper](#home-assistant-regression-helper)
+      - [Config flow registration fallbacks](#config-flow-registration-fallbacks)
     - [4. User as data source](#4-user-as-data-source)
     - [5. Communicate uncertainty](#5-communicate-uncertainty)
     - [6. Consequences for commits, diffs, and reviews](#6-consequences-for-commits-diffs-and-reviews)
@@ -59,8 +71,10 @@
     - [8. Required workflow summary](#8-required-workflow-summary)
     - [9. Rationale](#9-rationale)
     - [10. Post-task feedback obligations](#10-post-task-feedback-obligations)
+  - [X. PROTOCOL: Runtime API Validation (Single Source of Truth - SSoT)](#x-protocol-runtime-api-validation-single-source-of-truth---ssot)
   - [pip-audit workflow guidance (CORRECTION — April 2025)](#pip-audit-workflow-guidance-correction--april-2025)
     - [7) Type checking (mypy)](#7-type-checking-mypy)
+      - [Auto-installed stub packages](#auto-installed-stub-packages)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -179,6 +193,12 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 
 ## Environment verification
 
+### Quickstart checks (fast path before `pytest -q`)
+
+* **Cache cleanup:** Run `make clean` to prune `__pycache__` directories and stale bytecode before rerunning tests.
+* **Connectivity probe:** Confirm HTTP/HTTPS reachability with `python -m pip install --dry-run --no-deps pip` and capture the output for citations.
+* **Test stub install:** Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` when you need a minimal bootstrap immediately before `pytest -q`.
+
 * **Cache hygiene helper.** Run `make clean` from the repository root to prune `__pycache__` directories and stray `*.pyc` files after tests or whenever caches need to be refreshed. If you need to tidy up manually (for example after executing helper scripts), remove the bytecode caches with `find . -type d -name '__pycache__' -prune -exec rm -rf {} +` before committing.
 
 * **Generated protobuf sampling.** Use `script/rg_proto_snippet.sh` to preview hits when searching massive generated files (for example, `script/rg_proto_snippet.sh encryptedMetadata custom_components/googlefindmy/ProtoDecoders`). The helper wraps `rg --max-count` and truncates each line via `cut` so shell output stays within the limit documented in this guide.
@@ -187,7 +207,7 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 * **Preferred check:** Use `python -m pip install --dry-run --no-deps pip` so contributors document a consistent HTTP/HTTPS probe and capture the output in their summaries.
 * **Citation helper:** When recording the connectivity probe, note the exact chunk identifier or log file path that contains the dry-run output so future summaries can reference it without rescanning the terminal history.
 * **Dependency bootstrap timing:** Expect `pip install --upgrade homeassistant pytest-homeassistant-custom-component` to run for roughly five minutes in the hosted environment (downloads + wheel builds). Plan shell work accordingly so lengthy installs finish before kicking off lint or test runs.
-* **Bootstrap helper:** Run `make bootstrap-base-deps` from the repo root to pre-install `homeassistant` and `pytest-homeassistant-custom-component` once per environment. The task drops a sentinel at `.bootstrap/homeassistant-preinstall.stamp`; delete it (or run `make clean`) if you need to force a reinstall.
+* **Bootstrap helper:** Run `make bootstrap-base-deps` from the repo root to pre-install `homeassistant` and `pytest-homeassistant-custom-component` once per environment. The task drops a sentinel at `.bootstrap/homeassistant-preinstall.stamp`; delete it (or run `make clean`) if you need to force a reinstall. For a faster, test-focused bootstrap immediately before running `pytest -q`, prefer `make test-stubs`, which installs only these two stub packages without the broader base toolchain.
 * **Checks:** Run a quick internet-access probe that exercises the real package channels (for example, `python -m pip install --dry-run --no-deps pip`, `pip index versions pip`, or a package-manager metadata refresh such as `apt-get update`) and record the outcome in the summary. Avoid ICMP-only probes like `ping 8.8.8.8`, which are blocked in the managed environment and do not reflect HTTP/HTTPS reachability. When a tool installs command-line entry points into `~/.pyenv/versions/*/bin`, invoke it as `python -m <module>` so the connectivity probe also confirms module availability despite PATH differences.
 * **Fallback reminder:** If a CLI helper such as `pre-commit` is not yet on the PATH, rerun the command via its module form (for example, `python -m pre_commit run --all-files`) so the initial check still succeeds.
 * **Online mode:** When a network connection is available you may install or update missing development tooling (for example, `pip`, `pip-tools`, `pre-commit`, `rustup`, `node`, `jq`) whenever it is necessary for maintenance or local verification.

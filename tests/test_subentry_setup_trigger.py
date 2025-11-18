@@ -240,6 +240,33 @@ async def test_async_setup_new_subentries_enforces_registered_subentries(
 
 
 @pytest.mark.asyncio
+async def test_async_setup_new_subentries_requires_fallback_parent_membership(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fallback identifiers must also exist in the parent entry."""
+
+    caplog.set_level(logging.ERROR)
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    parent_entry.subentries["child-subentry"] = {"subentry_id": "child-subentry"}
+
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    hass = FakeHass(config_entries=config_entries)
+
+    mixed_identifier_subentry = SimpleNamespace(
+        entry_id="child-entry",
+        subentry_id="child-subentry",
+        unique_id="child-subentry",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+
+    with pytest.raises(HomeAssistantError):
+        await _async_setup_new_subentries(hass, parent_entry, [mixed_identifier_subentry])
+
+    assert config_entries.setup_calls == []
+    assert any("child-entry" in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
 async def test_async_setup_new_subentries_requires_registration_when_not_enforced(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
