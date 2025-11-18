@@ -12,7 +12,6 @@ from typing import cast
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.webdriver import WebDriver
 
-
 LOGGER = logging.getLogger(__name__)
 
 

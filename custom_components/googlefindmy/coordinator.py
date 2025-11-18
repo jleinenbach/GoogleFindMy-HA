@@ -62,16 +62,16 @@ import math
 import time
 import warnings
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Protocol, cast
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType, SimpleNamespace
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from homeassistant.core import Event
 
-    from . import ConfigEntrySubEntryManager, ConfigEntrySubentryDefinition
+    from . import ConfigEntrySubentryDefinition, ConfigEntrySubEntryManager
     from .google_home_filter import GoogleHomeFilter as GoogleHomeFilterProtocol
 else:  # pragma: no cover - typing fallback for runtime imports
     Event = Any
@@ -80,63 +80,66 @@ else:  # pragma: no cover - typing fallback for runtime imports
 from homeassistant.components.device_tracker import DOMAIN as DEVICE_TRACKER_DOMAIN
 from homeassistant.components.recorder import (
     get_instance as get_recorder,
+)
+from homeassistant.components.recorder import (
     history as recorder_history,
 )
 from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import (
+    issue_registry as ir,
+)  # Repairs: modern "needs action" UI
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import EVENT_DEVICE_REGISTRY_UPDATED
 from homeassistant.helpers.entity_registry import RegistryEntry as EntityRegistryEntry
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import UpdateFailed
-from homeassistant.helpers import (
-    issue_registry as ir,
-)  # Repairs: modern "needs action" UI
 
-from .api import GoogleFindMyAPI
-from .const import (
-    # Core / options
-    DEFAULT_MIN_POLL_INTERVAL,
-    DEFAULT_OPTIONS,
-    DOMAIN,
-    LOCATION_REQUEST_TIMEOUT_S,
-    OPT_IGNORED_DEVICES,
-    UPDATE_INTERVAL,
-    INTEGRATION_VERSION,
-    MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
-    # Integration "service device" metadata
-    SERVICE_DEVICE_MODEL,
-    SERVICE_DEVICE_MANUFACTURER,
-    SERVICE_DEVICE_TRANSLATION_KEY,
-    SERVICE_FEATURE_PLATFORMS,
-    SERVICE_SUBENTRY_KEY,
-    SUBENTRY_TYPE_SERVICE,
-    SUBENTRY_TYPE_HUB,
-    SUBENTRY_TYPE_TRACKER,
-    TRACKER_SUBENTRY_KEY,
-    TRACKER_FEATURE_PLATFORMS,
-    service_device_identifier,
-    # Helpers
-    coerce_ignored_mapping,
-    # Credential meta for Repairs placeholders
-    CONF_GOOGLE_EMAIL,
-    # Required symbols provided by const.py (5.1-A)
-    EVENT_AUTH_ERROR,
-    EVENT_AUTH_OK,
-    ISSUE_AUTH_EXPIRED_KEY,
-    issue_id_for,
-    DEFAULT_CONTRIBUTOR_MODE,
-    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
-    CONTRIBUTOR_MODE_IN_ALL_AREAS,
-    CACHE_KEY_CONTRIBUTOR_MODE,
-    CACHE_KEY_LAST_MODE_SWITCH,
-)
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
 # This avoids silent type/name drift and keeps source labels stable.
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2
 
+from .api import GoogleFindMyAPI
+from .const import (
+    CACHE_KEY_CONTRIBUTOR_MODE,
+    CACHE_KEY_LAST_MODE_SWITCH,
+    # Credential meta for Repairs placeholders
+    CONF_GOOGLE_EMAIL,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
+    DEFAULT_CONTRIBUTOR_MODE,
+    # Core / options
+    DEFAULT_MIN_POLL_INTERVAL,
+    DEFAULT_OPTIONS,
+    DOMAIN,
+    # Required symbols provided by const.py (5.1-A)
+    EVENT_AUTH_ERROR,
+    EVENT_AUTH_OK,
+    INTEGRATION_VERSION,
+    ISSUE_AUTH_EXPIRED_KEY,
+    LOCATION_REQUEST_TIMEOUT_S,
+    MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
+    OPT_IGNORED_DEVICES,
+    SERVICE_DEVICE_MANUFACTURER,
+    # Integration "service device" metadata
+    SERVICE_DEVICE_MODEL,
+    SERVICE_DEVICE_TRANSLATION_KEY,
+    SERVICE_FEATURE_PLATFORMS,
+    SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_HUB,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
+    TRACKER_FEATURE_PLATFORMS,
+    TRACKER_SUBENTRY_KEY,
+    UPDATE_INTERVAL,
+    # Helpers
+    coerce_ignored_mapping,
+    issue_id_for,
+    service_device_identifier,
+)
 from .ha_typing import DataUpdateCoordinator, callback
 
 _LOGGER = logging.getLogger(__name__)
@@ -307,7 +310,7 @@ def format_epoch_utc(value: Any) -> str | None:
     if ts is None:
         return None
     try:
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        dt = datetime.fromtimestamp(ts, tz=UTC)
     except (OverflowError, OSError, ValueError):
         return None
     return dt.isoformat().replace("+00:00", "Z")
@@ -828,7 +831,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     def _build_core_subentry_definitions(
         self,
-    ) -> list["ConfigEntrySubentryDefinition"]:
+    ) -> list[ConfigEntrySubentryDefinition]:
         """Return definitions for the core tracker/service subentries."""
 
         entry = self.config_entry or getattr(self, "entry", None)
@@ -3938,9 +3941,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         self._schedule_short_retry(
                             min(5.0, effective_interval / 2.0)
                         )
-                else:
-                    if self._fcm_defer_started_mono:
-                        self._clear_fcm_deferral()
+                elif self._fcm_defer_started_mono:
+                    self._clear_fcm_deferral()
 
                 if fcm_ready or force_poll:
                     if force_poll:
@@ -4852,7 +4854,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if ts is None:
             return None
         try:
-            return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+            return datetime.fromtimestamp(float(ts), tz=UTC)
         except Exception:
             return None
 

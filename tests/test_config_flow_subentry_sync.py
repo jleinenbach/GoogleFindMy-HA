@@ -8,10 +8,13 @@ from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from homeassistant import data_entry_flow
+from homeassistant.config_entries import ConfigSubentry
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.googlefindmy import (
-    ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
+    ConfigEntrySubEntryManager,
     config_flow,
 )
 from custom_components.googlefindmy.const import (
@@ -37,14 +40,17 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
-from homeassistant import data_entry_flow
-from homeassistant.config_entries import ConfigSubentry
-from homeassistant.exceptions import HomeAssistantError
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     attach_config_entries_flow_manager,
     set_config_flow_unique_id,
 )
+
+SCHEMA_VERSION = 2
+DEFAULT_LOCATION_POLL_INTERVAL = 900
+DEFAULT_DEVICE_POLL_DELAY = 8
+DEFAULT_MIN_ACCURACY = 75
+EXPECTED_CREATED_SUBENTRIES = 2
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -735,11 +741,11 @@ async def test_async_step_migrate_creates_subentries_and_moves_options() -> None
         CONF_GOOGLE_EMAIL: "Legacy@Example.com",
         CONF_OAUTH_TOKEN: "token",
         DATA_AUTH_METHOD: "secrets_json",
-        OPT_LOCATION_POLL_INTERVAL: 900,
-        OPT_DEVICE_POLL_DELAY: 8,
+        OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
+        OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
     }
     entry.options = {
-        OPT_MIN_ACCURACY_THRESHOLD: 75,
+        OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_MIN_ACCURACY,
         OPT_OPTIONS_SCHEMA_VERSION: 1,
     }
 
@@ -761,14 +767,14 @@ async def test_async_step_migrate_creates_subentries_and_moves_options() -> None
     assert entry.data[CONF_OAUTH_TOKEN] == "token"
 
     options = entry.options
-    assert options[OPT_LOCATION_POLL_INTERVAL] == 900
-    assert options[OPT_DEVICE_POLL_DELAY] == 8
-    assert options[OPT_MIN_ACCURACY_THRESHOLD] == 75
-    assert options[OPT_OPTIONS_SCHEMA_VERSION] == 2
+    assert options[OPT_LOCATION_POLL_INTERVAL] == DEFAULT_LOCATION_POLL_INTERVAL
+    assert options[OPT_DEVICE_POLL_DELAY] == DEFAULT_DEVICE_POLL_DELAY
+    assert options[OPT_MIN_ACCURACY_THRESHOLD] == DEFAULT_MIN_ACCURACY
+    assert options[OPT_OPTIONS_SCHEMA_VERSION] == SCHEMA_VERSION
     assert options[OPT_IGNORED_DEVICES] == {}
 
     manager = flow.hass.config_entries  # type: ignore[assignment]
-    assert len(manager.created) == 2
+    assert len(manager.created) == EXPECTED_CREATED_SUBENTRIES
     assert any(
         record["data"]["group_key"] == SERVICE_SUBENTRY_KEY for record in manager.created
     )

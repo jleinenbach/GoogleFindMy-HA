@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import inspect
-from typing import Any
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Any
 
 import pytest
+from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers import frame
 
+from custom_components.googlefindmy import api as api_module
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.api import GoogleFindMyAPI
 from custom_components.googlefindmy.const import (
@@ -24,8 +27,12 @@ from custom_components.googlefindmy.const import (
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
-from homeassistant.config_entries import ConfigSubentry
-from homeassistant.helpers import frame
+from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
+    start_sound_request as start_module,
+)
+from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
+    stop_sound_request as stop_module,
+)
 from tests.helpers.config_flow import prepare_flow_hass_config_entries
 
 
@@ -124,7 +131,7 @@ class _DummyConfigEntries:
         entry.data = data
         self.updated_payloads.append(data)
 
-    def async_update_subentry(
+    def async_update_subentry(  # noqa: PLR0913
         self,
         entry: _DummyEntry,
         subentry: ConfigSubentry,
@@ -251,8 +258,6 @@ def test_options_flow_rotating_token_clears_cached_aas(
 def test_fcm_token_lookup_uses_entry_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify the API forwards the config entry ID to the shared FCM receiver."""
 
-    from custom_components.googlefindmy import api as api_module
-
     class _CacheStub:
         """Minimal cache exposing an entry ID attribute for the API wrapper."""
 
@@ -290,8 +295,6 @@ def test_fcm_token_lookup_falls_back_without_entry_id(
 ) -> None:
     """Ensure legacy receivers without entry ID support continue to function."""
 
-    from custom_components.googlefindmy import api as api_module
-
     class _CacheStub:
         async def async_get_cached_value(self, key: str) -> Any:
             return None
@@ -318,13 +321,10 @@ def test_fcm_token_lookup_falls_back_without_entry_id(
     assert receiver.calls == [None]
 
 
-def test_play_stop_sound_uses_entry_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_play_stop_sound_uses_entry_cache(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure Play/Stop Sound submissions use the provided TokenCache with namespacing."""
-
-    from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
-        start_sound_request as start_module,
-        stop_sound_request as stop_module,
-    )
 
     class _FakeCache:
         """Minimal cache tracking get/set keys to verify namespacing."""

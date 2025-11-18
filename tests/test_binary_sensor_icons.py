@@ -8,7 +8,6 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-
 if "homeassistant.components.binary_sensor" not in sys.modules:
     binary_sensor_module = ModuleType("homeassistant.components.binary_sensor")
 
@@ -111,7 +110,6 @@ from custom_components.googlefindmy.const import (  # noqa: E402 - import after 
     SERVICE_SUBENTRY_KEY,
     service_device_identifier,
 )
-
 
 SERVICE_SUBENTRY_IDENTIFIER = "entry-id-service-subentry"
 

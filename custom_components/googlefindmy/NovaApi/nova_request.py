@@ -31,26 +31,27 @@ import logging
 import random
 import re
 import time
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING, Any, cast
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from importlib import import_module
+from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 
+from custom_components.googlefindmy.Auth.adm_token_retrieval import (
+    async_get_adm_token as async_get_adm_token_api,
+)
+from custom_components.googlefindmy.Auth.token_cache import (
+    TokenCache,  # NEW: for entry-scoped cache access in async path
+)
+from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
 from custom_components.googlefindmy.Auth.username_provider import (
     async_get_username,
     username_string,
 )
-from custom_components.googlefindmy.Auth.adm_token_retrieval import (
-    async_get_adm_token as async_get_adm_token_api,
-)
-from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
-from custom_components.googlefindmy.Auth.token_cache import (
-    TokenCache,  # NEW: for entry-scoped cache access in async path
-)
-from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 
+from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 
 if TYPE_CHECKING:
     from bs4 import BeautifulSoup as _BeautifulSoupType
@@ -84,6 +85,13 @@ NOVA_INITIAL_BACKOFF_S = 1.0
 NOVA_BACKOFF_FACTOR = 2.0
 NOVA_MAX_RETRY_AFTER_S = 60.0
 
+HTTP_OK = 200
+HTTP_UNAUTHORIZED = 401
+HTTP_TOO_MANY_REQUESTS = 429
+HTTP_SERVER_ERROR_MIN = 500
+HTTP_SERVER_ERROR_MAX = 600
+RECENT_REFRESH_WINDOW_S = 2.0
+
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KiB
 
 # --- Retry helpers ---
@@ -103,8 +111,8 @@ def _compute_delay(attempt: int, retry_after: str | None) -> float:
                 retry_dt = None
             if retry_dt is not None:
                 if retry_dt.tzinfo is None:
-                    retry_dt = retry_dt.replace(tzinfo=timezone.utc)
-                now = datetime.now(timezone.utc)
+                    retry_dt = retry_dt.replace(tzinfo=UTC)
+                now = datetime.now(UTC)
                 delay = max(0.0, (retry_dt - now).total_seconds())
 
     if delay is None:
@@ -188,19 +196,19 @@ class NovaHTTPError(NovaError):
 
 # ------------------------ Optional Home Assistant hooks ------------------------
 # These hooks allow the integration to supply a shared aiohttp ClientSession.
-_HASS_REF = None
+_STATE: dict[str, Any] = {"hass": None, "async_refresh_lock": None}
 
 
 def register_hass(hass: HomeAssistant) -> None:
     """Register a Home Assistant instance to provide a shared ClientSession."""
-    global _HASS_REF
-    _HASS_REF = hass
+
+    _STATE["hass"] = hass
 
 
 def unregister_hass() -> None:
     """Unregister the Home Assistant instance reference."""
-    global _HASS_REF
-    _HASS_REF = None
+
+    _STATE["hass"] = None
 
 
 # --- Refresh Locks ---
@@ -209,10 +217,10 @@ _async_refresh_lock: asyncio.Lock | None = None
 
 def _get_async_refresh_lock() -> asyncio.Lock:
     """Lazily initialize and return the async refresh lock."""
-    global _async_refresh_lock
-    if _async_refresh_lock is None:
-        _async_refresh_lock = asyncio.Lock()
-    return _async_refresh_lock
+
+    if _STATE["async_refresh_lock"] is None:
+        _STATE["async_refresh_lock"] = asyncio.Lock()
+    return cast(asyncio.Lock, _STATE["async_refresh_lock"])
 
 
 async def _get_initial_token_async(
@@ -279,7 +287,7 @@ class TTLPolicy:
     TTL_MARGIN_SEC, JITTER_SEC = 120, 90
     PROBE_INTERVAL_SEC, PROBE_INTERVAL_JITTER_PCT = 6 * 3600, 0.1
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         username: str,
         logger: logging.Logger,
@@ -288,7 +296,7 @@ class TTLPolicy:
         refresh_fn: Callable[[], str | None],
         set_auth_header_fn: Callable[[str], None],
         ns_prefix: str = "",
-    ) -> None:
+    ) -> None:  # noqa: PLR0913
         """
         Args:
             username: Account name this policy applies to.
@@ -366,24 +374,23 @@ class TTLPolicy:
         do_arm = False
         if startup_left and int(startup_left) > 0:
             do_arm = True
-        else:
-            if probenext is None:
-                self._set(
-                    self.k_probenext,
-                    now
-                    + self._jitter_pct(
-                        self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct
-                    ),
-                )
-            elif now >= float(probenext):
-                do_arm = True
-                self._set(
-                    self.k_probenext,
-                    now
-                    + self._jitter_pct(
-                        self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct
-                    ),
-                )
+        elif probenext is None:
+            self._set(
+                self.k_probenext,
+                now
+                + self._jitter_pct(
+                    self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct
+                ),
+            )
+        elif now >= float(probenext):
+            do_arm = True
+            self._set(
+                self.k_probenext,
+                now
+                + self._jitter_pct(
+                    self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct
+                ),
+            )
 
         if do_arm:
             self._set(self.k_armed, 1)
@@ -499,7 +506,9 @@ class TTLPolicy:
         # Always refresh after a 401 to resume normal operation.
         return self._do_refresh(now)
 
-    async def async_on_401(self, adaptive_downshift: bool = True) -> str | None:
+    async def async_on_401(
+        self, adaptive_downshift: bool = True
+    ) -> str | None:  # noqa: PLR0915
         """Async wrapper delegating to the synchronous policy."""
 
         return self.on_401(adaptive_downshift=adaptive_downshift)
@@ -508,7 +517,7 @@ class TTLPolicy:
 class AsyncTTLPolicy(TTLPolicy):
     """Native async version of the TTL policy (no blocking calls)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         username: str,
@@ -518,7 +527,7 @@ class AsyncTTLPolicy(TTLPolicy):
         refresh_fn: Callable[[], Awaitable[str | None]],
         set_auth_header_fn: Callable[[str], None],
         ns_prefix: str = "",
-    ) -> None:
+    ) -> None:  # noqa: PLR0913
         super().__init__(
             username=username,
             logger=logger,
@@ -559,7 +568,7 @@ class AsyncTTLPolicy(TTLPolicy):
             return True
         return bool(await self._aget(self.k_armed))
 
-    async def _do_refresh_async(self, now: float) -> str | None:
+    async def _do_refresh_async(self, now: float) -> str | None:  # noqa: PLR0912
         bases_to_clear = (
             f"adm_token_{self.username}",
             f"adm_token_issued_at_{self.username}",
@@ -625,7 +634,7 @@ class AsyncTTLPolicy(TTLPolicy):
             except (ValueError, TypeError) as e:
                 self.log.debug("Threshold check failed (async): %s", e)
 
-    async def async_on_401(self, adaptive_downshift: bool = True) -> str | None:
+    async def async_on_401(self, adaptive_downshift: bool = True) -> str | None:  # noqa: PLR0912,PLR0915
         """Async 401 handling with stampede guard and async cache I/O."""
         lock = _get_async_refresh_lock()
         async with lock:
@@ -643,7 +652,7 @@ class AsyncTTLPolicy(TTLPolicy):
                 )
                 issued = None
 
-            if issued is not None and (now - issued) < 2:
+            if issued is not None and (now - issued) < RECENT_REFRESH_WINDOW_S:
                 self.log.debug(
                     "Another task already refreshed the token; skipping duplicate refresh."
                 )
@@ -719,7 +728,7 @@ def nova_request(*_: object, **__: object) -> str:
     )
 
 
-async def async_nova_request(
+async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     api_scope: str,
     hex_payload: str,
     *,
@@ -851,11 +860,14 @@ async def async_nova_request(
 
     ephemeral_session = False
     if session is None:
-        if _HASS_REF:
+        hass_ref = _STATE.get("hass")
+        if hass_ref:
             # Use the HA-managed shared session for best performance and resource management.
-            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+            async_get_clientsession = import_module(
+                "homeassistant.helpers.aiohttp_client"
+            ).async_get_clientsession
 
-            session = async_get_clientsession(_HASS_REF)
+            session = async_get_clientsession(hass_ref)
         else:
             # Fallback for environments without a shared session (e.g., standalone scripts).
             session = aiohttp.ClientSession(
@@ -883,14 +895,14 @@ async def async_nova_request(
                         "Nova API async request to %s: status=%d", api_scope, status
                     )
 
-                    if status == 200:
+                    if status == HTTP_OK:
                         return content.hex()
 
                     text_snippet = _redact(
                         _beautify_text(content.decode(errors="ignore"))
                     )
 
-                    if status == 401:
+                    if status == HTTP_UNAUTHORIZED:
                         lvl = logging.INFO if not refreshed_once else logging.WARNING
                         _LOGGER.log(
                             lvl,
@@ -904,7 +916,9 @@ async def async_nova_request(
 
                         raise NovaAuthError(status, "Unauthorized after token refresh")
 
-                    if status in (408, 429) or 500 <= status < 600:
+                    if status in (408, HTTP_TOO_MANY_REQUESTS) or (
+                        HTTP_SERVER_ERROR_MIN <= status < HTTP_SERVER_ERROR_MAX
+                    ):
                         if retries_used < NOVA_MAX_RETRIES:
                             delay = _compute_delay(
                                 attempt, response.headers.get("Retry-After")
@@ -927,16 +941,16 @@ async def async_nova_request(
                                 retries_used + 1,
                                 status,
                             )
-                            if status == 429:
-                                raise NovaRateLimitError(
-                                    f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts."
-                                )
-                            raise NovaHTTPError(
-                                status,
-                                f"Nova API failed after {NOVA_MAX_RETRIES} attempts.",
-                            )
+                    if status == HTTP_TOO_MANY_REQUESTS:
+                        raise NovaRateLimitError(
+                            f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts."
+                        )
+                    raise NovaHTTPError(
+                        status,
+                        f"Nova API failed after {NOVA_MAX_RETRIES} attempts.",
+                    )
 
-                    raise NovaAuthError(status, text_snippet)
+                raise NovaAuthError(status, text_snippet)
 
             except asyncio.CancelledError:
                 raise

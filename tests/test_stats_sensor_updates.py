@@ -5,12 +5,23 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import datetime, timezone
-from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
+from datetime import UTC, datetime
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    DOMAIN,
+    SERVICE_SUBENTRY_KEY,
+    service_device_identifier,
+)
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.sensor import (
+    STATS_DESCRIPTIONS,
+    GoogleFindMyStatsSensor,
+)
 from tests.helpers import drain_loop
 
 if "homeassistant.components.sensor" not in sys.modules:
@@ -145,19 +156,6 @@ if update_module is not None:
         data_coordinator.__init__ = _init  # type: ignore[assignment]
         data_coordinator.async_add_listener = _async_add_listener  # type: ignore[assignment]
         data_coordinator.async_update_listeners = _async_update_listeners  # type: ignore[assignment]
-
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator  # noqa: E402
-from custom_components.googlefindmy.const import (  # noqa: E402
-    CONF_GOOGLE_EMAIL,
-    DOMAIN,
-    SERVICE_SUBENTRY_KEY,
-    service_device_identifier,
-)
-from custom_components.googlefindmy.sensor import (  # noqa: E402
-    STATS_DESCRIPTIONS,
-    GoogleFindMyStatsSensor,
-)
-
 
 class _StubHass:
     """Minimal Home Assistant stub exposing loop/create_task helpers."""
@@ -344,7 +342,7 @@ def test_history_fallback_increments_history_stat(
                 "gps_accuracy": 25.0,
                 "last_seen": "2024-02-05T08:00:00Z",
             },
-            last_updated=datetime(2024, 2, 6, tzinfo=timezone.utc),
+            last_updated=datetime(2024, 2, 6, tzinfo=UTC),
         )
 
         def _fake_get_last_state_changes(_hass, _limit, entity_ids):

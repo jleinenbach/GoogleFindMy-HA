@@ -10,7 +10,6 @@ import pytest
 
 from custom_components.googlefindmy import diagnostics
 from custom_components.googlefindmy.const import DOMAIN
-
 from tests.helpers import drain_loop
 
 

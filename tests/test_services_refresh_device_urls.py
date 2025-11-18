@@ -8,11 +8,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
 from homeassistant.core import ServiceCall
 
-from custom_components.googlefindmy import const
-from custom_components.googlefindmy import services
+from custom_components.googlefindmy import const, services
 
 
 class _StubServices:

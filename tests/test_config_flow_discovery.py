@@ -6,10 +6,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import types
-from collections.abc import Callable
-from typing import Any, Mapping
+from collections.abc import Callable, Mapping
+from typing import Any
 
 import pytest
+from homeassistant.helpers import frame
 
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import (
@@ -17,11 +18,10 @@ from custom_components.googlefindmy.const import (
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
-    DATA_SUBENTRY_KEY,
     DATA_SECRET_BUNDLE,
+    DATA_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.email import unique_account_id
-from homeassistant.helpers import frame
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     attach_config_entries_flow_manager,

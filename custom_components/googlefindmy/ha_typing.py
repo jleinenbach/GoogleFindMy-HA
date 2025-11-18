@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
-
-import logging
 
 from homeassistant.core import callback as ha_callback
 
@@ -115,8 +114,8 @@ else:
     import sys
     from types import ModuleType
 
-    from homeassistant.components.button import ButtonEntity  # noqa: F401
     from homeassistant.components.binary_sensor import BinarySensorEntity  # noqa: F401
+    from homeassistant.components.button import ButtonEntity  # noqa: F401
     from homeassistant.components.device_tracker import TrackerEntity  # noqa: F401
     try:
         from homeassistant.helpers.http import HomeAssistantView  # noqa: F401
@@ -148,5 +147,7 @@ else:
         SensorEntity,
     )
     from homeassistant.helpers.restore_state import RestoreEntity  # noqa: F401
-    from homeassistant.helpers.update_coordinator import CoordinatorEntity  # noqa: F401
-    from homeassistant.helpers.update_coordinator import DataUpdateCoordinator  # noqa: F401
+    from homeassistant.helpers.update_coordinator import (
+        CoordinatorEntity,  # noqa: F401
+        DataUpdateCoordinator,  # noqa: F401
+    )

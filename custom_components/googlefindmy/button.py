@@ -31,12 +31,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import EntityRecoveryManager
 from .const import (
     DOMAIN,
     SERVICE_LOCATE_DEVICE,
     TRACKER_SUBENTRY_KEY,
 )
-from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator, SubentryMetadata
 from .entity import (
     GoogleFindMyDeviceEntity,

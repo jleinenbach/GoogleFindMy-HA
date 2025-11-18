@@ -5,22 +5,41 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from dataclasses import dataclass
-from datetime import datetime
-
 import importlib
 import json
 import logging
 import sys
-
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from collections.abc import Awaitable, Callable, Iterable, Mapping
 from unittest.mock import AsyncMock
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
+from homeassistant.const import Platform
+from homeassistant.exceptions import ServiceValidationError
 
+from custom_components.googlefindmy import _platform_value
+from custom_components.googlefindmy.const import (
+    ATTR_MODE,
+    CONF_GOOGLE_EMAIL,
+    DATA_SECRET_BUNDLE,
+    DOMAIN,
+    MODE_MIGRATE,
+    SERVICE_FEATURE_PLATFORMS,
+    SERVICE_LOCATE_DEVICE,
+    SERVICE_REBUILD_REGISTRY,
+    SERVICE_SUBENTRY_KEY,
+    SERVICE_SUBENTRY_TRANSLATION_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
+    TRACKER_FEATURE_PLATFORMS,
+    TRACKER_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_TRANSLATION_KEY,
+)
 from tests.helpers import drain_loop
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 from tests.helpers.homeassistant import (
@@ -30,27 +49,6 @@ from tests.helpers.homeassistant import (
     resolve_config_entry_lookup,
 )
 
-from custom_components.googlefindmy import _platform_value
-from custom_components.googlefindmy.const import (
-    ATTR_MODE,
-    CONF_GOOGLE_EMAIL,
-    DATA_SECRET_BUNDLE,
-    DOMAIN,
-    MODE_MIGRATE,
-    SERVICE_LOCATE_DEVICE,
-    SERVICE_REBUILD_REGISTRY,
-    SERVICE_FEATURE_PLATFORMS,
-    SERVICE_SUBENTRY_KEY,
-    SERVICE_SUBENTRY_TRANSLATION_KEY,
-    SUBENTRY_TYPE_SERVICE,
-    SUBENTRY_TYPE_TRACKER,
-    TRACKER_FEATURE_PLATFORMS,
-    TRACKER_SUBENTRY_KEY,
-    TRACKER_SUBENTRY_TRANSLATION_KEY,
-)
-from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
-from homeassistant.const import Platform
-from homeassistant.exceptions import ServiceValidationError
 if TYPE_CHECKING:
     from custom_components.googlefindmy import RuntimeData
 
@@ -106,7 +104,7 @@ class _StubConfigEntry:
 
     def async_create_background_task(
         self,
-        hass: "_StubHass",
+        hass: _StubHass,
         target: Awaitable[Any],
         *,
         name: str | None = None,
@@ -1204,7 +1202,7 @@ async def test_programmatic_subentry_creation_triggers_setup_and_entities(
     monkeypatch.setattr(integration.dr, "async_get", lambda _hass: device_registry)
     monkeypatch.setattr(integration.er, "async_get", lambda _hass: entity_registry)
 
-    import custom_components.googlefindmy.device_tracker as device_tracker
+    from custom_components.googlefindmy import device_tracker
 
     added_entities: list[tuple[Any, str | None]] = []
 

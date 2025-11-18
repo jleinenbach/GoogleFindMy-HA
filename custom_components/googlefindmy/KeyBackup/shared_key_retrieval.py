@@ -28,18 +28,28 @@ Retrieval strategy (when not cached):
 """
 
 from __future__ import annotations
+
 import base64
 import json
 import logging
 import re
-from binascii import Error as BinasciiError, unhexlify
+import sys
+from binascii import Error as BinasciiError
+from binascii import unhexlify
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
-from custom_components.googlefindmy.typing_utils import run_in_executor as _run_in_executor
+from custom_components.googlefindmy.KeyBackup.shared_key_flow import (
+    request_shared_key_flow,
+)
+from custom_components.googlefindmy.typing_utils import (
+    run_in_executor as _run_in_executor,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+SHARED_KEY_LEN = 32
 
 _CACHE_KEY_BASE = "shared_key"  # canonical per-entry key in entry-scoped mode
 
@@ -70,8 +80,10 @@ def _decode_hex_32(s: str) -> bytes:
         b = unhexlify(t)
     except (BinasciiError, TypeError) as exc:
         raise ValueError("shared_key is not valid hex") from exc
-    if len(b) != 32:
-        raise ValueError(f"shared_key has invalid length {len(b)} bytes (expected 32)")
+    if len(b) != SHARED_KEY_LEN:
+        raise ValueError(
+            f"shared_key has invalid length {len(b)} bytes (expected {SHARED_KEY_LEN})"
+        )
     return b
 
 
@@ -96,9 +108,9 @@ def _decode_base64_like_32(s: str) -> bytes:
             b = base64.b64decode(v_padded)
         except (ValueError, TypeError) as exc:
             raise ValueError("shared_key is not valid base64/base64url") from exc
-    if len(b) != 32:
+    if len(b) != SHARED_KEY_LEN:
         raise ValueError(
-            f"shared_key (base64) has invalid length {len(b)} bytes (expected 32)"
+            f"shared_key (base64) has invalid length {len(b)} bytes (expected {SHARED_KEY_LEN})"
         )
     return b
 
@@ -158,12 +170,12 @@ async def _derive_from_fcm_credentials(*, cache: TokenCache) -> str:
                 f"FCM private key is not valid base64/base64url: {exc}"
             ) from exc
 
-    if len(der) < 32:
+    if len(der) < SHARED_KEY_LEN:
         raise RuntimeError(
             f"FCM private key too short ({len(der)} bytes); cannot derive shared key"
         )
 
-    shared = der[-32:]
+    shared = der[-SHARED_KEY_LEN:]
     return shared.hex()
 
 
@@ -173,19 +185,15 @@ async def _interactive_flow_hex() -> str:
     This opens a browser and requires a TTY; **not suitable for Home Assistant**.
     We keep it as a last-resort fallback for developer CLI usage.
     """
-    from custom_components.googlefindmy.KeyBackup.shared_key_flow import (  # lazy import
-        request_shared_key_flow,
-    )
-
     # Run potentially interactive/GUI logic in executor
     result = await _run_in_executor(request_shared_key_flow)
 
     # Normalize the result to hex
     if isinstance(result, (bytes, bytearray)):
         b = bytes(result)
-        if len(b) != 32:
+        if len(b) != SHARED_KEY_LEN:
             raise RuntimeError(
-                f"Interactive shared key has invalid length {len(b)} (expected 32)"
+                f"Interactive shared key has invalid length {len(b)} (expected {SHARED_KEY_LEN})"
             )
         return b.hex()
 
@@ -221,8 +229,6 @@ async def _retrieve_shared_key_hex(*, cache: TokenCache) -> str:
 
     # 2) Interactive flow (only if we seem to be in a CLI/TTY)
     try:
-        import sys
-
         if sys.stdin and sys.stdin.isatty():
             _LOGGER.info(
                 "Falling back to interactive shared key flow (CLI mode detected)"

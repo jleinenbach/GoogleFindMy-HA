@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING, Any, cast
 
 from selenium.webdriver.support.ui import WebDriverWait
@@ -18,8 +19,6 @@ if TYPE_CHECKING:
 
 def request_oauth_account_token_flow(headless: bool = False) -> str:
     # In Home Assistant context, skip the interactive prompts
-    import sys
-
     is_home_assistant = "homeassistant" in sys.modules
 
     if not headless and not is_home_assistant:
@@ -35,7 +34,7 @@ def request_oauth_account_token_flow(headless: bool = False) -> str:
     if not is_home_assistant:
         print("[AuthFlow] Installing ChromeDriver...")
 
-    driver: "WebDriver" = create_driver(headless=headless)
+    driver: WebDriver = create_driver(headless=headless)
 
     try:
         # Open the browser and navigate to the URL

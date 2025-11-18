@@ -12,8 +12,7 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy import config_flow
-from custom_components.googlefindmy import discovery
+from custom_components.googlefindmy import config_flow, discovery
 from custom_components.googlefindmy.const import DOMAIN
 
 

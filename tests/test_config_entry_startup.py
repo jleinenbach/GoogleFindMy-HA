@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
 from custom_components.googlefindmy.const import TRACKER_SUBENTRY_KEY
-
 from tests.test_hass_data_layout import _prepare_async_setup_entry_harness
 
 
@@ -33,7 +33,6 @@ async def test_device_trackers_populate_after_initial_refresh(
 
     def _find_tracker(self, device_id: str):  # type: ignore[no-untyped-def]
         del device_id
-        return None
 
     factory = functools.partial(
         stub_coordinator_factory,

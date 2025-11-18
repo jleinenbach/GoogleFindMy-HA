@@ -31,36 +31,30 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import ssl
 import struct
 import time
 import traceback
-import random
 from base64 import urlsafe_b64decode
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
-from collections.abc import Mapping
 
 from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 from google.protobuf.json_format import MessageToJson
-from google.protobuf.message import Message as RuntimeMessage
 from http_ece import decrypt as http_decrypt
+
+from google.protobuf.message import Message as RuntimeMessage
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy.protobuf_typing import MessageProto
 else:
     MessageProto = RuntimeMessage
 
-from .const import (
-    MCS_HOST,
-    MCS_PORT,
-    MCS_SELECTIVE_ACK_ID,
-    MCS_VERSION,
-)
-from .fcmregister import FcmRegister, FcmRegisterConfig
 from ._typing import (
     CredentialsUpdatedCallable,
     JSONDict,
@@ -68,6 +62,13 @@ from ._typing import (
     NotificationContextT,
     OnNotificationCallable,
 )
+from .const import (
+    MCS_HOST,
+    MCS_PORT,
+    MCS_SELECTIVE_ACK_ID,
+    MCS_VERSION,
+)
+from .fcmregister import FcmRegister, FcmRegisterConfig
 from .proto.mcs_pb2 import (  # pylint: disable=no-name-in-module
     Close,
     DataMessageStanza,
@@ -81,6 +82,8 @@ from .proto.mcs_pb2 import (  # pylint: disable=no-name-in-module
 )
 
 _logger = logging.getLogger(__name__)
+
+_LEGACY_MCS_PROTOCOL_VERSION = 38
 
 # MCS Message Types and Tags
 MCS_MESSAGE_TAG = {
@@ -162,7 +165,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
     - No internal reset/monitor loops; outer supervisor restarts the client.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         callback: OnNotificationCallable[JSONDict, NotificationContextT],
         fcm_config: FcmRegisterConfig,
@@ -339,7 +342,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         if self.first_message:
             r = await reader.readexactly(2)
             version, tag = struct.unpack("BB", r)
-            if version < MCS_VERSION and version != 38:
+            if version < MCS_VERSION and version != _LEGACY_MCS_PROTOCOL_VERSION:
                 raise RuntimeError(f"protocol version {version} unsupported")
             self.first_message = False
         else:

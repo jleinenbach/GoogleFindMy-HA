@@ -10,29 +10,29 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from typing import Any
 from collections.abc import Awaitable, Callable
+from importlib import import_module
+from typing import Any
 
 import aiohttp
 from aiohttp import ClientSession
 
-from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound.sound_request import (
-    create_sound_request,
-)
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.example_data_provider import get_example_data
+from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound._cli_helpers import (
     async_fetch_cli_fcm_token,
 )
+from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound.sound_request import (
+    create_sound_request,
+)
 from custom_components.googlefindmy.NovaApi.nova_request import (
-    async_nova_request,
     NovaAuthError,
-    NovaRateLimitError,
     NovaHTTPError,
+    NovaRateLimitError,
+    async_nova_request,
 )
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
-from custom_components.googlefindmy.example_data_provider import get_example_data
-
-from custom_components.googlefindmy.Auth.token_cache import TokenCache
-from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 
 
 def stop_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
@@ -51,7 +51,7 @@ def stop_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
     return create_sound_request(False, canonic_device_id, gcm_registration_id)
 
 
-async def async_submit_stop_sound_request(
+async def async_submit_stop_sound_request(  # noqa: PLR0913
     canonic_device_id: str,
     gcm_registration_id: str,
     *,
@@ -65,7 +65,7 @@ async def async_submit_stop_sound_request(
     refresh_override: Callable[[], Awaitable[str | None]] | None = None,
     # NEW: entry-scoped TokenCache to keep credentials and TTL metadata local
     cache: TokenCache | None = None,
-) -> str | None:
+) -> str | None:  # noqa: PLR0913
     """Submit a 'Stop Sound' action using the shared async Nova client.
 
     This function handles the network request and robustly catches common API
@@ -160,7 +160,9 @@ async def async_submit_stop_sound_request(
 async def _async_cli_main(entry_id_hint: str | None = None) -> None:
     """Execute the CLI helper for Stop Sound, enforcing explicit entry selection."""
 
-    from custom_components.googlefindmy.NovaApi.ListDevices import nbe_list_devices
+    nbe_list_devices = import_module(
+        "custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices"
+    )
 
     explicit_hint = entry_id_hint
     if explicit_hint is None:

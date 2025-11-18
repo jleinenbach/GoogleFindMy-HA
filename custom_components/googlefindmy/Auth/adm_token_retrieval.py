@@ -46,21 +46,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, cast
 from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, cast
 
 import gpsoauth
 
 # Prefer relative imports inside the package for robustness
+from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN, DATA_AUTH_METHOD
+from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
+from .token_cache import TokenCache
 from .token_retrieval import (
     InvalidAasTokenError,
-    async_request_token,
     _extract_android_id_from_credentials,
+    async_request_token,
 )
-from .token_cache import TokenCache
 from .username_provider import async_get_username, username_string
-from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
-from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN, DATA_AUTH_METHOD
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,23 +125,18 @@ def _is_non_retryable_auth(err: Exception) -> bool:
     if isinstance(err, InvalidAasTokenError):
         return True
     text = _clip(err)
-    # Typical shapes to consider non-retryable
-    if "BadAuthentication" in text:
-        return True
     low = text.lower()
-    if "invalid_grant" in low:
-        return True
-    if "missing 'auth' in gpsoauth response" in text:
-        # Most often wraps {"Error": "..."} from gpsoauth; treat as non-retryable
-        return True
-    if "neither 'token' nor 'auth' found" in low:
-        return True
-    if "missing 'token'/'auth' in gpsoauth response" in low:
+    signals = (
+        "badauthentication",
+        "invalid_grant",
+        "missing 'auth' in gpsoauth response",
+        "neither 'token' nor 'auth' found",
+        "missing 'token'/'auth' in gpsoauth response",
+    )
+    if any(signal in low for signal in signals):
         return True
     # Treat obvious HTTP-style auth denials as non-retryable as well
-    if "401" in low or "403" in low or "unauthorized" in low or "forbidden" in low:
-        return True
-    return False
+    return "401" in low or "403" in low or "unauthorized" in low or "forbidden" in low
 
 
 async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
@@ -260,7 +255,7 @@ async def _resolve_android_id_for_isolated_flow(
     return android_id
 
 
-async def async_get_adm_token(
+async def async_get_adm_token(  # noqa: PLR0912,PLR0915
     username: str | None = None,
     *,
     retries: int = 2,
@@ -523,7 +518,7 @@ async def _perform_oauth_with_provided_aas(
         raise
 
 
-async def async_get_adm_token_isolated(
+async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
     username: str,
     *,
     aas_token: str | None = None,

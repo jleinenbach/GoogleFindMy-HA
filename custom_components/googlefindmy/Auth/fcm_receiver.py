@@ -21,10 +21,11 @@ If you still call into this file directly, please migrate to the shared receiver
 
 from __future__ import annotations
 
+import json
 import logging
 import warnings
-from typing import TYPE_CHECKING, Any
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 try:
     # Primary, explicit import path within the integration
@@ -73,8 +74,6 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         # Normalize common storage shapes (dict or JSON-serialized dict)
         if isinstance(creds, str):
             try:
-                import json
-
                 creds = json.loads(creds)
             except json.JSONDecodeError:
                 # Keep raw string; accessors will handle missing structure gracefully.
@@ -107,8 +106,6 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         if isinstance(creds, str):
             # Late normalization if we were constructed before credentials were JSON.
             try:
-                import json
-
                 creds = json.loads(creds)
             except Exception:  # noqa: BLE001 - tolerate non-JSON values
                 pass
@@ -137,8 +134,6 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         creds = self._creds or self._read_cached_credentials()
         if isinstance(creds, str):
             try:
-                import json
-
                 creds = json.loads(creds)
             except Exception:  # noqa: BLE001
                 pass

@@ -1,7 +1,8 @@
 # custom_components/googlefindmy/protobuf_typing.pyi
 from __future__ import annotations
 
-from typing import Any, Generic, Iterable, Iterator, Mapping, Protocol, Self, TypeVar
+from collections.abc import Iterable, Iterator, Mapping
+from typing import Any, Generic, Protocol, Self, TypeVar
 
 _EnumT = TypeVar("_EnumT", bound=int)
 

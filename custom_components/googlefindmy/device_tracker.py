@@ -21,8 +21,8 @@ Entry-scope guarantees (C2):
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
-from typing import Any, Mapping, cast
+from collections.abc import Iterable, Mapping
+from typing import Any, cast
 
 from homeassistant.components.device_tracker import SourceType
 from homeassistant.config_entries import ConfigEntry
@@ -34,6 +34,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
 from . import EntityRecoveryManager, _extract_email_from_entry
 from .const import (
     CONF_OAUTH_TOKEN,
@@ -42,20 +43,20 @@ from .const import (
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator, SubentryMetadata, _as_ha_attributes
-from .entity import (
-    GoogleFindMyDeviceEntity,
-    ensure_config_subentry_id,
-    resolve_coordinator,
-    schedule_add_entities,
-    _entry_option,
-)
-from .ha_typing import RestoreEntity, TrackerEntity, callback
 from .discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
     _cloud_discovery_stable_key,
     _redact_account_for_log,
     _trigger_cloud_discovery,
 )
+from .entity import (
+    GoogleFindMyDeviceEntity,
+    _entry_option,
+    ensure_config_subentry_id,
+    resolve_coordinator,
+    schedule_add_entities,
+)
+from .ha_typing import RestoreEntity, TrackerEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
 

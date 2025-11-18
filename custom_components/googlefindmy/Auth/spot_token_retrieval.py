@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
-from .username_provider import async_get_username
+from .aas_token_retrieval import async_get_aas_token
 from .token_cache import TokenCache
+from .token_retrieval import async_request_token, request_token
+from .username_provider import async_get_username
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,48 +52,33 @@ async def _async_generate_spot_token(
         - The AAS provider is passed through so the OAuth exchange can resolve the
           AAS token from the *same* entry-scoped cache when provided upstream.
     """
-    try:
-        # Prefer native async implementation if available.
-        from .token_retrieval import async_request_token
-
-        _LOGGER.debug("Using async_request_token for Spot token generation")
-        token: str = await async_request_token(
-            username,
-            "spot",
-            True,  # play_services=True
-            cache=cache,
-            aas_provider=aas_provider,
-        )
-        if not token:
-            raise RuntimeError("async_request_token returned empty token")
+    _LOGGER.debug("Using async_request_token for Spot token generation")
+    token: str | None = await async_request_token(
+        username,
+        "spot",
+        True,  # play_services=True
+        cache=cache,
+        aas_provider=aas_provider,
+    )
+    if token:
         return token
-    except ImportError:
-        # No async entrypoint exported; fall back to sync retriever in a thread.
-        _LOGGER.debug(
-            "async_request_token not available; falling back to sync retriever in a thread"
-        )
-        from .token_retrieval import request_token  # sync path
 
-        if aas_provider is not None:
-            aas_token_value = await aas_provider()
-        else:
-            from .aas_token_retrieval import (
-                async_get_aas_token,
-            )  # lazy import for fallback
+    _LOGGER.debug(
+        "async_request_token unavailable or returned empty token; falling back to sync retriever in a thread"
+    )
+    aas_token_value = await (aas_provider() if aas_provider else async_get_aas_token(cache=cache))
 
-            aas_token_value = await async_get_aas_token(cache=cache)
-
-        token = await asyncio.to_thread(
-            request_token,
-            username,
-            "spot",
-            True,
-            aas_token=aas_token_value,
-            cache=cache,
-        )
-        if not token:
-            raise RuntimeError("request_token returned empty token")
-        return token
+    token = await asyncio.to_thread(
+        request_token,
+        username,
+        "spot",
+        True,
+        aas_token=aas_token_value,
+        cache=cache,
+    )
+    if not token:
+        raise RuntimeError("request_token returned empty token")
+    return token
 
 
 async def async_get_spot_token(
@@ -131,8 +118,6 @@ async def async_get_spot_token(
     if aas_provider is None:
 
         async def _fallback_aas_provider() -> str:
-            from .aas_token_retrieval import async_get_aas_token  # lazy import
-
             return await async_get_aas_token(cache=cache)
 
         aas_provider = _fallback_aas_provider

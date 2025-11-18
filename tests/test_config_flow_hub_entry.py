@@ -5,18 +5,19 @@ from __future__ import annotations
 
 import inspect
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Callable, Protocol
+from typing import Protocol
 
 import pytest
+from homeassistant.config_entries import ConfigEntry
 
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import (
-    SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_HUB,
+    SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
 )
-from homeassistant.config_entries import ConfigEntry
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     ConfigEntriesFlowManagerStub,

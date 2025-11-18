@@ -11,10 +11,10 @@ generate wheels locally.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Iterable, Sequence
 
 
 @dataclass(frozen=True, slots=True)

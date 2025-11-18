@@ -22,35 +22,37 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, TypeVar, cast
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
+from typing import Any, TypeVar, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.loader import async_get_integration
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.loader import async_get_integration
 
 from .const import (
-    DOMAIN,
-    # user-facing options (non-secret)
-    OPT_LOCATION_POLL_INTERVAL,
-    OPT_DEVICE_POLL_DELAY,
-    OPT_MIN_ACCURACY_THRESHOLD,
-    OPT_MOVEMENT_THRESHOLD,
-    OPT_GOOGLE_HOME_FILTER_ENABLED,
-    OPT_GOOGLE_HOME_FILTER_KEYWORDS,
-    OPT_ENABLE_STATS_ENTITIES,
-    OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_IGNORED_DEVICES,
+    CONF_GOOGLE_EMAIL,
+    # secrets in entry.data (must never be exposed)
+    CONF_OAUTH_TOKEN,
     # defaults for options (used to avoid hard-coded literals)
     DEFAULT_ENABLE_STATS_ENTITIES,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    # secrets in entry.data (must never be exposed)
-    CONF_OAUTH_TOKEN,
-    CONF_GOOGLE_EMAIL,
+    DOMAIN,
+    OPT_DEVICE_POLL_DELAY,
+    OPT_ENABLE_STATS_ENTITIES,
+    OPT_GOOGLE_HOME_FILTER_ENABLED,
+    OPT_GOOGLE_HOME_FILTER_KEYWORDS,
+    OPT_IGNORED_DEVICES,
+    # user-facing options (non-secret)
+    OPT_LOCATION_POLL_INTERVAL,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_MIN_ACCURACY_THRESHOLD,
+    OPT_MOVEMENT_THRESHOLD,
 )
 from .ha_typing import callback
+
 # ---------------------------------------------------------------------------
 # Compatibility placeholders
 # ---------------------------------------------------------------------------
@@ -181,7 +183,7 @@ def _iso_utc(ts: float | None) -> str | None:
     if not isinstance(ts, (int, float)) or ts <= 0:
         return None
     try:
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(float(ts), tz=UTC).isoformat()
     except Exception:
         return None
 

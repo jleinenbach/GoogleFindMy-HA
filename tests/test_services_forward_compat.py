@@ -12,7 +12,6 @@ import pytest
 
 from custom_components.googlefindmy import services
 from custom_components.googlefindmy.const import DOMAIN, SERVICE_LOCATE_DEVICE
-
 from custom_components.googlefindmy.util_services import register_entity_service
 
 

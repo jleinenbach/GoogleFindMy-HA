@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy.SpotApi import spot_request as spot_module
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 from custom_components.googlefindmy.NovaApi import nova_request as nova_module
+from custom_components.googlefindmy.SpotApi import spot_request as spot_module
 
 
 class _DummyCache:

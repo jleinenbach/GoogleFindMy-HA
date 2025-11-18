@@ -8,8 +8,10 @@ from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant.config_entries import ConfigSubentry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.const import (
     DOMAIN,
     SERVICE_FEATURE_PLATFORMS,
@@ -19,9 +21,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
 )
-from homeassistant.config_entries import ConfigSubentry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
 
 def _build_subentry(

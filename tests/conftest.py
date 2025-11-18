@@ -9,7 +9,7 @@ import json
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
@@ -17,9 +17,8 @@ from typing import Any, cast
 import pytest
 
 from tests.helpers import install_homeassistant_core_callback_stub
-from tests.helpers.constants import load_googlefindmy_const_module
 from tests.helpers.config_entries_stub import install_config_entries_stubs
-
+from tests.helpers.constants import load_googlefindmy_const_module
 
 ConfigEntryAuthFailed: type[Exception] = Exception
 
@@ -1364,8 +1363,8 @@ def _stub_homeassistant() -> None:
         "homeassistant.util", ModuleType("homeassistant.util")
     )
     dt_module = ModuleType("homeassistant.util.dt")
-    dt_module.UTC = timezone.utc
-    dt_module.utcnow = lambda: datetime.now(timezone.utc)
+    dt_module.UTC = UTC
+    dt_module.utcnow = lambda: datetime.now(UTC)
     dt_module.now = dt_module.utcnow
     dt_module.as_local = lambda dt: dt
     sys.modules["homeassistant.util.dt"] = dt_module
@@ -1634,7 +1633,6 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
 
             async def async_config_entry_first_refresh(self) -> None:
                 self.first_refresh_calls += 1
-                return None
 
             async def async_shutdown(self) -> None:
                 return None

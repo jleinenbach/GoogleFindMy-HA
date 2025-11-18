@@ -7,19 +7,18 @@ import asyncio
 import base64
 import importlib
 import sys
+from collections.abc import Awaitable, Callable, Coroutine
 from types import ModuleType, SimpleNamespace
-from collections.abc import Callable
-from typing import Any, Awaitable, Coroutine, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 import pytest
 
-from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
     FcmReceiverHA,
     _call_in_executor,
 )
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
-
+from custom_components.googlefindmy.const import DOMAIN
 from tests.helpers import drain_loop
 
 _T = TypeVar("_T")

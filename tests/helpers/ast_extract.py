@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 _ModulePath = Path | str
 

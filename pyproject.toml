@@ -51,6 +51,116 @@ extend-exclude = [
     "custom_components/googlefindmy/Auth/firebase_messaging/proto",
 ]
 
+[tool.ruff.lint]
+select = [
+    "F",
+    "E",
+    "W",
+    "I",
+    "UP",
+    "PL",
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+    "PLC0415",
+    "E402",
+    "UP022",
+]
+"custom_components/googlefindmy/config_flow.py" = [
+    "PLR0912",
+    "PLR0915",
+    "UP040",
+    "PLR0911",
+    "PLC0415",
+    "UP047",
+    "PLR0913",
+    "PLW0603",
+    "PLR2004",
+]
+"custom_components/googlefindmy/const.py" = ["PLR0912"]
+"custom_components/googlefindmy/coordinator.py" = [
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+    "PLR0911",
+]
+"custom_components/googlefindmy/__init__.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLR2004",
+    "PLW0603",
+    "PLC0415",
+    "UP031",
+]
+"custom_components/googlefindmy/services.py" = [
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/sensor.py" = ["PLR0912", "PLR0915"]
+"custom_components/googlefindmy/map_view.py" = [
+    "PLW0603",
+    "PLC0415",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+]
+"custom_components/googlefindmy/protobuf_typing.pyi" = ["UP046"]
+"custom_components/googlefindmy/SpotApi/spot_request.py" = [
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/entity.py" = ["PLR0913"]
+"custom_components/googlefindmy/get_oauth_token.py" = ["PLC0415"]
+"custom_components/googlefindmy/google_home_filter.py" = ["PLC0415", "PLR0911"]
+"custom_components/googlefindmy/ha_typing.py" = ["UP047", "UP046"]
+"custom_components/googlefindmy/location_recorder.py" = ["PLR0911", "PLR2004"]
+"custom_components/googlefindmy/api.py" = [
+    "PLW0603",
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+]
+"custom_components/googlefindmy/discovery.py" = [
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/device_tracker.py" = ["PLR0912", "PLR0915"]
+"custom_components/googlefindmy/diagnostics.py" = ["PLR0912", "PLR0915", "UP047"]
+"custom_components/googlefindmy/system_health.py" = ["UP047", "PLR2004"]
+"custom_components/googlefindmy/typing_utils.py" = ["UP047"]
+"google/protobuf/internal/containers.pyi" = ["UP046"]
+"script/list_wheelhouse.py" = ["PLR2004"]
+"script/sync_translations.py" = ["PLR0912"]
+"tests/conftest.py" = ["PLW0603"]
+"tests/helpers/config_flow.py" = ["UP047"]
+"tests/helpers/homeassistant.py" = ["PLR0911"]
+"tests/helpers/homeassistant_stub.py" = ["UP047"]
+"custom_components/googlefindmy/button.py" = ["PLR0912", "PLR0915"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
 [tool.pytest.ini_options]
 addopts = ["-q", "--cov-report=term"]
 testpaths = ["tests"]
@@ -62,10 +172,12 @@ filterwarnings = [
 [tool.mypy]
 python_version = "3.13"
 warn_unused_ignores = true
-ignore_missing_imports = true
 show_error_codes = true
 mypy_path = ["."]
 explicit_package_bases = true
+strict = true
+local_partial_types = true
+warn_return_any = true
 files = [
     "custom_components/googlefindmy",
 ]

@@ -27,15 +27,21 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from typing import Any, Protocol, cast, runtime_checkable
 from collections.abc import Awaitable, Callable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from aiohttp import ClientError, ClientSession
-from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .Auth.token_cache import TokenCache
 from .Auth.username_provider import username_string
+from .const import (
+    CONF_OAUTH_TOKEN,  # used by the ephemeral flow cache
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
+    DEFAULT_CONTRIBUTOR_MODE,
+)
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
     get_location_data_for_device,
 )
@@ -49,15 +55,11 @@ from .NovaApi.ListDevices.nbe_list_devices import async_request_device_list
 from .NovaApi.nova_request import NovaAuthError, NovaHTTPError, NovaRateLimitError
 from .ProtoDecoders.decoder import (
     _select_best_location as _decoder_select_best_location,
+)
+from .ProtoDecoders.decoder import (
     get_canonic_ids,
     get_devices_with_location,
     parse_device_list_protobuf,
-)
-from .const import (
-    CONF_OAUTH_TOKEN,  # used by the ephemeral flow cache
-    DEFAULT_CONTRIBUTOR_MODE,
-    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
-    CONTRIBUTOR_MODE_IN_ALL_AREAS,
 )
 
 _LOGGER = logging.getLogger(__name__)

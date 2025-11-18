@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from types import ModuleType
-from typing import Callable
 
 import pytest
 

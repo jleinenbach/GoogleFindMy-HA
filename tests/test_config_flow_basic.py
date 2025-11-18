@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any
 
 import pytest
 
@@ -19,8 +20,9 @@ from tests.helpers.config_flow import (
 def test_flow_module_import_and_handler_registry() -> None:
     """Import the config flow module and verify handler registration."""
 
-    import custom_components.googlefindmy.config_flow as config_flow  # noqa: PLC0415
     from homeassistant import config_entries as config_entries_module
+
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
 
     assert hasattr(config_flow, "ConfigFlow"), "ConfigFlow class missing after import"
 
@@ -36,7 +38,7 @@ def test_flow_module_import_and_handler_registry() -> None:
 def test_supported_subentry_types_disable_manual_flows() -> None:
     """Config flow should not expose manual subentry factories to the UI."""
 
-    import custom_components.googlefindmy.config_flow as config_flow  # noqa: PLC0415
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
 
     entry = SimpleNamespace(
         entry_id="entry-test",
@@ -53,7 +55,7 @@ def test_supported_subentry_types_disable_manual_flows() -> None:
 def test_subentry_update_constructor_allows_config_entry_and_subentry() -> None:
     """Update flows must accept both the config entry and an existing subentry."""
 
-    import custom_components.googlefindmy.config_flow as config_flow  # noqa: PLC0415
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
 
     config_subentry_cls = getattr(config_flow, "ConfigSubentry", None)
     if config_subentry_cls is None:
@@ -89,7 +91,7 @@ def test_subentry_update_constructor_allows_config_entry_and_subentry() -> None:
 def hass_fixture() -> SimpleNamespace:
     """Return a minimal Home Assistant stub with a flow manager."""
 
-    import custom_components.googlefindmy.config_flow as config_flow  # noqa: PLC0415
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
 
     hass = SimpleNamespace(data={})
 

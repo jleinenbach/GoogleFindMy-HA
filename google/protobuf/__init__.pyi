@@ -5,6 +5,7 @@ from types import ModuleType
 
 from . import descriptor as descriptor
 from .internal import containers as containers
-from .message import DecodeError as DecodeError, Message as Message
+from .message import DecodeError as DecodeError
+from .message import Message as Message
 
 text_format: ModuleType

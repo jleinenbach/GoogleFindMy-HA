@@ -10,7 +10,6 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
-
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 

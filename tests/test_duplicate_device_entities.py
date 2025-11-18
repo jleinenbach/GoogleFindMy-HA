@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from collections.abc import Callable, Iterable
 from types import SimpleNamespace
-from typing import Any, Callable
-from collections.abc import Iterable
+from typing import Any
 
 from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,

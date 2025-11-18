@@ -43,9 +43,9 @@ from typing import Any
 
 import gpsoauth
 
+from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 from .token_cache import TokenCache
 from .username_provider import username_string
-from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,7 +56,9 @@ except Exception:  # noqa: BLE001
     gpsoauth_exceptions = None
 
 # Legacy fallback Android ID for gpsoauth exchange when FCM credentials are missing.
+# Legacy fallback Android ID for gpsoauth exchange when FCM credentials are missing.
 _ANDROID_ID: int = 0x38918A453D071993
+_JWT_SEGMENT_MIN_COUNT = 2
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +80,18 @@ def _summarize_response(obj: Mapping[str, Any] | object) -> str:
     return f"{type(obj).__name__}"
 
 
+def _mask_email_for_logs(email: str | None) -> str:
+    """Return a privacy-friendly representation of an email for logs."""
+
+    if not email or "@" not in email:
+        return "<unknown>"
+    local, domain = email.split("@", 1)
+    if not local:
+        return f"*@{domain}"
+    masked_local = (local[0] + "***") if len(local) > 1 else "*"
+    return f"{masked_local}@{domain}"
+
+
 def _looks_like_jwt(token: str) -> bool:
     """Very lightweight check for JWT-like blobs (Base64URL x3, commonly 'eyJ' prefix).
 
@@ -86,7 +100,7 @@ def _looks_like_jwt(token: str) -> bool:
         exchange path. This is not a full JWT validator and intentionally avoids
         strict checks to keep the code robust and non-invasive.
     """
-    return token.count(".") >= 2 and token[:3] == "eyJ"
+    return token.count(".") >= _JWT_SEGMENT_MIN_COUNT and token[:3] == "eyJ"
 
 
 def _disqualifies_oauth_for_exchange(token: str) -> str | None:
@@ -142,7 +156,6 @@ async def _exchange_oauth_for_aas(
         return gpsoauth.exchange_token(username, oauth_token, android_id)
 
     loop = asyncio.get_running_loop()
-    from .adm_token_retrieval import _mask_email as _mask_email_for_logs
 
     _LOGGER.debug(
         "Calling gpsoauth.exchange_token with username=%s, oauth_token_prefix=%s, oauth_token_len=%d, android_id=0x%X",
@@ -199,7 +212,7 @@ async def _exchange_oauth_for_aas(
 # ---------------------------------------------------------------------------
 
 
-async def _generate_aas_token(*, cache: TokenCache) -> str:
+async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PLR0915
     """Generate an AAS token using the best available OAuth token and username.
 
     Strategy:
@@ -392,9 +405,7 @@ async def async_get_aas_token(
 # ----------------------- Legacy sync wrapper (unsupported) -----------------------
 
 
-def get_aas_token() -> (
-    str
-):  # pragma: no cover - legacy path kept for compatibility messaging
+def get_aas_token() -> str:  # pragma: no cover - legacy path kept for compatibility messaging
     """Legacy sync API is intentionally unsupported to prevent event loop deadlocks.
 
     Raises:

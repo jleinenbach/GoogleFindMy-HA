@@ -4,14 +4,15 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from types import MappingProxyType, SimpleNamespace
-from typing import Any, Sequence
+from typing import Any
 
 import pytest
+from homeassistant.config_entries import ConfigSubentry
 
 import custom_components.googlefindmy as integration
 from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
-from homeassistant.config_entries import ConfigSubentry
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
 
 

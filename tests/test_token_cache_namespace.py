@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 
+from custom_components.googlefindmy import api as googlefindmy_api
 from custom_components.googlefindmy.Auth import token_cache
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
-from custom_components.googlefindmy import api as googlefindmy_api
 
 
 class _FakeHass:

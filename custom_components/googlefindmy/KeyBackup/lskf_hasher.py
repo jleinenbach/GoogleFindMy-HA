@@ -9,8 +9,8 @@ import hashlib
 import time
 from binascii import unhexlify
 from concurrent.futures import ProcessPoolExecutor
-import pyscrypt
 
+import pyscrypt
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
 

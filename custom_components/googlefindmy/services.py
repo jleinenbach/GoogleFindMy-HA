@@ -18,15 +18,15 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
 from collections.abc import Iterable, Mapping
+from typing import Any
 
 from homeassistant.components.device_tracker import DOMAIN as DEVICE_TRACKER_DOMAIN
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import device_registry as dr, entity_registry as er
-from homeassistant.helpers.network import get_url
-
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.network import get_url
 
 try:  # Home Assistant 2025.5+: attribute constant exposed
     from homeassistant.const import ATTR_ENTRY_ID
@@ -34,19 +34,19 @@ except ImportError:  # pragma: no cover - forward compatibility for HA < 2025.5
     ATTR_ENTRY_ID = "entry_id"
 
 from .const import (
+    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DOMAIN,
+    LEGACY_SERVICE_IDENTIFIER,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,  # ctx provides the key but we keep a local fallback constant
+    SERVICE_DEVICE_IDENTIFIER_PREFIX,
     SERVICE_LOCATE_DEVICE,
     SERVICE_LOCATE_EXTERNAL,
     SERVICE_PLAY_SOUND,
-    SERVICE_STOP_SOUND,
-    SERVICE_REFRESH_DEVICE_URLS,
     SERVICE_REBUILD_REGISTRY,
+    SERVICE_REFRESH_DEVICE_URLS,
+    SERVICE_STOP_SOUND,
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
-    OPT_MAP_VIEW_TOKEN_EXPIRATION,  # ctx provides the key but we keep a local fallback constant
-    DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    LEGACY_SERVICE_IDENTIFIER,
-    SERVICE_DEVICE_IDENTIFIER_PREFIX,
     map_token_hex_digest,
     map_token_secret_seed,
     service_device_identifier,

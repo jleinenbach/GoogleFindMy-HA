@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -30,6 +30,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import EntityRecoveryManager
 from .const import (
     DEFAULT_ENABLE_STATS_ENTITIES,
     DOMAIN,
@@ -37,7 +38,6 @@ from .const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
-from . import EntityRecoveryManager
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
 from .entity import (
     GoogleFindMyDeviceEntity,
@@ -687,7 +687,7 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
             if isinstance(value, datetime):
                 new_dt = value
             elif isinstance(value, (int, float)):
-                new_dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+                new_dt = datetime.fromtimestamp(float(value), tz=UTC)
             elif isinstance(value, str):
                 v = value.strip()
                 if v.endswith("Z"):
@@ -695,7 +695,7 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
                 try:
                     dt = datetime.fromisoformat(v)
                     if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                        dt = dt.replace(tzinfo=UTC)
                     new_dt = dt
                 except ValueError:
                     new_dt = None
@@ -749,7 +749,7 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
                 try:
                     dt = datetime.fromisoformat(v)
                     if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
+                        dt = dt.replace(tzinfo=UTC)
                     ts = dt.timestamp()
                 except ValueError:
                     ts = float(v)  # numeric string fallback
@@ -777,7 +777,7 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
             return
 
         # Set our native value now (no need to wait for next coordinator tick)
-        self._attr_native_value = datetime.fromtimestamp(ts, tz=timezone.utc)
+        self._attr_native_value = datetime.fromtimestamp(ts, tz=UTC)
         self.async_write_ha_state()
 
     @property

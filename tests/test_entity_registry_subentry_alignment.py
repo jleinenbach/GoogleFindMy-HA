@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Iterable
 from types import SimpleNamespace
-from typing import Any, Callable, Iterable
+from typing import Any
 
 import pytest
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.googlefindmy import binary_sensor, device_tracker, sensor
 from custom_components.googlefindmy.const import (
@@ -17,8 +20,6 @@ from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
 
 
 class _ConfigEntryStub:

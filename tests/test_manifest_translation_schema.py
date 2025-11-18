@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-
 MANIFEST_BANNED_KEYS = {"discovery", "discovery_update_info"}
 TRANSLATION_BANNED_KEYS = {"discovery"}
 

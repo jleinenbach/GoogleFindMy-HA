@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any
 
 import pytest
 
@@ -19,7 +20,7 @@ from tests.helpers.config_flow import (
 def test_config_flow_import_and_registers_handler() -> None:
     """Import the config flow module and assert the handler metadata."""
 
-    import custom_components.googlefindmy.config_flow as config_flow  # noqa: PLC0415
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
 
     assert hasattr(config_flow, "ConfigFlow"), "ConfigFlow class is missing"
     assert getattr(config_flow.ConfigFlow, "domain", None) == DOMAIN
@@ -29,7 +30,7 @@ def test_config_flow_import_and_registers_handler() -> None:
 def hass_fixture() -> SimpleNamespace:
     """Return a minimal hass stub with a flow manager."""
 
-    import custom_components.googlefindmy.config_flow as config_flow  # noqa: PLC0415
+    from custom_components.googlefindmy import config_flow  # noqa: PLC0415
 
     hass = SimpleNamespace(data={})
 

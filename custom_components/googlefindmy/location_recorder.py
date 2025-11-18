@@ -4,12 +4,12 @@
 import logging
 import math
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from datetime import datetime, timedelta, timezone
 
-from homeassistant.core import HomeAssistant
+from homeassistant.components.recorder import get_instance, history
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
-from homeassistant.components.recorder import history, get_instance
+from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
@@ -179,9 +179,9 @@ def _normalize_epoch(value: Any) -> float | None:
             except ValueError:
                 return None
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             else:
-                dt = dt.astimezone(timezone.utc)
+                dt = dt.astimezone(UTC)
             return dt.timestamp()
         return None
 
@@ -207,7 +207,7 @@ def _extract_last_seen(attrs: dict[str, Any]) -> tuple[float | None, str | None]
         last_seen_utc = raw_last_seen.strip() or None
     if last_seen_utc is None and last_seen_ts is not None:
         try:
-            dt = datetime.fromtimestamp(last_seen_ts, tz=timezone.utc)
+            dt = datetime.fromtimestamp(last_seen_ts, tz=UTC)
             last_seen_utc = dt.isoformat().replace("+00:00", "Z")
         except (OverflowError, OSError, ValueError):
             last_seen_utc = None

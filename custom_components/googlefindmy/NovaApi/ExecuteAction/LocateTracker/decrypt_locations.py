@@ -10,13 +10,12 @@ import hashlib
 import logging
 import math
 import time
+from importlib import import_module
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, cast
 
-from google.protobuf.message import DecodeError
-
-from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import decrypt
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
+from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import decrypt
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
     decrypt_aes_gcm,
     decrypt_eik,
@@ -25,11 +24,11 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypte
     WrappedLocation,
 )
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
-from custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2 import (
-    DeviceRegistration,
-)
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
     parse_device_update_protobuf,
+)
+from custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2 import (
+    DeviceRegistration,
 )
 from custom_components.googlefindmy.SpotApi.CreateBleDevice.config import (
     mcu_fast_pair_model_id,
@@ -42,9 +41,18 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_inf
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     async_get_owner_key,
 )
+from google.protobuf.message import DecodeError
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
+
+_LAT_MIN = -90.0
+_LAT_MAX = 90.0
+_LON_MIN = -180.0
+_LON_MAX = 180.0
+_MICROSECONDS_THRESHOLD = 1e15
+_MILLISECONDS_THRESHOLD = 1e12
+_MIN_VALID_EPOCH_S = 946684800.0  # 2000-01-01
 
 # Acceptable future drift for timestamps to accommodate timezone offsets and
 # clock skew while still rejecting obviously invalid data is centralized in
@@ -97,7 +105,7 @@ def create_google_maps_link(latitude: float, longitude: float) -> str | None:
         )
         return None
 
-    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+    if not (_LAT_MIN <= lat_f <= _LAT_MAX and _LON_MIN <= lon_f <= _LON_MAX):
         _LOGGER.debug(
             "Out-of-bounds coordinates for Maps link; skipping link generation"
         )
@@ -219,7 +227,7 @@ def retrieve_identity_key(
     )
 
 
-def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:
+def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:  # noqa: PLR0911
     """Robustly parse a Unix epoch timestamp (float) from various inputs.
 
     Handles int, float, str, bytes, and protobuf Time objects.
@@ -254,16 +262,16 @@ def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:
             return None
 
     # Unit heuristic (ms/μs)
-    if v > 1e15:  # microseconds
+    if v > _MICROSECONDS_THRESHOLD:  # microseconds
         v /= 1e6
-    elif v > 1e12:  # milliseconds
+    elif v > _MILLISECONDS_THRESHOLD:  # milliseconds
         v /= 1e3
 
     # Finite and plausibility check
     if not math.isfinite(v):
         return None
     # Plausibility: >= 2000-01-01 and <= now + realistic drift window
-    if v < 946684800.0:
+    if v < _MIN_VALID_EPOCH_S:
         return None
     if v > (now_s + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S):
         return None
@@ -314,7 +322,7 @@ def _is_valid_latlon(lat: float, lon: float) -> bool:
         return False
     if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
         return False
-    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+    if not (_LAT_MIN <= lat_f <= _LAT_MAX and _LON_MIN <= lon_f <= _LON_MAX):
         return False
     return True
 
@@ -358,7 +366,7 @@ def _infer_report_hint(status_value: Any) -> str | None:
 
 
 # ----------------------------- Main decryptor ---------------------------------
-async def async_decrypt_location_response_locations(
+async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate, *, cache: TokenCache
 ) -> list[dict[str, Any]]:
     """Decrypt and normalize location reports into HA-friendly dicts (async).
@@ -564,9 +572,7 @@ async def async_decrypt_location_response_locations(
             # Log with timezone-awareness if HA util is available (debug only)
             if _LOGGER.isEnabledFor(logging.DEBUG):
                 try:
-                    from homeassistant.util import (
-                        dt as dt_util,
-                    )  # lazy import (keeps __main__ dev check usable)
+                    dt_util = import_module("homeassistant.util.dt")
 
                     ts_local = dt_util.as_local(
                         datetime.datetime.fromtimestamp(loc.time, tz=datetime.UTC)

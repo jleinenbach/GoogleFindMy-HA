@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Iterable, Sequence
 
 DEFAULT_PATTERN = "_typing.py"
 

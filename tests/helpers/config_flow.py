@@ -659,7 +659,7 @@ class ConfigEntriesDomainUniqueIdLookupMixin:
     # See ``tests/AGENTS.md`` ("Config entries unique ID lookup helper") for
     # guidance on reusing this mixin across new stubs instead of duplicating the
     # lookup wiring.
-    
+
     def async_entry_for_domain_unique_id(
         self, domain: str, unique_id: str
     ) -> Any | None:

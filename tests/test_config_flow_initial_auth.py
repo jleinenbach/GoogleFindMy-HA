@@ -7,20 +7,26 @@ import asyncio
 import importlib
 import inspect
 import sys
-from typing import Any, Mapping
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from types import MappingProxyType, SimpleNamespace
+from typing import Any
 
 import pytest
+from homeassistant import config_entries as ha_config_entries
+from homeassistant import data_entry_flow
+from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers import frame
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.api import GoogleFindMyAPI
+from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import (
-    DOMAIN,
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
+    DOMAIN,
     OPT_CONTRIBUTOR_MODE,
     OPT_DEVICE_POLL_DELAY,
     OPT_ENABLE_STATS_ENTITIES,
@@ -33,11 +39,6 @@ from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
-from custom_components.googlefindmy.Auth.username_provider import username_string
-from homeassistant import config_entries as ha_config_entries, data_entry_flow
-from homeassistant.helpers import frame
-from homeassistant.helpers.update_coordinator import UpdateFailed
-from homeassistant.config_entries import ConfigSubentry
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     attach_config_entries_flow_manager,

@@ -4,55 +4,54 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
-from typing import Any, Protocol, TypeVar, TypeAlias
+from typing import Any, Protocol, TypeVar
 
-JSONDict: TypeAlias = dict[str, Any]
-MutableJSONMapping: TypeAlias = MutableMapping[str, Any]
+type JSONDict = dict[str, Any]
+type MutableJSONMapping = MutableMapping[str, Any]
 
-NotificationPayloadT = TypeVar(
-    "NotificationPayloadT",
+NotificationPayloadT_contra = TypeVar(
+    "NotificationPayloadT_contra",
     bound=Mapping[str, Any],
     contravariant=True,
 )
-NotificationContextT = TypeVar(
-    "NotificationContextT",
+NotificationContextT_contra = TypeVar(
+    "NotificationContextT_contra",
     contravariant=True,
 )
-CredentialsMappingT = TypeVar(
-    "CredentialsMappingT",
+CredentialsMappingT_contra = TypeVar(
+    "CredentialsMappingT_contra",
     bound=MutableMapping[str, Any],
     contravariant=True,
 )
 
 
 class OnNotificationCallable(
-    Protocol[NotificationPayloadT, NotificationContextT]
+    Protocol[NotificationPayloadT_contra, NotificationContextT_contra]
 ):
     """Callable protocol for push notification handlers."""
 
     def __call__(
         self,
-        payload: NotificationPayloadT,
+        payload: NotificationPayloadT_contra,
         persistent_id: str,
-        context: NotificationContextT | None,
+        context: NotificationContextT_contra | None,
     ) -> None:
         """Invoke the handler with the decoded payload."""
 
 
-class CredentialsUpdatedCallable(Protocol[CredentialsMappingT]):
+class CredentialsUpdatedCallable(Protocol[CredentialsMappingT_contra]):
     """Callable protocol for credential update notifications."""
 
-    def __call__(self, credentials: CredentialsMappingT) -> None:
+    def __call__(self, credentials: CredentialsMappingT_contra) -> None:
         """Persist or react to refreshed credential payloads."""
 
 
 __all__ = [
-    "CredentialsMappingT",
+    "CredentialsMappingT_contra",
     "CredentialsUpdatedCallable",
     "JSONDict",
     "MutableJSONMapping",
-    "NotificationContextT",
-    "NotificationPayloadT",
+    "NotificationContextT_contra",
+    "NotificationPayloadT_contra",
     "OnNotificationCallable",
 ]
-

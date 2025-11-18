@@ -5,16 +5,18 @@
 from __future__ import annotations
 
 import asyncio
-
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import frame
 
 from custom_components.googlefindmy import (
-    config_flow,
-    ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
+    ConfigEntrySubEntryManager,
+    config_flow,
 )
 from custom_components.googlefindmy.const import (
     DOMAIN,
@@ -26,8 +28,6 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from homeassistant.config_entries import ConfigSubentry
-from homeassistant.helpers import device_registry as dr, frame
 from tests.helpers.config_flow import prepare_flow_hass_config_entries
 
 
@@ -102,7 +102,7 @@ class _ManagerWithRegistries:
             return []
         return list(entry.subentries.values())
 
-    def async_update_subentry(
+    def async_update_subentry(  # noqa: PLR0913
         self,
         entry: _EntryStub,
         subentry: ConfigSubentry,
@@ -454,7 +454,7 @@ def test_coordinator_default_features_map_to_core_group() -> None:
 
 
 @pytest.mark.asyncio
-async def test_options_settings_repairs_missing_service_subentry() -> None:
+async def test_options_settings_repairs_missing_service_subentry() -> None:  # noqa: PLR0915
     """Settings step should rebuild missing service subentries before showing forms."""
 
     entry = _EntryStub()

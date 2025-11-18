@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Collection
-from datetime import datetime, timezone
-from typing import Any, Callable, Protocol, TypeVar, cast
+from collections.abc import Callable, Collection
+from datetime import UTC, datetime
+from typing import Any, Protocol, TypeVar, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -56,7 +56,7 @@ def _format_epoch_utc(value: Any) -> str | None:
     if timestamp is None:
         return None
     try:
-        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        dt = datetime.fromtimestamp(timestamp, tz=UTC)
     except (OverflowError, OSError, ValueError):
         return None
     return dt.isoformat().replace("+00:00", "Z")

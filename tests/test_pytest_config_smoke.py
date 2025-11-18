@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 _CHILD_ENV_VAR = "PYTEST_CONFIG_SMOKE_CHILD"
 
 
@@ -29,8 +28,7 @@ def test_pytest_config_emits_no_config_warnings() -> None:
         [sys.executable, "-m", "pytest", "--fixtures"],
         cwd=repo_root,
         check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=env,
     )

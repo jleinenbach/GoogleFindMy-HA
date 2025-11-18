@@ -17,6 +17,11 @@ if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 
+MERGED_LATITUDE = 37.7749
+MERGED_LONGITUDE = -122.4194
+MERGED_LAST_SEEN = 1_700_000_950.0
+
+
 def test_decoder_prefers_newer_coordinates_over_owner_status() -> None:
     """A fresher aggregated report with coordinates outranks an older owner report."""
 
@@ -111,8 +116,8 @@ def test_semantic_report_outranks_older_coordinate_candidate() -> None:
     coordinate_fix = {
         "status": "aggregated",
         "last_seen": 1_700_000_000,
-        "latitude": 37.7749,
-        "longitude": -122.4194,
+        "latitude": MERGED_LATITUDE,
+        "longitude": MERGED_LONGITUDE,
         "accuracy": 30.0,
     }
 
@@ -126,11 +131,11 @@ def test_semantic_report_outranks_older_coordinate_candidate() -> None:
 
     assert best["status"] == "semantic_only"
     assert "latitude" not in best or best["latitude"] is None
-    assert best["last_seen"] == 1_700_000_950.0
+    assert best["last_seen"] == MERGED_LAST_SEEN
 
     merged = _merge_semantics_if_near_ts(best, normed)
 
-    assert merged["latitude"] == 37.7749
-    assert merged["longitude"] == -122.4194
-    assert merged["last_seen"] == 1_700_000_950.0
+    assert merged["latitude"] == MERGED_LATITUDE
+    assert merged["longitude"] == MERGED_LONGITUDE
+    assert merged["last_seen"] == MERGED_LAST_SEEN
     assert merged["semantic_name"] == "Office"

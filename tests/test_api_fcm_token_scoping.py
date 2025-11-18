@@ -1,9 +1,8 @@
 # tests/test_api_fcm_token_scoping.py
 from __future__ import annotations
 
-import logging
-
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
 

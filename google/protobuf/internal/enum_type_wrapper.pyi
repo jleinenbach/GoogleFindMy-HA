@@ -1,7 +1,8 @@
 # google/protobuf/internal/enum_type_wrapper.pyi
 from __future__ import annotations
 
-from typing import Any, Iterable, Iterator, TypeVar
+from collections.abc import Iterable, Iterator
+from typing import Any, TypeVar
 
 from custom_components.googlefindmy.protobuf_typing import EnumTypeWrapperMeta
 

@@ -7,6 +7,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from homeassistant.config_entries import ConfigSubentry
+
 from custom_components.googlefindmy import (
     ConfigEntrySubEntryManager,
     _migrate_entry_identifier_namespaces,
@@ -20,8 +22,11 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from homeassistant.config_entries import ConfigSubentry
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
+
+IGNORED_AT_PRIMARY = 1234
+IGNORED_AT_SECONDARY = 42
+SCHEMA_VERSION = 2
 
 
 class _ConfigEntriesStub(ConfigEntriesDomainUniqueIdLookupMixin):
@@ -131,10 +136,10 @@ def test_async_remove_config_entry_device_normalizes_identifier(monkeypatch) -> 
 
     metadata = ignored["device-123"]
     assert metadata["name"] == "Device Name"
-    assert metadata["ignored_at"] == 1234
+    assert metadata["ignored_at"] == IGNORED_AT_PRIMARY
     assert "Legacy Device" in metadata["aliases"]
     assert "Legacy Alias" in metadata["aliases"]
-    assert updated_options[OPT_OPTIONS_SCHEMA_VERSION] == 2
+    assert updated_options[OPT_OPTIONS_SCHEMA_VERSION] == SCHEMA_VERSION
 
 
 def test_migrate_entry_identifier_namespaces_updates_subentries() -> None:
@@ -149,7 +154,7 @@ def test_migrate_entry_identifier_namespaces_updates_subentries() -> None:
                 "entry-2:device-1": {
                     "name": "Legacy Name",
                     "aliases": ["Legacy Alias"],
-                    "ignored_at": 42,
+                    "ignored_at": IGNORED_AT_SECONDARY,
                     "source": "imported",
                 }
             }
@@ -185,9 +190,9 @@ def test_migrate_entry_identifier_namespaces_updates_subentries() -> None:
     assert "device-1" in ignored
     metadata = ignored["device-1"]
     assert metadata["name"] == "Legacy Name"
-    assert metadata["ignored_at"] == 42
+    assert metadata["ignored_at"] == IGNORED_AT_SECONDARY
     assert "Legacy Alias" in metadata["aliases"]
-    assert updated_options[OPT_OPTIONS_SCHEMA_VERSION] == 2
+    assert updated_options[OPT_OPTIONS_SCHEMA_VERSION] == SCHEMA_VERSION
 
     manager = ConfigEntrySubEntryManager(hass, entry)
     managed = manager.get(TRACKER_SUBENTRY_KEY)
