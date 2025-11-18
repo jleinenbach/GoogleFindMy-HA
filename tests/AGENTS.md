@@ -268,6 +268,21 @@ before child entries became visible. Prefer these controls over ad-hoc
 monkeypatching whenever a regression exercises delayed subentry registration or
 setup retries.
 
+### Quick reference — subentry registry race monkeypatch targets
+
+Use these shortcuts when writing regression tests that need to emulate missing
+or late subentry registrations:
+
+* `"custom_components.googlefindmy._registered_subentry_ids"` — patch to
+  return an empty set and simulate Home Assistant omitting the new subentry
+  from its registry during setup.
+* `FakeConfigEntriesManager.set_transient_unknown_entry(entry_id, *, lookup_misses=..., setup_failures=...)`
+  — drive deterministic `UnknownEntry` responses for repeated
+  `async_get_entry` or `async_setup` calls.
+* `FakeConfigEntriesManager._registered_subentry_ids` — seed or clear the
+  manager's cached registry snapshot before calling integration helpers that
+  inspect the parent's registered subentries.
+
 > **Reminder:** Because these helpers already model `UnknownEntry` behavior,
 > new tests should avoid importing `custom_components.googlefindmy`'s
 > `UnknownEntry` fallback directly. Use the provided knobs on

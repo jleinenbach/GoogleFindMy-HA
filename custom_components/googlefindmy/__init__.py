@@ -2192,6 +2192,7 @@ async def _async_setup_new_subentries(
         )
 
     missing_registrations: set[str] = set()
+    retry_missing_registrations = False
 
     for target, fallback_target in setup_targets:
         if target not in parent_subentry_ids:
@@ -2216,8 +2217,8 @@ async def _async_setup_new_subentries(
                     parent_entry.entry_id,
                     candidate,
                 )
-                if enforce_registration:
-                    missing_registrations.add(candidate)
+                missing_registrations.add(candidate)
+                retry_missing_registrations = retry_missing_registrations or not registered_subentry_ids
                 continue
 
             _LOGGER.warning(
@@ -2246,8 +2247,8 @@ async def _async_setup_new_subentries(
                     parent_entry.entry_id,
                     candidate,
                 )
-                if enforce_registration:
-                    missing_registrations.add(candidate)
+                missing_registrations.add(candidate)
+                retry_missing_registrations = True
                 continue
             except Exception as err:  # pragma: no cover - defensive logging
                 _LOGGER.debug(
@@ -2258,13 +2259,19 @@ async def _async_setup_new_subentries(
                 )
                 continue
 
-    if enforce_registration and missing_registrations:
-        raise ConfigEntryNotReady(
-            "; ".join(
-                f"Config subentry {candidate} missing before setup"
+    if missing_registrations:
+        message = "; ".join(
+            (
+                "Config subentry "
+                f"{candidate} missing for parent {parent_entry.entry_id}"
                 for candidate in sorted(missing_registrations)
             )
         )
+
+        if retry_missing_registrations:
+            raise ConfigEntryNotReady(message)
+
+        raise HomeAssistantError(message)
 
 
 def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:

@@ -239,6 +239,40 @@ async def test_async_setup_new_subentries_enforces_registered_subentries(
 
 
 @pytest.mark.asyncio
+async def test_async_setup_new_subentries_requires_registration_when_not_enforced(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing registered subentries should still raise without enforcement."""
+
+    caplog.set_level(logging.ERROR)
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    registered_subentry = SimpleNamespace(
+        entry_id="child-entry",
+        subentry_id="child-entry",
+        unique_id="child-entry",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+    parent_entry.subentries[registered_subentry.subentry_id] = registered_subentry
+
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    hass = FakeHass(config_entries=config_entries)
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy._registered_subentry_ids",
+        lambda _hass, _entry: set(),
+    )
+
+    with pytest.raises(ConfigEntryNotReady):
+        await _async_setup_new_subentries(hass, parent_entry, [registered_subentry])
+
+    assert config_entries.setup_calls == []
+    assert any(
+        "Config subentry child-entry not registered" in message
+        for message in caplog.messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_async_setup_new_subentries_requires_registration_when_enforced() -> None:
     """Subentry scheduling should proceed when the registry exposes the subentry."""
 
