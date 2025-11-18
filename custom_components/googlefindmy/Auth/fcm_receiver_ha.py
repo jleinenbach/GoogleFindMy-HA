@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import functools
 import json
 import logging
 import math
@@ -64,32 +65,41 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    decrypt_location_response_locations,
+)
+from custom_components.googlefindmy.ProtoDecoders.decoder import (
+    parse_device_update_protobuf,
+)
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+
+    from custom_components.googlefindmy.Auth.firebase_messaging._typing import (
+        CredentialsUpdatedCallable,
+    )
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
     from custom_components.googlefindmy.google_home_filter import (
         GoogleHomeFilter as GoogleHomeFilterProtocol,
     )
-    from custom_components.googlefindmy.Auth.firebase_messaging._typing import (
-        CredentialsUpdatedCallable,
-    )
 else:
     GoogleHomeFilterProtocol = Any
+    TokenCache = Any
 
 # Integration-level tunables (safe fallbacks if missing)
 try:
     from custom_components.googlefindmy.const import (
-        FCM_CLIENT_HEARTBEAT_INTERVAL_S,
-        FCM_SERVER_HEARTBEAT_INTERVAL_S,
-        FCM_IDLE_RESET_AFTER_S,
-        FCM_CONNECTION_RETRY_COUNT,
-        FCM_MONITOR_INTERVAL_S,
-        FCM_ABORT_ON_SEQ_ERROR_COUNT,
         DOMAIN,
+        FCM_ABORT_ON_SEQ_ERROR_COUNT,
+        FCM_CLIENT_HEARTBEAT_INTERVAL_S,
+        FCM_CONNECTION_RETRY_COUNT,
+        FCM_IDLE_RESET_AFTER_S,
+        FCM_MONITOR_INTERVAL_S,
+        FCM_SERVER_HEARTBEAT_INTERVAL_S,
         OPT_IGNORED_DEVICES,  # for ignore fallback via options
     )
 except ImportError:  # pragma: no cover
@@ -110,15 +120,17 @@ if TYPE_CHECKING:
         FcmPushClientRunState,
         FcmRegisterConfig,
     )
+
     HAVE_FCM_PUSH_CLIENT = True
 else:
     try:
         from custom_components.googlefindmy.Auth.firebase_messaging import (
-            FcmPushClientRunState,
             FcmPushClient,
-            FcmRegisterConfig,
             FcmPushClientConfig,
+            FcmPushClientRunState,
+            FcmRegisterConfig,
         )
+
         HAVE_FCM_PUSH_CLIENT = True
     except ImportError:  # pragma: no cover
         HAVE_FCM_PUSH_CLIENT = False
@@ -132,25 +144,28 @@ _LOGGER = logging.getLogger(__name__)
 type JSONDict = dict[str, Any]
 type MutableJSONMapping = MutableMapping[str, Any]
 
+_P = ParamSpec("_P")
 _T = TypeVar("_T")
 
 
-async def _call_in_executor(func: Callable[..., _T], /, *args: Any) -> _T:
+async def _call_in_executor(
+    func: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs
+) -> _T:
     """Run ``func`` in a background thread with wide Python compatibility."""
 
     to_thread_obj = getattr(asyncio, "to_thread", None)
     if to_thread_obj is not None:
         to_thread = cast(Callable[..., Awaitable[_T]], to_thread_obj)
-        return await to_thread(func, *args)
+        return await to_thread(func, *args, **kwargs)
 
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(func, *args)
+            future = executor.submit(func, *args, **kwargs)
             return future.result()
 
-    return await loop.run_in_executor(None, func, *args)
+    return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
 
 
 def _coordinator_google_home_filter(
@@ -190,9 +205,13 @@ class FcmReceiverHA:
         self._hass: HomeAssistant | None = None
 
         # Per-entry in-memory credentials and clients
-        self.creds: dict[str, MutableJSONMapping | None] = {}  # entry_id -> credentials dict
+        self.creds: dict[
+            str, MutableJSONMapping | None
+        ] = {}  # entry_id -> credentials dict
         self.pcs: dict[str, FcmPushClient] = {}  # entry_id -> FcmPushClient
-        self.supervisors: dict[str, asyncio.Task[None]] = {}  # entry_id -> supervisor task
+        self.supervisors: dict[
+            str, asyncio.Task[None]
+        ] = {}  # entry_id -> supervisor task
         self._stop_evts: dict[str, asyncio.Event] = {}  # entry_id -> stop event
 
         # Per-request callbacks awaiting device responses (entry-agnostic)
@@ -373,7 +392,10 @@ class FcmReceiverHA:
                     _on_creds_updated_entry,
                 )
                 pc = FcmPushClient(
-                    lambda payload, persistent_id, context, eid=entry_id: self._on_notification(
+                    lambda payload,
+                    persistent_id,
+                    context,
+                    eid=entry_id: self._on_notification(
                         eid, payload, persistent_id, context
                     ),
                     fcm_config,
@@ -392,16 +414,16 @@ class FcmReceiverHA:
             self.creds[entry_id] = creds if isinstance(creds, dict) else None
             return pc
 
-    async def _start_supervisor_for_entry(
+    async def _start_supervisor_for_entry(  # noqa: PLR0915
         self, entry_id: str, cache: TokenCache | None
-    ) -> None:  # noqa: PLR0915, PLR0912
+    ) -> None:
         """Start the supervisor loop for the given entry if not running."""
         if entry_id in self.supervisors and not self.supervisors[entry_id].done():
             return
 
         stop_evt = self._stop_evts.setdefault(entry_id, asyncio.Event())
 
-        async def _supervisor() -> None:
+        async def _supervisor() -> None:  # noqa: PLR0912, PLR0915
             backoff = 1.0
             try:
                 while not stop_evt.is_set():
@@ -661,37 +683,14 @@ class FcmReceiverHA:
         payload: Mapping[str, Any],
         persistent_id: str | None,
         context: Any | None,
-    ) -> None:  # noqa: PLR0912
-        """Handle incoming FCM notification (sync callback from per-entry client).
-
-        Args:
-            entry_id: The entry_id whose client delivered this push.
-            payload: Envelope mapping from the FCM client (expected to hold the data dict).
-            persistent_id: Unused; provided by the client.
-            context: Optional context provided by the client.
-        """
+    ) -> None:
+        """Handle incoming FCM notification (sync callback from per-entry client)."""
         _ = persistent_id  # maintained for signature compatibility
         _ = context
         try:
-            payload_dict = (payload.get("data") or {}).get(
-                "com.google.android.apps.adm.FCM_PAYLOAD"
-            )
-            if not payload_dict:
-                _LOGGER.debug("FCM notification without FMD payload")
+            hex_string = self._extract_hex_payload(payload)
+            if hex_string is None:
                 return
-
-            # Base64 decode with padding
-            pad = len(payload_dict) % 4
-            if pad:
-                payload_dict += "=" * (4 - pad)
-
-            try:
-                decoded = base64.b64decode(payload_dict)
-            except (binascii.Error, ValueError) as err:
-                _LOGGER.error("FCM Base64 decode failed: %s", err)
-                return
-
-            hex_string = binascii.hexlify(decoded).decode("utf-8")
 
             canonic_id = self._extract_canonic_id_from_response(hex_string)
             if not canonic_id:
@@ -699,77 +698,38 @@ class FcmReceiverHA:
                 return
 
             token = self._extract_push_token(dict(payload))
-
-            # Route preference: token → entry map; fallback to client entry; final fallback: owner index; else broadcast.
-            target_entries: set[str] | None = None
-            if token and token in self._token_to_entries:
-                target_entries = set(self._token_to_entries[token])
-                route_src = "token"
-            else:
-                target_entries = {entry_id} if entry_id else None
-                route_src = "client"
-
-            if (not target_entries) and self._hass is not None:
-                try:
-                    owner_index = self._hass.data.get(DOMAIN, {}).get(
-                        "device_owner_index", {}
-                    )
-                    eid = owner_index.get(canonic_id)
-                    if isinstance(eid, str):
-                        target_entries = {eid}
-                        route_src = "owner_index"
-                except Exception:
-                    pass
-
-            if not target_entries:
-                route_src = "fallback"
-
-            # Select coordinators for the routed entries (or all as last resort)
+            target_entries, route_src = self._route_target_entries(
+                entry_id, canonic_id, token
+            )
             target_coordinators = self._coordinators_for_entries(target_entries)
 
-            # Direct per-request callback bypasses fan-out when available
             cb = self.location_update_callbacks.get(canonic_id)
             if cb:
-                _LOGGER.info(
-                    "push_received(entry=%s, device=%s, fanout_targets=%d, route=%s)",
-                    ",".join(sorted(target_entries)) if target_entries else "unknown",
-                    canonic_id[:8],
-                    1,
-                    route_src,
-                )
+                self._log_push_received(canonic_id, target_entries, route_src, 1)
                 asyncio.create_task(
                     self._run_callback_async(cb, canonic_id, hex_string)
                 )
                 return
 
-            # Check if any chosen coordinator would process this device (ignore-aware).
-            any_tracked = False
+            tracked = [
+                c for c in target_coordinators if self._is_tracked(c, canonic_id)
+            ]
             for coordinator in target_coordinators:
-                if self._is_tracked(coordinator, canonic_id):
-                    any_tracked = True
-                else:
-                    _LOGGER.debug(
-                        "Skipping FCM update for ignored device %s", canonic_id[:8]
-                    )
+                if coordinator in tracked:
+                    continue
+                _LOGGER.debug(
+                    "Skipping FCM update for ignored device %s", canonic_id[:8]
+                )
 
-            _LOGGER.info(
-                "push_received(entry=%s, device=%s, fanout_targets=%d, route=%s)",
-                ",".join(sorted(target_entries)) if target_entries else "unknown",
-                canonic_id[:8],
-                len(
-                    [c for c in target_coordinators if self._is_tracked(c, canonic_id)]
-                ),
-                route_src,
-            )
+            self._log_push_received(canonic_id, target_entries, route_src, len(tracked))
 
-            if not any_tracked:
+            if not tracked:
                 _LOGGER.debug(
                     "No registered coordinator will process %s; dropping FCM update",
                     canonic_id[:8],
                 )
                 return
 
-            # Decode + enqueue with routing context; per-coordinator filtering happens on flush.
             asyncio.create_task(
                 self._process_background_update(
                     entry_id, canonic_id, hex_string, target_entries
@@ -780,6 +740,67 @@ class FcmReceiverHA:
             _LOGGER.error("Error processing FCM notification: %s", err)
 
     # -------------------- Routing helpers --------------------
+
+    def _extract_hex_payload(self, payload: Mapping[str, Any]) -> str | None:
+        """Return the decoded hex payload or None when absent."""
+        payload_dict = (payload.get("data") or {}).get(
+            "com.google.android.apps.adm.FCM_PAYLOAD"
+        )
+        if not payload_dict:
+            _LOGGER.debug("FCM notification without FMD payload")
+            return None
+
+        pad = len(payload_dict) % 4
+        if pad:
+            payload_dict += "=" * (4 - pad)
+
+        try:
+            decoded = base64.b64decode(payload_dict)
+        except (binascii.Error, ValueError) as err:
+            _LOGGER.error("FCM Base64 decode failed: %s", err)
+            return None
+
+        return binascii.hexlify(decoded).decode("utf-8")
+
+    def _route_target_entries(
+        self, entry_id: str, canonic_id: str, token: str | None
+    ) -> tuple[set[str] | None, str]:
+        """Determine routing targets and the selected source."""
+        if token and token in self._token_to_entries:
+            return set(self._token_to_entries[token]), "token"
+
+        if entry_id:
+            return {entry_id}, "client"
+
+        owner_entry = self._lookup_owner_entry(canonic_id)
+        if owner_entry:
+            return {owner_entry}, "owner_index"
+
+        return None, "fallback"
+
+    def _lookup_owner_entry(self, canonic_id: str) -> str | None:
+        """Best-effort lookup of owner entry id from hass data."""
+        if self._hass is None:
+            return None
+        owner_index = self._hass.data.get(DOMAIN, {}).get("device_owner_index", {})
+        entry_id = owner_index.get(canonic_id)
+        return entry_id if isinstance(entry_id, str) else None
+
+    def _log_push_received(
+        self,
+        canonic_id: str,
+        target_entries: set[str] | None,
+        route_src: str,
+        fanout_targets: int,
+    ) -> None:
+        """Log the push receipt with routing context."""
+        _LOGGER.info(
+            "push_received(entry=%s, device=%s, fanout_targets=%d, route=%s)",
+            ",".join(sorted(target_entries)) if target_entries else "unknown",
+            canonic_id[:8],
+            fanout_targets,
+            route_src,
+        )
 
     @staticmethod
     def _extract_push_token(envelope: dict[str, Any]) -> str | None:
@@ -809,6 +830,77 @@ class FcmReceiverHA:
             except Exception:
                 pass
         return res
+
+    def _prepare_coordinator_payload(
+        self, coordinator: Any, key: tuple[str, str], payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Apply coordinator-specific filtering and return payload or None if filtered."""
+        coordinator_payload = dict(payload)
+        semantic_name = coordinator_payload.get("semantic_name")
+        ghf = _coordinator_google_home_filter(coordinator)
+        if semantic_name and ghf is not None:
+            try:
+                should_filter, replacement_attrs = ghf.should_filter_detection(
+                    key[1], semantic_name
+                )
+            except Exception as gf_err:
+                _LOGGER.debug("Google Home filter error for %s: %s", key[1][:8], gf_err)
+                should_filter, replacement_attrs = False, None
+
+            if should_filter:
+                _LOGGER.debug(
+                    "Filtered Google Home detection for %s (push path)", key[1][:8]
+                )
+                return None
+
+            if replacement_attrs:
+                if "latitude" in replacement_attrs and "longitude" in replacement_attrs:
+                    coordinator_payload["latitude"] = replacement_attrs.get("latitude")
+                    coordinator_payload["longitude"] = replacement_attrs.get(
+                        "longitude"
+                    )
+                radius = replacement_attrs.get("radius")
+                if radius is not None:
+                    coordinator_payload["accuracy"] = radius
+                coordinator_payload["semantic_name"] = None
+
+        return coordinator_payload
+
+    def _write_coordinator_payload(
+        self, coordinator: Any, device_id: str, payload: dict[str, Any]
+    ) -> bool:
+        """Persist the payload into coordinator caches."""
+        update_cache = getattr(coordinator, "update_device_cache", None)
+        if callable(update_cache):
+            update_cache(device_id, payload)
+            return True
+
+        try:
+            coordinator._device_location_data[device_id] = payload  # noqa: SLF001
+            _LOGGER.debug(
+                "Fallback: wrote to coordinator._device_location_data directly"
+            )
+            coordinator.increment_stat("background_updates")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("Coordinator cache update failed for %s: %s", device_id, err)
+            return False
+        return True
+
+    def _record_crowd_source_stat(self, coordinator: Any) -> None:
+        """Increment crowd-source stat when available."""
+        try:
+            coordinator.increment_stat("crowd_sourced_updates")
+        except Exception:
+            pass
+
+    async def _notify_coordinator(self, coordinator: Any, device_id: str) -> None:
+        """Notify coordinator about updated payload."""
+        push = getattr(coordinator, "push_updated", None)
+        if callable(push):
+            push([device_id])
+            return
+
+        await coordinator.async_request_refresh()
 
     def _update_token_routing(self, token: str, entry_ids: set[str]) -> None:
         """Update the token→entry mapping."""
@@ -912,10 +1004,6 @@ class FcmReceiverHA:
     def _extract_canonic_id_from_response(self, hex_response: str) -> str | None:
         """Extract canonical id via the decoder."""
         try:
-            from custom_components.googlefindmy.ProtoDecoders.decoder import (
-                parse_device_update_protobuf,
-            )
-
             device_update = parse_device_update_protobuf(hex_response)
             if device_update.HasField("deviceMetadata"):
                 ids = device_update.deviceMetadata.identifierInformation.canonicIds.canonicId
@@ -1015,76 +1103,21 @@ class FcmReceiverHA:
                 if not self._is_tracked(coordinator, key[1]):
                     continue
 
-                coordinator_payload = dict(payload)
+                coordinator_payload = self._prepare_coordinator_payload(
+                    coordinator, key, payload
+                )
+                if coordinator_payload is None:
+                    continue
 
-                # Apply Google Home filter per coordinator (if available)
-                semantic_name = coordinator_payload.get("semantic_name")
-                ghf = _coordinator_google_home_filter(coordinator)
-                if semantic_name and ghf is not None:
-                    try:
-                        should_filter, replacement_attrs = ghf.should_filter_detection(
-                            key[1], semantic_name
-                        )
-                    except Exception as gf_err:
-                        _LOGGER.debug(
-                            "Google Home filter error for %s: %s", key[1][:8], gf_err
-                        )
-                        should_filter, replacement_attrs = False, None
-
-                    if should_filter:
-                        _LOGGER.debug(
-                            "Filtered Google Home detection for %s (push path)",
-                            key[1][:8],
-                        )
-                        continue
-
-                    if replacement_attrs:
-                        if (
-                            "latitude" in replacement_attrs
-                            and "longitude" in replacement_attrs
-                        ):
-                            coordinator_payload["latitude"] = replacement_attrs.get(
-                                "latitude"
-                            )
-                            coordinator_payload["longitude"] = replacement_attrs.get(
-                                "longitude"
-                            )
-                        if (
-                            "radius" in replacement_attrs
-                            and replacement_attrs.get("radius") is not None
-                        ):
-                            coordinator_payload["accuracy"] = replacement_attrs.get(
-                                "radius"
-                            )
-                        coordinator_payload["semantic_name"] = None
-
-                update_cache = getattr(coordinator, "update_device_cache", None)
-                if callable(update_cache):
-                    update_cache(key[1], coordinator_payload)
-                else:
-                    try:
-                        coordinator._device_location_data[key[1]] = coordinator_payload  # noqa: SLF001
-                        _LOGGER.debug(
-                            "Fallback: wrote to coordinator._device_location_data directly"
-                        )
-                        coordinator.increment_stat("background_updates")
-                    except Exception as err:  # noqa: BLE001
-                        _LOGGER.error(
-                            "Coordinator cache update failed for %s: %s", key[1], err
-                        )
-                        continue
+                if not self._write_coordinator_payload(
+                    coordinator, key[1], coordinator_payload
+                ):
+                    continue
 
                 if coordinator_payload.get("is_own_report") is False:
-                    try:
-                        coordinator.increment_stat("crowd_sourced_updates")
-                    except Exception:
-                        pass
+                    self._record_crowd_source_stat(coordinator)
 
-                push = getattr(coordinator, "push_updated", None)
-                if callable(push):
-                    push([key[1]])
-                else:
-                    await coordinator.async_request_refresh()
+                await self._notify_coordinator(coordinator, key[1])
 
             except Exception as err:
                 _LOGGER.debug(
@@ -1098,13 +1131,6 @@ class FcmReceiverHA:
     def _decode_background_location(self, entry_id: str, hex_string: str) -> JSONDict:
         """Decode background location using protobuf decoders (CPU-bound)."""
         try:
-            from custom_components.googlefindmy.ProtoDecoders.decoder import (
-                parse_device_update_protobuf,
-            )
-            from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
-                decrypt_location_response_locations,
-            )
-
             device_update = parse_device_update_protobuf(hex_string)
             cache = self._entry_caches.get(entry_id)
             if cache is None:
@@ -1323,23 +1349,10 @@ class FcmReceiverHA:
 
     # -------------------- Manual locate registration --------------------
 
-    async def async_register_for_location_updates(
-        self, canonic_id: str, callback: Callable[[str, str], None]
-    ) -> str | None:
-        """Register a manual locate callback and ensure an entry token is available."""
-
-        if not isinstance(canonic_id, str) or not canonic_id:
-            _LOGGER.warning("Manual locate registration skipped: missing canonical id")
-            return None
-        if not callable(callback):
-            _LOGGER.error(
-                "Manual locate registration for %s rejected: callback is not callable",
-                canonic_id[:8],
-            )
-            return None
-
-        entry_id: str | None = None
-        cache: TokenCache | None = None
+    def _select_manual_locate_entry(  # noqa: PLR0912
+        self, canonic_id: str
+    ) -> tuple[str | None, TokenCache | None]:
+        """Choose the best entry/cache for manual locate registration."""
         fallback_entry: str | None = None
         fallback_cache: TokenCache | None = None
         display_entry: str | None = None
@@ -1362,31 +1375,29 @@ class FcmReceiverHA:
                     self._entry_caches[candidate_entry] = candidate_cache
 
             present = False
-            try:
-                present_fn = getattr(coordinator, "is_device_present", None)
-                if callable(present_fn):
+            present_fn = getattr(coordinator, "is_device_present", None)
+            if callable(present_fn):
+                try:
                     present = bool(present_fn(canonic_id))
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug(
-                    "[entry=%s] Manual locate presence check failed for %s: %s",
-                    candidate_entry,
-                    canonic_id[:8],
-                    err,
-                )
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug(
+                        "[entry=%s] Manual locate presence check failed for %s: %s",
+                        candidate_entry,
+                        canonic_id[:8],
+                        err,
+                    )
 
             has_display = False
             if not present:
-                try:
-                    name_fn = getattr(coordinator, "get_device_display_name", None)
-                    if callable(name_fn):
+                name_fn = getattr(coordinator, "get_device_display_name", None)
+                if callable(name_fn):
+                    try:
                         has_display = bool(name_fn(canonic_id))
-                except Exception:
-                    has_display = False
+                    except Exception:
+                        has_display = False
 
             if present:
-                entry_id = candidate_entry
-                cache = candidate_cache
-                break
+                return candidate_entry, candidate_cache
 
             if has_display:
                 display_entry = candidate_entry
@@ -1396,14 +1407,39 @@ class FcmReceiverHA:
                 fallback_entry = candidate_entry
                 fallback_cache = candidate_cache
 
-        if entry_id is None and display_entry is not None:
-            entry_id = display_entry
-            cache = display_cache
+        if display_entry is not None:
+            return display_entry, display_cache
 
-        if entry_id is None and fallback_entry is not None:
-            entry_id = fallback_entry
-            cache = fallback_cache
+        return fallback_entry, fallback_cache
 
+    async def _ensure_token_for_entry(self, entry_id: str) -> str | None:
+        """Request and return a token for the given entry when missing."""
+        token = self.get_fcm_token(entry_id)
+        if token:
+            return token
+
+        ok_reg = await self._register_for_fcm_entry(entry_id)
+        if not ok_reg:
+            return None
+
+        return self.get_fcm_token(entry_id)
+
+    async def async_register_for_location_updates(
+        self, canonic_id: str, callback: Callable[[str, str], None]
+    ) -> str | None:
+        """Register a manual locate callback and ensure an entry token is available."""
+
+        if not isinstance(canonic_id, str) or not canonic_id:
+            _LOGGER.warning("Manual locate registration skipped: missing canonical id")
+            return None
+        if not callable(callback):
+            _LOGGER.error(
+                "Manual locate registration for %s rejected: callback is not callable",
+                canonic_id[:8],
+            )
+            return None
+
+        entry_id, cache = self._select_manual_locate_entry(canonic_id)
         if entry_id is None:
             _LOGGER.warning(
                 "Manual locate registration skipped for %s: no coordinator available",
@@ -1425,16 +1461,7 @@ class FcmReceiverHA:
 
             await self._start_supervisor_for_entry(entry_id, cache)
 
-            token = self.get_fcm_token(entry_id)
-            if not token:
-                ok_reg = await self._register_for_fcm_entry(entry_id)
-                if not ok_reg:
-                    _LOGGER.warning(
-                        "[entry=%s] Manual locate registration failed: token request rejected",
-                        entry_id,
-                    )
-                    return None
-                token = self.get_fcm_token(entry_id)
+            token = await self._ensure_token_for_entry(entry_id)
 
             if not token:
                 _LOGGER.warning(
