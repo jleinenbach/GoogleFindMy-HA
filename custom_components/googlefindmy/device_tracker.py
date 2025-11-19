@@ -20,6 +20,7 @@ Entry-scope guarantees (C2):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
@@ -186,6 +187,11 @@ async def async_setup_entry(
 
         known_ids: set[str] = set()
 
+        # Prime the snapshot so a subsequent scan after listener registration
+        # can observe trackers even when the coordinator's first fetch returns
+        # an empty list during cold boots.
+        coordinator.get_subentry_snapshot(tracker_subentry_key)
+
         def _schedule_tracker_entities(
             new_entities: Iterable[GoogleFindMyDeviceTracker],
             update_before_add: bool = True,
@@ -199,10 +205,6 @@ async def async_setup_entry(
                 log_owner="Device tracker setup",
                 logger=_LOGGER,
             )
-
-        # Ensure Home Assistant marks the platform as loaded even when the
-        # coordinator snapshot is empty on cold boot.
-        _schedule_tracker_entities((), False)
 
         @callback
         def _scan_available_trackers_from_coordinator() -> None:
@@ -281,12 +283,26 @@ async def async_setup_entry(
                             "Cloud tracker scanner deduplicated discovery for %s", account_ref
                         )
 
-                hass.async_create_task(_async_trigger_cloud_scan(len(to_add)))
+                hass_async_create_task = getattr(hass, "async_create_task", None)
+                if callable(hass_async_create_task):
+                    pending = hass_async_create_task(
+                        _async_trigger_cloud_scan(len(to_add))
+                    )
+                    if asyncio.iscoroutine(pending):
+                        asyncio.create_task(pending)
+                else:
+                    _LOGGER.debug(
+                        "Device tracker setup: hass missing async_create_task; skipping cloud discovery trigger"
+                    )
 
         unsub = coordinator.async_add_listener(
             _scan_available_trackers_from_coordinator
         )
         config_entry.async_on_unload(unsub)
+
+        # Process any snapshot data that may already be available so the
+        # listener does not have to wait for the next coordinator refresh.
+        _scan_available_trackers_from_coordinator()
 
         runtime_data = getattr(config_entry, "runtime_data", None)
         recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)

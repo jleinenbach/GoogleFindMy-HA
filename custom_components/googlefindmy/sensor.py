@@ -320,9 +320,9 @@ async def async_setup_entry(
             )
             known_ids.add(dev_id)
 
-    if should_init_service:
+    if should_init_service and service_entities:
         _schedule_service_entities(service_entities, True)
-    if should_init_tracker:
+    if should_init_tracker and tracker_entities:
         _schedule_tracker_entities(tracker_entities, True)
 
     @callback
