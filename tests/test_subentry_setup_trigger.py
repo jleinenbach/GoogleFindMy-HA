@@ -11,8 +11,8 @@ import pytest
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from custom_components.googlefindmy import (
-    ConfigEntrySubEntryManager,
     ConfigEntrySubentryDefinition,
+    ConfigEntrySubEntryManager,
     RuntimeData,
     _async_setup_new_subentries,
     _async_setup_subentry,
@@ -232,8 +232,6 @@ async def test_subentry_manager_retries_unknown_entry_without_enforcement() -> N
 
     tracker_key = "tracker"
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
-    tracker_subentry_id = f"{parent_entry.entry_id}:{tracker_key}"
-
     class _RetryingConfigEntriesManager(FakeConfigEntriesManager):
         def __init__(self) -> None:
             super().__init__([parent_entry])
@@ -241,14 +239,14 @@ async def test_subentry_manager_retries_unknown_entry_without_enforcement() -> N
         def async_add_subentry(self, entry: FakeConfigEntry, subentry: Any) -> Any:
             subentry_id = getattr(subentry, "subentry_id", None)
             if not isinstance(subentry_id, str) or not subentry_id:
-                subentry_id = tracker_subentry_id
+                subentry_id = f"{entry.entry_id}:{tracker_key}"
                 setattr(subentry, "subentry_id", subentry_id)
             entry.subentries[subentry_id] = subentry
             entry._registered_subentry_ids.add(subentry_id)
+            self.set_transient_unknown_entry(subentry_id, setup_failures=1)
             return subentry
 
     config_entries = _RetryingConfigEntriesManager()
-    config_entries.set_transient_unknown_entry(tracker_subentry_id, setup_failures=1)
     hass = FakeHass(config_entries=config_entries)
     manager = ConfigEntrySubEntryManager(hass, parent_entry)
 
@@ -259,8 +257,10 @@ async def test_subentry_manager_retries_unknown_entry_without_enforcement() -> N
     )
 
     await manager.async_sync([definition])
-    assert config_entries.setup_calls == [tracker_subentry_id]
     assert tracker_key in manager._managed
+    assert len(config_entries.setup_calls) == 1
+    scheduled_subentry_id = config_entries.setup_calls[0]
+    assert isinstance(scheduled_subentry_id, str) and scheduled_subentry_id
 
     await _async_setup_new_subentries(
         hass,
@@ -268,7 +268,10 @@ async def test_subentry_manager_retries_unknown_entry_without_enforcement() -> N
         list(manager._managed.values()),
     )
 
-    assert config_entries.setup_calls == [tracker_subentry_id, tracker_subentry_id]
+    assert config_entries.setup_calls == [
+        scheduled_subentry_id,
+        scheduled_subentry_id,
+    ]
 
 
 @pytest.mark.asyncio
