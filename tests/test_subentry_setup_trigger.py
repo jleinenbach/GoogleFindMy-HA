@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable, Iterable
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +16,7 @@ from custom_components.googlefindmy import (
     ConfigEntrySubentryDefinition,
     ConfigEntrySubEntryManager,
     RuntimeData,
+    _async_create_task,
     _async_setup_new_subentries,
     _async_setup_subentry,
     _subentry_setup_tracker,
@@ -73,6 +75,42 @@ async def test_async_setup_subentry_inherits_parent_runtime_data() -> None:
     assert await _async_setup_subentry(hass, child_entry) is True
     assert child_entry.runtime_data is runtime_data
     assert forward_called is False
+
+
+@pytest.mark.asyncio
+async def test_async_create_task_schedules_from_worker_thread() -> None:
+    """Task scheduling should marshal worker threads back to the HA loop."""
+
+    loop = asyncio.get_running_loop()
+    hass = FakeHass(config_entries=FakeConfigEntriesManager([]))
+    setattr(hass, "loop", loop)
+
+    thread_names: list[str] = []
+
+    def _recording_async_create_task(
+        coro: Any, *, name: str | None = None
+    ) -> asyncio.Task[Any]:
+        thread_names.append(threading.current_thread().name)
+        assert name == "googlefindmy.threadsafe_test"
+        return loop.create_task(coro)
+
+    setattr(hass, "async_create_task", _recording_async_create_task)
+
+    async def _marker() -> None:
+        thread_names.append(f"coro:{threading.current_thread().name}")
+
+    task = await loop.run_in_executor(
+        None,
+        lambda: _async_create_task(
+            hass,
+            _marker(),
+            name="googlefindmy.threadsafe_test",
+        ),
+    )
+
+    await task
+
+    assert thread_names == ["MainThread", "coro:MainThread"]
 
 
 @pytest.mark.asyncio

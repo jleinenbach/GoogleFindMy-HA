@@ -48,6 +48,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -2102,17 +2103,47 @@ def _is_retry_handle_bucket(candidate: object) -> TypeGuard[RetryHandleBucket]:
 def _async_create_task(
     hass: HomeAssistant, coro: CoroutineType, *, name: str | None = None
 ) -> asyncio.Task[Any]:
-    """Schedule ``coro`` on Home Assistant's loop and return the created task."""
+    """Schedule ``coro`` on Home Assistant's loop in a thread-safe manner."""
 
     create_task = getattr(hass, "async_create_task", None)
-    if callable(create_task):
-        return cast(asyncio.Task[Any], create_task(coro, name=name))
+    loop = getattr(hass, "loop", None)
 
-    task: asyncio.Task[Any] = asyncio.create_task(coro)
-    with suppress(RuntimeError):
-        if name and hasattr(task, "set_name"):
-            task.set_name(name)
-    return task
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if loop is None:
+        if running_loop is None:
+            msg = "Home Assistant loop unavailable while scheduling task"
+            raise RuntimeError(msg)
+        loop = running_loop
+
+    def _schedule() -> asyncio.Task[Any]:
+        if callable(create_task):
+            return cast(asyncio.Task[Any], create_task(coro, name=name))
+
+        task: asyncio.Task[Any] = loop.create_task(coro)
+        with suppress(RuntimeError):
+            if name and hasattr(task, "set_name"):
+                task.set_name(name)
+        return task
+
+    if running_loop is loop:
+        return _schedule()
+
+    result: Future[asyncio.Task[Any]] = Future()
+
+    def _threadsafe_schedule() -> None:
+        try:
+            task = _schedule()
+        except Exception as err:  # pragma: no cover - defensive
+            result.set_exception(err)
+            return
+        result.set_result(task)
+
+    loop.call_soon_threadsafe(_threadsafe_schedule)
+    return result.result()
 
 
 def _subentry_retry_queue_bucket(
