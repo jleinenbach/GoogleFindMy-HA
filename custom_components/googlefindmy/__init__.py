@@ -52,7 +52,15 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType, SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeAlias, TypeGuard, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    TypedDict,
+    TypeGuard,
+    TypeVar,
+    cast,
+)
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
@@ -2061,12 +2069,12 @@ _SUBENTRY_SETUP_RETRY_DELAY = 2.0
 _SUBENTRY_SETUP_MAX_ATTEMPTS = 3
 """Maximum number of setup attempts recorded per config subentry."""
 
-RetryQueueBucket: TypeAlias = dict[str, dict[str, int]]
-RetryHandleEntry: TypeAlias = asyncio.TimerHandle | asyncio.Task[Any] | object
-RetryHandleBucket: TypeAlias = dict[str, RetryHandleEntry]
+type RetryQueueBucket = dict[str, dict[str, int]]
+type RetryHandleEntry = asyncio.TimerHandle | asyncio.Task[Any] | object
+type RetryHandleBucket = dict[str, RetryHandleEntry]
 
 
-CoroutineType: TypeAlias = Coroutine[Any, Any, Any]
+type CoroutineType = Coroutine[Any, Any, Any]
 
 
 def _is_retry_queue_bucket(candidate: object) -> TypeGuard[RetryQueueBucket]:
