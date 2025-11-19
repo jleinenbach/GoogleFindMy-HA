@@ -6203,11 +6203,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # Home Assistant will handle per-subentry platform forwarding automatically;
     # the integration must only trigger config entry setup here and after
     # programmatic creation (see docs/CONFIG_SUBENTRIES_HANDBOOK.md).
+    # Subentries are already registered locally; rely on Home Assistant to
+    # finalize their registry state without forcing ConfigEntryNotReady loops.
     await _async_setup_new_subentries(
         hass,
         entry,
         entry.subentries.values(),
-        enforce_registration=True,
     )
 
     # Home Assistant will fan out platform setup per subentry after this returns
