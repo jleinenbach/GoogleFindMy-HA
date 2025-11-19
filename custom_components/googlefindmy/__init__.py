@@ -43,6 +43,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Collection,
+    Coroutine,
     Iterable,
     Mapping,
     Sequence,
@@ -51,7 +52,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType, SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeAlias, TypeGuard, TypeVar, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
@@ -2060,9 +2061,38 @@ _SUBENTRY_SETUP_RETRY_DELAY = 2.0
 _SUBENTRY_SETUP_MAX_ATTEMPTS = 3
 """Maximum number of setup attempts recorded per config subentry."""
 
+RetryQueueBucket: TypeAlias = dict[str, dict[str, int]]
+RetryHandleEntry: TypeAlias = asyncio.TimerHandle | asyncio.Task[Any] | object
+RetryHandleBucket: TypeAlias = dict[str, RetryHandleEntry]
+
+
+CoroutineType: TypeAlias = Coroutine[Any, Any, Any]
+
+
+def _is_retry_queue_bucket(candidate: object) -> TypeGuard[RetryQueueBucket]:
+    """Return True when ``candidate`` matches the retry queue mapping."""
+
+    if not isinstance(candidate, dict):
+        return False
+    for parent_entry_id, subentry_attempts in candidate.items():
+        if not isinstance(parent_entry_id, str) or not isinstance(subentry_attempts, dict):
+            return False
+        for subentry_id, attempts in subentry_attempts.items():
+            if not isinstance(subentry_id, str) or not isinstance(attempts, int):
+                return False
+    return True
+
+
+def _is_retry_handle_bucket(candidate: object) -> TypeGuard[RetryHandleBucket]:
+    """Return True when ``candidate`` is a retry handle mapping."""
+
+    if not isinstance(candidate, dict):
+        return False
+    return all(isinstance(parent_entry_id, str) for parent_entry_id in candidate)
+
 
 def _async_create_task(
-    hass: HomeAssistant, coro: Awaitable[Any], *, name: str | None = None
+    hass: HomeAssistant, coro: CoroutineType, *, name: str | None = None
 ) -> asyncio.Task[Any]:
     """Schedule ``coro`` on Home Assistant's loop and return the created task."""
 
@@ -2070,7 +2100,7 @@ def _async_create_task(
     if callable(create_task):
         return cast(asyncio.Task[Any], create_task(coro, name=name))
 
-    task = asyncio.create_task(coro)
+    task: asyncio.Task[Any] = asyncio.create_task(coro)
     with suppress(RuntimeError):
         if name and hasattr(task, "set_name"):
             task.set_name(name)
@@ -2079,28 +2109,32 @@ def _async_create_task(
 
 def _subentry_retry_queue_bucket(
     hass: HomeAssistant,
-) -> dict[str, dict[str, int]]:
+) -> RetryQueueBucket:
     """Return or initialize the integration-wide retry queue bucket."""
 
     bucket = _domain_data(hass)
-    retry_bucket = bucket.get("_subentry_retry_queue")
-    if not isinstance(retry_bucket, dict):
-        retry_bucket = {}
-        bucket["_subentry_retry_queue"] = retry_bucket
-    return cast(dict[str, dict[str, int]], retry_bucket)
+    retry_bucket_candidate = bucket.get("_subentry_retry_queue")
+    if _is_retry_queue_bucket(retry_bucket_candidate):
+        return retry_bucket_candidate
+
+    retry_bucket: RetryQueueBucket = {}
+    bucket["_subentry_retry_queue"] = retry_bucket
+    return retry_bucket
 
 
 def _subentry_retry_handles_bucket(
     hass: HomeAssistant,
-) -> dict[str, asyncio.TimerHandle | object]:
+) -> RetryHandleBucket:
     """Return or initialize the retry handle cache."""
 
     bucket = _domain_data(hass)
-    handles_bucket = bucket.get("_subentry_retry_handles")
-    if not isinstance(handles_bucket, dict):
-        handles_bucket = {}
-        bucket["_subentry_retry_handles"] = handles_bucket
-    return cast(dict[str, asyncio.TimerHandle | object], handles_bucket)
+    handles_bucket_candidate = bucket.get("_subentry_retry_handles")
+    if _is_retry_handle_bucket(handles_bucket_candidate):
+        return handles_bucket_candidate
+
+    handles_bucket: RetryHandleBucket = {}
+    bucket["_subentry_retry_handles"] = handles_bucket
+    return handles_bucket
 
 
 def _pending_subentry_retries(
@@ -2181,11 +2215,17 @@ def _queue_subentry_retry(
             name=f"{DOMAIN}.retry_config_subentries.{entry_id}",
         )
 
+    handle: asyncio.TimerHandle | Awaitable[Any] | None
     handle = async_call_later(hass, _SUBENTRY_SETUP_RETRY_DELAY, _retry_callback)
-    if inspect.isawaitable(handle):
+    if isinstance(handle, Awaitable):
+        awaitable_handle = handle
+
+        async def _await_retry_handle() -> None:
+            await awaitable_handle
+
         handles_bucket[entry_id] = _async_create_task(
             hass,
-            cast(Awaitable[Any], handle),
+            _await_retry_handle(),
             name=f"{DOMAIN}.subentry_retry_handle.{entry_id}",
         )
     else:
