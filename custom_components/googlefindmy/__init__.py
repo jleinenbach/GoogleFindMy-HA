@@ -1956,16 +1956,13 @@ class ConfigEntrySubEntryManager:
             await self.async_remove(key)
 
         if created_subentries:
-            state = getattr(self._entry, "state", None)
-            is_initial_setup = isinstance(state, ConfigEntryState) and state in (
-                ConfigEntryState.SETUP_IN_PROGRESS,
-                ConfigEntryState.SETUP_RETRY,
-            )
+            # agents/runtime_patterns/AGENTS.md: Never enforce registration
+            # during initial sync; rely on _async_setup_new_subentries to retry
+            # UnknownEntry once the registry publishes the new subentry.
             await _async_setup_new_subentries(
                 self._hass,
                 self._entry,
                 created_subentries,
-                enforce_registration=is_initial_setup,
             )
 
     async def async_remove(self, key: str) -> None:
