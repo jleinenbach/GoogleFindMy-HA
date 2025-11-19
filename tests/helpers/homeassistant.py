@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import FrozenInstanceError, dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -753,4 +753,7 @@ class FakeHass:
     config_entries: FakeConfigEntriesManager
     services: FakeServiceRegistry = field(default_factory=FakeServiceRegistry)
     data: dict[str, Any] = field(default_factory=dict)
+    loop: asyncio.AbstractEventLoop | None = None
+    loop_thread_id: int | None = None
+    async_create_task: Callable[[Awaitable[Any], str | None], asyncio.Task[Any]] | None = None
 
