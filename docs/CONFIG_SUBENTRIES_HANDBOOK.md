@@ -484,6 +484,13 @@ Integrations can create subentries programmatically when runtime discovery finds
 - The setup call ensures `_async_setup_subentry` binds the child to the parent runtime data and that Core injects `config_subentry_id` when forwarding platforms. Without it, trackers remain present in memory but never surface entities (`N present / 0 enabled`).
 - Yield once to the event loop (for example, `await asyncio.sleep(0)`) before triggering setup so the registry has time to publish the new subentry identifier and avoid transient `UnknownEntry` errors.
 
+#### Automatic retry queue for `UnknownEntry`
+
+- `_async_setup_new_subentries` now records every registration candidate that raises `homeassistant.config_entries.UnknownEntry` and schedules a follow-up via `hass.helpers.event.async_call_later`.
+- The helper retries **only** the unresolved identifiers so parent discovery does not run repeatedly, and `_SUBENTRY_SETUP_MAX_ATTEMPTS` (currently 3) bounds each subentry's retries to avoid infinite loops.
+- A successful retry clears the queue immediately; repeated failures log a warning before abandoning the ID so users can reload manually if Core never surfaces the child.
+- Because retries are now decoupled from parent setup, `ConfigEntryNotReady` is no longer used to propagate `UnknownEntry` backoffs—parent entries finish loading while the queue handles stragglers.
+
 ## Section VIII: Peer-Review Checklist and Troubleshooting
 
 ### A. Checklist
