@@ -105,6 +105,7 @@ from homeassistant.helpers import (
 from homeassistant.helpers import (
     issue_registry as ir,
 )
+from homeassistant.helpers.event import async_call_later
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
@@ -2043,6 +2044,8 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     views_registered: bool
     _subentry_forward_helper_logs: set[str]
     _subentry_setup_history: dict[str, set[str]]
+    _subentry_retry_queue: dict[str, dict[str, int]]
+    _subentry_retry_handles: dict[str, asyncio.TimerHandle | object]
 
 
 def _domain_data(hass: HomeAssistant) -> GoogleFindMyDomainData:
@@ -2050,6 +2053,183 @@ def _domain_data(hass: HomeAssistant) -> GoogleFindMyDomainData:
 
     return cast(GoogleFindMyDomainData, hass.data.setdefault(DOMAIN, {}))
 
+
+_SUBENTRY_SETUP_RETRY_DELAY = 2.0
+"""Delay (in seconds) before retrying UnknownEntry setup attempts."""
+
+_SUBENTRY_SETUP_MAX_ATTEMPTS = 3
+"""Maximum number of setup attempts recorded per config subentry."""
+
+
+def _async_create_task(
+    hass: HomeAssistant, coro: Awaitable[Any], *, name: str | None = None
+) -> asyncio.Task[Any]:
+    """Schedule ``coro`` on Home Assistant's loop and return the created task."""
+
+    create_task = getattr(hass, "async_create_task", None)
+    if callable(create_task):
+        return cast(asyncio.Task[Any], create_task(coro, name=name))
+
+    task = asyncio.create_task(coro)
+    with suppress(RuntimeError):
+        if name and hasattr(task, "set_name"):
+            task.set_name(name)
+    return task
+
+
+def _subentry_retry_queue_bucket(
+    hass: HomeAssistant,
+) -> dict[str, dict[str, int]]:
+    """Return or initialize the integration-wide retry queue bucket."""
+
+    bucket = _domain_data(hass)
+    retry_bucket = bucket.get("_subentry_retry_queue")
+    if not isinstance(retry_bucket, dict):
+        retry_bucket = {}
+        bucket["_subentry_retry_queue"] = retry_bucket
+    return cast(dict[str, dict[str, int]], retry_bucket)
+
+
+def _subentry_retry_handles_bucket(
+    hass: HomeAssistant,
+) -> dict[str, asyncio.TimerHandle | object]:
+    """Return or initialize the retry handle cache."""
+
+    bucket = _domain_data(hass)
+    handles_bucket = bucket.get("_subentry_retry_handles")
+    if not isinstance(handles_bucket, dict):
+        handles_bucket = {}
+        bucket["_subentry_retry_handles"] = handles_bucket
+    return cast(dict[str, asyncio.TimerHandle | object], handles_bucket)
+
+
+def _pending_subentry_retries(
+    hass: HomeAssistant, parent_entry_id: str
+) -> tuple[str, ...]:
+    """Return pending retry targets for ``parent_entry_id``."""
+
+    retry_bucket = _subentry_retry_queue_bucket(hass)
+    entry_queue = retry_bucket.get(parent_entry_id)
+    if not isinstance(entry_queue, dict):
+        return ()
+    return tuple(entry_queue.keys())
+
+
+def _cancel_subentry_retry_handle(hass: HomeAssistant, entry_id: str) -> None:
+    """Cancel a scheduled retry callback when one is present."""
+
+    handles_bucket = _subentry_retry_handles_bucket(hass)
+    handle = handles_bucket.pop(entry_id, None)
+    if handle is None:
+        return
+    cancel = getattr(handle, "cancel", None)
+    if callable(cancel):
+        cancel()
+
+
+def _clear_subentry_retry_entry(
+    hass: HomeAssistant,
+    parent_entry_id: str,
+    registration_candidate: str,
+) -> None:
+    """Remove ``registration_candidate`` from the retry queue if present."""
+
+    retry_bucket = _subentry_retry_queue_bucket(hass)
+    entry_queue = retry_bucket.get(parent_entry_id)
+    if isinstance(entry_queue, dict):
+        entry_queue.pop(registration_candidate, None)
+        if not entry_queue:
+            retry_bucket.pop(parent_entry_id, None)
+            _cancel_subentry_retry_handle(hass, parent_entry_id)
+
+
+def _queue_subentry_retry(
+    hass: HomeAssistant,
+    parent_entry: MyConfigEntry,
+    registration_candidate: str,
+) -> None:
+    """Record a retry attempt for ``registration_candidate`` and schedule a follow-up."""
+
+    entry_id = parent_entry.entry_id
+    retry_bucket = _subentry_retry_queue_bucket(hass)
+    entry_queue = retry_bucket.setdefault(entry_id, {})
+    attempts = entry_queue.get(registration_candidate, 0) + 1
+    entry_queue[registration_candidate] = attempts
+
+    if attempts >= _SUBENTRY_SETUP_MAX_ATTEMPTS:
+        entry_queue.pop(registration_candidate, None)
+        if not entry_queue:
+            retry_bucket.pop(entry_id, None)
+            _cancel_subentry_retry_handle(hass, entry_id)
+        _LOGGER.warning(
+            "[%s] Giving up on config subentry %s after %s attempts",  # noqa: G004
+            entry_id,
+            registration_candidate,
+            attempts,
+        )
+        return
+
+    handles_bucket = _subentry_retry_handles_bucket(hass)
+    if entry_id in handles_bucket:
+        return
+
+    def _retry_callback(_now: Any) -> None:
+        handles_bucket.pop(entry_id, None)
+        _async_create_task(
+            hass,
+            _async_retry_pending_subentries(hass, entry_id),
+            name=f"{DOMAIN}.retry_config_subentries.{entry_id}",
+        )
+
+    handle = async_call_later(hass, _SUBENTRY_SETUP_RETRY_DELAY, _retry_callback)
+    if inspect.isawaitable(handle):
+        handles_bucket[entry_id] = _async_create_task(
+            hass,
+            cast(Awaitable[Any], handle),
+            name=f"{DOMAIN}.subentry_retry_handle.{entry_id}",
+        )
+    else:
+        handles_bucket[entry_id] = handle if handle is not None else object()
+
+
+async def _async_retry_pending_subentries(
+    hass: HomeAssistant, parent_entry_id: str
+) -> None:
+    """Retry pending config subentry setups for ``parent_entry_id``."""
+
+    pending = _pending_subentry_retries(hass, parent_entry_id)
+    if not pending:
+        return
+
+    config_entries = getattr(hass, "config_entries", None)
+    if config_entries is None:
+        _LOGGER.debug(
+            "[%s] Skipping subentry retry because config entries manager missing",  # noqa: G004
+            parent_entry_id,
+        )
+        return
+
+    get_entry = getattr(config_entries, "async_get_entry", None)
+    if not callable(get_entry):
+        return
+
+    parent_entry = get_entry(parent_entry_id)
+    if parent_entry is None:
+        _LOGGER.debug(
+            "[%s] Dropping pending config subentry retries because parent entry missing",  # noqa: G004
+            parent_entry_id,
+        )
+        retry_bucket = _subentry_retry_queue_bucket(hass)
+        retry_bucket.pop(parent_entry_id, None)
+        _cancel_subentry_retry_handle(hass, parent_entry_id)
+        return
+
+    await _async_setup_new_subentries(
+        hass,
+        parent_entry,
+        (),
+        retry_entry_ids=pending,
+    )
 
 def _subentry_setup_tracker(
     hass: HomeAssistant, parent_entry: MyConfigEntry
@@ -2122,9 +2302,10 @@ def _registered_subentry_ids(
 async def _async_setup_new_subentries(
     hass: HomeAssistant,
     parent_entry: MyConfigEntry,
-    subentries: Iterable[ConfigSubentry | Any],
+    subentries: Iterable[ConfigSubentry | Any] | None,
     *,
     enforce_registration: bool = False,
+    retry_entry_ids: Iterable[str] | None = None,
 ) -> None:
     """Trigger Home Assistant setup for newly created subentries.
 
@@ -2151,20 +2332,21 @@ async def _async_setup_new_subentries(
             if isinstance(entry_identifier, str) and entry_identifier:
                 parent_subentry_ids.add(entry_identifier)
     resolved_subentries: list[ConfigSubentry | Any] = []
-    for subentry in subentries:
-        resolved = subentry
-        if isinstance(parent_subentries, Mapping):
-            unique_id = getattr(subentry, "unique_id", None)
-            if isinstance(unique_id, str):
-                resolved = next(
-                    (
-                        candidate
-                        for candidate in parent_subentries.values()
-                        if getattr(candidate, "unique_id", None) == unique_id
-                    ),
-                    subentry,
-                )
-        resolved_subentries.append(resolved)
+    if subentries:
+        for subentry in subentries:
+            resolved = subentry
+            if isinstance(parent_subentries, Mapping):
+                unique_id = getattr(subentry, "unique_id", None)
+                if isinstance(unique_id, str):
+                    resolved = next(
+                        (
+                            candidate
+                            for candidate in parent_subentries.values()
+                            if getattr(candidate, "unique_id", None) == unique_id
+                        ),
+                        subentry,
+                    )
+            resolved_subentries.append(resolved)
 
     setup_targets: list[tuple[str, str | None]] = []
     for subentry in resolved_subentries:
@@ -2185,6 +2367,11 @@ async def _async_setup_new_subentries(
         if subentry_entry_id is None:
             continue
         setup_targets.append((subentry_entry_id, fallback_entry_id))
+
+    if retry_entry_ids:
+        for retry_id in retry_entry_ids:
+            if isinstance(retry_id, str) and retry_id:
+                setup_targets.append((retry_id, None))
 
     if not setup_targets:
         return
@@ -2266,6 +2453,9 @@ async def _async_setup_new_subentries(
 
             try:
                 await hass.config_entries.async_setup(registration_candidate)
+                _clear_subentry_retry_entry(
+                    hass, parent_entry.entry_id, registration_candidate
+                )
                 _LOGGER.debug(
                     "[%s] Scheduled setup for config subentry '%s'",
                     parent_entry.entry_id,
@@ -2285,6 +2475,7 @@ async def _async_setup_new_subentries(
                     raise ConfigEntryNotReady(
                         "Config subentry %s not yet registered" % registration_candidate
                     ) from None
+                _queue_subentry_retry(hass, parent_entry, registration_candidate)
                 continue
             except Exception as err:  # pragma: no cover - defensive logging
                 _LOGGER.debug(

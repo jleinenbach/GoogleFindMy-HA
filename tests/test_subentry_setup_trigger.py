@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +11,7 @@ import pytest
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from custom_components.googlefindmy import (
+    _SUBENTRY_SETUP_MAX_ATTEMPTS,
     ConfigEntrySubentryDefinition,
     ConfigEntrySubEntryManager,
     RuntimeData,
@@ -185,10 +186,10 @@ async def test_async_setup_subentry_errors_when_unregistered(caplog: pytest.LogC
 
 
 @pytest.mark.asyncio
-async def test_async_setup_new_subentries_retries_unknown_and_clears_tracker(
-    caplog: pytest.LogCaptureFixture,
+async def test_async_setup_new_subentries_retries_unknown_and_reschedules(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """UnknownEntry should clear the tracker so setup can retry once registered."""
+    """UnknownEntry should clear the tracker and auto-schedule a retry."""
 
     caplog.set_level(logging.WARNING)
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
@@ -204,26 +205,118 @@ async def test_async_setup_new_subentries_retries_unknown_and_clears_tracker(
     config_entries.set_transient_unknown_entry(subentry.entry_id, setup_failures=1)
     hass = FakeHass(config_entries=config_entries)
 
-    with pytest.raises(ConfigEntryNotReady):
-        await _async_setup_new_subentries(
-            hass,
-            parent_entry,
-            [subentry],
-            enforce_registration=True,
-        )
+    scheduled_callbacks: list[Callable[[Any], None]] = []
 
-    tracker = _subentry_setup_tracker(hass, parent_entry)
-    assert subentry.entry_id not in tracker
+    class _Handle:
+        def __init__(self) -> None:
+            self._cancelled = False
+
+        def cancel(self) -> None:
+            self._cancelled = True
+
+    def _fake_async_call_later(
+        _hass: FakeHass, _delay: float, callback: Callable[[Any], None]
+    ) -> _Handle:
+        scheduled_callbacks.append(callback)
+        return _Handle()
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.async_call_later", _fake_async_call_later
+    )
+
+    tasks: list[asyncio.Task[Any]] = []
+
+    def _capture_task(
+        _hass: Any, coro: Any, *, name: str | None = None
+    ) -> asyncio.Task[Any]:
+        del _hass, name
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy._async_create_task", _capture_task
+    )
 
     await _async_setup_new_subentries(
         hass,
         parent_entry,
         [subentry],
-        enforce_registration=True,
     )
+
+    tracker = _subentry_setup_tracker(hass, parent_entry)
+    assert subentry.entry_id not in tracker
+    assert scheduled_callbacks
+    assert config_entries.setup_calls == [subentry.entry_id]
+
+    scheduled_callbacks.pop(0)(None)
+    if tasks:
+        await asyncio.gather(*tasks)
 
     assert config_entries.setup_calls == [subentry.entry_id, subentry.entry_id]
     assert any("not yet registered" in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_async_setup_new_subentries_stops_after_retry_limit(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retries should stop after the configured attempt limit."""
+
+    caplog.set_level(logging.WARNING)
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    subentry = SimpleNamespace(
+        entry_id="child-entry",
+        subentry_id="child-entry",
+        unique_id="child-entry",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+    parent_entry.subentries[subentry.subentry_id] = subentry
+
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    config_entries.set_transient_unknown_entry(
+        subentry.entry_id, setup_failures=_SUBENTRY_SETUP_MAX_ATTEMPTS + 2
+    )
+    hass = FakeHass(config_entries=config_entries)
+
+    scheduled_callbacks: list[Callable[[Any], None]] = []
+
+    def _fake_async_call_later(
+        _hass: FakeHass, _delay: float, callback: Callable[[Any], None]
+    ) -> SimpleNamespace:
+        scheduled_callbacks.append(callback)
+        return SimpleNamespace(cancel=lambda: None)
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.async_call_later", _fake_async_call_later
+    )
+
+    tasks: list[asyncio.Task[Any]] = []
+
+    def _capture_task(
+        _hass: Any, coro: Any, *, name: str | None = None
+    ) -> asyncio.Task[Any]:
+        del _hass, name
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy._async_create_task", _capture_task
+    )
+
+    await _async_setup_new_subentries(hass, parent_entry, [subentry])
+
+    while scheduled_callbacks:
+        scheduled_callbacks.pop(0)(None)
+        if tasks:
+            await asyncio.gather(*tasks)
+            tasks.clear()
+
+    assert config_entries.setup_calls == [
+        subentry.entry_id
+    ] * _SUBENTRY_SETUP_MAX_ATTEMPTS
+    assert any("Giving up on config subentry" in message for message in caplog.messages)
 
 
 @pytest.mark.asyncio
