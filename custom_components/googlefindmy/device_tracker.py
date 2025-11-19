@@ -184,7 +184,6 @@ async def async_setup_entry(
             )
             continue
 
-        entities: list[GoogleFindMyDeviceTracker] = []
         known_ids: set[str] = set()
 
         def _schedule_tracker_entities(
@@ -201,40 +200,9 @@ async def async_setup_entry(
                 logger=_LOGGER,
             )
 
-        initial_snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
-        for device in initial_snapshot:
-            dev_id = device.get("id")
-            name = device.get("name")
-            if not dev_id or not name:
-                _LOGGER.debug("Skipping device without id/name: %s", device)
-                continue
-            if dev_id in known_ids:
-                _LOGGER.debug(
-                    "Ignoring duplicate device id %s in startup snapshot", dev_id
-                )
-                continue
-            existing_entry = coordinator.find_tracker_entity_entry(dev_id)
-            if existing_entry is not None:
-                _LOGGER.debug(
-                    "Startup: registry already contains tracker entity %s (unique_id=%s) for %s (device_id=%s); creating canonical tracker entity for subentry '%s'.",
-                    existing_entry.entity_id,
-                    existing_entry.unique_id,
-                    name,
-                    dev_id,
-                    tracker_subentry_identifier_str,
-                )
-            known_ids.add(dev_id)
-            entities.append(
-                GoogleFindMyDeviceTracker(
-                    coordinator,
-                    device,
-                    subentry_key=tracker_subentry_key,
-                    subentry_identifier=tracker_subentry_identifier_str,
-                )
-            )
-
-        if entities:
-            _schedule_tracker_entities(entities, True)
+        # Ensure Home Assistant marks the platform as loaded even when the
+        # coordinator snapshot is empty on cold boot.
+        _schedule_tracker_entities((), False)
 
         @callback
         def _scan_available_trackers_from_coordinator() -> None:
@@ -319,7 +287,6 @@ async def async_setup_entry(
             _scan_available_trackers_from_coordinator
         )
         config_entry.async_on_unload(unsub)
-        _scan_available_trackers_from_coordinator()
 
         runtime_data = getattr(config_entry, "runtime_data", None)
         recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)

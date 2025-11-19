@@ -137,8 +137,6 @@ def schedule_add_entities(
     """Call ``async_add_entities`` safely and await coroutine returns if needed."""
 
     entity_list = list(entities)
-    if not entity_list:
-        return
 
     kwargs: dict[str, Any] = {"update_before_add": update_before_add}
     result: Any = None
