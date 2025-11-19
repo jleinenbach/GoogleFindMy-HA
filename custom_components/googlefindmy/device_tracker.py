@@ -20,6 +20,7 @@ Entry-scope guarantees (C2):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
@@ -184,8 +185,12 @@ async def async_setup_entry(
             )
             continue
 
-        entities: list[GoogleFindMyDeviceTracker] = []
         known_ids: set[str] = set()
+
+        # Prime the snapshot so a subsequent scan after listener registration
+        # can observe trackers even when the coordinator's first fetch returns
+        # an empty list during cold boots.
+        coordinator.get_subentry_snapshot(tracker_subentry_key)
 
         def _schedule_tracker_entities(
             new_entities: Iterable[GoogleFindMyDeviceTracker],
@@ -200,41 +205,6 @@ async def async_setup_entry(
                 log_owner="Device tracker setup",
                 logger=_LOGGER,
             )
-
-        initial_snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
-        for device in initial_snapshot:
-            dev_id = device.get("id")
-            name = device.get("name")
-            if not dev_id or not name:
-                _LOGGER.debug("Skipping device without id/name: %s", device)
-                continue
-            if dev_id in known_ids:
-                _LOGGER.debug(
-                    "Ignoring duplicate device id %s in startup snapshot", dev_id
-                )
-                continue
-            existing_entry = coordinator.find_tracker_entity_entry(dev_id)
-            if existing_entry is not None:
-                _LOGGER.debug(
-                    "Startup: registry already contains tracker entity %s (unique_id=%s) for %s (device_id=%s); creating canonical tracker entity for subentry '%s'.",
-                    existing_entry.entity_id,
-                    existing_entry.unique_id,
-                    name,
-                    dev_id,
-                    tracker_subentry_identifier_str,
-                )
-            known_ids.add(dev_id)
-            entities.append(
-                GoogleFindMyDeviceTracker(
-                    coordinator,
-                    device,
-                    subentry_key=tracker_subentry_key,
-                    subentry_identifier=tracker_subentry_identifier_str,
-                )
-            )
-
-        if entities:
-            _schedule_tracker_entities(entities, True)
 
         @callback
         def _scan_available_trackers_from_coordinator() -> None:
@@ -313,12 +283,25 @@ async def async_setup_entry(
                             "Cloud tracker scanner deduplicated discovery for %s", account_ref
                         )
 
-                hass.async_create_task(_async_trigger_cloud_scan(len(to_add)))
+                hass_async_create_task = getattr(hass, "async_create_task", None)
+                if callable(hass_async_create_task):
+                    pending = hass_async_create_task(
+                        _async_trigger_cloud_scan(len(to_add))
+                    )
+                    if asyncio.iscoroutine(pending):
+                        asyncio.create_task(pending)
+                else:
+                    _LOGGER.debug(
+                        "Device tracker setup: hass missing async_create_task; skipping cloud discovery trigger"
+                    )
 
         unsub = coordinator.async_add_listener(
             _scan_available_trackers_from_coordinator
         )
         config_entry.async_on_unload(unsub)
+
+        # Process any snapshot data that may already be available so the
+        # listener does not have to wait for the next coordinator refresh.
         _scan_available_trackers_from_coordinator()
 
         runtime_data = getattr(config_entry, "runtime_data", None)

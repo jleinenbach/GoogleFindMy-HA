@@ -259,7 +259,7 @@ async def async_setup_entry(
 
         if entities:
             _LOGGER.debug("Adding %d initial button entity(ies)", len(entities))
-            _schedule_button_entities(entities, True)
+        _schedule_button_entities(entities, True)
 
         @callback
         def _add_new_devices() -> None:
