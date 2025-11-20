@@ -203,6 +203,14 @@ async def async_setup_entry(
                 config_subentry_id,
                 tracker_meta_config_id,
             )
+            schedule_add_entities(
+                coordinator.hass,
+                async_add_entities,
+                entities=[],
+                config_subentry_id=config_subentry_id,
+                log_owner="Button setup",
+                logger=_LOGGER,
+            )
             continue
 
         known_ids: set[str] = set()

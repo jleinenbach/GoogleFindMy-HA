@@ -187,6 +187,14 @@ async def async_setup_entry(
                 config_subentry_id,
                 expected_config_subentry_id,
             )
+            schedule_add_entities(
+                coordinator.hass,
+                async_add_entities,
+                entities=[],
+                config_subentry_id=config_subentry_id,
+                log_owner="Device tracker setup",
+                logger=_LOGGER,
+            )
             continue
 
         known_ids: set[str] = set()

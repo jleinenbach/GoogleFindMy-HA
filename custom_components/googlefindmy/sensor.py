@@ -225,6 +225,14 @@ async def async_setup_entry(
             config_subentry_id,
             ", ".join(sorted(resolved_ids)),
         )
+        schedule_add_entities(
+            coordinator.hass,
+            async_add_entities,
+            entities=[],
+            config_subentry_id=config_subentry_id,
+            log_owner="Sensor setup",
+            logger=_LOGGER,
+        )
         return
 
     if service_config_subentry_id is None:
