@@ -56,6 +56,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
+    Coroutine,
     Literal,
     TypedDict,
     TypeGuard,
@@ -2024,9 +2025,9 @@ class RuntimeData:
     legacy_forwarded_platforms: set[str] | None = None
     legacy_forward_notice: bool = False
     subentry_retry_attempts: dict[str, dict[str, int]] = field(default_factory=dict)
-    subentry_retry_handles: dict[str, asyncio.TimerHandle] = field(
-        default_factory=dict
-    )
+    subentry_retry_handles: dict[
+        str, asyncio.TimerHandle | asyncio.Task[Any] | Coroutine[Any, Any, Any]
+    ] = field(default_factory=dict)
 
     @property
     def cache(self) -> TokenCache:
@@ -2056,7 +2057,9 @@ def _get_retry_attempts(entry: MyConfigEntry) -> dict[str, dict[str, int]]:
     return _runtime_data(entry).subentry_retry_attempts
 
 
-def _get_retry_handles(entry: MyConfigEntry) -> dict[str, asyncio.TimerHandle]:
+def _get_retry_handles(
+    entry: MyConfigEntry,
+) -> dict[str, asyncio.TimerHandle | asyncio.Task[Any] | Coroutine[Any, Any, Any]]:
     """Return the retry handle mapping for ``entry`` from runtime data."""
 
     return _runtime_data(entry).subentry_retry_handles
@@ -2155,7 +2158,7 @@ def _schedule_subentry_retry(
     if inspect.isawaitable(handle):
         task = _async_create_task(
             hass,
-            handle,
+            cast(CoroutineType, handle),
             name=f"{DOMAIN}.schedule_config_subentry_retry.{entry_id}",
         )
         handles_map[entry_id] = task
@@ -6702,7 +6705,15 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
     if isinstance(runtime_data, RuntimeData):
         for handle in runtime_data.subentry_retry_handles.values():
-            handle.cancel()
+            if inspect.iscoroutine(handle):
+                handle.close()
+                continue
+            if isinstance(handle, asyncio.Task):
+                handle.cancel()
+                continue
+            cancel = getattr(handle, "cancel", None)
+            if callable(cancel):
+                cancel()
         runtime_data.subentry_retry_handles.clear()
         runtime_data.subentry_retry_attempts.clear()
 
