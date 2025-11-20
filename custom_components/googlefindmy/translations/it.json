@@ -31,7 +31,7 @@
       },
       "device_selection": {
         "title": "Impostazioni di interrogazione",
-        "description": "I nuovi dispositivi rilevati appaiono disattivati e possono essere attivati nelle impostazioni del dispositivo. Configura qui i parametri generali di polling:\n• Intervallo di polling posizione: frequenza di avvio di un nuovo ciclo (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per ciascun dispositivo all’interno di un ciclo (1–60 secondi)",
+        "description": "I nuovi dispositivi rilevati appaiono disattivati e possono essere attivati nelle impostazioni del dispositivo. Configura qui i parametri generali di polling:\n• Intervallo di polling posizione: frequenza di avvio di un nuovo ciclo (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per ciascun dispositivo all’interno di un ciclo (1–60 secondi)\n\nFiltro Google Home: attivo per impostazione predefinita con le parole chiave nest/google/home/mini/hub/display/chromecast/speaker. Sostituisce le coordinate della zona Home per i rilevamenti Google/Nest/Chromecast e ignora le segnalazioni ripetute di \"home\" per 15 minuti. Regola qui le parole chiave se i tuoi dispositivi usano altri nomi.",
         "data": {
           "location_poll_interval": "Intervallo di polling posizione (s)",
           "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
