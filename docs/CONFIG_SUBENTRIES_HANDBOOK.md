@@ -55,6 +55,12 @@ Home Assistant's 2025.11.2 contracts reinforce strict separation between persist
 - [ ] `async_unload_entry` cancels scheduled retry handles and tears down runtime clients.
 - [ ] Logging avoids retry spam while still surfacing the final give-up message.
 
+### H. Core API safety notes
+
+- **Update config entries through the API, not by mutation.** Do not write directly to `entry.data` or `entry.options`; use `hass.config_entries.async_update_entry` (or `async_update_subentry` for child entries) so Home Assistant persists the change and fires the appropriate lifecycle callbacks.
+- **Avoid private coordinator attributes.** Fields such as `coordinator._subentry_metadata` are implementation details and may change between releases. Prefer public sources like `entry.subentries`, `entry.runtime_data`, or coordinator properties explicitly documented by Home Assistant. Store transient values in `entry.runtime_data` rather than reaching into private coordinator state.
+- **Leverage `DataUpdateCoordinator._async_setup` for initial work.** On Home Assistant 2024.8+, `_async_setup` runs automatically before the first refresh. Populate cached values (for example, visible device IDs) there instead of launching background tasks during `async_config_entry_first_refresh`, which reduces race conditions during setup.
+
 ## Section 0: Architectural evolution and lifecycle guardrails (2024–2025)
 
 ### A. Why subentries replaced ad-hoc options packs
