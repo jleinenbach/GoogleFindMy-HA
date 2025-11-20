@@ -376,6 +376,14 @@ To contribute, please:
 7. Test thoroughly with your Find My devices
 8. Submit a pull request with detailed description
 
+For quick sanity checks during development, run the lint and type checks after bootstrapping the Home Assistant stubs:
+
+```bash
+make test-stubs
+python -m ruff check
+python -m mypy --strict
+```
+
 ### Release process
 
 - Update the version in both `custom_components/googlefindmy/manifest.json` and `custom_components/googlefindmy/const.py` (`INTEGRATION_VERSION`) at the same time so the manifest metadata and runtime constants remain in sync.

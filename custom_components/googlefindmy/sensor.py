@@ -241,14 +241,21 @@ async def async_setup_entry(
             logger=_LOGGER,
         )
 
+    tracker_entities_added = False
+
     def _schedule_tracker_entities(
         new_entities: Iterable[SensorEntity],
         update_before_add: bool = True,
     ) -> None:
+        nonlocal tracker_entities_added
+
+        entity_list = list(new_entities)
+        tracker_entities_added |= bool(entity_list)
+
         schedule_add_entities(
             coordinator.hass,
             async_add_entities,
-            entities=new_entities,
+            entities=entity_list,
             update_before_add=update_before_add,
             config_subentry_id=tracker_config_subentry_id,
             log_owner="Sensor setup (tracker)",
@@ -358,6 +365,11 @@ async def async_setup_entry(
     if should_init_tracker:
         unsub = coordinator.async_add_listener(_add_new_sensors_on_update)
         entry.async_on_unload(unsub)
+
+        # Guarantee Home Assistant receives an AddEntitiesCallback invocation
+        # only when no tracker metrics are available during cold boots.
+        if not tracker_entities_added:
+            _schedule_tracker_entities((), True)
 
     runtime_data = getattr(entry, "runtime_data", None)
     recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)

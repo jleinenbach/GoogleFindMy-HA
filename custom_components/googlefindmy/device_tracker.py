@@ -192,14 +192,21 @@ async def async_setup_entry(
         # an empty list during cold boots.
         coordinator.get_subentry_snapshot(tracker_subentry_key)
 
+        tracker_entities_added = False
+
         def _schedule_tracker_entities(
             new_entities: Iterable[GoogleFindMyDeviceTracker],
             update_before_add: bool = True,
         ) -> None:
+            nonlocal tracker_entities_added
+
+            entity_list = list(new_entities)
+            tracker_entities_added |= bool(entity_list)
+
             schedule_add_entities(
                 coordinator.hass,
                 async_add_entities,
-                entities=new_entities,
+                entities=entity_list,
                 update_before_add=update_before_add,
                 config_subentry_id=tracker_config_subentry_for_entities_str,
                 log_owner="Device tracker setup",
@@ -303,6 +310,12 @@ async def async_setup_entry(
         # Process any snapshot data that may already be available so the
         # listener does not have to wait for the next coordinator refresh.
         _scan_available_trackers_from_coordinator()
+
+        # Ensure Home Assistant observes at least one AddEntitiesCallback call
+        # per platform setup so unload can complete even when no trackers are
+        # available on cold start.
+        if not tracker_entities_added:
+            _schedule_tracker_entities((), True)
 
         runtime_data = getattr(config_entry, "runtime_data", None)
         recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
