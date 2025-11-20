@@ -56,7 +56,6 @@ from types import MappingProxyType, SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
-    Coroutine,
     Literal,
     TypedDict,
     TypeGuard,
