@@ -18,6 +18,17 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
+from pytest import importorskip
+
+importorskip(
+    "homeassistant",
+    reason="homeassistant test stubs must be installed",
+)
+importorskip(
+    "pytest_homeassistant_custom_component",
+    reason="pytest-homeassistant-custom-component must be installed",
+)
+
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry
 from homeassistant.const import Platform
 from homeassistant.exceptions import ServiceValidationError
@@ -574,6 +585,166 @@ def test_service_stats_unique_id_migration_prefers_service_subentry(
             f"{service_subentry.subentry_id}_api_updates_total"
         )
         assert entity_registry.updated == ["sensor.googlefindmy_api_updates"]
+    finally:
+        drain_loop(loop)
+
+
+def test_unique_id_migration_rewrites_legacy_tracker_entities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy tracker IDs are namespaced and scoped to subentries without collisions."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        integration = importlib.import_module("custom_components.googlefindmy")
+
+        entry = _StubConfigEntry()
+        entry.entry_id = "entry-legacy"
+
+        tracker_subentry = ConfigSubentry(
+            data={
+                "group_key": TRACKER_SUBENTRY_KEY,
+                "features": ("device_tracker", "sensor"),
+            },
+            subentry_type=SUBENTRY_TYPE_TRACKER,
+            title="Devices",
+            unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+            subentry_id="tracker-subentry",
+        )
+        entry.subentries = {tracker_subentry.subentry_id: tracker_subentry}
+
+        hass = _StubHass(entry, loop)
+
+        class _RegistryStub:
+            def __init__(self) -> None:
+                self.entities: dict[str, SimpleNamespace] = {}
+                self._by_key: dict[tuple[str, str, str], str] = {}
+                self.updated: list[str] = []
+
+            def add(
+                self,
+                *,
+                entity_id: str,
+                domain: str,
+                platform: str,
+                unique_id: str,
+                config_entry_id: str,
+            ) -> None:
+                entry_obj = SimpleNamespace(
+                    entity_id=entity_id,
+                    domain=domain,
+                    platform=platform,
+                    unique_id=unique_id,
+                    config_entry_id=config_entry_id,
+                )
+                self.entities[entity_id] = entry_obj
+                self._by_key[(domain, platform, unique_id)] = entity_id
+
+            def async_get_entity_id(
+                self, domain: str, platform: str, unique_id: str
+            ) -> str | None:
+                return self._by_key.get((domain, platform, unique_id))
+
+            def async_update_entity(
+                self,
+                entity_id: str,
+                *,
+                new_unique_id: str | None = None,
+                **_: Any,
+            ) -> None:
+                entry_obj = self.entities[entity_id]
+                if new_unique_id:
+                    self._by_key.pop(
+                        (entry_obj.domain, entry_obj.platform, entry_obj.unique_id),
+                        None,
+                    )
+                    entry_obj.unique_id = new_unique_id
+                    self._by_key[(entry_obj.domain, entry_obj.platform, new_unique_id)] = (
+                        entity_id
+                    )
+                self.updated.append(entity_id)
+
+        class _DeviceRegistryStub:
+            def __init__(self) -> None:
+                self.devices: dict[str, Any] = {}
+
+            def async_update_device(self, **_: Any) -> None:  # pragma: no cover - stub
+                return None
+
+        entity_registry = _RegistryStub()
+        entity_registry.add(
+            entity_id="device_tracker.googlefindmy_device_one",
+            domain="device_tracker",
+            platform=integration.DOMAIN,
+            unique_id=f"{integration.DOMAIN}_device-1",
+            config_entry_id=entry.entry_id,
+        )
+        entity_registry.add(
+            entity_id="device_tracker.googlefindmy_device_two",
+            domain="device_tracker",
+            platform=integration.DOMAIN,
+            unique_id=f"{integration.DOMAIN}_{entry.entry_id}_device-2",
+            config_entry_id=entry.entry_id,
+        )
+        device_registry = _DeviceRegistryStub()
+
+        monkeypatch.setattr(
+            integration.er, "async_get", lambda _hass: entity_registry
+        )
+        monkeypatch.setattr(integration.dr, "async_get", lambda _hass: device_registry)
+
+        loop.run_until_complete(integration._async_migrate_unique_ids(hass, entry))
+
+        migrated_one = entity_registry.entities[
+            "device_tracker.googlefindmy_device_one"
+        ]
+        migrated_two = entity_registry.entities[
+            "device_tracker.googlefindmy_device_two"
+        ]
+        expected_one = (
+            f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-1"
+        )
+        expected_two = (
+            f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-2"
+        )
+
+        assert migrated_one.unique_id == expected_one
+        assert migrated_two.unique_id == expected_two
+        assert entity_registry.async_get_entity_id(
+            "device_tracker", integration.DOMAIN, expected_one
+        ) == "device_tracker.googlefindmy_device_one"
+        assert entity_registry.async_get_entity_id(
+            "device_tracker", integration.DOMAIN, expected_two
+        ) == "device_tracker.googlefindmy_device_two"
+
+        assert entry.options["unique_id_migrated"] is True
+        assert entry.options["unique_id_subentry_migrated"] is True
+        assert hass.config_entries.entry_update_calls[-1][1]["options"][
+            "unique_id_migrated"
+        ]
+        assert hass.config_entries.entry_update_calls[-1][1]["options"][
+            "unique_id_subentry_migrated"
+        ]
+
+        entity_registry.updated.clear()
+
+        def _fail_migration(*_: Any, **__: Any) -> None:
+            msg = "Migration helpers should not run once options flags are set"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            integration, "_migrate_legacy_unique_ids", _fail_migration
+        )
+        monkeypatch.setattr(
+            integration, "_migrate_unique_ids_to_subentry", _fail_migration
+        )
+
+        loop.run_until_complete(integration._async_migrate_unique_ids(hass, entry))
+
+        assert entity_registry.updated == []
+        assert len(hass.config_entries.entry_update_calls) == 1
     finally:
         drain_loop(loop)
 
