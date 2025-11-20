@@ -209,6 +209,24 @@ async def async_setup_entry(
         tracker_config_subentry_id,
     )
 
+    resolved_ids = {
+        candidate
+        for candidate in (service_config_subentry_id, tracker_config_subentry_id)
+        if isinstance(candidate, str) and candidate
+    }
+    if (
+        isinstance(config_subentry_id, str)
+        and config_subentry_id
+        and resolved_ids
+        and config_subentry_id not in resolved_ids
+    ):
+        _LOGGER.debug(
+            "Sensor setup skipped for unrelated subentry '%s' (expected one of: %s)",
+            config_subentry_id,
+            ", ".join(sorted(resolved_ids)),
+        )
+        return
+
     if service_config_subentry_id is None:
         should_init_service = False
     if tracker_config_subentry_id is None:
