@@ -173,15 +173,19 @@ async def async_setup_entry(
             or tracker_subentry_key,
         )
 
+        expected_config_subentry_id = (
+            tracker_meta_config_id or tracker_config_subentry_for_entities
+        )
+
         if (
             config_subentry_id
-            and tracker_meta_config_id
-            and config_subentry_id != tracker_meta_config_id
+            and expected_config_subentry_id
+            and config_subentry_id != expected_config_subentry_id
         ):
             _LOGGER.debug(
                 "Device tracker setup ignored for unrelated subentry '%s' (expected '%s')",
                 config_subentry_id,
-                tracker_meta_config_id,
+                expected_config_subentry_id,
             )
             continue
 
