@@ -2023,6 +2023,10 @@ class RuntimeData:
     entity_recovery_manager: EntityRecoveryManager | None = None
     legacy_forwarded_platforms: set[str] | None = None
     legacy_forward_notice: bool = False
+    subentry_retry_attempts: dict[str, dict[str, int]] = field(default_factory=dict)
+    subentry_retry_handles: dict[str, asyncio.TimerHandle] = field(
+        default_factory=dict
+    )
 
     @property
     def cache(self) -> TokenCache:
@@ -2036,6 +2040,33 @@ type MyConfigEntry = ConfigEntry
 SUBENTRY_FORWARD_HELPER_LOG_KEY: Literal[
     "_subentry_forward_helper_logs"
 ] = "_subentry_forward_helper_logs"
+
+
+def _runtime_data(entry: MyConfigEntry) -> RuntimeData:
+    """Return the runtime data container attached to ``entry``."""
+
+    data = entry.runtime_data
+    assert isinstance(data, RuntimeData)
+    return data
+
+
+def _get_retry_attempts(entry: MyConfigEntry) -> dict[str, dict[str, int]]:
+    """Return the retry attempts mapping for ``entry`` from runtime data."""
+
+    return _runtime_data(entry).subentry_retry_attempts
+
+
+def _get_retry_handles(entry: MyConfigEntry) -> dict[str, asyncio.TimerHandle]:
+    """Return the retry handle mapping for ``entry`` from runtime data."""
+
+    return _runtime_data(entry).subentry_retry_handles
+
+
+def _safe_setattr(target: object, name: str, value: Any) -> None:
+    """Set an attribute on ``target`` when the object permits mutation."""
+
+    with suppress(AttributeError, TypeError):
+        setattr(target, name, value)
 
 class GoogleFindMyDomainData(TypedDict, total=False):
     """Typed container describing objects stored under ``hass.data[DOMAIN]``."""
@@ -2054,8 +2085,6 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     views_registered: bool
     _subentry_forward_helper_logs: set[str]
     _subentry_setup_history: dict[str, set[str]]
-    _subentry_retry_queue: dict[str, dict[str, int]]
-    _subentry_retry_handles: dict[str, asyncio.TimerHandle | object]
 
 
 def _domain_data(hass: HomeAssistant) -> GoogleFindMyDomainData:
@@ -2070,34 +2099,97 @@ _SUBENTRY_SETUP_RETRY_DELAY = 2.0
 _SUBENTRY_SETUP_MAX_ATTEMPTS = 3
 """Maximum number of setup attempts recorded per config subentry."""
 
-type RetryQueueBucket = dict[str, dict[str, int]]
-type RetryHandleEntry = asyncio.TimerHandle | asyncio.Task[Any] | object
-type RetryHandleBucket = dict[str, RetryHandleEntry]
-
-
 type CoroutineType = Coroutine[Any, Any, Any]
 
 
-def _is_retry_queue_bucket(candidate: object) -> TypeGuard[RetryQueueBucket]:
-    """Return True when ``candidate`` matches the retry queue mapping."""
+def _cancel_subentry_retry_handle(parent_entry: MyConfigEntry) -> None:
+    """Cancel a scheduled retry callback when one is present."""
 
-    if not isinstance(candidate, dict):
-        return False
-    for parent_entry_id, subentry_attempts in candidate.items():
-        if not isinstance(parent_entry_id, str) or not isinstance(subentry_attempts, dict):
-            return False
-        for subentry_id, attempts in subentry_attempts.items():
-            if not isinstance(subentry_id, str) or not isinstance(attempts, int):
-                return False
-    return True
+    handles_map = _get_retry_handles(parent_entry)
+    handle = handles_map.pop(parent_entry.entry_id, None)
+    if handle is None:
+        return
+    if inspect.iscoroutine(handle):
+        handle.close()
+        return
+    if isinstance(handle, asyncio.Task):
+        handle.cancel()
+        return
+    cancel = getattr(handle, "cancel", None)
+    if callable(cancel):
+        cancel()
 
 
-def _is_retry_handle_bucket(candidate: object) -> TypeGuard[RetryHandleBucket]:
-    """Return True when ``candidate`` is a retry handle mapping."""
+def _clear_subentry_retry_entry(
+    parent_entry: MyConfigEntry, registration_candidate: str
+) -> None:
+    """Remove ``registration_candidate`` from the retry queue if present."""
 
-    if not isinstance(candidate, dict):
-        return False
-    return all(isinstance(parent_entry_id, str) for parent_entry_id in candidate)
+    attempts_map = _get_retry_attempts(parent_entry)
+    entry_queue = attempts_map.get(parent_entry.entry_id)
+    if isinstance(entry_queue, dict):
+        entry_queue.pop(registration_candidate, None)
+        if not entry_queue:
+            attempts_map.pop(parent_entry.entry_id, None)
+            _cancel_subentry_retry_handle(parent_entry)
+
+
+def _schedule_subentry_retry(
+    hass: HomeAssistant, parent_entry: MyConfigEntry
+) -> None:
+    """Schedule a retry callback for ``parent_entry`` when absent."""
+
+    handles_map = _get_retry_handles(parent_entry)
+    entry_id = parent_entry.entry_id
+    if entry_id in handles_map:
+        return
+
+    def _retry_callback(_now: Any) -> None:
+        handles_map.pop(entry_id, None)
+        hass.async_create_task(
+            _async_retry_pending_subentries(hass, parent_entry),
+            name=f"{DOMAIN}.retry_config_subentries.{entry_id}",
+        )
+
+    handle = async_call_later(hass, _SUBENTRY_SETUP_RETRY_DELAY, _retry_callback)
+    if inspect.isawaitable(handle):
+        task = _async_create_task(
+            hass,
+            handle,
+            name=f"{DOMAIN}.schedule_config_subentry_retry.{entry_id}",
+        )
+        handles_map[entry_id] = task
+        return
+
+    if handle is not None:
+        handles_map[entry_id] = handle
+
+
+def _queue_subentry_retry(
+    hass: HomeAssistant,
+    parent_entry: MyConfigEntry,
+    registration_candidate: str,
+) -> None:
+    """Record a retry attempt for ``registration_candidate`` and schedule a follow-up."""
+
+    entry_queue = _get_retry_attempts(parent_entry).setdefault(parent_entry.entry_id, {})
+    attempts = entry_queue.get(registration_candidate, 0) + 1
+    entry_queue[registration_candidate] = attempts
+
+    if attempts >= _SUBENTRY_SETUP_MAX_ATTEMPTS:
+        entry_queue.pop(registration_candidate, None)
+        if not entry_queue:
+            _get_retry_attempts(parent_entry).pop(parent_entry.entry_id, None)
+            _cancel_subentry_retry_handle(parent_entry)
+        _LOGGER.warning(
+            "[%s] Giving up on config subentry %s after %s attempts",  # noqa: G004
+            parent_entry.entry_id,
+            registration_candidate,
+            attempts,
+        )
+        return
+
+    _schedule_subentry_retry(hass, parent_entry)
 
 
 def _async_create_task(
@@ -2146,161 +2238,16 @@ def _async_create_task(
     return result.result()
 
 
-def _subentry_retry_queue_bucket(
-    hass: HomeAssistant,
-) -> RetryQueueBucket:
-    """Return or initialize the integration-wide retry queue bucket."""
-
-    bucket = _domain_data(hass)
-    retry_bucket_candidate = bucket.get("_subentry_retry_queue")
-    if _is_retry_queue_bucket(retry_bucket_candidate):
-        return retry_bucket_candidate
-
-    retry_bucket: RetryQueueBucket = {}
-    bucket["_subentry_retry_queue"] = retry_bucket
-    return retry_bucket
-
-
-def _subentry_retry_handles_bucket(
-    hass: HomeAssistant,
-) -> RetryHandleBucket:
-    """Return or initialize the retry handle cache."""
-
-    bucket = _domain_data(hass)
-    handles_bucket_candidate = bucket.get("_subentry_retry_handles")
-    if _is_retry_handle_bucket(handles_bucket_candidate):
-        return handles_bucket_candidate
-
-    handles_bucket: RetryHandleBucket = {}
-    bucket["_subentry_retry_handles"] = handles_bucket
-    return handles_bucket
-
-
-def _pending_subentry_retries(
-    hass: HomeAssistant, parent_entry_id: str
-) -> tuple[str, ...]:
-    """Return pending retry targets for ``parent_entry_id``."""
-
-    retry_bucket = _subentry_retry_queue_bucket(hass)
-    entry_queue = retry_bucket.get(parent_entry_id)
-    if not isinstance(entry_queue, dict):
-        return ()
-    return tuple(entry_queue.keys())
-
-
-def _cancel_subentry_retry_handle(hass: HomeAssistant, entry_id: str) -> None:
-    """Cancel a scheduled retry callback when one is present."""
-
-    handles_bucket = _subentry_retry_handles_bucket(hass)
-    handle = handles_bucket.pop(entry_id, None)
-    if handle is None:
-        return
-    cancel = getattr(handle, "cancel", None)
-    if callable(cancel):
-        cancel()
-
-
-def _clear_subentry_retry_entry(
-    hass: HomeAssistant,
-    parent_entry_id: str,
-    registration_candidate: str,
-) -> None:
-    """Remove ``registration_candidate`` from the retry queue if present."""
-
-    retry_bucket = _subentry_retry_queue_bucket(hass)
-    entry_queue = retry_bucket.get(parent_entry_id)
-    if isinstance(entry_queue, dict):
-        entry_queue.pop(registration_candidate, None)
-        if not entry_queue:
-            retry_bucket.pop(parent_entry_id, None)
-            _cancel_subentry_retry_handle(hass, parent_entry_id)
-
-
-def _queue_subentry_retry(
-    hass: HomeAssistant,
-    parent_entry: MyConfigEntry,
-    registration_candidate: str,
-) -> None:
-    """Record a retry attempt for ``registration_candidate`` and schedule a follow-up."""
-
-    entry_id = parent_entry.entry_id
-    retry_bucket = _subentry_retry_queue_bucket(hass)
-    entry_queue = retry_bucket.setdefault(entry_id, {})
-    attempts = entry_queue.get(registration_candidate, 0) + 1
-    entry_queue[registration_candidate] = attempts
-
-    if attempts >= _SUBENTRY_SETUP_MAX_ATTEMPTS:
-        entry_queue.pop(registration_candidate, None)
-        if not entry_queue:
-            retry_bucket.pop(entry_id, None)
-            _cancel_subentry_retry_handle(hass, entry_id)
-        _LOGGER.warning(
-            "[%s] Giving up on config subentry %s after %s attempts",  # noqa: G004
-            entry_id,
-            registration_candidate,
-            attempts,
-        )
-        return
-
-    handles_bucket = _subentry_retry_handles_bucket(hass)
-    if entry_id in handles_bucket:
-        return
-
-    def _retry_callback(_now: Any) -> None:
-        handles_bucket.pop(entry_id, None)
-        _async_create_task(
-            hass,
-            _async_retry_pending_subentries(hass, entry_id),
-            name=f"{DOMAIN}.retry_config_subentries.{entry_id}",
-        )
-
-    handle: asyncio.TimerHandle | Awaitable[Any] | None
-    handle = async_call_later(hass, _SUBENTRY_SETUP_RETRY_DELAY, _retry_callback)
-    if isinstance(handle, Awaitable):
-        awaitable_handle = handle
-
-        async def _await_retry_handle() -> None:
-            await awaitable_handle
-
-        handles_bucket[entry_id] = _async_create_task(
-            hass,
-            _await_retry_handle(),
-            name=f"{DOMAIN}.subentry_retry_handle.{entry_id}",
-        )
-    else:
-        handles_bucket[entry_id] = handle if handle is not None else object()
-
-
 async def _async_retry_pending_subentries(
-    hass: HomeAssistant, parent_entry_id: str
+    hass: HomeAssistant, parent_entry: MyConfigEntry
 ) -> None:
-    """Retry pending config subentry setups for ``parent_entry_id``."""
+    """Retry pending config subentry setups for ``parent_entry``."""
 
-    pending = _pending_subentry_retries(hass, parent_entry_id)
+    attempts_map = _get_retry_attempts(parent_entry)
+    handles_map = _get_retry_handles(parent_entry)
+    pending = tuple(attempts_map.get(parent_entry.entry_id, {}).keys())
     if not pending:
-        return
-
-    config_entries = getattr(hass, "config_entries", None)
-    if config_entries is None:
-        _LOGGER.debug(
-            "[%s] Skipping subentry retry because config entries manager missing",  # noqa: G004
-            parent_entry_id,
-        )
-        return
-
-    get_entry = getattr(config_entries, "async_get_entry", None)
-    if not callable(get_entry):
-        return
-
-    parent_entry = get_entry(parent_entry_id)
-    if parent_entry is None:
-        _LOGGER.debug(
-            "[%s] Dropping pending config subentry retries because parent entry missing",  # noqa: G004
-            parent_entry_id,
-        )
-        retry_bucket = _subentry_retry_queue_bucket(hass)
-        retry_bucket.pop(parent_entry_id, None)
-        _cancel_subentry_retry_handle(hass, parent_entry_id)
+        handles_map.pop(parent_entry.entry_id, None)
         return
 
     await _async_setup_new_subentries(
@@ -2532,9 +2479,9 @@ async def _async_setup_new_subentries(
 
             try:
                 await hass.config_entries.async_setup(registration_candidate)
-                _clear_subentry_retry_entry(
-                    hass, parent_entry.entry_id, registration_candidate
-                )
+                _clear_subentry_retry_entry(parent_entry, registration_candidate)
+                if fallback_target is not None:
+                    _clear_subentry_retry_entry(parent_entry, fallback_target)
                 _LOGGER.debug(
                     "[%s] Scheduled setup for config subentry '%s'",
                     parent_entry.entry_id,
@@ -2550,10 +2497,6 @@ async def _async_setup_new_subentries(
                     parent_entry.entry_id,
                     registration_candidate,
                 )
-                if enforce_registration:
-                    raise ConfigEntryNotReady(
-                        "Config subentry %s not yet registered" % registration_candidate
-                    ) from None
                 _queue_subentry_retry(hass, parent_entry, registration_candidate)
                 continue
             except Exception as err:  # pragma: no cover - defensive logging
@@ -6757,6 +6700,12 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         if isinstance(runtime_data_raw, RuntimeData):
             runtime_data = runtime_data_raw
 
+    if isinstance(runtime_data, RuntimeData):
+        for handle in runtime_data.subentry_retry_handles.values():
+            handle.cancel()
+        runtime_data.subentry_retry_handles.clear()
+        runtime_data.subentry_retry_attempts.clear()
+
     subentries = _collect_entry_subentries(entry)
 
     unload_parent_platforms = True
@@ -6781,10 +6730,10 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         return True
 
     overall_success = False
-    setattr(entry, "_gfm_parent_unload_in_progress", True)
+    _safe_setattr(entry, "_gfm_parent_unload_in_progress", True)
     try:
         if callable(unload_callable):
-            setattr(entry, "_gfm_parent_unload_call_count", unload_call_count + 1)
+            _safe_setattr(entry, "_gfm_parent_unload_call_count", unload_call_count + 1)
             try:
                 result = unload_callable(entry, tuple(PLATFORMS))
                 if isinstance(result, Awaitable):
@@ -6799,13 +6748,13 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 unload_parent_platforms = False
             else:
                 if unload_parent_platforms:
-                    setattr(entry, "_gfm_parent_platforms_unloaded", True)
+                    _safe_setattr(entry, "_gfm_parent_platforms_unloaded", True)
         else:
             _LOGGER.debug(
                 "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
                 entry.entry_id,
             )
-            setattr(entry, "_gfm_parent_platforms_unloaded", True)
+            _safe_setattr(entry, "_gfm_parent_platforms_unloaded", True)
 
         if not unload_parent_platforms:
             if runtime_data is not None:
@@ -6911,7 +6860,11 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         if runtime_data is not None:
             coordinator = runtime_data.coordinator
             if coordinator is not None:
-                await coordinator.async_shutdown()
+                shutdown = getattr(coordinator, "async_shutdown", None)
+                if callable(shutdown):
+                    result = shutdown()
+                    if inspect.isawaitable(result):
+                        await result
 
             if runtime_data.subentry_manager is not None:
                 try:
@@ -6966,10 +6919,10 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         overall_success = True
         return True
     finally:
-        setattr(entry, "_gfm_parent_unload_in_progress", False)
+        _safe_setattr(entry, "_gfm_parent_unload_in_progress", False)
         if not overall_success:
-            setattr(entry, "_gfm_parent_platforms_unloaded", False)
-            setattr(entry, "_gfm_parent_unload_call_count", unload_call_count)
+            _safe_setattr(entry, "_gfm_parent_platforms_unloaded", False)
+            _safe_setattr(entry, "_gfm_parent_unload_call_count", unload_call_count)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
