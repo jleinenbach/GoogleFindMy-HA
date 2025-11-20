@@ -19,6 +19,7 @@ from custom_components.googlefindmy import (
     _async_create_task,
     _async_setup_new_subentries,
     _async_setup_subentry,
+    _async_unload_parent_entry,
     _subentry_setup_tracker,
 )
 from custom_components.googlefindmy.const import (
@@ -35,6 +36,19 @@ from tests.helpers.homeassistant import (
     FakeEntityRegistry,
     FakeHass,
 )
+
+
+def _attach_runtime(entry: FakeConfigEntry) -> RuntimeData:
+    """Attach a minimal runtime data container to ``entry``."""
+
+    runtime_data = RuntimeData(
+        coordinator=SimpleNamespace(),  # type: ignore[arg-type]
+        token_cache=object(),  # type: ignore[arg-type]
+        subentry_manager=SimpleNamespace(),  # type: ignore[arg-type]
+        fcm_receiver=None,
+    )
+    entry.runtime_data = runtime_data
+    return runtime_data
 
 
 @pytest.mark.asyncio
@@ -195,6 +209,7 @@ async def test_async_setup_subentry_errors_when_unregistered(caplog: pytest.LogC
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
     config_entries = FakeConfigEntriesManager([parent_entry])
     hass = FakeHass(config_entries=config_entries)
+    _attach_runtime(parent_entry)
 
     bucket = hass.data.setdefault(DOMAIN, {})
     entries_bucket = bucket.setdefault("entries", {})
@@ -243,6 +258,8 @@ async def test_async_setup_new_subentries_retries_unknown_and_reschedules(
     config_entries.set_transient_unknown_entry(subentry.entry_id, setup_failures=1)
     hass = FakeHass(config_entries=config_entries)
 
+    runtime_data = _attach_runtime(parent_entry)
+
     scheduled_callbacks: list[Callable[[Any], None]] = []
 
     class _Handle:
@@ -265,16 +282,13 @@ async def test_async_setup_new_subentries_retries_unknown_and_reschedules(
     tasks: list[asyncio.Task[Any]] = []
 
     def _capture_task(
-        _hass: Any, coro: Any, *, name: str | None = None
+        coro: Any, *, name: str | None = None
     ) -> asyncio.Task[Any]:
-        del _hass, name
         task = asyncio.create_task(coro)
         tasks.append(task)
         return task
 
-    monkeypatch.setattr(
-        "custom_components.googlefindmy._async_create_task", _capture_task
-    )
+    hass.async_create_task = _capture_task
 
     await _async_setup_new_subentries(
         hass,
@@ -284,6 +298,10 @@ async def test_async_setup_new_subentries_retries_unknown_and_reschedules(
 
     tracker = _subentry_setup_tracker(hass, parent_entry)
     assert subentry.entry_id not in tracker
+    assert runtime_data.subentry_retry_attempts == {
+        parent_entry.entry_id: {subentry.entry_id: 1}
+    }
+    assert runtime_data.subentry_retry_handles[parent_entry.entry_id]
     assert scheduled_callbacks
     assert config_entries.setup_calls == [subentry.entry_id]
 
@@ -292,6 +310,8 @@ async def test_async_setup_new_subentries_retries_unknown_and_reschedules(
         await asyncio.gather(*tasks)
 
     assert config_entries.setup_calls == [subentry.entry_id, subentry.entry_id]
+    assert runtime_data.subentry_retry_attempts == {}
+    assert runtime_data.subentry_retry_handles == {}
     assert any("not yet registered" in message for message in caplog.messages)
 
 
@@ -317,6 +337,8 @@ async def test_async_setup_new_subentries_stops_after_retry_limit(
     )
     hass = FakeHass(config_entries=config_entries)
 
+    runtime_data = _attach_runtime(parent_entry)
+
     scheduled_callbacks: list[Callable[[Any], None]] = []
 
     def _fake_async_call_later(
@@ -332,16 +354,13 @@ async def test_async_setup_new_subentries_stops_after_retry_limit(
     tasks: list[asyncio.Task[Any]] = []
 
     def _capture_task(
-        _hass: Any, coro: Any, *, name: str | None = None
+        coro: Any, *, name: str | None = None
     ) -> asyncio.Task[Any]:
-        del _hass, name
         task = asyncio.create_task(coro)
         tasks.append(task)
         return task
 
-    monkeypatch.setattr(
-        "custom_components.googlefindmy._async_create_task", _capture_task
-    )
+    hass.async_create_task = _capture_task
 
     await _async_setup_new_subentries(hass, parent_entry, [subentry])
 
@@ -354,6 +373,8 @@ async def test_async_setup_new_subentries_stops_after_retry_limit(
     assert config_entries.setup_calls == [
         subentry.entry_id
     ] * _SUBENTRY_SETUP_MAX_ATTEMPTS
+    assert runtime_data.subentry_retry_attempts == {}
+    assert runtime_data.subentry_retry_handles == {}
     assert any("Giving up on config subentry" in message for message in caplog.messages)
 
 
@@ -379,6 +400,7 @@ async def test_subentry_manager_retries_unknown_entry_without_enforcement() -> N
 
     config_entries = _RetryingConfigEntriesManager()
     hass = FakeHass(config_entries=config_entries)
+    _attach_runtime(parent_entry)
     manager = ConfigEntrySubEntryManager(hass, parent_entry)
 
     definition = ConfigEntrySubentryDefinition(
@@ -415,6 +437,7 @@ async def test_async_setup_new_subentries_enforces_registered_subentries(
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
     config_entries = FakeConfigEntriesManager([parent_entry])
     hass = FakeHass(config_entries=config_entries)
+    _attach_runtime(parent_entry)
 
     orphan_subentry = SimpleNamespace(
         entry_id="child-entry",
@@ -510,6 +533,7 @@ async def test_async_setup_new_subentries_requires_fallback_parent_membership(
 
     config_entries = FakeConfigEntriesManager([parent_entry])
     hass = FakeHass(config_entries=config_entries)
+    _attach_runtime(parent_entry)
 
     mixed_identifier_subentry = SimpleNamespace(
         entry_id="child-entry",
@@ -545,6 +569,7 @@ async def test_async_setup_new_subentries_requires_registration_when_not_enforce
 
     config_entries = FakeConfigEntriesManager([parent_entry])
     hass = FakeHass(config_entries=config_entries)
+    _attach_runtime(parent_entry)
 
     monkeypatch.setattr(
         "custom_components.googlefindmy._registered_subentry_ids",
@@ -575,6 +600,7 @@ async def test_async_setup_new_subentries_requires_registration_when_enforced() 
 
     config_entries = FakeConfigEntriesManager([parent_entry])
     hass = FakeHass(config_entries=config_entries)
+    _attach_runtime(parent_entry)
 
     await _async_setup_new_subentries(
         hass,
@@ -603,6 +629,7 @@ async def test_async_setup_new_subentries_links_entities_and_devices(
     parent_entry.subentries[registered_subentry.subentry_id] = registered_subentry
 
     config_entries = FakeConfigEntriesManager([parent_entry])
+    _attach_runtime(parent_entry)
     hass = SimpleNamespace(
         config_entries=config_entries,
         data={},
@@ -678,3 +705,34 @@ async def test_async_setup_new_subentries_links_entities_and_devices(
     assert device_entry is not None
     assert device_entry.config_subentry_id == registered_subentry.subentry_id
     assert any("Scheduled setup for config subentry" in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_async_unload_entry_cancels_retry_handles() -> None:
+    """Scheduled retry handles should be cancelled during parent unload."""
+
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    runtime_data = _attach_runtime(parent_entry)
+    runtime_data.subentry_retry_attempts[parent_entry.entry_id] = {"child-entry": 2}
+
+    class _Handle:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    handle = _Handle()
+    runtime_data.subentry_retry_handles[parent_entry.entry_id] = handle
+
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    config_entries.async_unload_platforms = lambda entry, platforms: True  # type: ignore[attr-defined]
+    config_entries.async_forward_entry_unload = (  # type: ignore[attr-defined]
+        lambda entry, platform, **kwargs: True
+    )
+    hass = FakeHass(config_entries=config_entries)
+
+    assert await _async_unload_parent_entry(hass, parent_entry) is True
+    assert handle.cancelled is True
+    assert runtime_data.subentry_retry_handles == {}
+    assert runtime_data.subentry_retry_attempts == {}
