@@ -6389,6 +6389,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
         raise ConfigEntryNotReady(f"Initial refresh failed: {err}") from err
 
+    metadata = getattr(coordinator, "_subentry_metadata", None)
+    pending_visibility_updates: list[
+        Awaitable[ConfigSubentry | bool | None] | ConfigSubentry | bool | None
+    ] = []
+    key_field = getattr(runtime_subentry_manager, "_key_field", "group_key")
+
+    def _normalize_visible_ids(raw: object) -> tuple[str, ...]:
+        if isinstance(raw, (str, bytes)) or not isinstance(raw, Iterable):
+            return tuple()
+
+        deduped_ids: dict[str, None] = {}
+        for device_id in raw:
+            if isinstance(device_id, str) and device_id:
+                deduped_ids.setdefault(device_id, None)
+
+        return tuple(deduped_ids)
+
+    if isinstance(metadata, Mapping):
+        for group_key, subentry_meta in metadata.items():
+            managed_subentry = runtime_subentry_manager.managed_subentries.get(
+                group_key
+            )
+            if managed_subentry is None:
+                continue
+
+            desired_visible_ids = _normalize_visible_ids(
+                getattr(subentry_meta, "visible_device_ids", None)
+            )
+            existing_visible_ids = _normalize_visible_ids(
+                managed_subentry.data.get("visible_device_ids")
+            )
+
+            if desired_visible_ids == existing_visible_ids:
+                continue
+
+            payload = dict(managed_subentry.data)
+            payload.setdefault(key_field, group_key)
+            payload["visible_device_ids"] = list(desired_visible_ids)
+
+            update_result = hass.config_entries.async_update_subentry(
+                entry,
+                managed_subentry,
+                data=payload,
+            )
+            pending_visibility_updates.append(update_result)
+
+    for update_result in pending_visibility_updates:
+        try:
+            await runtime_subentry_manager._await_subentry_result(update_result)
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug(
+                "[%s] Subentry visibility write failed during setup: %s",
+                entry.entry_id,
+                err,
+            )
+
+    if pending_visibility_updates:
+        runtime_subentry_manager._refresh_from_entry()
+        coordinator._refresh_subentry_index()  # noqa: SLF001 - align platform setup
+
     await _async_normalize_device_names(hass)
     await coordinator.async_wait_subentry_visibility_updates()
 

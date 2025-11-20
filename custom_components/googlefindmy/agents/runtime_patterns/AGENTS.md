@@ -27,6 +27,7 @@ Runtime contracts, platform forwarding rules, and HA lifecycle helper usage for 
     * Mismatch deferral: `Sensor setup skipped for unrelated subentry '<forwarded>' (expected one of: <known ids>)`.
     * Empty registration after listener: `Device tracker setup: subentry_key=<key>, config_subentry_id=<id>` (listener attached) followed by an empty `schedule_add_entities` call before returning.
 * **Thread-safe retry scheduling:** When retry callbacks are dispatched from worker threads or callbacks that may run off the event loop, enqueue the coroutine using `hass.add_job` if available (or `loop.call_soon_threadsafe(...)` as a fallback) instead of `hass.async_create_task`. This preserves Home Assistant’s thread-safety guarantees and keeps retry handles compatible with the shared scheduler helpers.
+* **Post-refresh visibility sync:** After `coordinator.async_config_entry_first_refresh()` completes, reconcile each managed subentry’s stored `visible_device_ids` with the coordinator metadata and persist corrections via `async_update_subentry` before refreshing the coordinator’s subentry index. This keeps platform setup aligned with the latest visibility map.
 
 ### Regression note
 
