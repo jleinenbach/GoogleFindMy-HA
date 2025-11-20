@@ -6,7 +6,7 @@ Type-hinting, import-guard, and strict mypy reminders that apply to every module
 
 ## Typing reminders
 
-* Prefer importing container ABCs (for example, `Iterable`, `Mapping`, `Sequence`) from `collections.abc` rather than `typing` so runtime imports stay lightweight and ruff avoids duplicate definition warnings.
+* Prefer importing container ABCs (for example, `Iterable`, `Mapping`, `Sequence`) from `collections.abc` rather than `typing` so runtime imports stay lightweight and ruff avoids duplicate definition warnings. Import coroutine annotations (for example, `Coroutine`) from `collections.abc` as well to prevent redundant definitions that trigger duplicate-import lint errors.
 * When adding iterable-type annotations inside `config_flow.py`, reuse the existing `CollIterable` alias to keep type hints consistent with the options-flow helpers and avoid reintroducing stray `typing.Iterable` imports.
 * When annotating Firebase Cloud Messaging helpers, reference the `FcmReceiverHAType` alias exported from `ha_typing`. Guard values retrieved from `hass.data` as `object | None` and validate them with `_resolve_fcm_receiver_class()` before returning them so both ruff (undefined name) **and** mypy strict (no `Any` leakage) keep passing while the HTTP stack stays lazily imported.
 * When listening for Home Assistant state changes (for example, in `google_home_filter.py`), reuse the module's lazy `_async_track_state_change_event` proxy instead of importing `homeassistant.helpers.event.async_track_state_change_event` at module import time. The proxy keeps pytest stubs effective and avoids forcing Home Assistant's HTTP stack (and its deprecation warnings) to load during integration startup.
