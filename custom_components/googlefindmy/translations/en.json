@@ -31,7 +31,7 @@
       },
       "device_selection": {
         "title": "Polling Settings",
-        "description": "Newly discovered devices appear disabled and can be enabled in device settings. Configure the general polling parameters:\n• Location poll interval: How often to start a new polling cycle (60–3600 seconds)\n• Device poll delay: Delay between individual device polls within a cycle (1–60 seconds)",
+        "description": "Newly discovered devices appear disabled and can be enabled in device settings. Configure the general polling parameters:\n• Location poll interval: How often to start a new polling cycle (60–3600 seconds)\n• Device poll delay: Delay between individual device polls within a cycle (1–60 seconds)\n\nGoogle Home filter: Enabled by default with keywords nest/google/home/mini/hub/display/chromecast/speaker. Matches substitute Home zone coordinates for Google/Nest/Chromecast detections and debounce repeated \"home\" updates for 15 minutes. Adjust the keywords here if your devices use different names.",
         "data": {
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",

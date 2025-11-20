@@ -185,6 +185,16 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `delete_caches_on_remove` | true | toggle | Removes stored authentication caches when the integration is deleted. |
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
 
+### Google Home filter behavior
+
+The Google Home filter helps prevent noisy location updates from speakers and displays that frequently report "Home":
+
+* **Defaults**: The filter starts enabled with keywords `nest`, `google`, `home`, `mini`, `hub`, `display`, `chromecast`, and `speaker`.
+* **Detection**: Any detection whose semantic name contains one of these keywords is treated as a Google/Nest/Chromecast device.
+* **Substitution**: When a Google Home detection is away from Home, the integration substitutes the `zone.home` latitude/longitude (and radius when available) so Home Assistant resolves the tracker to `home` instead of the semantic label.
+* **Debounce window**: Consecutive "home" or Google Home detections for the same device within 15 minutes are suppressed to reduce spam.
+* **Tuning**: Adjust `google_home_filter_enabled` and `google_home_filter_keywords` from the integration's options flow to refine matching or disable substitution. The keywords field accepts comma-separated values or a list; changes update both the detection logic and the config flow copy.
+
 ## Subentries and feature groups
 
 Home Assistant's config-entry **subentries** let the integration organize devices and helper entities into feature groups. The coordinator deterministically provisions two subentries—`SERVICE_SUBENTRY_KEY` and `TRACKER_SUBENTRY_KEY`—and recreates them after reloads or restarts so entity grouping stays stable across updates. Both subentries persist alongside the config entry, storing options, `visible_device_ids`, and diagnostics based on their constant identifiers.

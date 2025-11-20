@@ -31,7 +31,7 @@
       },
       "device_selection": {
         "title": "Abfrageeinstellungen",
-        "description": "Neu erkannte Geräte erscheinen deaktiviert und können in den Geräteeinstellungen aktiviert werden. Konfiguriere hier die allgemeinen Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden)",
+        "description": "Neu erkannte Geräte erscheinen deaktiviert und können in den Geräteeinstellungen aktiviert werden. Konfiguriere hier die allgemeinen Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden)\n\nGoogle-Home-Filter: Standardmäßig aktiviert mit den Schlüsselwörtern nest/google/home/mini/hub/display/chromecast/speaker. Für Google-/Nest-/Chromecast-Erkennungen werden die Koordinaten der Home-Zone eingesetzt und wiederholte \"home\"-Meldungen 15 Minuten lang entprellt. Passe die Schlüsselwörter hier an, wenn deine Geräte andere Namen verwenden.",
         "data": {
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
           "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",

@@ -31,7 +31,7 @@
       },
       "device_selection": {
         "title": "Paramètres d’interrogation",
-        "description": "Les nouveaux appareils détectés apparaissent désactivés et peuvent être activés dans les paramètres de l’appareil. Configurez ici les paramètres généraux d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)",
+        "description": "Les nouveaux appareils détectés apparaissent désactivés et peuvent être activés dans les paramètres de l’appareil. Configurez ici les paramètres généraux d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)\n\nFiltre Google Home : activé par défaut avec les mots-clés nest/google/home/mini/hub/display/chromecast/speaker. Remplace les coordonnées de la zone Home pour les détections Google/Nest/Chromecast et ignore les rapports \"home\" répétés pendant 15 minutes. Ajustez ici les mots-clés si vos appareils utilisent d’autres noms.",
         "data": {
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d’appareil (s)",
