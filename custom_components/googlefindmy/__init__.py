@@ -7109,13 +7109,20 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                 entry.entry_id,
                 display_name,
             )
+            issue_severity = getattr(ir, "IssueSeverity", None)
+            if issue_severity is not None:
+                severity_value = getattr(issue_severity, "INFO", None)
+                if severity_value is None:
+                    severity_value = getattr(issue_severity, "WARNING", "warning")
+            else:
+                severity_value = getattr(ir, "WARNING", "warning")
             try:
                 ir.async_create_issue(
                     hass,
                     DOMAIN,
                     issue_id,
                     is_fixable=False,
-                    severity=ir.IssueSeverity.INFO,
+                    severity=severity_value,
                     translation_key="cache_purged",
                     translation_placeholders={"entry_title": display_name},
                 )
