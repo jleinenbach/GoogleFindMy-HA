@@ -239,7 +239,8 @@ The integration provides a couple of Home Assistant Actions for use with automat
 | googlefindmy.stop_sound | Device ID (required) | Stop the active sound on the selected device. |
 | googlefindmy.locate_external | Device ID (required), Device Name (optional) | Trigger the locate flow via the external helper while optionally labeling logs with a human-readable device name. |
 | googlefindmy.refresh_device_urls | - | Refreshes all device Map View URLs.  Useful if you are having problems with accessing Map View pages. |
-| googlefindmy.rebuild_registry | Mode (optional), Device IDs (optional) | Maintenance: defaults to rebuilding all entities/devices; choose **Migrate** to re-run the soft data→options migration or target specific devices. |
+| googlefindmy.rebuild_device_registry | - | Maintenance: rebuilds device registry links for Google Find My hubs and removes tracker devices incorrectly tied to the parent entry. |
+| googlefindmy.rebuild_registry | Config Entry ID(s) (optional) | Reload integration config entries; without a payload the first configured entry reloads, or target specific IDs by passing one or many `entry_id` values. |
 
 ## Supported devices and functions
 
