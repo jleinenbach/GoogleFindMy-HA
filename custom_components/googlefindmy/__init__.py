@@ -1047,6 +1047,7 @@ class ConfigEntrySubEntryManager:
         "_key_field",
         "_managed",
         "_managed_by_subentry_id",
+        "_visibility_update_task",
     )
 
     def __init__(
@@ -1064,6 +1065,7 @@ class ConfigEntrySubEntryManager:
         self._managed: dict[str, ConfigSubentry] = {}
         self._managed_by_subentry_id: dict[str, str] = {}
         self._cleanup: dict[str, CleanupCallback | None] = {}
+        self._visibility_update_task: asyncio.Task[None] | None = None
         self._refresh_from_entry()
 
     @staticmethod
@@ -1633,9 +1635,13 @@ class ConfigEntrySubEntryManager:
                     )
                     self._index_managed_subentry(key, refreshed_subentry)
 
-            self._hass.async_create_task(
+            task = self._hass.async_create_task(
                 _await_visibility_update(),
                 name=f"{DOMAIN}.subentry_visibility_refresh",
+            )
+            self._visibility_update_task = task
+            task.add_done_callback(
+                lambda done_task: self._clear_visibility_task(done_task)
             )
             return
 
@@ -1645,6 +1651,29 @@ class ConfigEntrySubEntryManager:
         )
         # Ensure local view reflects Home Assistant's stored subentry.
         self._index_managed_subentry(key, refreshed)
+        self._visibility_update_task = None
+
+    async def async_wait_visible_device_updates(self) -> None:
+        """Wait for the latest visibility update task to finish."""
+
+        task = self._visibility_update_task
+        if task is None:
+            return
+
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug(
+                "Visibility update task for %s raised: %s", self._entry.entry_id, err
+            )
+
+    def _clear_visibility_task(self, task: asyncio.Task[object]) -> None:
+        """Clear the cached visibility task when it matches the active one."""
+
+        if self._visibility_update_task is task:
+            self._visibility_update_task = None
 
     async def async_sync(
         self, definitions: Iterable[ConfigEntrySubentryDefinition]
@@ -6361,6 +6390,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         raise ConfigEntryNotReady(f"Initial refresh failed: {err}") from err
 
     await _async_normalize_device_names(hass)
+    await coordinator.async_wait_subentry_visibility_updates()
 
     # --- END CORRECTED STARTUP ORDER ---
 

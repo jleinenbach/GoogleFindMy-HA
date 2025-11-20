@@ -829,6 +829,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         return self._default_subentry_key_value or "core_tracking"
 
+    async def async_wait_subentry_visibility_updates(self) -> None:
+        """Await pending visibility updates scheduled by the subentry manager."""
+
+        manager = self._subentry_manager
+        wait_visible = getattr(manager, "async_wait_visible_device_updates", None)
+        if not callable(wait_visible):
+            return
+
+        try:
+            await wait_visible()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug(
+                "[%s] Visibility wait helper skipped due to: %s",
+                self._entry_id() or "unknown",
+                err,
+            )
+
     def _build_core_subentry_definitions(
         self,
     ) -> list[ConfigEntrySubentryDefinition]:
