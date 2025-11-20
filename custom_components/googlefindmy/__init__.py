@@ -2265,11 +2265,32 @@ def _subentry_setup_tracker(
 ) -> set[str]:
     """Return (and cache) the per-entry subentry setup tracker."""
 
-    runtime = _runtime_data(parent_entry)
-    tracker = getattr(runtime, "subentry_setup_history", None)
+    runtime_data = getattr(parent_entry, "runtime_data", None)
+    if isinstance(runtime_data, RuntimeData):
+        tracker = getattr(runtime_data, "subentry_setup_history", None)
+        if not isinstance(tracker, set):
+            tracker = set()
+            runtime_data.subentry_setup_history = tracker
+
+        # Merge any fallback history captured before runtime data was attached
+        # (for example, during isolated manager tests) so retry bookkeeping
+        # retains the full setup story once the container exists.
+        domain_bucket = _domain_data(hass)
+        domain_history = domain_bucket.get("_subentry_setup_history")
+        if isinstance(domain_history, dict):
+            cached = domain_history.pop(parent_entry.entry_id, None)
+            if isinstance(cached, set):
+                tracker.update(cached)
+
+        return tracker
+
+    domain_bucket = _domain_data(hass)
+    history = domain_bucket.setdefault("_subentry_setup_history", {})
+    tracker = history.get(parent_entry.entry_id)
     if not isinstance(tracker, set):
         tracker = set()
-        runtime.subentry_setup_history = tracker
+        history[parent_entry.entry_id] = tracker
+
     return tracker
 
 
