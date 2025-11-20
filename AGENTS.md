@@ -490,6 +490,7 @@ Add to the PR description:
 <a id="rule-9doc-canonical"></a>
 * **Rule §9.DOC (canonical):** Keep documentation and docstrings accurate for existing features by correcting errors and augmenting missing details without shortening or deleting content. When functionality is intentionally removed or deprecated, remove or reduce the corresponding documentation to reflect that change while preserving historical clarity.
   * **Decision algorithm:** IF functionality is intentionally removed/deprecated → update or remove the related documentation to match the removal (include deprecation context as needed); ELSE → correct/augment the documentation without shortening it.
+* Documentation-only updates must still record any prerequisite bootstraps performed during the edit (for example, `python -m pip install --upgrade homeassistant`) so reviewers can trace required environment steps alongside the content changes.
 
 ---
 
