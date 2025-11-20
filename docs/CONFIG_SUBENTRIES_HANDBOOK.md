@@ -10,6 +10,51 @@ This handbook captures the Home Assistant 2025.7+ contract for configuration sub
 - **Device/registry repairs:** Follow Section VIII.D for orphan detection and rebuild workflows; always include the child `entry_id` when updating tracker/service devices.
 - **Style note for quick references:** When adding concise checklists or reminders inside a subsection, anchor them at the `####` level (for example, `#### Race-condition checklist`) beneath the owning `###` heading so the handbook's numbering remains stable and navigation panes keep related guidance grouped together.
 
+## Section 0 supplement: Resilient config subentries (developer digest)
+
+Home Assistant's 2025.11.2 contracts reinforce strict separation between persistent configuration and runtime state. Use this digest as a drop-in reference for keeping parent and child entries resilient without violating Core's retry orchestration.
+
+### A. Configuration vs. runtime state boundaries
+
+- **Persistent configuration lives in `entry.data` and `entry.options`.** Update either field only through `hass.config_entries.async_update_entry`, and never insert runtime objects (clients, coordinators, tasks, retry handles) into them.
+- **Runtime state belongs in `entry.runtime_data` (per entry) or `hass.data[DOMAIN]` (shared across parents).** Store API clients, coordinators, locks, and retry bookkeeping there so restarts rebuild transient state cleanly.
+
+### B. Parent entry as orchestrator
+
+- The parent `async_setup_entry` owns the primary connection and the shared runtime container. Subentries and platforms reuse that container instead of creating their own top-level clients.
+- Reserve `ConfigEntryNotReady` for the parent entry's critical dependencies or for the initial coordinator refresh called from `_async_setup_parent_entry`. After Core loads the parent, subentries should rely on bounded local retries rather than raising new `ConfigEntryNotReady` loops.
+
+### C. Subentry setup and runtime access
+
+- Create or discover subentries inside the parent setup helper and invoke `hass.config_entries.async_setup(subentry_id)` once registration is complete.
+- Inside `_async_setup_subentry`, read the parent runtime data from `entry.runtime_data` (populated from `hass.data[DOMAIN]["entries"][parent_entry_id]`) and keep the subentry bootstrap symmetrical with the parent's initial flow.
+
+### D. Retry strategy
+
+- **Let Home Assistant handle critical retries.** If the parent cannot authenticate, cannot open the primary channel, or the first coordinator refresh fails, raise `ConfigEntryNotReady` so Core controls backoff and logging.
+- **Keep local retries bounded for non-critical subentry races.** When a fresh subentry is temporarily missing from the registry (`UnknownEntry`), track attempts and timer handles in `entry.runtime_data` (for example, `subentry_retry_attempts` and `subentry_retry_handles`). Use `async_call_later` to reschedule `_async_setup_new_subentries` and stop after a fixed ceiling with a single warning.
+- **Use `DataUpdateCoordinator` for runtime resilience.** Call `async_config_entry_first_refresh` during setup (raising `ConfigEntryNotReady` on failure), then rely on the coordinator's built-in backoff for transient runtime errors.
+
+### E. Logging expectations
+
+- Log one clear warning or error when parent setup fails and escalates to `ConfigEntryNotReady`.
+- For subentry retries, log the first miss at `WARNING`, subsequent retry scheduling at `DEBUG`, and a single warning when the bounded attempts are exhausted.
+- Let coordinators handle their own intermittent errors without duplicating log spam.
+
+### F. Unload hygiene
+
+- `async_unload_entry` must cancel retry timer handles stored in `entry.runtime_data`, clear attempt maps, stop clients, and unload platforms. Consistent cleanup prevents lingering tasks after removal or reload.
+
+### G. Developer checklist
+
+- [ ] No runtime objects stored in `entry.data` or `entry.options`.
+- [ ] Runtime clients, coordinators, locks, and retry trackers stored in `entry.runtime_data` (and shared state only inside `hass.data[DOMAIN]`).
+- [ ] Parent setup validates critical dependencies and uses `ConfigEntryNotReady` only there (or during the first coordinator refresh it triggers).
+- [ ] Subentries reuse the parent runtime data instead of building duplicate clients.
+- [ ] Non-critical child setup races use bounded `async_call_later` retries; coordinators manage runtime fetch retries themselves.
+- [ ] `async_unload_entry` cancels scheduled retry handles and tears down runtime clients.
+- [ ] Logging avoids retry spam while still surfacing the final give-up message.
+
 ## Section 0: Architectural evolution and lifecycle guardrails (2024–2025)
 
 ### A. Why subentries replaced ad-hoc options packs
