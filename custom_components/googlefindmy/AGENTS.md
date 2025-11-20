@@ -20,3 +20,9 @@ child directory overrides it.
 
 When adding new guidance, prefer creating another `agents/<topic>/AGENTS.md` file instead of expanding this index. This keeps
 updates like the subentry unload reminder easy to place without scrolling through unrelated instructions.
+
+### Import deferral reminder
+
+Heavyweight runtime dependencies (for example, browser drivers such as `undetected_chromedriver`) must be imported lazily inside
+the helpers that use them. Avoid module-level imports that execute expensive discovery logic during Home Assistant startup—wrap
+the import in a small getter and call it only from the executor-backed runtime path.
