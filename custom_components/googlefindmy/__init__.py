@@ -2142,6 +2142,22 @@ def _schedule_subentry_retry(
 ) -> None:
     """Schedule a retry callback for ``parent_entry`` when absent."""
 
+    loop = getattr(hass, "loop", None)
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if loop is not None and running_loop is not loop:
+        add_job = getattr(hass, "add_job", None)
+
+        if callable(add_job):
+            add_job(_schedule_subentry_retry, hass, parent_entry)
+            return
+
+        loop.call_soon_threadsafe(_schedule_subentry_retry, hass, parent_entry)
+        return
+
     handles_map = _get_retry_handles(parent_entry)
     entry_id = parent_entry.entry_id
     if entry_id in handles_map:
@@ -2149,7 +2165,8 @@ def _schedule_subentry_retry(
 
     def _retry_callback(_now: Any) -> None:
         handles_map.pop(entry_id, None)
-        hass.async_create_task(
+        _async_create_task(
+            hass,
             _async_retry_pending_subentries(hass, parent_entry),
             name=f"{DOMAIN}.retry_config_subentries.{entry_id}",
         )
@@ -2200,7 +2217,9 @@ def _async_create_task(
 ) -> asyncio.Task[Any]:
     """Schedule ``coro`` on Home Assistant's loop in a thread-safe manner."""
 
-    create_task = getattr(hass, "async_create_task", None)
+    add_job = getattr(hass, "add_job", None)
+    create_task = getattr(hass, "create_task", None)
+    async_create_task = getattr(hass, "async_create_task", None)
     loop = getattr(hass, "loop", None)
 
     try:
@@ -2215,10 +2234,21 @@ def _async_create_task(
         loop = running_loop
 
     def _schedule() -> asyncio.Task[Any]:
-        if callable(create_task):
-            return cast(asyncio.Task[Any], create_task(coro, name=name))
+        task: asyncio.Task[Any]
 
-        task: asyncio.Task[Any] = loop.create_task(coro)
+        if callable(add_job):
+            scheduled = add_job(coro)
+            if isinstance(scheduled, asyncio.Task):
+                task = scheduled
+            else:
+                task = loop.create_task(coro)
+        elif callable(create_task):
+            task = cast(asyncio.Task[Any], create_task(coro, name=name))
+        elif callable(async_create_task):
+            task = cast(asyncio.Task[Any], async_create_task(coro, name=name))
+        else:
+            task = loop.create_task(coro)
+
         with suppress(RuntimeError):
             if name and hasattr(task, "set_name"):
                 task.set_name(name)
@@ -5143,7 +5173,8 @@ def _schedule_duplicate_unload(hass: HomeAssistant, entry: ConfigEntry) -> None:
         entry.state,
     )
 
-    hass.async_create_task(
+    _async_create_task(
+        hass,
         hass.config_entries.async_unload(entry.entry_id),
         name=f"{DOMAIN}.unload_duplicate.{entry.entry_id}",
     )
