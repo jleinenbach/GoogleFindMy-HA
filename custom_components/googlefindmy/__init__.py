@@ -2021,6 +2021,7 @@ class RuntimeData:
     fcm_receiver: FcmReceiverHAType | None = None
     google_home_filter: GoogleHomeFilterProtocol | None = None
     entity_recovery_manager: EntityRecoveryManager | None = None
+    subentry_setup_history: set[str] = field(default_factory=set)
     legacy_forwarded_platforms: set[str] | None = None
     legacy_forward_notice: bool = False
     subentry_retry_attempts: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -2264,12 +2265,32 @@ def _subentry_setup_tracker(
 ) -> set[str]:
     """Return (and cache) the per-entry subentry setup tracker."""
 
-    bucket = _domain_data(hass)
-    tracker_bucket = bucket.setdefault("_subentry_setup_history", {})
-    tracker = tracker_bucket.get(parent_entry.entry_id)
+    runtime_data = getattr(parent_entry, "runtime_data", None)
+    if isinstance(runtime_data, RuntimeData):
+        tracker = getattr(runtime_data, "subentry_setup_history", None)
+        if not isinstance(tracker, set):
+            tracker = set()
+            runtime_data.subentry_setup_history = tracker
+
+        # Merge any fallback history captured before runtime data was attached
+        # (for example, during isolated manager tests) so retry bookkeeping
+        # retains the full setup story once the container exists.
+        domain_bucket = _domain_data(hass)
+        domain_history = domain_bucket.get("_subentry_setup_history")
+        if isinstance(domain_history, dict):
+            cached = domain_history.pop(parent_entry.entry_id, None)
+            if isinstance(cached, set):
+                tracker.update(cached)
+
+        return tracker
+
+    domain_bucket = _domain_data(hass)
+    history = domain_bucket.setdefault("_subentry_setup_history", {})
+    tracker = history.get(parent_entry.entry_id)
     if not isinstance(tracker, set):
         tracker = set()
-        tracker_bucket[parent_entry.entry_id] = tracker
+        history[parent_entry.entry_id] = tracker
+
     return tracker
 
 
@@ -6220,20 +6241,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
         is_reload = entry_state in reload_values
 
-    # Use the runtime-attached manager here
-    _subentry_setup_tracker(hass, entry).clear()
-
-    runtime_subentry_manager = ConfigEntrySubEntryManager(hass, entry)
-    coordinator.attach_subentry_manager(
-        runtime_subentry_manager, is_reload=is_reload
-    )
-
-    # STEP 2: Create and Synchronize Sub-Entries (RUNNING NOW)
-    # This is necessary so the coordinator knows the Sub-Entry-IDs in Step 3.
-    tracker_features = sorted(TRACKER_FEATURE_PLATFORMS)
-    service_features = sorted(SERVICE_FEATURE_PLATFORMS)
-    fcm_push_enabled = fcm is not None
-
     filter_cls = _resolve_google_home_filter_class()
     google_home_filter_instance: GoogleHomeFilterProtocol | None = None
     if filter_cls is not None:
@@ -6246,6 +6253,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             _LOGGER.debug("GoogleHomeFilter attach skipped due to: %s", err)
     else:
         _LOGGER.debug("GoogleHomeFilter not available; continuing without it")
+
+    runtime_subentry_manager = ConfigEntrySubEntryManager(hass, entry)
+    entity_recovery_manager = EntityRecoveryManager(hass, entry, coordinator)
+    runtime_data = RuntimeData(
+        coordinator=coordinator,
+        token_cache=cache,
+        subentry_manager=runtime_subentry_manager,
+        fcm_receiver=fcm,
+        entity_recovery_manager=entity_recovery_manager,
+        google_home_filter=google_home_filter_instance,
+    )
+    entry.runtime_data = runtime_data
+    entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
+    entries_bucket[entry.entry_id] = runtime_data
+    # Attach runtime data before subentry sync/setup so _async_setup_new_subentries
+    # retry bookkeeping can access the per-entry container during parent setup.
+    _subentry_setup_tracker(hass, entry).clear()
+    runtime_data.subentry_retry_attempts.clear()
+    runtime_data.subentry_retry_handles.clear()
+
+    coordinator.attach_subentry_manager(
+        runtime_subentry_manager, is_reload=is_reload
+    )
+
+    # STEP 2: Create and Synchronize Sub-Entries (RUNNING NOW)
+    # This is necessary so the coordinator knows the Sub-Entry-IDs in Step 3.
+    tracker_features = sorted(TRACKER_FEATURE_PLATFORMS)
+    service_features = sorted(SERVICE_FEATURE_PLATFORMS)
+    fcm_push_enabled = fcm is not None
 
     has_google_home_filter = google_home_filter_instance is not None
     entry_title = entry.title or entry.data.get(CONF_GOOGLE_EMAIL, "Google Find My")
@@ -6322,21 +6358,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _LOGGER.debug(
             "FCM receiver has no _start_listening(); relying on on-demand start via per-request registration."
         )
-
-    # Expose runtime object via the typed container (preferred access pattern)
-    entity_recovery_manager = EntityRecoveryManager(hass, entry, coordinator)
-
-    runtime_data = RuntimeData(
-        coordinator=coordinator,
-        token_cache=cache,
-        subentry_manager=runtime_subentry_manager,
-        fcm_receiver=fcm,
-        entity_recovery_manager=entity_recovery_manager,
-        google_home_filter=google_home_filter_instance,
-    )
-    entry.runtime_data = runtime_data
-    entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
-    entries_bucket[entry.entry_id] = runtime_data
 
     entity_registry = er.async_get(hass)
     registry_entries_iterable: Iterable[Any] = _iter_config_entry_entities(
