@@ -359,6 +359,10 @@ async def async_setup_entry(
         unsub = coordinator.async_add_listener(_add_new_sensors_on_update)
         entry.async_on_unload(unsub)
 
+        # Guarantee Home Assistant receives an AddEntitiesCallback invocation
+        # even when no tracker metrics are available during cold boots.
+        _schedule_tracker_entities((), False)
+
     runtime_data = getattr(entry, "runtime_data", None)
     recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
 

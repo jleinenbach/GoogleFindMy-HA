@@ -304,6 +304,11 @@ async def async_setup_entry(
         # listener does not have to wait for the next coordinator refresh.
         _scan_available_trackers_from_coordinator()
 
+        # Ensure Home Assistant observes at least one AddEntitiesCallback call
+        # per platform setup so unload can complete even when no trackers are
+        # available on cold start.
+        _schedule_tracker_entities((), False)
+
         runtime_data = getattr(config_entry, "runtime_data", None)
         recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
 
