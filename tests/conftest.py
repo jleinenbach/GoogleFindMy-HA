@@ -1673,6 +1673,14 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                     return list(self._snapshot_callback(key, feature))
                 return list(self.data)
 
+            async def async_wait_subentry_visibility_updates(self) -> None:
+                """Mirror the coordinator visibility wait helper."""
+
+                manager = getattr(self, "subentry_manager", None)
+                wait_visible = getattr(manager, "async_wait_visible_device_updates", None)
+                if callable(wait_visible):
+                    await wait_visible()
+
             def is_device_visible_in_subentry(
                 self, subentry_key: str, device_id: str
             ) -> bool:

@@ -72,6 +72,12 @@ code relies on those helpers, add explicit guards or local fallbacks so
 entities remain importable under the stub; otherwise, `AttributeError`
 failures will surface before the real coordinator features are present.
 
+Keep the coordinator stubs aligned with runtime helpers introduced in
+`custom_components.googlefindmy.coordinator` (for example, visibility-wait
+helpers) so setup paths under test do not regress with missing attributes.
+Update `tests/conftest.py` alongside new coordinator helpers to maintain
+parity with production behavior.
+
 When adding or adjusting tests, normalize imports with
 `python -m ruff check --select I --fix` so `I001` findings resolve without
 manual resorting.
