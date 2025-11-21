@@ -781,3 +781,8 @@ class FakeHass:
     loop_thread_id: int | None = None
     async_create_task: Callable[[Awaitable[Any], str | None], asyncio.Task[Any]] | None = None
 
+    def verify_event_loop_thread(self, _action: str | None = None) -> None:
+        """Mirror Home Assistant's dispatcher guard with a no-op for tests."""
+
+        return
+
