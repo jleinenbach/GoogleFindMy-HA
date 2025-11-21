@@ -5,7 +5,7 @@ This handbook captures the validated Home Assistant 2025.11+ contract for config
 ## Quick summary
 
   - **Object Model:** A `ConfigSubentry` is a **dataclass**, not a full `ConfigEntry`. It does **not** have a global `entry_id`, a `state`, or a `runtime_data` attribute. It exists strictly as data within `entry.subentries`.
-  - **Lifecycle = Parent Reload:** You cannot "setup" or "unload" a subentry individually via `hass.config_entries`. Instead, adding, updating, or removing a subentry triggers a **Parent Entry Reload**. The parent's `async_setup_entry` is responsible for iterating over `entry.subentries` and initializing them.
+- **Lifecycle = Parent-Managed Forwarding:** You cannot "setup" or "unload" a subentry individually via `hass.config_entries`. Instead, the parent entry explicitly forwards platform setup for each subentry (using `_async_setup_new_subentries`) so Home Assistant can invoke `async_setup_entry` with the correct `config_subentry_id` context when supported.
   - **Identifier Handling:** Always use `subentry.subentry_id`. The attribute `entry_id` does not exist on the `ConfigSubentry` object.
   - **Platform Forwarding:** The parent entry forwards platforms once. Platforms must iterate over the subentry data provided in `entry.runtime_data` and create entities/devices linked to the specific subentry.
   - **Automatic Cleanup:** Using `hass.config_entries.async_remove_subentry` automatically invokes `async_clear_config_subentry` in the Device and Entity registries. No manual cleanup is required if devices are registered correctly.
@@ -37,9 +37,8 @@ Previous guides incorrectly stated that `hass.config_entries.async_setup(subentr
 **Correct Pattern:**
 
 1.  **Add/Update:** Call `hass.config_entries.async_add_subentry` or `async_update_subentry`.
-2.  **Trigger:** These methods internally call `_async_update_entry`, which fires update listeners.
-3.  **Reaction:** The Parent Entry's update listener receives the signal and calls `hass.config_entries.async_reload(parent_entry.entry_id)`.
-4.  **Execution:** `async_setup_entry` runs for the **Parent**. It reads all subentries and sets up the runtime environment for them.
+2.  **Forward:** Explicitly trigger platform setup for the new subentries from the parent entry via `_async_setup_new_subentries(hass, parent_entry, [subentry])`. The helper forwards `async_forward_entry_setups` from the parent and passes `config_subentry_id` when the installed Home Assistant core accepts the keyword.
+3.  **Execution:** Platforms receive `config_subentry_id` (when supported) during their normal `async_setup_entry` fan-out and must attach entities/devices to the forwarded subentry.
 
 ### C. Runtime Data Strategy
 
@@ -99,7 +98,7 @@ class LocationSubentryFlowHandler(config_entries.ConfigSubentryFlow):
         return self.async_show_form(...)
 ```
 
-**Note:** When `async_create_entry` is called, the `ConfigSubentryFlowManager` in Core automatically calls `hass.config_entries.async_add_subentry`. This triggers the parent reload.
+**Note:** When `async_create_entry` is called, the `ConfigSubentryFlowManager` in Core automatically calls `hass.config_entries.async_add_subentry`. The integration must then forward platform setup for the new subentry (and may still rely on parent reload listeners for other state changes).
 
 ## Section III: Lifecycle Management (`__init__.py`)
 
@@ -129,10 +128,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 3. Store Runtime Data
     entry.runtime_data = RuntimeData(client=client, subentry_coordinators=coordinators)
 
-    # 4. Forward Platforms (ONCE)
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # 4. Forward Platforms (per subentry)
+    await _async_setup_new_subentries(hass, entry, entry.subentries.values())
     
-    # 5. Listen for updates (to trigger reloads on subentry changes)
+    # 5. Listen for updates (to trigger reloads on subentry changes when configured)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     
     return True
@@ -171,11 +170,12 @@ async def _async_add_discovered_subentry(hass, parent_entry, discovery_data):
         # subentry_id is auto-generated if omitted, but you can generate one if needed
     )
 
-    # Add to Core - This triggers save and LISTENER (Reload)
+    # Add to Core, then forward platform setup for the new subentry
     hass.config_entries.async_add_subentry(parent_entry, subentry)
+    await _async_setup_new_subentries(hass, parent_entry, [subentry])
 ```
 
-**Crucial:** Do **not** call `async_setup` manually. The `async_add_subentry` call triggers the update listener, which calls `async_reload(parent.entry_id)`, which re-runs `async_setup_entry`.
+**Crucial:** Do **not** call `async_setup` manually. Forward platform setup via `_async_setup_new_subentries` so Home Assistant fans out the parent entry with the correct subentry context.
 
 ## Section IV: Platform Implementation & Entity Registry
 
@@ -264,7 +264,7 @@ ent_reg = er.async_get(hass)
 
   - [ ] **No `hass.config_entries.async_setup(subentry_id)` calls.**
   - [ ] **No usage of `subentry.entry_id`** (it does not exist).
-  - [ ] **Parent Reload Strategy:** Adding/removing a subentry relies on the parent's `update_listener` to reload the integration.
+  - [ ] **Parent Forwarding Strategy:** Adding/removing a subentry relies on `_async_setup_new_subentries` to forward platforms for each child while keeping the parent entry as the setup target.
   - [ ] **Runtime Data:** `entry.runtime_data` is attached to the Parent `ConfigEntry` and contains a collection of subentry logic.
   - [ ] **Registry Safety:** Verify that removing a subentry via the UI removes the associated devices. If not, check that entities are being added with the correct context.
 

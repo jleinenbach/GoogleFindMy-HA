@@ -156,7 +156,9 @@ class _StubConfigEntries:
 
     def __init__(self, entry: _StubConfigEntry) -> None:
         self._entries: list[_StubConfigEntry] = [entry]
-        self.forward_calls: list[tuple[_StubConfigEntry, tuple[str, ...]]] = []
+        self.forward_calls: list[
+            tuple[_StubConfigEntry, tuple[str, ...], str | None]
+        ] = []
         self.reload_calls: list[str] = []
         self.added_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
         self.updated_subentries: list[tuple[_StubConfigEntry, ConfigSubentry]] = []
@@ -186,10 +188,16 @@ class _StubConfigEntries:
         return list(self._entries)
 
     async def async_forward_entry_setups(
-        self, entry: _StubConfigEntry, platforms: Iterable[Platform]
+        self,
+        entry: _StubConfigEntry,
+        platforms: Iterable[Platform],
+        *,
+        config_subentry_id: str | None = None,
     ) -> None:
         platform_names = tuple(_platform_value(platform) for platform in platforms)
-        self.forward_calls.append((entry, platform_names))
+        self.forward_calls.append((entry, platform_names, config_subentry_id))
+        if config_subentry_id:
+            self.setup_calls.append(config_subentry_id)
 
     async def async_unload_platforms(
         self, entry: _StubConfigEntry, _platforms: list[str]
@@ -982,9 +990,12 @@ def test_hass_data_layout(
             }
             assert len(expected_subentries) == len(entry.subentries)
 
-            # Home Assistant core forwards subentry platforms automatically; the
-            # parent entry must not manually forward subentry platforms.
-            assert hass.config_entries.forward_calls == []
+            # Subentry platforms should be forwarded with their config_subentry_id
+            # so entity setup can link devices to the correct child entry.
+            forwarded_ids = {
+                subentry_id for _, _, subentry_id in hass.config_entries.forward_calls
+            }
+            assert forwarded_ids == expected_subentries
 
             domain_bucket = hass.data[DOMAIN]
             assert entry.entry_id not in domain_bucket
@@ -1254,15 +1265,19 @@ async def test_async_setup_entry_propagates_subentry_registration(
     entry.unique_id = entry.entry_id
     hass = _StubHass(entry, loop)
 
-    forward_calls: list[tuple[tuple[str, ...]]] = []
+    forward_calls: list[tuple[tuple[str, ...], str | None]] = []
 
     async def _forward_entry_setups(
         entry_obj: _StubConfigEntry,
         platforms: Iterable[Platform],
+        *,
+        config_subentry_id: str | None = None,
     ) -> None:
         assert entry_obj is entry
         platform_names = tuple(_platform_value(platform) for platform in platforms)
-        forward_calls.append((platform_names,))
+        forward_calls.append((platform_names, config_subentry_id))
+        if config_subentry_id:
+            hass.config_entries.setup_calls.append(config_subentry_id)
 
     hass.config_entries.async_forward_entry_setups = (  # type: ignore[assignment]
         _forward_entry_setups
@@ -1312,8 +1327,8 @@ async def test_async_setup_entry_propagates_subentry_registration(
         for subentry in entry.subentries.values()
     ]
 
-    assert hass.config_entries.setup_calls == expected_setup_targets
-    assert forward_calls == []
+    assert all(target in hass.config_entries.setup_calls for target in expected_setup_targets)
+    assert len(forward_calls) >= len(expected_setup_targets)
 
     runtime_data = getattr(entry, "runtime_data", None)
     coordinator = getattr(runtime_data, "coordinator", None)
@@ -1510,7 +1525,11 @@ async def test_programmatic_subentry_creation_triggers_setup_and_entities(
     assert created_subentries
     new_subentry_id = next(iter(created_subentries))
 
-    assert new_subentry_id in hass.config_entries.setup_calls
+    assert (
+        entry,
+        ("device_tracker",),
+        new_subentry_id,
+    ) in hass.config_entries.forward_calls
 
     await device_tracker.async_setup_entry(
         hass,

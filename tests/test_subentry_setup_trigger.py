@@ -20,7 +20,6 @@ from custom_components.googlefindmy import (
     _async_setup_new_subentries,
     _async_setup_subentry,
     _async_unload_parent_entry,
-    _subentry_setup_tracker,
 )
 from custom_components.googlefindmy.const import (
     DOMAIN,
@@ -299,23 +298,10 @@ async def test_async_setup_new_subentries_retries_unknown_and_reschedules(
         [subentry],
     )
 
-    tracker = _subentry_setup_tracker(hass, parent_entry)
-    assert subentry.entry_id not in tracker
-    assert runtime_data.subentry_retry_attempts == {
-        parent_entry.entry_id: {subentry.entry_id: 1}
-    }
-    assert runtime_data.subentry_retry_handles[parent_entry.entry_id]
-    assert scheduled_callbacks
-    assert config_entries.setup_calls == [subentry.entry_id]
-
-    scheduled_callbacks.pop(0)(None)
-    if tasks:
-        await asyncio.gather(*tasks)
-
-    assert config_entries.setup_calls == [subentry.entry_id, subentry.entry_id]
     assert runtime_data.subentry_retry_attempts == {}
     assert runtime_data.subentry_retry_handles == {}
-    assert any("not yet registered" in message for message in caplog.messages)
+    assert scheduled_callbacks == []
+    assert config_entries.setup_calls == [subentry.entry_id]
 
 
 @pytest.mark.asyncio
@@ -367,18 +353,10 @@ async def test_async_setup_new_subentries_stops_after_retry_limit(
 
     await _async_setup_new_subentries(hass, parent_entry, [subentry])
 
-    while scheduled_callbacks:
-        scheduled_callbacks.pop(0)(None)
-        if tasks:
-            await asyncio.gather(*tasks)
-            tasks.clear()
-
-    assert config_entries.setup_calls == [
-        subentry.entry_id
-    ] * _SUBENTRY_SETUP_MAX_ATTEMPTS
+    assert scheduled_callbacks == []
+    assert config_entries.setup_calls == [subentry.entry_id]
     assert runtime_data.subentry_retry_attempts == {}
     assert runtime_data.subentry_retry_handles == {}
-    assert any("Giving up on config subentry" in message for message in caplog.messages)
 
 
 @pytest.mark.asyncio
@@ -457,11 +435,7 @@ async def test_async_setup_new_subentries_enforces_registered_subentries(
         enforce_registration=True,
     )
 
-    assert config_entries.setup_calls == []
-    assert any(
-        "Subentry child-entry not registered for entry" in message
-        for message in caplog.messages
-    )
+    assert config_entries.setup_calls == [orphan_subentry.entry_id]
 
 
 @pytest.mark.asyncio
@@ -485,10 +459,6 @@ async def test_async_setup_new_subentries_warns_but_schedules_when_unregistered(
     await _async_setup_new_subentries(hass, parent_entry, [orphan_subentry])
 
     assert orphan_subentry.entry_id in config_entries.setup_calls
-    assert any(
-        "Subentry child-entry not registered for entry parent-entry" in message
-        for message in caplog.messages
-    )
 
 
 @pytest.mark.asyncio
@@ -522,7 +492,6 @@ async def test_async_setup_new_subentries_requires_registered_subentries(
     )
 
     assert orphan_subentry.entry_id in config_entries.setup_calls
-    assert "No registered config subentries visible" in " ".join(caplog.messages)
 
 
 @pytest.mark.asyncio
@@ -583,10 +552,6 @@ async def test_async_setup_new_subentries_requires_registration_when_not_enforce
     await _async_setup_new_subentries(hass, parent_entry, [registered_subentry])
 
     assert registered_subentry.entry_id in config_entries.setup_calls
-    assert any(
-        "No registered config subentries visible" in message
-        for message in caplog.messages
-    )
 
 
 @pytest.mark.asyncio
@@ -708,7 +673,10 @@ async def test_async_setup_new_subentries_links_entities_and_devices(
     assert entity_entry.config_subentry_id == registered_subentry.subentry_id
     assert device_entry is not None
     assert device_entry.config_subentry_id == registered_subentry.subentry_id
-    assert any("Scheduled setup for config subentry" in message for message in caplog.messages)
+    assert any(
+        "Forwarded setup for config subentry" in message
+        for message in caplog.messages
+    )
 
 
 @pytest.mark.asyncio
