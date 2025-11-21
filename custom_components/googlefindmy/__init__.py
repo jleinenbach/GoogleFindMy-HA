@@ -2370,179 +2370,49 @@ async def _async_setup_new_subentries(
 
     Home Assistant does not automatically set up subentries when they are added
     programmatically. After creating a ConfigSubentry (via async_sync or other
-    helpers), the integration must call ``hass.config_entries.async_setup`` for
-    each new entry id so Core can run ``_async_setup_subentry`` and forward
-    platforms with the correct ``config_subentry_id`` context. See
-    docs/CONFIG_SUBENTRIES_HANDBOOK.md for the canonical lifecycle.
+    helpers), the integration must forward platform setup from the parent entry
+    so Core can run ``_async_setup_subentry`` and pass the correct
+    ``config_subentry_id`` context. See docs/CONFIG_SUBENTRIES_HANDBOOK.md for
+    the canonical lifecycle.
     """
 
-    setup_tracker = _subentry_setup_tracker(hass, parent_entry)
-
-    parent_subentries = getattr(parent_entry, "subentries", None)
-    parent_subentry_ids: set[str] = set()
-    if isinstance(parent_subentries, Mapping):
-        for key, subentry in parent_subentries.items():
-            if isinstance(key, str) and key:
-                parent_subentry_ids.add(key)
-            identifier = _resolve_config_subentry_identifier(subentry)
-            if isinstance(identifier, str) and identifier:
-                parent_subentry_ids.add(identifier)
-            entry_identifier = getattr(subentry, "entry_id", None)
-            if isinstance(entry_identifier, str) and entry_identifier:
-                parent_subentry_ids.add(entry_identifier)
-    resolved_subentries: list[ConfigSubentry | Any] = []
-    if subentries:
-        for subentry in subentries:
-            resolved = subentry
-            if isinstance(parent_subentries, Mapping):
-                unique_id = getattr(subentry, "unique_id", None)
-                if isinstance(unique_id, str):
-                    resolved = next(
-                        (
-                            candidate
-                            for candidate in parent_subentries.values()
-                            if getattr(candidate, "unique_id", None) == unique_id
-                        ),
-                        subentry,
-                    )
-            resolved_subentries.append(resolved)
-
-    setup_targets: list[tuple[str, str | None]] = []
-    for subentry in resolved_subentries:
-        subentry_entry_id = _subentry_entry_id(subentry)
-        fallback_entry_id = None
-
-        explicit_entry_id = getattr(subentry, "entry_id", None)
-        if (
-            isinstance(explicit_entry_id, str)
-            and explicit_entry_id
-            and explicit_entry_id != subentry_entry_id
-        ):
-            fallback_entry_id = explicit_entry_id
-
-        if subentry_entry_id is None:
-            subentry_entry_id = fallback_entry_id
-
-        if subentry_entry_id is None:
-            continue
-        setup_targets.append((subentry_entry_id, fallback_entry_id))
-
-    if retry_entry_ids:
-        for retry_id in retry_entry_ids:
-            if isinstance(retry_id, str) and retry_id:
-                setup_targets.append((retry_id, None))
-
-    if not setup_targets:
+    if subentries is None:
         return
 
-    # Yield to the event loop so Home Assistant can finish publishing the
-    # subentry into the registry before setup runs (race guard documented in
-    # agents/runtime_patterns/AGENTS.md).
-    await asyncio.sleep(0)
+    pending_subentries = tuple(subentries)
+    if not pending_subentries:
+        return
 
     config_entries = getattr(hass, "config_entries", None)
-    if config_entries is None:
+    forward_setups = getattr(config_entries, "async_forward_entry_setups", None)
+    if not callable(forward_setups):
         _LOGGER.debug(
-            "[%s] async_setup_entry: Skipping subentry setup because manager missing",
+            "[%s] async_setup_entry: Subentry forward helper missing; skipping setup",
             parent_entry.entry_id,
         )
         return
 
-    get_entry = getattr(config_entries, "async_get_entry", lambda _entry_id: None)
-    registered_subentry_ids = _registered_subentry_ids(hass, parent_entry)
-    if not registered_subentry_ids:
-        _LOGGER.warning(
-            "[%s] No registered config subentries visible before scheduling",  # noqa: G004
-            parent_entry.entry_id,
+    for subentry in pending_subentries:
+        identifier = _resolve_config_subentry_identifier(subentry)
+        if identifier is None:
+            continue
+
+        platforms = _determine_subentry_platforms(subentry)
+        result = _invoke_with_optional_keyword(
+            forward_setups,
+            (parent_entry, platforms),
+            "config_subentry_id",
+            identifier,
         )
-    else:
+        if inspect.isawaitable(result):
+            await result
+
         _LOGGER.debug(
-            "[%s] Registered config subentries available before scheduling: %s",
+            "[%s] Forwarded setup for config subentry '%s' to platforms: %s",
             parent_entry.entry_id,
-            sorted(registered_subentry_ids),
+            identifier,
+            platforms,
         )
-
-    for target, fallback_target in setup_targets:
-        for registration_candidate in (target, fallback_target):
-            if registration_candidate is None:
-                continue
-
-            if registration_candidate in setup_tracker:
-                continue
-
-            if registration_candidate not in parent_subentry_ids:
-                _LOGGER.warning(
-                    "[%s] Subentry %s not registered for entry %s",  # noqa: G004
-                    parent_entry.entry_id,
-                    registration_candidate,
-                    parent_entry.entry_id,
-                )
-                if enforce_registration:
-                    _LOGGER.debug(
-                        "[%s] Registration enforcement enabled; skipping setup for %s",  # noqa: G004
-                        parent_entry.entry_id,
-                        registration_candidate,
-                    )
-                    continue
-
-            if registered_subentry_ids and registration_candidate not in registered_subentry_ids:
-                _LOGGER.warning(
-                    "[%s] Config subentry %s not registered; waiting for registry update",  # noqa: G004
-                    parent_entry.entry_id,
-                    registration_candidate,
-                )
-                continue
-
-            _LOGGER.debug(
-                "[%s] Scheduling setup for config subentry '%s'",  # noqa: G004
-                parent_entry.entry_id,
-                registration_candidate,
-            )
-            entry_obj = get_entry(registration_candidate)
-            state = getattr(entry_obj, "state", None)
-            if isinstance(state, ConfigEntryState) and state in (
-                ConfigEntryState.SETUP_IN_PROGRESS,
-                ConfigEntryState.LOADED,
-            ):
-                break
-
-            setup_tracker.add(registration_candidate)
-            if fallback_target is not None:
-                setup_tracker.add(fallback_target)
-
-            try:
-                await hass.config_entries.async_setup(registration_candidate)
-                _clear_subentry_retry_entry(parent_entry, registration_candidate)
-                if fallback_target is not None:
-                    _clear_subentry_retry_entry(parent_entry, fallback_target)
-                _LOGGER.debug(
-                    "[%s] Scheduled setup for config subentry '%s'",
-                    parent_entry.entry_id,
-                    registration_candidate,
-                )
-            except UnknownEntry:
-                setup_tracker.discard(registration_candidate)
-                if fallback_target is not None:
-                    setup_tracker.discard(fallback_target)
-
-                _LOGGER.warning(
-                    "[%s] Config subentry %s not yet registered; will retry when available",  # noqa: G004
-                    parent_entry.entry_id,
-                    registration_candidate,
-                )
-                _queue_subentry_retry(hass, parent_entry, registration_candidate)
-                continue
-            except Exception as err:  # pragma: no cover - defensive logging
-                _LOGGER.debug(
-                    "[%s] async_setup_entry: Subentry '%s' setup raised: %s",
-                    parent_entry.entry_id,
-                    registration_candidate,
-                    err,
-                )
-                continue
-
-            break
-
 
 def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
     """Return the shared FCM lock, creating it if missing."""

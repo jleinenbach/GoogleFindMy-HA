@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import Platform
 from homeassistant.core import ServiceCall
 
 from custom_components.googlefindmy import UnknownEntry
@@ -328,6 +329,9 @@ class FakeConfigEntriesManager:
             self.async_migrate_entry = None  # type: ignore[assignment]
             self.async_migrate = None  # type: ignore[assignment]
         self.setup_calls: list[str] = []
+        self.forward_setup_calls: list[
+            tuple[FakeConfigEntry, tuple[str, ...], str | None]
+        ] = []
         self.lookup_attempts: dict[str, int] = defaultdict(int)
         self._transient_unknown: dict[str, _TransientUnknownEntryConfig] = {}
         if transient_unknown_entries:
@@ -429,6 +433,26 @@ class FakeConfigEntriesManager:
         if config is not None and config.setup_failures > 0:
             config.setup_failures -= 1
             raise UnknownEntry(entry_id)
+        return True
+
+    async def async_forward_entry_setups(
+        self,
+        entry: FakeConfigEntry,
+        platforms: Iterable[Platform | str],
+        *,
+        config_subentry_id: str | None = None,
+    ) -> bool:
+        """Record forwarded platform setups for assertions."""
+
+        platform_names = tuple(
+            platform.value
+            if isinstance(platform, Platform) and isinstance(platform.value, str)
+            else str(platform)
+            for platform in platforms
+        )
+        self.forward_setup_calls.append((entry, platform_names, config_subentry_id))
+        if config_subentry_id:
+            self.setup_calls.append(config_subentry_id)
         return True
 
     def async_update_entry(self, entry: FakeConfigEntry, **kwargs: Any) -> None:

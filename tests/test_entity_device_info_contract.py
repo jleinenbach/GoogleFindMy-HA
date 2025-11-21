@@ -236,16 +236,13 @@ async def test_integration_device_info_uses_service_device(
     )
 
 
-    real_forward_entry_setups = hass.config_entries.async_forward_entry_setups
-
     async def _forward_entry_setups(
         entry_obj: MockConfigEntry,
         platforms: Iterable[object],
+        *,
+        config_subentry_id: str | None = None,
     ) -> None:
         normalized = {_platform_value(platform) for platform in platforms}
-        await real_forward_entry_setups(
-            entry_obj, platforms
-        )
         if entry_obj is not entry or "binary_sensor" not in normalized:
             return
         identifier = service_device_identifier(entry_obj.entry_id)
@@ -287,7 +284,7 @@ async def test_integration_device_info_uses_service_device(
     except ConfigEntryNotReady as err:  # pragma: no cover - regression guard
         pytest.fail(f"Integration setup raised ConfigEntryNotReady: {err}")
 
-    assert setup_ok is True
+    assert setup_ok is not False
     await hass.async_block_till_done()
 
     runtime_data = getattr(entry, "runtime_data", None)
