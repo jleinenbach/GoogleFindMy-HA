@@ -6360,6 +6360,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
         return tuple(deduped_ids)
 
+    def _extract_visible_ids(subentry_meta: object) -> tuple[str, ...]:
+        if isinstance(subentry_meta, Mapping):
+            raw_visible_ids = subentry_meta.get("visible_device_ids")
+        else:
+            raw_visible_ids = getattr(subentry_meta, "visible_device_ids", None)
+
+        return _normalize_visible_ids(raw_visible_ids)
+
     if metadata is not None:
         for group_key, subentry_meta in metadata.items():
             managed_subentry = runtime_subentry_manager.managed_subentries.get(
@@ -6368,9 +6376,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             if managed_subentry is None:
                 continue
 
-            desired_visible_ids = _normalize_visible_ids(
-                getattr(subentry_meta, "visible_device_ids", None)
-            )
+            desired_visible_ids = _extract_visible_ids(subentry_meta)
             existing_visible_ids = _normalize_visible_ids(
                 managed_subentry.data.get("visible_device_ids")
             )
