@@ -51,14 +51,21 @@ class SentinelError(RuntimeError):
 def _reset_uc(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reset the undetected_chromedriver stubs for each test."""
 
-    monkeypatch.setattr(chrome_driver.uc, "ChromeOptions", _BootstrapChromeOptions)
-    monkeypatch.setattr(chrome_driver.uc, "Chrome", _bootstrap_chrome)
+    stub_uc = SimpleNamespace(
+        ChromeOptions=_BootstrapChromeOptions, Chrome=_bootstrap_chrome
+    )
+    chrome_driver._reset_uc_cache(stub_uc)
+
+    yield
+
+    chrome_driver._reset_uc_cache(None)
 
 
 def test_get_options_headless_uses_expected_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure headless options populate the expected Chrome arguments."""
 
-    monkeypatch.setattr(chrome_driver.uc, "ChromeOptions", FakeChromeOptions)
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
 
     options = chrome_driver.get_options(headless=True)
 
@@ -77,13 +84,14 @@ def test_create_driver_headless_passes_options_to_uc(monkeypatch: pytest.MonkeyP
     fake_driver = object()
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(chrome_driver.uc, "ChromeOptions", FakeChromeOptions)
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
 
     def fake_chrome(*, options: object) -> object:
         captured["options"] = options
         return fake_driver
 
-    monkeypatch.setattr(chrome_driver.uc, "Chrome", fake_chrome)
+    monkeypatch.setattr(uc_module, "Chrome", fake_chrome)
 
     driver = chrome_driver.create_driver(headless=True)
 
@@ -110,8 +118,9 @@ def test_create_driver_fallback_logs_and_raises_runtime_error(
         chrome_calls.append(options)
         raise SentinelError("driver start failed")
 
-    monkeypatch.setattr(chrome_driver.uc, "ChromeOptions", FakeChromeOptions)
-    monkeypatch.setattr(chrome_driver.uc, "Chrome", chrome_stub)
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.setattr(uc_module, "Chrome", chrome_stub)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/opt/chrome")
 
     with pytest.raises(RuntimeError):
