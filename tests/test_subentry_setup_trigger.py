@@ -29,13 +29,13 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.entity import schedule_add_entities
 from tests.helpers.homeassistant import (
-    capture_async_dispatcher_send,
     FakeConfigEntriesManager,
     FakeConfigEntry,
     FakeDeviceEntry,
     FakeDeviceRegistry,
     FakeEntityRegistry,
     FakeHass,
+    capture_async_dispatcher_send,
 )
 
 

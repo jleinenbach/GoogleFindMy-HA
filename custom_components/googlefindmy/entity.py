@@ -23,10 +23,18 @@ Highlights for contributors:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import time
-from collections.abc import Iterable, Mapping, MutableMapping
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    Mapping,
+    MutableMapping,
+)
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.config_entries import ConfigEntry
@@ -37,8 +45,6 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
-
-from .ha_typing import CoordinatorEntity, callback
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
@@ -67,6 +73,7 @@ from .const import (
     service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator
+from .ha_typing import CoordinatorEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -131,19 +138,44 @@ def ensure_dispatcher_dependencies(hass: HomeAssistant) -> None:
         hass.data = {}
     if not hasattr(hass, "verify_event_loop_thread"):
         hass.verify_event_loop_thread = lambda *_args: None
+
     if not hasattr(hass, "async_run_hass_job"):
-        hass.async_run_hass_job = _default_async_run_hass_job
+        hass.async_run_hass_job = _default_async_run_hass_job(hass)
 
 
-def _default_async_run_hass_job(job: Any, *args: Any) -> Any:
-    """Run a Home Assistant job or the ``target`` attribute if present."""
+def _default_async_run_hass_job(hass: HomeAssistant) -> Callable[..., Any]:
+    """Return a dispatcher-compatible runner that schedules coroutines."""
 
-    target = getattr(job, "target", None)
-    if callable(target):
-        return target(*args)
-    if callable(job):
-        return job(*args)
-    return None
+    def _run(job: Any, *args: Any) -> Any:
+        target = getattr(job, "target", None)
+        callable_job = target if callable(target) else (job if callable(job) else None)
+        if callable_job is None:
+            return None
+
+        result = callable_job(*args)
+        if inspect.isawaitable(result):
+            awaitable_result: Awaitable[Any] = result
+            loop = getattr(hass, "loop", None)
+            if loop is None:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+            if inspect.iscoroutine(result):
+                coroutine = cast(Coroutine[Any, Any, Any], result)
+                if loop is not None:
+                    return loop.create_task(coroutine)
+                return asyncio.create_task(coroutine)
+
+            if loop is not None:
+                return asyncio.ensure_future(awaitable_result, loop=loop)
+
+            return asyncio.ensure_future(awaitable_result)
+
+        return result
+
+    return _run
 
 
 def schedule_add_entities(
@@ -183,7 +215,11 @@ def schedule_add_entities(
         )
 
     if inspect.isawaitable(result):
-        hass.async_create_task(result)
+        if inspect.iscoroutine(result):
+            hass.async_create_task(cast(Coroutine[Any, Any, Any], result))
+            return
+
+        asyncio.ensure_future(result)
 
 
 class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):

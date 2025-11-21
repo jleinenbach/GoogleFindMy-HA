@@ -126,10 +126,9 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self,
         entry: _EntryStub,
         platforms: Sequence[object],
-    ) -> bool:
+    ) -> None:
         assert entry is self._entry
         self.forward_setup_calls.append((entry, tuple(platforms)))
-        return True
 
     def async_remove_subentry(self, entry: _EntryStub, subentry_id: str) -> bool:  # noqa: FBT001
         assert entry is self._entry

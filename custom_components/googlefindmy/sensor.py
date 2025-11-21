@@ -128,6 +128,8 @@ async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
+    *,
+    config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device sensor entities.
 
@@ -312,8 +314,6 @@ async def async_setup_entry(
             )
             _schedule_service_entities(stats_entities, True)
             created_stats[identifier] = created_for_scope
-        else:
-            _schedule_service_entities([], True)
 
     def _add_tracker_scope(scope: _Scope, forwarded_config_id: str | None) -> None:
         nonlocal primary_tracker_scope, tracker_scheduler
@@ -446,7 +446,8 @@ async def async_setup_entry(
 
     seen_subentries: set[str | None] = set()
 
-    async def async_add_subentry(subentry: Any | None = None) -> None:
+    @callback
+    def async_add_subentry(subentry: Any | None = None) -> None:
         subentry_identifier = None
         if isinstance(subentry, str):
             subentry_identifier = subentry
@@ -459,12 +460,20 @@ async def async_setup_entry(
             return
         seen_subentries.add(subentry_identifier)
 
+        processed_ids: set[str | None] = set()
+
         for scope in _collect_scopes(
             feature="sensor",
             default_key=SERVICE_SUBENTRY_KEY,
             hint_subentry_id=subentry_identifier,
             forwarded_config_id=subentry_identifier,
         ):
+            scope_identifier = (
+                scope.config_subentry_id or scope.identifier or scope.subentry_key
+            )
+            if scope_identifier in processed_ids:
+                continue
+            processed_ids.add(scope_identifier)
             if _scope_matches_forwarded(scope, subentry_identifier):
                 _add_service_scope(scope, subentry_identifier)
 
@@ -474,6 +483,12 @@ async def async_setup_entry(
             hint_subentry_id=subentry_identifier,
             forwarded_config_id=subentry_identifier,
         ):
+            scope_identifier = (
+                scope.config_subentry_id or scope.identifier or scope.subentry_key
+            )
+            if scope_identifier in processed_ids:
+                continue
+            processed_ids.add(scope_identifier)
             if _scope_matches_forwarded(scope, subentry_identifier):
                 _add_tracker_scope(scope, subentry_identifier)
 
@@ -481,10 +496,11 @@ async def async_setup_entry(
     subentry_manager = getattr(runtime_data, "subentry_manager", None)
     managed_subentries = getattr(subentry_manager, "managed_subentries", None)
     if isinstance(managed_subentries, Mapping):
-        for managed_subentry in managed_subentries.values():
-            await async_add_subentry(managed_subentry)
+        if config_subentry_id is not None:
+            for managed_subentry in managed_subentries.values():
+                async_add_subentry(managed_subentry)
     else:
-        await async_add_subentry(None)
+        async_add_subentry(config_subentry_id)
 
     entry.async_on_unload(
         async_dispatcher_connect(

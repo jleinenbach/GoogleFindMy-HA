@@ -94,6 +94,8 @@ async def async_setup_entry(  # noqa: PLR0915
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
+    *,
+    config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device binary sensor entities (per config entry).
 
@@ -255,7 +257,8 @@ async def async_setup_entry(  # noqa: PLR0915
 
     seen_subentries: set[str | None] = set()
 
-    async def async_add_subentry(subentry: Any | None = None) -> None:
+    @callback
+    def async_add_subentry(subentry: Any | None = None) -> None:
         subentry_identifier = None
         if isinstance(subentry, str):
             subentry_identifier = subentry
@@ -277,10 +280,11 @@ async def async_setup_entry(  # noqa: PLR0915
     subentry_manager = getattr(runtime_data, "subentry_manager", None)
     managed_subentries = getattr(subentry_manager, "managed_subentries", None)
     if isinstance(managed_subentries, Mapping):
-        for managed_subentry in managed_subentries.values():
-            await async_add_subentry(managed_subentry)
+        if config_subentry_id is not None:
+            for managed_subentry in managed_subentries.values():
+                async_add_subentry(managed_subentry)
     else:
-        await async_add_subentry(None)
+        async_add_subentry(config_subentry_id)
 
     entry.async_on_unload(
         async_dispatcher_connect(

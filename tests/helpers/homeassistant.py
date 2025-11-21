@@ -438,7 +438,7 @@ class FakeConfigEntriesManager:
         self,
         entry: FakeConfigEntry,
         platforms: Iterable[Platform | str],
-    ) -> bool:
+    ) -> None:
         """Record forwarded platform setups for assertions."""
 
         platform_names = tuple(
@@ -448,7 +448,6 @@ class FakeConfigEntriesManager:
             for platform in platforms
         )
         self.forward_setup_calls.append((entry, platform_names))
-        return True
 
     def async_update_entry(self, entry: FakeConfigEntry, **kwargs: Any) -> None:
         """Capture entry updates in ``update_calls`` for assertions."""
