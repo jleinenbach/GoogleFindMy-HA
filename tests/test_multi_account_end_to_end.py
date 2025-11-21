@@ -267,6 +267,9 @@ class _StubHass:
     async def async_add_executor_job(self, func: Callable[..., Any], *args: Any) -> Any:
         return func(*args)
 
+    def verify_event_loop_thread(self, _action: str | None = None) -> None:
+        return
+
 
 def test_multi_account_end_to_end(
     monkeypatch: pytest.MonkeyPatch,

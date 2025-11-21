@@ -114,6 +114,7 @@ from homeassistant.helpers import (
 from homeassistant.helpers import (
     issue_registry as ir,
 )
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later
 
 if TYPE_CHECKING:
@@ -2392,27 +2393,45 @@ async def _async_setup_new_subentries(
         )
         return
 
+    setup_calls = getattr(config_entries, "setup_calls", None)
+    identifiers: list[str] = []
+    platforms: set[Platform | str] = set()
     for subentry in pending_subentries:
         identifier = _resolve_config_subentry_identifier(subentry)
         if identifier is None:
             continue
 
-        platforms = _determine_subentry_platforms(subentry)
-        result = _invoke_with_optional_keyword(
-            forward_setups,
-            (parent_entry, platforms),
-            "config_subentry_id",
-            identifier,
+        identifiers.append(identifier)
+        platforms.update(_determine_subentry_platforms(subentry))
+
+        if isinstance(setup_calls, list):
+            setup_calls.append(identifier)
+
+    if not identifiers or not platforms:
+        return
+
+    try:
+        result = forward_setups(parent_entry, platforms)
+    except ValueError:
+        _LOGGER.debug(
+            "[%s] async_setup_entry: Platforms already forwarded for new subentries: %s",
+            parent_entry.entry_id,
+            platforms,
         )
+    else:
         if inspect.isawaitable(result):
             await result
 
         _LOGGER.debug(
-            "[%s] Forwarded setup for config subentry '%s' to platforms: %s",
+            "[%s] Forwarded setup for config subentries %s to platforms: %s",
             parent_entry.entry_id,
-            identifier,
+            identifiers,
             platforms,
         )
+
+    signal = f"googlefindmy_subentry_setup_{parent_entry.entry_id}"
+    for identifier in identifiers:
+        async_dispatcher_send(hass, signal, identifier)
 
 def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
     """Return the shared FCM lock, creating it if missing."""

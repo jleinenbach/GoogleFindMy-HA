@@ -23,6 +23,7 @@ from custom_components.googlefindmy import (
 )
 from custom_components.googlefindmy.const import (
     DOMAIN,
+    SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
 )
@@ -410,6 +411,100 @@ async def test_subentry_manager_retries_unknown_entry_without_enforcement() -> N
 
 
 @pytest.mark.asyncio
+async def test_async_setup_new_subentries_aggregates_platforms_and_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forward subentry platforms once and dispatch setup signals per child."""
+
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    tracker_subentry = SimpleNamespace(
+        entry_id="child-entry",  # legacy attribute names used by stubs
+        subentry_id="child-entry",
+        unique_id="child-entry",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+    service_subentry = SimpleNamespace(
+        entry_id="service-entry",
+        subentry_id="service-entry",
+        unique_id="service-entry",
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+    )
+
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    hass = FakeHass(config_entries=config_entries)
+    _attach_runtime(parent_entry)
+
+    dispatched: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.async_dispatcher_send",
+        lambda hass_arg, signal, subentry_id: dispatched.append(
+            (signal, subentry_id)
+        ),
+    )
+
+    await _async_setup_new_subentries(
+        hass,
+        parent_entry,
+        [tracker_subentry, service_subentry],
+    )
+
+    assert len(config_entries.forward_setup_calls) == 1
+    _, platform_names, config_subentry_id = config_entries.forward_setup_calls[0]
+    assert set(platform_names) == {
+        "binary_sensor",
+        "button",
+        "device_tracker",
+        "sensor",
+    }
+    assert config_subentry_id is None
+
+    expected_signal = f"googlefindmy_subentry_setup_{parent_entry.entry_id}"
+    assert dispatched == [
+        (expected_signal, tracker_subentry.subentry_id),
+        (expected_signal, service_subentry.subentry_id),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_setup_new_subentries_ignores_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ValueError from forward_entry_setups should not block dispatchers."""
+
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    subentry = SimpleNamespace(
+        entry_id="child-entry",
+        subentry_id="child-entry",
+        unique_id="child-entry",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+    )
+
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    hass = FakeHass(config_entries=config_entries)
+    _attach_runtime(parent_entry)
+
+    dispatched: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.async_dispatcher_send",
+        lambda hass_arg, signal, subentry_id: dispatched.append(
+            (signal, subentry_id)
+        ),
+    )
+
+    def _raise_value_error(*_: object, **__: object) -> None:
+        raise ValueError("already setup")
+
+    monkeypatch.setattr(config_entries, "async_forward_entry_setups", _raise_value_error)
+
+    await _async_setup_new_subentries(hass, parent_entry, [subentry])
+
+    assert dispatched == [
+        (f"googlefindmy_subentry_setup_{parent_entry.entry_id}", subentry.subentry_id)
+    ]
+    assert config_entries.setup_calls == [subentry.subentry_id]
+
+
+@pytest.mark.asyncio
 async def test_async_setup_new_subentries_enforces_registered_subentries(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -599,11 +694,8 @@ async def test_async_setup_new_subentries_links_entities_and_devices(
 
     config_entries = FakeConfigEntriesManager([parent_entry])
     _attach_runtime(parent_entry)
-    hass = SimpleNamespace(
-        config_entries=config_entries,
-        data={},
-        async_create_task=lambda coro, name=None: asyncio.create_task(coro),
-    )
+    hass = FakeHass(config_entries=config_entries)
+    hass.async_create_task = lambda coro, name=None: asyncio.create_task(coro)
 
     device_registry = FakeDeviceRegistry(
         [
@@ -674,7 +766,7 @@ async def test_async_setup_new_subentries_links_entities_and_devices(
     assert device_entry is not None
     assert device_entry.config_subentry_id == registered_subentry.subentry_id
     assert any(
-        "Forwarded setup for config subentry" in message
+        "Forwarded setup for config subentries" in message
         for message in caplog.messages
     )
 
