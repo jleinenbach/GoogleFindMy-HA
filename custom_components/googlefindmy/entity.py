@@ -124,6 +124,28 @@ def ensure_config_subentry_id(
     return None
 
 
+def ensure_dispatcher_dependencies(hass: HomeAssistant) -> None:
+    """Ensure dispatcher helpers can bind to the provided Home Assistant stub."""
+
+    if not hasattr(hass, "data"):
+        hass.data = {}
+    if not hasattr(hass, "verify_event_loop_thread"):
+        hass.verify_event_loop_thread = lambda *_args: None
+    if not hasattr(hass, "async_run_hass_job"):
+        hass.async_run_hass_job = _default_async_run_hass_job
+
+
+def _default_async_run_hass_job(job: Any, *args: Any) -> Any:
+    """Run a Home Assistant job or the ``target`` attribute if present."""
+
+    target = getattr(job, "target", None)
+    if callable(target):
+        return target(*args)
+    if callable(job):
+        return job(*args)
+    return None
+
+
 def schedule_add_entities(
     hass: HomeAssistant,
     async_add_entities: AddEntitiesCallback,
