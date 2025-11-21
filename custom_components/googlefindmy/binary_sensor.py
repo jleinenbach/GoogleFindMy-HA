@@ -94,7 +94,6 @@ async def async_setup_entry(  # noqa: PLR0915
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-    config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device binary sensor entities (per config entry).
 
@@ -105,7 +104,10 @@ async def async_setup_entry(  # noqa: PLR0915
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = entry
 
-    def _collect_service_scopes(hint_subentry_id: str | None = None) -> list[_ServiceScope]:
+    def _collect_service_scopes(
+        hint_subentry_id: str | None = None,
+        forwarded_config_id: str | None = None,
+    ) -> list[_ServiceScope]:
         scopes: dict[str, _ServiceScope] = {}
 
         subentry_metas = getattr(coordinator, "_subentry_metadata", None)
@@ -158,7 +160,11 @@ async def async_setup_entry(  # noqa: PLR0915
             identifier = hint_subentry_id
             scopes.setdefault(
                 identifier,
-                _ServiceScope(SERVICE_SUBENTRY_KEY, hint_subentry_id, identifier),
+                _ServiceScope(
+                    SERVICE_SUBENTRY_KEY,
+                    forwarded_config_id or hint_subentry_id,
+                    identifier,
+                ),
             )
 
         if scopes:
@@ -170,7 +176,7 @@ async def async_setup_entry(  # noqa: PLR0915
         return [
             _ServiceScope(
                 SERVICE_SUBENTRY_KEY,
-                config_subentry_id,
+                forwarded_config_id,
                 fallback_identifier,
             )
         ]
@@ -179,10 +185,10 @@ async def async_setup_entry(  # noqa: PLR0915
     primary_scope: _ServiceScope | None = None
     primary_scheduler: Callable[[Iterable[BinarySensorEntity], bool], None] | None = None
 
-    def _add_scope(scope: _ServiceScope) -> None:
+    def _add_scope(scope: _ServiceScope, forwarded_config_id: str | None) -> None:
         nonlocal primary_scope, primary_scheduler
         sanitized_config_id = ensure_config_subentry_id(
-            entry, "binary_sensor", scope.config_subentry_id or config_subentry_id
+            entry, "binary_sensor", scope.config_subentry_id or forwarded_config_id
         )
         if sanitized_config_id is None:
             _LOGGER.debug(
@@ -237,6 +243,7 @@ async def async_setup_entry(  # noqa: PLR0915
             deduped_entities.append(entity)
 
         if not deduped_entities:
+            _schedule_service_entities([], True)
             return
 
         _LOGGER.debug(
@@ -246,14 +253,9 @@ async def async_setup_entry(  # noqa: PLR0915
         )
         _schedule_service_entities(deduped_entities, True)
 
-    scopes = _collect_service_scopes(config_subentry_id)
-    for scope in scopes:
-        _add_scope(scope)
+    seen_subentries: set[str | None] = set()
 
-    signal = f"googlefindmy_subentry_setup_{entry.entry_id}"
-
-    @callback
-    def _handle_subentry_setup(subentry: Any | None = None) -> None:
+    async def async_add_subentry(subentry: Any | None = None) -> None:
         subentry_identifier = None
         if isinstance(subentry, str):
             subentry_identifier = subentry
@@ -262,12 +264,30 @@ async def async_setup_entry(  # noqa: PLR0915
                 subentry, "entry_id", None
             )
 
-        for scope in _collect_service_scopes(subentry_identifier):
-            _add_scope(scope)
+        if subentry_identifier in seen_subentries:
+            return
+        seen_subentries.add(subentry_identifier)
 
-    entry.async_on_unload(async_dispatcher_connect(hass, signal, _handle_subentry_setup))
+        for scope in _collect_service_scopes(
+            subentry_identifier, forwarded_config_id=subentry_identifier
+        ):
+            _add_scope(scope, subentry_identifier)
 
     runtime_data = getattr(entry, "runtime_data", None)
+    subentry_manager = getattr(runtime_data, "subentry_manager", None)
+    managed_subentries = getattr(subentry_manager, "managed_subentries", None)
+    if isinstance(managed_subentries, Mapping):
+        for managed_subentry in managed_subentries.values():
+            await async_add_subentry(managed_subentry)
+    else:
+        await async_add_subentry(None)
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", async_add_subentry
+        )
+    )
+
     recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
 
     if isinstance(recovery_manager, EntityRecoveryManager):
