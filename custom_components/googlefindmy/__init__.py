@@ -2245,7 +2245,7 @@ def _async_create_task(
 ) -> asyncio.Task[Any]:
     """Schedule ``coro`` using Home Assistant's task helper."""
 
-    return hass.async_create_task(coro, name=name)
+    return cast(asyncio.Task[Any], hass.async_create_task(coro, name=name))
 
 
 async def _async_retry_pending_subentries(
