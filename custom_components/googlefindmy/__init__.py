@@ -6780,12 +6780,20 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 unload_awaitables: list[Awaitable[Any]] = []
                 for platform in platforms:
                     platform_name = getattr(platform, "value", str(platform))
-                    result = _invoke_with_optional_keyword(
-                        forward_unload,
-                        (entry, platform_name),
-                        "config_subentry_id",
-                        identifier,
-                    )
+                    try:
+                        result = _invoke_with_optional_keyword(
+                            forward_unload,
+                            (entry, platform_name),
+                            "config_subentry_id",
+                            identifier,
+                        )
+                    except ValueError:
+                        _LOGGER.debug(
+                            "[%s] Subentry platform '%s' was never loaded; skipping unload",  # noqa: G004
+                            identifier,
+                            platform_name,
+                        )
+                        continue
                     if inspect.isawaitable(result):
                         unload_awaitables.append(result)
                     else:
@@ -6799,6 +6807,13 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                     )
                     for outcome in gathered:
                         if isinstance(outcome, BaseException):
+                            if isinstance(outcome, ValueError):
+                                _LOGGER.debug(
+                                    "[%s] Subentry platform unload skipped: %s",  # noqa: G004
+                                    identifier,
+                                    outcome,
+                                )
+                                continue
                             all_unloaded = False
                             continue
                         if isinstance(outcome, bool):
