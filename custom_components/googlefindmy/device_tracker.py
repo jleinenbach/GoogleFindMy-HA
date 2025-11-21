@@ -21,6 +21,7 @@ Entry-scope guarantees (C2):
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ from . import EntityRecoveryManager, _extract_email_from_entry
 from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
+    DOMAIN,
     OPT_MIN_ACCURACY_THRESHOLD,
     TRACKER_SUBENTRY_KEY,
 )
@@ -87,6 +89,8 @@ async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
+    *,
+    config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device tracker entities.
 
@@ -479,7 +483,8 @@ async def async_setup_entry(
 
     seen_subentries: set[str | None] = set()
 
-    async def async_add_subentry(subentry: Any | None = None) -> None:
+    @callback
+    def async_add_subentry(subentry: Any | None = None) -> None:
         subentry_identifier = None
         if isinstance(subentry, str):
             subentry_identifier = subentry
@@ -502,26 +507,29 @@ async def async_setup_entry(
     managed_subentries = getattr(subentry_manager, "managed_subentries", None)
     if isinstance(managed_subentries, Mapping):
         for managed_subentry in managed_subentries.values():
-            await async_add_subentry(managed_subentry)
+            async_add_subentry(managed_subentry)
     else:
-        await async_add_subentry(None)
+        async_add_subentry(config_subentry_id)
 
     @callback
     def _handle_subentry_setup(subentry: Any | None = None) -> None:
-        """Schedule subentry setup from dispatcher callbacks.
-
-        Dispatcher callbacks must schedule coroutines under Home Assistant's job
-        runner (or stubbed equivalents) instead of awaiting them directly.
-        """
+        """Schedule subentry setup from dispatcher callbacks."""
 
         hass_async_create_task = getattr(hass, "async_create_task", None)
         if callable(hass_async_create_task):
-            hass_async_create_task(async_add_subentry(subentry))
+            result = async_add_subentry(subentry)
+            if inspect.isawaitable(result):
+                hass_async_create_task(result)
             return
 
         hass_add_job = getattr(hass, "add_job", None)
         if callable(hass_add_job):
-            hass_add_job(async_add_subentry(subentry))
+            result = async_add_subentry(subentry)
+            if inspect.isawaitable(result):
+                hass_add_job(result)
+            return
+
+        async_add_subentry(subentry)
 
     config_entry.async_on_unload(
         async_dispatcher_connect(

@@ -105,6 +105,8 @@ async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
+    *,
+    config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device button entities."""
     coordinator = resolve_coordinator(config_entry)
@@ -311,7 +313,8 @@ async def async_setup_entry(
 
     seen_subentries: set[str | None] = set()
 
-    async def async_add_subentry(subentry: Any | None = None) -> None:
+    @callback
+    def async_add_subentry(subentry: Any | None = None) -> None:
         subentry_identifier = None
         if isinstance(subentry, str):
             subentry_identifier = subentry
@@ -333,10 +336,11 @@ async def async_setup_entry(
     subentry_manager = getattr(runtime_data, "subentry_manager", None)
     managed_subentries = getattr(subentry_manager, "managed_subentries", None)
     if isinstance(managed_subentries, Mapping):
-        for managed_subentry in managed_subentries.values():
-            await async_add_subentry(managed_subentry)
+        if config_subentry_id is not None:
+            for managed_subentry in managed_subentries.values():
+                async_add_subentry(managed_subentry)
     else:
-        await async_add_subentry(None)
+        async_add_subentry(config_subentry_id)
 
     config_entry.async_on_unload(
         async_dispatcher_connect(

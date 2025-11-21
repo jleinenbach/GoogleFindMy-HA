@@ -2394,16 +2394,23 @@ async def _async_setup_new_subentries(
         return
 
     setup_calls = getattr(config_entries, "setup_calls", None)
-    platforms: set[Platform | str] = set()
+    platform_names: list[str] = list(
+        dict.fromkeys(SERVICE_FEATURE_PLATFORMS + TRACKER_FEATURE_PLATFORMS)
+    )
     for subentry in pending_subentries:
-        platforms.update(_determine_subentry_platforms(subentry))
+        for platform in _determine_subentry_platforms(subentry):
+            name = _platform_value(platform)
+            if name and name not in platform_names:
+                platform_names.append(name)
 
         identifier = _resolve_config_subentry_identifier(subentry)
         if identifier is not None and isinstance(setup_calls, list):
             setup_calls.append(identifier)
 
-    if not platforms:
+    if not platform_names:
         return
+
+    platforms: tuple[str, ...] = tuple(sorted(platform_names))
 
     try:
         result = forward_setups(parent_entry, platforms)
