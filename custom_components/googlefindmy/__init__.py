@@ -5887,6 +5887,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     setattr(entry, "_gfm_parent_platforms_unloaded", False)
     setattr(entry, "_gfm_parent_unload_call_count", 0)
+    _safe_setattr(entry, "_gfm_parent_platforms_forwarded", False)
 
     _ensure_runtime_imports()
     # --- Multi-entry policy: allow MA; block duplicate-account (same email) ----
@@ -6711,13 +6712,24 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
     subentries = _collect_entry_subentries(entry)
 
-    unload_parent_platforms = True
+    forwarded_parent_platforms = bool(
+        getattr(entry, "_gfm_parent_platforms_forwarded", True)
+    )
+    unload_parent_platforms = forwarded_parent_platforms
     unload_callable = getattr(hass.config_entries, "async_unload_platforms", None)
     unload_call_count = int(getattr(entry, "_gfm_parent_unload_call_count", 0) or 0)
     in_progress = bool(getattr(entry, "_gfm_parent_unload_in_progress", False))
     unload_completed = bool(
         getattr(entry, "_gfm_parent_platforms_unloaded", False)
     )
+
+    if not forwarded_parent_platforms:
+        _LOGGER.debug(
+            "[%s] Parent platforms never forwarded; skipping parent unload",
+            entry.entry_id,
+        )
+        _safe_setattr(entry, "_gfm_parent_platforms_unloaded", True)
+        unload_parent_platforms = True
 
     if unload_completed and not in_progress:
         _LOGGER.debug(
