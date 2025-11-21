@@ -265,6 +265,7 @@ Key takeaways for subentry work:
 - **`ConfigSubentry` is data-only.** It exposes `data`, `subentry_id`, `subentry_type`, `title`, and `unique_id`, but no `entry_id`, `state`, or `runtime_data` fields. The dataclass is immutable (`frozen=True`).
 - **Platform forwarding remains parent-scoped.** `async_forward_entry_setups` only accepts a parent `ConfigEntry` plus the platform iterable; it cannot forward a specific `config_subentry_id` and intentionally rejects extra kwargs.
 - **Lifecycle hooks live on the parent entry.** Parent entries own task creation, reload scheduling, and reauthentication via the `ConfigEntry` methods shown above.
+- **Dispatcher hand-off:** After running the quick SSoT probe below, jump directly to the dispatcher-based forward-once pattern in [`custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md`](../custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md#dispatcher-pattern-example-single-forward--per-subentry-signal) for the recommended implementation scaffold.
 
 ### A. Configuration vs. Data Model
 

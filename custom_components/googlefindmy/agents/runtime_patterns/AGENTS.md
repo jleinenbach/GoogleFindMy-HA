@@ -10,12 +10,13 @@ Runtime contracts, platform forwarding rules, and HA lifecycle helper usage for 
 * View classes under `custom_components/googlefindmy/map_view.py` should expose constructors that accept `HomeAssistant` as the first argument. Register new views by instantiating them with the active `hass` instance (for example, `GoogleFindMyMapView(hass)`) instead of assigning `hass` after creation so the runtime contract stays consistent.
 * **Platform forwarding reminder:**
   * The parent `async_setup_entry` handles coordinator/bootstrap work and explicitly triggers platform setup for any new subentries by calling `_async_setup_new_subentries`. Home Assistant subentry flows do not automatically fan out to platforms.
-  * Forward setups **from the parent entry** via `_async_setup_new_subentries`, which uses `_invoke_with_optional_keyword` to pass `config_subentry_id` to `async_forward_entry_setups` only when the core version accepts it.
+  * Forward setups **once per platform set** via `_async_setup_new_subentries` by gathering the union of required platforms and calling `hass.config_entries.async_forward_entry_setups(parent_entry, platforms)` **without** `config_subentry_id` or other kwargs (see the interface snapshot in [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md#quick-ssot-probe-per-subentry-platform-forwarding)).
+  * Immediately after forwarding, emit dispatcher signals for each subentry so platforms receive the full `ConfigSubentry` object and can attach entities per child.
   * When forwarding or unloading the **parent entry's** own platforms, continue passing a `tuple` of platform names to `hass.config_entries.async_forward_entry_setups`/`async_forward_entry_unload`. Home Assistant caches these iterables and expects immutability during parent-level fan-out.
-  * Each platform must iterate the subentry coordinators stored on `entry.runtime_data` and add entities per child via `async_add_entities(..., config_subentry_id=subentry_id)`. Validate the identifier before emitting entities and log a debug deferral when Home Assistant omits it.
+  * Each platform must iterate the subentry coordinators stored on `entry.runtime_data` and add entities per child when signaled by the dispatcher. Deduplicate entities per subentry to avoid `_2`/`_3` suffix churn on reconnects or retries.
   * Leave a short inline comment explaining which pattern you chose whenever platform lists move between parent and subentry paths.
   * The legacy `RuntimeData.legacy_forwarded_platforms`/`legacy_forward_notice` tracking remains in the codebase for historical builds but should stay dormant on modern Home Assistant releases.
-* Use the shared `_async_setup_new_subentries` helper whenever subentries are created (during parent setup **and** at runtime) so every child receives a setup pass with the appropriate `config_subentry_id` context when supported by Core.
+* Use the shared `_async_setup_new_subentries` helper whenever subentries are created (during parent setup **and** at runtime) so every child receives a dispatcher signal after the single forward pass.
 * Once subentries exist, invoke `_async_setup_new_subentries` **without** `enforce_registration=True`. The registration delay loop is reserved for missing IDs; removing the flag prevents an infinite `ConfigEntryNotReady` retry cycle when Home Assistant is already finalizing the registry.
   * See [`docs/CONFIG_SUBENTRIES_HANDBOOK.md#automatic-retry-queue-for-unknownentry`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md#automatic-retry-queue-for-unknownentry) for the bounded retry/backoff design that `_async_setup_new_subentries` enforces when `UnknownEntry` fires.
   * The retry queue stores its handles and per-subentry attempt counts on `entry.runtime_data` (for example, `RuntimeData.subentry_retry_handles` and `RuntimeData.subentry_retry_attempts`). Keep those runtime caches typed and cleaned up during unload so strict mypy runs continue to catch handle leaks or mismatched awaitables as the queue gains new states. After adjusting imports near these helpers, run `python -m ruff check --select I --fix` to keep the lint-driven sorting from masking future docstring or typing diffs.
@@ -30,6 +31,50 @@ Runtime contracts, platform forwarding rules, and HA lifecycle helper usage for 
   * Empty deferrals still need to report as a loaded platform: log the mismatch and call `schedule_add_entities` with an empty list so Home Assistant marks the forwarded subentry as initialized even when no entities apply.
 * **Thread-safe retry scheduling:** When retry callbacks are dispatched from worker threads or callbacks that may run off the event loop, enqueue the coroutine using `hass.add_job` if available (or `loop.call_soon_threadsafe(...)` as a fallback) instead of `hass.async_create_task`. This preserves Home Assistant’s thread-safety guarantees and keeps retry handles compatible with the shared scheduler helpers.
 * **Post-refresh visibility sync:** After `coordinator.async_config_entry_first_refresh()` completes, reconcile each managed subentry’s stored `visible_device_ids` with the coordinator metadata and persist corrections via `async_update_subentry` before refreshing the coordinator’s subentry index. This keeps platform setup aligned with the latest visibility map.
+
+### Dispatcher pattern example (single forward + per-subentry signal)
+
+Use this pattern to keep platform forwarding (once) separate from per-subentry entity creation:
+
+```python
+from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
+
+
+async def _async_setup_new_subentries(
+    hass: HomeAssistant, parent_entry: ConfigEntry, subentries: Iterable[ConfigSubentry]
+) -> None:
+    platforms = {subentry.data.get("platform") for subentry in subentries}
+    await hass.config_entries.async_forward_entry_setups(parent_entry, platforms)
+
+    for subentry in subentries:
+        async_dispatcher_send(
+            hass, f"{DOMAIN}_subentry_setup_{parent_entry.entry_id}", subentry
+        )
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    seen: set[str] = set()
+
+    async def async_add_subentry(subentry: ConfigSubentry) -> None:
+        if subentry.subentry_id in seen:
+            return
+        seen.add(subentry.subentry_id)
+        entities = build_entities_for_subentry(subentry)
+        await async_add_entities(entities)
+
+    for subentry in entry.runtime_data.subentry_manager.managed_subentries.values():
+        await async_add_subentry(subentry)
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, f"{DOMAIN}_subentry_setup_{entry.entry_id}", async_add_subentry
+        )
+    )
+```
+
+The forward call runs only once per platform set, while each subentry is delivered via dispatcher with its full context, aligning with the SSoT interface snapshot in [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md#quick-ssot-probe-per-subentry-platform-forwarding).
 
 ### Regression note
 
