@@ -184,6 +184,7 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 3. **Avoid work in the `TYPE_CHECKING` block.** Limit the guarded section to imports and type-only definitions; execute all runtime logic outside the guard so mypy and the interpreter share the same behavior.
 4. **Catch only `ImportError` when providing runtime fallbacks.** Optional integration helpers should surface unexpected runtime exceptions immediately instead of masking them behind broad `except Exception:` guards. This keeps startup failures debuggable and prevents silent misconfiguration when a dependency is present but broken for other reasons.
 * `google/protobuf/**` — Local type stub overlays that model the minimal subset of `google.protobuf` used by the integration. These stubs unblock strict mypy runs without depending on the upstream package’s incomplete type hints. Update them when generated protobuf code begins to reference additional APIs or when upstream ships first-party stubs that supersede these local helpers.
+* **Documentation alignment:** When describing config entries or subentries in `docs/`, keep `docs/CONFIG_SUBENTRIES_HANDBOOK.md` as the canonical source of truth. Sync other documentation with the handbook and add inline citations back to the relevant sections whenever you reference the `homeassistant.config_entries` interface snapshot or platform-forwarding rules.
 
 >
 > | Domain | Primary use cases |

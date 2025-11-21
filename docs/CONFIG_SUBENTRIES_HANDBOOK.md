@@ -12,6 +12,260 @@ This handbook captures the validated Home Assistant 2025.11+ contract for config
 
 ## Section 0 supplement: The Reality of Core 2025.11
 
+### Interface snapshot: `homeassistant.config_entries`
+
+The 2025.11 core release exposes the following public surface for configuration entries and subentries. This snapshot preserves the canonical signatures so future updates keep platform forwarding aligned with the Single Source of Truth (SSoT):
+
+```python
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable, Coroutine, Iterable, Mapping
+from dataclasses import dataclass
+from enum import Enum, StrEnum
+from types import MappingProxyType
+from typing import Any, TypedDict
+
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.typing import UNDEFINED, ConfigType, DiscoveryInfoType, UndefinedType
+from homeassistant.loader import Integration
+
+SOURCE_BLUETOOTH = "bluetooth"
+SOURCE_DHCP = "dhcp"
+SOURCE_DISCOVERY = "discovery"
+SOURCE_ESPHOME = "esphome"
+SOURCE_HARDWARE = "hardware"
+SOURCE_HASSIO = "hassio"
+SOURCE_HOMEKIT = "homekit"
+SOURCE_IMPORT = "import"
+SOURCE_INTEGRATION_DISCOVERY = "integration_discovery"
+SOURCE_MQTT = "mqtt"
+SOURCE_SSDP = "ssdp"
+SOURCE_SYSTEM = "system"
+SOURCE_USB = "usb"
+SOURCE_USER = "user"
+SOURCE_ZEROCONF = "zeroconf"
+SOURCE_IGNORE = "ignore"
+SOURCE_REAUTH = "reauth"
+SOURCE_RECONFIGURE = "reconfigure"
+
+class ConfigEntryState(Enum):
+    LOADED = "loaded", True
+    SETUP_ERROR = "setup_error", True
+    MIGRATION_ERROR = "migration_error", False
+    SETUP_RETRY = "setup_retry", True
+    NOT_LOADED = "not_loaded", True
+    FAILED_UNLOAD = "failed_unload", False
+    SETUP_IN_PROGRESS = "setup_in_progress", False
+    UNLOAD_IN_PROGRESS = "unload_in_progress", False
+
+    @property
+    def recoverable(self) -> bool: ...
+
+class ConfigEntryDisabler(StrEnum):
+    USER = "user"
+
+class ConfigError(Exception): ...
+class UnknownEntry(ConfigError): ...
+class UnknownSubEntry(ConfigError): ...
+class OperationNotAllowed(ConfigError): ...
+
+class ConfigFlowContext(TypedDict, total=False):
+    source: str
+    entry_id: str
+    unique_id: str | None
+
+class ConfigSubentryData(TypedDict):
+    data: Mapping[str, Any]
+    subentry_type: str
+    title: str
+    unique_id: str | None
+
+@dataclass(frozen=True, kw_only=True)
+class ConfigSubentry:
+    data: MappingProxyType[str, Any]
+    subentry_id: str
+    subentry_type: str
+    title: str
+    unique_id: str | None
+
+    def as_dict(self) -> dict[str, Any]: ...
+
+class ConfigEntry:
+    entry_id: str
+    domain: str
+    title: str
+    data: MappingProxyType[str, Any]
+    options: MappingProxyType[str, Any]
+    subentries: MappingProxyType[str, ConfigSubentry]
+    unique_id: str | None
+    state: ConfigEntryState
+    reason: str | None
+    version: int
+    minor_version: int
+    disabled_by: ConfigEntryDisabler | None
+    source: str
+    pref_disable_new_entities: bool
+    pref_disable_polling: bool
+    runtime_data: Any
+
+    def __init__(
+        self,
+        *,
+        data: Mapping[str, Any],
+        domain: str,
+        title: str,
+        source: str,
+        subentries_data: Iterable[ConfigSubentryData] | None,
+        unique_id: str | None,
+        version: int,
+    ) -> None: ...
+
+    @property
+    def supports_options(self) -> bool: ...
+
+    @property
+    def supports_reconfigure(self) -> bool: ...
+
+    async def async_setup(
+        self,
+        hass: HomeAssistant,
+        *,
+        integration: Integration | None = None,
+    ) -> None: ...
+
+    async def async_unload(
+        self, hass: HomeAssistant, *, integration: Integration | None = None
+    ) -> bool: ...
+
+    async def async_remove(self, hass: HomeAssistant) -> None: ...
+
+    @callback
+    def async_on_unload(
+        self, func: Callable[[], Coroutine[Any, Any, None] | None]
+    ) -> None: ...
+
+    @callback
+    def async_start_reauth(
+        self,
+        hass: HomeAssistant,
+        context: ConfigFlowContext | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    @callback
+    def async_create_task(
+        self,
+        hass: HomeAssistant,
+        target: Coroutine[Any, Any, Any],
+        name: str | None = None,
+        eager_start: bool = True,
+    ) -> asyncio.Task: ...
+
+    @callback
+    def async_create_background_task(
+        self,
+        hass: HomeAssistant,
+        target: Coroutine[Any, Any, Any],
+        name: str,
+        eager_start: bool = True,
+    ) -> asyncio.Task: ...
+
+class ConfigEntries:
+    def __init__(self, hass: HomeAssistant, hass_config: ConfigType) -> None: ...
+
+    @callback
+    def async_get_entry(self, entry_id: str) -> ConfigEntry | None: ...
+
+    @callback
+    def async_get_known_entry(self, entry_id: str) -> ConfigEntry: ...
+
+    @callback
+    def async_entries(
+        self,
+        domain: str | None = None,
+        include_ignore: bool = True,
+        include_disabled: bool = True,
+    ) -> list[ConfigEntry]: ...
+
+    @callback
+    def async_entry_for_domain_unique_id(
+        self, domain: str, unique_id: str
+    ) -> ConfigEntry | None: ...
+
+    async def async_add(self, entry: ConfigEntry) -> None: ...
+
+    async def async_remove(self, entry_id: str) -> dict[str, Any]: ...
+
+    async def async_setup(self, entry_id: str, _lock: bool = True) -> bool: ...
+
+    async def async_unload(self, entry_id: str, _lock: bool = True) -> bool: ...
+
+    @callback
+    def async_schedule_reload(self, entry_id: str) -> None: ...
+
+    async def async_reload(self, entry_id: str) -> bool: ...
+
+    async def async_set_disabled_by(
+        self, entry_id: str, disabled_by: ConfigEntryDisabler | None
+    ) -> bool: ...
+
+    @callback
+    def async_update_entry(
+        self,
+        entry: ConfigEntry,
+        *,
+        data: Mapping[str, Any] | UndefinedType = UNDEFINED,
+        options: Mapping[str, Any] | UndefinedType = UNDEFINED,
+        title: str | UndefinedType = UNDEFINED,
+        unique_id: str | None | UndefinedType = UNDEFINED,
+        version: int | UndefinedType = UNDEFINED,
+    ) -> bool: ...
+
+    @callback
+    def async_add_subentry(self, entry: ConfigEntry, subentry: ConfigSubentry) -> bool: ...
+
+    @callback
+    def async_remove_subentry(self, entry: ConfigEntry, subentry_id: str) -> bool: ...
+
+    @callback
+    def async_update_subentry(
+        self,
+        entry: ConfigEntry,
+        subentry: ConfigSubentry,
+        *,
+        data: Mapping[str, Any] | UndefinedType = UNDEFINED,
+        title: str | UndefinedType = UNDEFINED,
+        unique_id: str | None | UndefinedType = UNDEFINED,
+    ) -> bool: ...
+
+    async def async_forward_entry_setups(
+        self, entry: ConfigEntry, platforms: Iterable[Platform | str]
+    ) -> None:
+        """
+        Forward the setup of an entry to platforms.
+        NOTE: Does NOT accept config_subentry_id or kwargs.
+        """
+        ...
+
+    async def async_forward_entry_unload(
+        self, entry: ConfigEntry, domain: Platform | str
+    ) -> bool: ...
+
+    async def async_unload_platforms(
+        self, entry: ConfigEntry, platforms: Iterable[Platform | str]
+    ) -> bool: ...
+
+    async def async_wait_component(self, entry: ConfigEntry) -> bool: ...
+```
+
+Key takeaways for subentry work:
+
+- **`ConfigSubentry` is data-only.** It exposes `data`, `subentry_id`, `subentry_type`, `title`, and `unique_id`, but no `entry_id`, `state`, or `runtime_data` fields. The dataclass is immutable (`frozen=True`).
+- **Platform forwarding remains parent-scoped.** `async_forward_entry_setups` only accepts a parent `ConfigEntry` plus the platform iterable; it cannot forward a specific `config_subentry_id` and intentionally rejects extra kwargs.
+- **Lifecycle hooks live on the parent entry.** Parent entries own task creation, reload scheduling, and reauthentication via the `ConfigEntry` methods shown above.
+
 ### A. Configuration vs. Data Model
 
 In Core 2025.11, the `ConfigEntry` class contains a dictionary of subentries:
