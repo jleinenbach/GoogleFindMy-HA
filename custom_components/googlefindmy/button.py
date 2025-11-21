@@ -105,29 +105,12 @@ async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-    config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device button entities."""
     coordinator = resolve_coordinator(config_entry)
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = config_entry
-
-    forward_calls = getattr(getattr(hass, "config_entries", None), "forward_calls", [])
-    if config_subentry_id is None and forward_calls:
-        _LOGGER.debug(
-            "Button setup deferred because Home Assistant will forward subentry setups"
-        )
-        schedule_add_entities(
-            hass,
-            async_add_entities,
-            entities=(),
-            update_before_add=True,
-            config_subentry_id=None,
-            log_owner="Button setup",
-            logger=_LOGGER,
-        )
-        return
 
     platform_getter = getattr(entity_platform, "async_get_current_platform", None)
     if callable(platform_getter):
@@ -140,7 +123,10 @@ async def async_setup_entry(
                 "async_trigger_coordinator_refresh",
             )
 
-    def _collect_tracker_scopes(hint_subentry_id: str | None = None) -> list[_TrackerScope]:
+    def _collect_tracker_scopes(
+        hint_subentry_id: str | None = None,
+        forwarded_config_id: str | None = None,
+    ) -> list[_TrackerScope]:
         scopes: dict[str, _TrackerScope] = {}
 
         subentry_metas = getattr(coordinator, "_subentry_metadata", None)
@@ -192,7 +178,11 @@ async def async_setup_entry(
         if hint_subentry_id:
             scopes.setdefault(
                 hint_subentry_id,
-                _TrackerScope(TRACKER_SUBENTRY_KEY, hint_subentry_id, hint_subentry_id),
+                _TrackerScope(
+                    TRACKER_SUBENTRY_KEY,
+                    forwarded_config_id or hint_subentry_id,
+                    hint_subentry_id,
+                ),
             )
 
         if scopes:
@@ -202,7 +192,7 @@ async def async_setup_entry(
         return [
             _TrackerScope(
                 TRACKER_SUBENTRY_KEY,
-                config_subentry_id,
+                forwarded_config_id,
                 fallback_identifier,
             )
         ]
@@ -211,11 +201,11 @@ async def async_setup_entry(
     primary_scope: _TrackerScope | None = None
     primary_scheduler: Callable[[Iterable[ButtonEntity], bool], None] | None = None
 
-    def _add_scope(scope: _TrackerScope) -> None:
+    def _add_scope(scope: _TrackerScope, forwarded_config_id: str | None) -> None:
         nonlocal primary_scope, primary_scheduler
 
         sanitized_config_id = ensure_config_subentry_id(
-            config_entry, "button", scope.config_subentry_id or config_subentry_id
+            config_entry, "button", scope.config_subentry_id or forwarded_config_id
         )
         if sanitized_config_id is None:
             _LOGGER.debug(
@@ -302,6 +292,8 @@ async def async_setup_entry(
                 len(initial_entities),
             )
             _schedule_button_entities(initial_entities, True)
+        else:
+            _schedule_button_entities([], True)
 
         @callback
         def _add_new_devices() -> None:
@@ -317,13 +309,9 @@ async def async_setup_entry(
         unsub = coordinator.async_add_listener(_add_new_devices)
         config_entry.async_on_unload(unsub)
 
-    for scope in _collect_tracker_scopes(config_subentry_id):
-        _add_scope(scope)
+    seen_subentries: set[str | None] = set()
 
-    signal = f"googlefindmy_subentry_setup_{config_entry.entry_id}"
-
-    @callback
-    def _handle_subentry_setup(subentry: Any | None = None) -> None:
+    async def async_add_subentry(subentry: Any | None = None) -> None:
         subentry_identifier = None
         if isinstance(subentry, str):
             subentry_identifier = subentry
@@ -332,14 +320,32 @@ async def async_setup_entry(
                 subentry, "entry_id", None
             )
 
-        for scope in _collect_tracker_scopes(subentry_identifier):
-            _add_scope(scope)
+        if subentry_identifier in seen_subentries:
+            return
+        seen_subentries.add(subentry_identifier)
 
-    config_entry.async_on_unload(
-        async_dispatcher_connect(hass, signal, _handle_subentry_setup)
-    )
+        for scope in _collect_tracker_scopes(
+            subentry_identifier, forwarded_config_id=subentry_identifier
+        ):
+            _add_scope(scope, subentry_identifier)
 
     runtime_data = getattr(config_entry, "runtime_data", None)
+    subentry_manager = getattr(runtime_data, "subentry_manager", None)
+    managed_subentries = getattr(subentry_manager, "managed_subentries", None)
+    if isinstance(managed_subentries, Mapping):
+        for managed_subentry in managed_subentries.values():
+            await async_add_subentry(managed_subentry)
+    else:
+        await async_add_subentry(None)
+
+    config_entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            f"{DOMAIN}_subentry_setup_{config_entry.entry_id}",
+            async_add_subentry,
+        )
+    )
+
     recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
 
     if isinstance(recovery_manager, EntityRecoveryManager):
