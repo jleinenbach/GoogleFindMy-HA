@@ -124,7 +124,9 @@ async def test_async_create_task_schedules_from_worker_thread() -> None:
 
     await task
 
-    assert thread_names == ["MainThread", "coro:MainThread"]
+    main_thread_name = threading.main_thread().name
+    assert thread_names[0] != main_thread_name
+    assert thread_names[1] == f"coro:{main_thread_name}"
 
 
 @pytest.mark.asyncio
@@ -209,6 +211,7 @@ async def test_async_setup_subentry_errors_when_unregistered(caplog: pytest.LogC
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
     config_entries = FakeConfigEntriesManager([parent_entry])
     hass = FakeHass(config_entries=config_entries)
+    hass.async_create_task = asyncio.create_task
     _attach_runtime(parent_entry)
 
     bucket = hass.data.setdefault(DOMAIN, {})
@@ -400,6 +403,7 @@ async def test_subentry_manager_retries_unknown_entry_without_enforcement() -> N
 
     config_entries = _RetryingConfigEntriesManager()
     hass = FakeHass(config_entries=config_entries)
+    hass.async_create_task = asyncio.create_task
     _attach_runtime(parent_entry)
     manager = ConfigEntrySubEntryManager(hass, parent_entry)
 

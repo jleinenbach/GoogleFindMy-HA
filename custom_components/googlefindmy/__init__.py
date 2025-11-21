@@ -48,7 +48,6 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -2244,60 +2243,9 @@ def _queue_subentry_retry(
 def _async_create_task(
     hass: HomeAssistant, coro: CoroutineType, *, name: str | None = None
 ) -> asyncio.Task[Any]:
-    """Schedule ``coro`` on Home Assistant's loop in a thread-safe manner."""
+    """Schedule ``coro`` using Home Assistant's task helper."""
 
-    add_job = getattr(hass, "add_job", None)
-    create_task = getattr(hass, "create_task", None)
-    async_create_task = getattr(hass, "async_create_task", None)
-    loop = getattr(hass, "loop", None)
-
-    try:
-        running_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        running_loop = None
-
-    if loop is None:
-        if running_loop is None:
-            msg = "Home Assistant loop unavailable while scheduling task"
-            raise RuntimeError(msg)
-        loop = running_loop
-
-    def _schedule() -> asyncio.Task[Any]:
-        task: asyncio.Task[Any]
-
-        if callable(add_job):
-            scheduled = add_job(coro)
-            if isinstance(scheduled, asyncio.Task):
-                task = scheduled
-            else:
-                task = loop.create_task(coro)
-        elif callable(create_task):
-            task = cast(asyncio.Task[Any], create_task(coro, name=name))
-        elif callable(async_create_task):
-            task = cast(asyncio.Task[Any], async_create_task(coro, name=name))
-        else:
-            task = loop.create_task(coro)
-
-        with suppress(RuntimeError):
-            if name and hasattr(task, "set_name"):
-                task.set_name(name)
-        return task
-
-    if running_loop is loop:
-        return _schedule()
-
-    result: Future[asyncio.Task[Any]] = Future()
-
-    def _threadsafe_schedule() -> None:
-        try:
-            task = _schedule()
-        except Exception as err:  # pragma: no cover - defensive
-            result.set_exception(err)
-            return
-        result.set_result(task)
-
-    loop.call_soon_threadsafe(_threadsafe_schedule)
-    return result.result()
+    return hass.async_create_task(coro, name=name)
 
 
 async def _async_retry_pending_subentries(
