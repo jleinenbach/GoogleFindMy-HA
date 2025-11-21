@@ -27,7 +27,14 @@ import asyncio
 import inspect
 import logging
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, MutableMapping
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    Mapping,
+    MutableMapping,
+)
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.config_entries import ConfigEntry
@@ -38,8 +45,6 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.network import get_url
-
-from .ha_typing import CoordinatorEntity, callback
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
@@ -68,6 +73,7 @@ from .const import (
     service_device_identifier,
 )
 from .coordinator import GoogleFindMyCoordinator
+from .ha_typing import CoordinatorEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
 
