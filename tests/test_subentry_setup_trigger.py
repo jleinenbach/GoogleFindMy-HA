@@ -436,6 +436,10 @@ async def test_async_setup_new_subentries_aggregates_platforms_and_dispatches(
     _attach_runtime(parent_entry)
 
     monkeypatch.setattr(
+        "homeassistant.helpers.dispatcher.async_dispatcher_send",
+        capture_async_dispatcher_send,
+    )
+    monkeypatch.setattr(
         "custom_components.googlefindmy.async_dispatcher_send",
         capture_async_dispatcher_send,
     )
@@ -482,17 +486,37 @@ async def test_async_setup_new_subentries_ignores_value_error(
     _attach_runtime(parent_entry)
 
     monkeypatch.setattr(
+        "homeassistant.helpers.dispatcher.async_dispatcher_send",
+        capture_async_dispatcher_send,
+    )
+    monkeypatch.setattr(
         "custom_components.googlefindmy.async_dispatcher_send",
         capture_async_dispatcher_send,
     )
 
-    def _raise_value_error(*_: object, **__: object) -> None:
+    forward_calls: list[tuple[FakeConfigEntry, tuple[str, ...]]] = []
+
+    def _raise_value_error(
+        entry: FakeConfigEntry, platforms: Iterable[str | Any]
+    ) -> None:
+        forward_calls.append((entry, tuple(platforms)))
         raise ValueError("already setup")
 
     monkeypatch.setattr(config_entries, "async_forward_entry_setups", _raise_value_error)
 
     await _async_setup_new_subentries(hass, parent_entry, [subentry])
 
+    assert forward_calls == [
+        (
+            parent_entry,
+            (
+                "binary_sensor",
+                "button",
+                "device_tracker",
+                "sensor",
+            ),
+        )
+    ]
     assert hass.dispatcher_signals == [
         (f"googlefindmy_subentry_setup_{parent_entry.entry_id}", (subentry,))
     ]
