@@ -2394,20 +2394,15 @@ async def _async_setup_new_subentries(
         return
 
     setup_calls = getattr(config_entries, "setup_calls", None)
-    identifiers: list[str] = []
     platforms: set[Platform | str] = set()
     for subentry in pending_subentries:
-        identifier = _resolve_config_subentry_identifier(subentry)
-        if identifier is None:
-            continue
-
-        identifiers.append(identifier)
         platforms.update(_determine_subentry_platforms(subentry))
 
-        if isinstance(setup_calls, list):
+        identifier = _resolve_config_subentry_identifier(subentry)
+        if identifier is not None and isinstance(setup_calls, list):
             setup_calls.append(identifier)
 
-    if not identifiers or not platforms:
+    if not platforms:
         return
 
     try:
@@ -2423,15 +2418,14 @@ async def _async_setup_new_subentries(
             await result
 
         _LOGGER.debug(
-            "[%s] Forwarded setup for config subentries %s to platforms: %s",
+            "[%s] Forwarded setup for config subentries to platforms: %s",
             parent_entry.entry_id,
-            identifiers,
             platforms,
         )
 
-    signal = f"googlefindmy_subentry_setup_{parent_entry.entry_id}"
-    for identifier in identifiers:
-        async_dispatcher_send(hass, signal, identifier)
+    signal = f"{DOMAIN}_subentry_setup_{parent_entry.entry_id}"
+    for subentry in pending_subentries:
+        async_dispatcher_send(hass, signal, subentry)
 
 def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
     """Return the shared FCM lock, creating it if missing."""

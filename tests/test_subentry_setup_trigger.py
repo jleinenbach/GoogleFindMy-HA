@@ -434,12 +434,10 @@ async def test_async_setup_new_subentries_aggregates_platforms_and_dispatches(
     hass = FakeHass(config_entries=config_entries)
     _attach_runtime(parent_entry)
 
-    dispatched: list[tuple[str, str]] = []
+    dispatched: list[tuple[str, Any]] = []
     monkeypatch.setattr(
         "custom_components.googlefindmy.async_dispatcher_send",
-        lambda hass_arg, signal, subentry_id: dispatched.append(
-            (signal, subentry_id)
-        ),
+        lambda hass_arg, signal, subentry: dispatched.append((signal, subentry)),
     )
 
     await _async_setup_new_subentries(
@@ -460,8 +458,8 @@ async def test_async_setup_new_subentries_aggregates_platforms_and_dispatches(
 
     expected_signal = f"googlefindmy_subentry_setup_{parent_entry.entry_id}"
     assert dispatched == [
-        (expected_signal, tracker_subentry.subentry_id),
-        (expected_signal, service_subentry.subentry_id),
+        (expected_signal, tracker_subentry),
+        (expected_signal, service_subentry),
     ]
 
 
@@ -483,12 +481,10 @@ async def test_async_setup_new_subentries_ignores_value_error(
     hass = FakeHass(config_entries=config_entries)
     _attach_runtime(parent_entry)
 
-    dispatched: list[tuple[str, str]] = []
+    dispatched: list[tuple[str, Any]] = []
     monkeypatch.setattr(
         "custom_components.googlefindmy.async_dispatcher_send",
-        lambda hass_arg, signal, subentry_id: dispatched.append(
-            (signal, subentry_id)
-        ),
+        lambda hass_arg, signal, subentry: dispatched.append((signal, subentry)),
     )
 
     def _raise_value_error(*_: object, **__: object) -> None:
@@ -499,7 +495,7 @@ async def test_async_setup_new_subentries_ignores_value_error(
     await _async_setup_new_subentries(hass, parent_entry, [subentry])
 
     assert dispatched == [
-        (f"googlefindmy_subentry_setup_{parent_entry.entry_id}", subentry.subentry_id)
+        (f"googlefindmy_subentry_setup_{parent_entry.entry_id}", subentry)
     ]
     assert config_entries.setup_calls == [subentry.subentry_id]
 
