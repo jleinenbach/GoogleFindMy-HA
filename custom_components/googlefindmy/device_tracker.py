@@ -506,11 +506,28 @@ async def async_setup_entry(
     else:
         await async_add_subentry(None)
 
+    @callback
+    def _handle_subentry_setup(subentry: Any | None = None) -> None:
+        """Schedule subentry setup from dispatcher callbacks.
+
+        Dispatcher callbacks must schedule coroutines under Home Assistant's job
+        runner (or stubbed equivalents) instead of awaiting them directly.
+        """
+
+        hass_async_create_task = getattr(hass, "async_create_task", None)
+        if callable(hass_async_create_task):
+            hass_async_create_task(async_add_subentry(subentry))
+            return
+
+        hass_add_job = getattr(hass, "add_job", None)
+        if callable(hass_add_job):
+            hass_add_job(async_add_subentry(subentry))
+
     config_entry.async_on_unload(
         async_dispatcher_connect(
             hass,
             f"{DOMAIN}_subentry_setup_{config_entry.entry_id}",
-            async_add_subentry,
+            _handle_subentry_setup,
         )
     )
 
