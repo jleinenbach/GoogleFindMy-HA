@@ -2394,9 +2394,7 @@ async def _async_setup_new_subentries(
         return
 
     setup_calls = getattr(config_entries, "setup_calls", None)
-    platform_names: list[str] = list(
-        dict.fromkeys(SERVICE_FEATURE_PLATFORMS + TRACKER_FEATURE_PLATFORMS)
-    )
+    platform_names: list[str] = []
     for subentry in pending_subentries:
         for platform in _determine_subentry_platforms(subentry):
             name = _platform_value(platform)
