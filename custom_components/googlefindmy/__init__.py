@@ -2128,7 +2128,7 @@ def _domain_data(hass: HomeAssistant) -> GoogleFindMyDomainData:
 _SUBENTRY_SETUP_RETRY_DELAY = 2.0
 """Delay (in seconds) before retrying UnknownEntry setup attempts."""
 
-_SUBENTRY_SETUP_MAX_ATTEMPTS = 3
+_SUBENTRY_SETUP_MAX_ATTEMPTS = 20
 """Maximum number of setup attempts recorded per config subentry."""
 
 type CoroutineType = Coroutine[Any, Any, Any]
