@@ -191,6 +191,7 @@ from .const import (
     CONFIG_ENTRY_VERSION as CONFIG_ENTRY_VERSION,
 )
 from .email import normalize_email, unique_account_id
+from .ha_typing import callback
 
 # Shared FCM provider (HA-managed singleton)
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -2165,6 +2166,7 @@ def _clear_subentry_retry_entry(
             _cancel_subentry_retry_handle(parent_entry)
 
 
+@callback
 def _schedule_subentry_retry(
     hass: HomeAssistant, parent_entry: MyConfigEntry
 ) -> None:
@@ -2191,6 +2193,7 @@ def _schedule_subentry_retry(
     if entry_id in handles_map:
         return
 
+    @callback
     def _retry_callback(_now: Any) -> None:
         handles_map.pop(entry_id, None)
         _async_create_task(
