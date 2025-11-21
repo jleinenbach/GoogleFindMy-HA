@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from importlib import import_module
 from typing import Any, Protocol, cast
+
+import ecdsa  # type: ignore[import-untyped]
 
 
 class CurveFpProtocol(Protocol):
@@ -30,22 +31,20 @@ class CurveParametersProtocol(Protocol):
 def load_curve() -> CurveParametersProtocol:
     """Load the SECP160r1 curve parameters with runtime imports.
 
-    Using ``import_module`` sidesteps mypy's missing-stub warnings while keeping
-    the returned object fully typed via the Protocol above.
+    The eager module-level import keeps the returned object fully typed while
+    matching the access pattern used by the other helpers below.
     """
 
-    return cast(CurveParametersProtocol, getattr(import_module("ecdsa"), "SECP160r1"))
+    return cast(CurveParametersProtocol, ecdsa.SECP160r1)
 
 
 def load_curve_fp_class() -> type[CurveFpProtocol]:
     """Return the ``CurveFp`` class from ``ecdsa.ellipticcurve``."""
 
-    return cast(
-        type[CurveFpProtocol], getattr(import_module("ecdsa.ellipticcurve"), "CurveFp")
-    )
+    return cast(type[CurveFpProtocol], ecdsa.ellipticcurve.CurveFp)
 
 
 def load_point_class() -> type[Any]:
     """Return the ``Point`` class from ``ecdsa.ellipticcurve``."""
 
-    return cast(type[Any], getattr(import_module("ecdsa.ellipticcurve"), "Point"))
+    return cast(type[Any], ecdsa.ellipticcurve.Point)
