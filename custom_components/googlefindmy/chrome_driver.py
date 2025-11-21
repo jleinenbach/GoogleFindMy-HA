@@ -48,21 +48,27 @@ def _load_uc() -> Any:
 
 
 _UC_CACHE = SimpleNamespace(module=None)
-uc: Any = SimpleNamespace(ChromeOptions=None, Chrome=None)
 
 
-def get_uc() -> Any:
-    """Lazily import ``undetected_chromedriver``."""
+def _get_uc_module() -> Any:
+    """Lazily import and cache ``undetected_chromedriver``."""
 
     if _UC_CACHE.module is None:
-        if getattr(uc, "Chrome", None) is not None and getattr(uc, "ChromeOptions", None) is not None:
-            _UC_CACHE.module = uc
-        else:
-            _UC_CACHE.module = cast(Any, _load_uc())
-
-        globals()["uc"] = _UC_CACHE.module
+        _UC_CACHE.module = cast(Any, _load_uc())
 
     return _UC_CACHE.module
+
+
+def _reset_uc_cache(module: Any | None = None) -> None:
+    """Reset the cached ``undetected_chromedriver`` module.
+
+    This helper exists for tests that need to inject a stub without
+    importing the real dependency.
+    """
+
+    _UC_CACHE.module = module
+
+
 type ChromeOptions = Any
 
 
@@ -116,11 +122,11 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
 
     Returns
     -------
-    uc.ChromeOptions
+    undetected_chromedriver.ChromeOptions
         The configured Chrome options instance.
     """
 
-    chrome_options = get_uc().ChromeOptions()
+    chrome_options = _get_uc_module().ChromeOptions()
     if not headless:
         chrome_options.add_argument("--start-maximized")
     else:
@@ -152,7 +158,7 @@ def get_driver(chrome_path: str | None, *, headless: bool = False) -> WebDriver:
     if chrome_path:
         options.binary_location = chrome_path
 
-    return cast(WebDriver, get_uc().Chrome(options=options))
+    return cast(WebDriver, _get_uc_module().Chrome(options=options))
 
 
 def create_driver(chrome_path: str | None = None, *, headless: bool = False) -> WebDriver:
@@ -171,7 +177,7 @@ def create_driver(chrome_path: str | None = None, *, headless: bool = False) -> 
         fallback_options = get_options(headless=headless)
         fallback_options.binary_location = fallback_path
         try:
-            return cast(WebDriver, get_uc().Chrome(options=fallback_options))
+            return cast(WebDriver, _get_uc_module().Chrome(options=fallback_options))
         except Exception as fallback_err:  # noqa: BLE001
             LOGGER.warning(
                 "ChromeDriver failed using system binary: %s", fallback_err
