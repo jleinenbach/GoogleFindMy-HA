@@ -6389,11 +6389,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
         raise ConfigEntryNotReady(f"Initial refresh failed: {err}") from err
 
-    metadata = getattr(coordinator, "_subentry_metadata", None)
+    raw_metadata = getattr(coordinator, "_subentry_metadata", None)
+    metadata: Mapping[str, object] | None
+    if isinstance(raw_metadata, Mapping):
+        metadata = raw_metadata
+    else:
+        metadata = None
     pending_visibility_updates: list[
         Awaitable[ConfigSubentry | bool | None] | ConfigSubentry | bool | None
     ] = []
     key_field = getattr(runtime_subentry_manager, "_key_field", "group_key")
+    has_visibility_metadata = metadata is not None
 
     def _normalize_visible_ids(raw: object) -> tuple[str, ...]:
         if isinstance(raw, (str, bytes)) or not isinstance(raw, Iterable):
@@ -6406,7 +6412,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
         return tuple(deduped_ids)
 
-    if isinstance(metadata, Mapping):
+    if metadata is not None:
         for group_key, subentry_meta in metadata.items():
             managed_subentry = runtime_subentry_manager.managed_subentries.get(
                 group_key
@@ -6445,7 +6451,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 err,
             )
 
-    if pending_visibility_updates:
+    if has_visibility_metadata or pending_visibility_updates:
         runtime_subentry_manager._refresh_from_entry()
         coordinator._refresh_subentry_index()  # noqa: SLF001 - align platform setup
 
