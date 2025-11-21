@@ -25,7 +25,8 @@ Provided sensors:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any, NamedTuple
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -34,6 +35,7 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -50,12 +52,21 @@ from .coordinator import GoogleFindMyCoordinator, format_epoch_utc
 from .entity import (
     GoogleFindMyEntity,
     ensure_config_subentry_id,
+    ensure_dispatcher_dependencies,
     resolve_coordinator,
     schedule_add_entities,
 )
 from .ha_typing import BinarySensorEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _ServiceScope(NamedTuple):
+    """Resolved service subentry scope for entity creation."""
+
+    subentry_key: str
+    config_subentry_id: str | None
+    identifier: str
 
 # --------------------------------------------------------------------------------------
 # Entity descriptions
@@ -79,7 +90,7 @@ AUTH_STATUS_DESC = BinarySensorEntityDescription(
 # --------------------------------------------------------------------------------------
 # Platform setup
 # --------------------------------------------------------------------------------------
-async def async_setup_entry(
+async def async_setup_entry(  # noqa: PLR0915
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
@@ -90,92 +101,191 @@ async def async_setup_entry(
     Registers both diagnostic sensors under the per-entry service device.
     """
     coordinator = resolve_coordinator(entry)
-    service_meta = coordinator.get_subentry_metadata(feature="binary_sensor")
-    service_subentry_key = (
-        service_meta.key if service_meta is not None else SERVICE_SUBENTRY_KEY
-    )
-    service_meta_config_id = (
-        getattr(service_meta, "config_subentry_id", None)
-        if service_meta is not None
-        else None
-    )
-    service_subentry_identifier = coordinator.stable_subentry_identifier(
-        key=service_subentry_key
-    )
-    service_config_subentry_id = ensure_config_subentry_id(
-        entry,
-        "binary_sensor",
-        config_subentry_id or service_meta_config_id,
-    )
+    ensure_dispatcher_dependencies(hass)
+    if getattr(coordinator, "config_entry", None) is None:
+        coordinator.config_entry = entry
 
-    _LOGGER.debug(
-        "Binary sensor setup: subentry_key=%s, config_subentry_id=%s",
-        service_subentry_key,
-        service_config_subentry_id,
-    )
+    def _collect_service_scopes(hint_subentry_id: str | None = None) -> list[_ServiceScope]:
+        scopes: dict[str, _ServiceScope] = {}
 
-    if service_config_subentry_id is None:
+        subentry_metas = getattr(coordinator, "_subentry_metadata", None)
+        if isinstance(subentry_metas, Mapping):
+            for key, meta in subentry_metas.items():
+                meta_features = getattr(meta, "features", ())
+                if "binary_sensor" not in meta_features:
+                    continue
+
+                stable_identifier = getattr(meta, "stable_identifier", None)
+                identifier = (
+                    stable_identifier() if callable(stable_identifier) else None
+                    or getattr(meta, "config_subentry_id", None)
+                    or coordinator.stable_subentry_identifier(key=key)
+                )
+                scopes[identifier] = _ServiceScope(
+                    key,
+                    getattr(meta, "config_subentry_id", None),
+                    identifier,
+                )
+
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, Mapping):
+            for subentry in subentries.values():
+                data = getattr(subentry, "data", {})
+                group_key = SERVICE_SUBENTRY_KEY
+                subentry_features: Iterable[Any] = ()
+                if isinstance(data, Mapping):
+                    group_key = data.get("group_key", group_key)
+                    subentry_features = data.get("features", ())
+
+                if "binary_sensor" not in subentry_features:
+                    continue
+
+                config_id = (
+                    getattr(subentry, "subentry_id", None)
+                    or getattr(subentry, "entry_id", None)
+                )
+                identifier = (
+                    config_id
+                    or coordinator.stable_subentry_identifier(key=group_key)
+                    or SERVICE_SUBENTRY_KEY
+                )
+                scopes.setdefault(
+                    identifier,
+                    _ServiceScope(group_key or SERVICE_SUBENTRY_KEY, config_id, identifier),
+                )
+
+        if hint_subentry_id:
+            identifier = hint_subentry_id
+            scopes.setdefault(
+                identifier,
+                _ServiceScope(SERVICE_SUBENTRY_KEY, hint_subentry_id, identifier),
+            )
+
+        if scopes:
+            return list(scopes.values())
+
+        fallback_identifier = coordinator.stable_subentry_identifier(
+            feature="binary_sensor"
+        )
+        return [
+            _ServiceScope(
+                SERVICE_SUBENTRY_KEY,
+                config_subentry_id,
+                fallback_identifier,
+            )
+        ]
+
+    added_unique_ids: set[str] = set()
+    primary_scope: _ServiceScope | None = None
+    primary_scheduler: Callable[[Iterable[BinarySensorEntity], bool], None] | None = None
+
+    def _add_scope(scope: _ServiceScope) -> None:
+        nonlocal primary_scope, primary_scheduler
+        sanitized_config_id = ensure_config_subentry_id(
+            entry, "binary_sensor", scope.config_subentry_id or config_subentry_id
+        )
+        if sanitized_config_id is None:
+            _LOGGER.debug(
+                "Binary sensor setup: awaiting config_subentry_id for key '%s'; deferring",
+                scope.subentry_key,
+            )
+            return
+
+        subentry_identifier = scope.identifier or sanitized_config_id
+
+        def _schedule_service_entities(
+            new_entities: Iterable[BinarySensorEntity],
+            update_before_add: bool = True,
+        ) -> None:
+            schedule_add_entities(
+                coordinator.hass,
+                async_add_entities,
+                entities=new_entities,
+                update_before_add=update_before_add,
+                config_subentry_id=sanitized_config_id,
+                log_owner="Binary sensor setup",
+                logger=_LOGGER,
+            )
+
+        if primary_scope is None:
+            primary_scope = scope
+        if primary_scheduler is None:
+            primary_scheduler = _schedule_service_entities
+
+        entities: list[BinarySensorEntity] = [
+            GoogleFindMyPollingSensor(
+                coordinator,
+                entry,
+                subentry_key=scope.subentry_key,
+                subentry_identifier=subentry_identifier,
+            ),
+            GoogleFindMyAuthStatusSensor(
+                coordinator,
+                entry,
+                subentry_key=scope.subentry_key,
+                subentry_identifier=subentry_identifier,
+            ),
+        ]
+
+        deduped_entities: list[BinarySensorEntity] = []
+        for entity in entities:
+            unique_id = getattr(entity, "unique_id", None)
+            if isinstance(unique_id, str) and unique_id in added_unique_ids:
+                continue
+            if isinstance(unique_id, str):
+                added_unique_ids.add(unique_id)
+            deduped_entities.append(entity)
+
+        if not deduped_entities:
+            return
+
         _LOGGER.debug(
-            "Binary sensor setup: awaiting config_subentry_id for key '%s'; skipping",
-            service_subentry_key,
+            "Binary sensor setup: subentry_key=%s, config_subentry_id=%s",
+            scope.subentry_key,
+            sanitized_config_id,
         )
-        return
+        _schedule_service_entities(deduped_entities, True)
 
-    if (
-        config_subentry_id
-        and service_meta_config_id
-        and config_subentry_id != service_meta_config_id
-    ):
-        _LOGGER.debug(
-            "Binary sensor setup ignored for unrelated subentry '%s' (expected '%s')",
-            config_subentry_id,
-            service_meta_config_id,
-        )
-        schedule_add_entities(
-            coordinator.hass,
-            async_add_entities,
-            entities=[],
-            config_subentry_id=config_subentry_id,
-            log_owner="Binary sensor setup",
-            logger=_LOGGER,
-        )
-        return
+    scopes = _collect_service_scopes(config_subentry_id)
+    for scope in scopes:
+        _add_scope(scope)
 
-    def _schedule_service_entities(
-        new_entities: Iterable[BinarySensorEntity],
-        update_before_add: bool = True,
-    ) -> None:
-        schedule_add_entities(
-            coordinator.hass,
-            async_add_entities,
-            entities=new_entities,
-            update_before_add=update_before_add,
-            config_subentry_id=service_config_subentry_id,
-            log_owner="Binary sensor setup",
-            logger=_LOGGER,
-        )
+    signal = f"googlefindmy_subentry_setup_{entry.entry_id}"
 
-    entities: list[BinarySensorEntity] = [
-        GoogleFindMyPollingSensor(
-            coordinator,
-            entry,
-            subentry_key=service_subentry_key,
-            subentry_identifier=service_subentry_identifier,
-        ),
-        GoogleFindMyAuthStatusSensor(
-            coordinator,
-            entry,
-            subentry_key=service_subentry_key,
-            subentry_identifier=service_subentry_identifier,
-        ),
-    ]
-    _schedule_service_entities(entities, True)
+    @callback
+    def _handle_subentry_setup(subentry: Any | None = None) -> None:
+        subentry_identifier = None
+        if isinstance(subentry, str):
+            subentry_identifier = subentry
+        else:
+            subentry_identifier = getattr(subentry, "subentry_id", None) or getattr(
+                subentry, "entry_id", None
+            )
+
+        for scope in _collect_service_scopes(subentry_identifier):
+            _add_scope(scope)
+
+    entry.async_on_unload(async_dispatcher_connect(hass, signal, _handle_subentry_setup))
 
     runtime_data = getattr(entry, "runtime_data", None)
     recovery_manager = getattr(runtime_data, "entity_recovery_manager", None)
 
     if isinstance(recovery_manager, EntityRecoveryManager):
         entry_id = getattr(entry, "entry_id", None)
+        service_subentry_identifier = (
+            primary_scope.identifier if primary_scope is not None else None
+        )
+        service_subentry_key = (
+            primary_scope.subentry_key if primary_scope is not None else SERVICE_SUBENTRY_KEY
+        )
+
+        def _recovery_add_entities(
+            new_entities: Iterable[BinarySensorEntity],
+            update_before_add: bool = True,
+        ) -> None:
+            if primary_scheduler is None:
+                return
+            primary_scheduler(new_entities, update_before_add)
 
         def _expected_unique_ids() -> set[str]:
             if not isinstance(entry_id, str) or not entry_id:
@@ -217,7 +327,7 @@ async def async_setup_entry(
         recovery_manager.register_binary_sensor_platform(
             expected_unique_ids=_expected_unique_ids,
             entity_factory=_build_entities,
-            add_entities=_schedule_service_entities,
+            add_entities=_recovery_add_entities,
         )
 
 
