@@ -29,6 +29,7 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.entity import schedule_add_entities
 from tests.helpers.homeassistant import (
+    capture_async_dispatcher_send,
     FakeConfigEntriesManager,
     FakeConfigEntry,
     FakeDeviceEntry,
@@ -434,10 +435,9 @@ async def test_async_setup_new_subentries_aggregates_platforms_and_dispatches(
     hass = FakeHass(config_entries=config_entries)
     _attach_runtime(parent_entry)
 
-    dispatched: list[tuple[str, Any]] = []
     monkeypatch.setattr(
         "custom_components.googlefindmy.async_dispatcher_send",
-        lambda hass_arg, signal, subentry: dispatched.append((signal, subentry)),
+        capture_async_dispatcher_send,
     )
 
     await _async_setup_new_subentries(
@@ -447,19 +447,19 @@ async def test_async_setup_new_subentries_aggregates_platforms_and_dispatches(
     )
 
     assert len(config_entries.forward_setup_calls) == 1
-    _, platform_names, config_subentry_id = config_entries.forward_setup_calls[0]
+    forwarded_entry, platform_names = config_entries.forward_setup_calls[0]
+    assert forwarded_entry is parent_entry
     assert set(platform_names) == {
         "binary_sensor",
         "button",
         "device_tracker",
         "sensor",
     }
-    assert config_subentry_id is None
 
     expected_signal = f"googlefindmy_subentry_setup_{parent_entry.entry_id}"
-    assert dispatched == [
-        (expected_signal, tracker_subentry),
-        (expected_signal, service_subentry),
+    assert hass.dispatcher_signals == [
+        (expected_signal, (tracker_subentry,)),
+        (expected_signal, (service_subentry,)),
     ]
 
 
@@ -481,10 +481,9 @@ async def test_async_setup_new_subentries_ignores_value_error(
     hass = FakeHass(config_entries=config_entries)
     _attach_runtime(parent_entry)
 
-    dispatched: list[tuple[str, Any]] = []
     monkeypatch.setattr(
         "custom_components.googlefindmy.async_dispatcher_send",
-        lambda hass_arg, signal, subentry: dispatched.append((signal, subentry)),
+        capture_async_dispatcher_send,
     )
 
     def _raise_value_error(*_: object, **__: object) -> None:
@@ -494,8 +493,8 @@ async def test_async_setup_new_subentries_ignores_value_error(
 
     await _async_setup_new_subentries(hass, parent_entry, [subentry])
 
-    assert dispatched == [
-        (f"googlefindmy_subentry_setup_{parent_entry.entry_id}", subentry)
+    assert hass.dispatcher_signals == [
+        (f"googlefindmy_subentry_setup_{parent_entry.entry_id}", (subentry,))
     ]
     assert config_entries.setup_calls == [subentry.subentry_id]
 

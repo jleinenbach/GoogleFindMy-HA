@@ -42,6 +42,7 @@ __all__ = [
     "deferred_subentry_entry_id_assignment",
     "service_device_stub",
     "GoogleFindMyConfigEntryStub",
+    "capture_async_dispatcher_send",
 ]
 
 try:  # pragma: no cover - fallback runs only when HA stubs are absent
@@ -329,9 +330,7 @@ class FakeConfigEntriesManager:
             self.async_migrate_entry = None  # type: ignore[assignment]
             self.async_migrate = None  # type: ignore[assignment]
         self.setup_calls: list[str] = []
-        self.forward_setup_calls: list[
-            tuple[FakeConfigEntry, tuple[str, ...], str | None]
-        ] = []
+        self.forward_setup_calls: list[tuple[FakeConfigEntry, tuple[str, ...]]] = []
         self.lookup_attempts: dict[str, int] = defaultdict(int)
         self._transient_unknown: dict[str, _TransientUnknownEntryConfig] = {}
         if transient_unknown_entries:
@@ -439,8 +438,6 @@ class FakeConfigEntriesManager:
         self,
         entry: FakeConfigEntry,
         platforms: Iterable[Platform | str],
-        *,
-        config_subentry_id: str | None = None,
     ) -> bool:
         """Record forwarded platform setups for assertions."""
 
@@ -450,9 +447,7 @@ class FakeConfigEntriesManager:
             else str(platform)
             for platform in platforms
         )
-        self.forward_setup_calls.append((entry, platform_names, config_subentry_id))
-        if config_subentry_id:
-            self.setup_calls.append(config_subentry_id)
+        self.forward_setup_calls.append((entry, platform_names))
         return True
 
     def async_update_entry(self, entry: FakeConfigEntry, **kwargs: Any) -> None:
@@ -780,9 +775,26 @@ class FakeHass:
     loop: asyncio.AbstractEventLoop | None = None
     loop_thread_id: int | None = None
     async_create_task: Callable[[Awaitable[Any], str | None], asyncio.Task[Any]] | None = None
+    dispatcher_send_hook: Callable[[str, tuple[Any, ...]], None] | None = None
+    dispatcher_signals: list[tuple[str, tuple[Any, ...]]] = field(default_factory=list)
 
     def verify_event_loop_thread(self, _action: str | None = None) -> None:
         """Mirror Home Assistant's dispatcher guard with a no-op for tests."""
 
         return
+
+
+def capture_async_dispatcher_send(
+    hass: Any, signal: str, *args: Any
+) -> None:  # pragma: no cover - exercised via tests
+    """Record dispatcher signals on FakeHass instances for assertions."""
+
+    if isinstance(hass, FakeHass):
+        hass.dispatcher_signals.append((signal, args))
+        if hass.dispatcher_send_hook is not None:
+            hass.dispatcher_send_hook(signal, args)
+            return
+
+    # Preserve default no-op behaviour for unrelated hass doubles
+    return
 
