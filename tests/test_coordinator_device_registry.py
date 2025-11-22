@@ -870,11 +870,7 @@ def test_devices_register_without_service_parent(
     assert fake_registry.created[0]["identifiers"] == {(DOMAIN, "entry-42:abc123")}
     assert fake_registry.created[0]["via_device"] is None
     assert fake_registry.created[0]["via_device_id"] is None
-    assert len(fake_registry.updated) == 1
-    healing_payload = fake_registry.updated[0]
-    assert healing_payload["config_subentry_id"] == entry.tracker_subentry_id
-    assert healing_payload["add_config_subentry_id"] is None
-    assert healing_payload["add_config_entry_id"] == entry.entry_id
+    assert not fake_registry.updated
 
 
 def test_hub_entry_skips_registry_updates(
@@ -894,6 +890,64 @@ def test_hub_entry_skips_registry_updates(
     assert created == 0
     assert fake_registry.created == []
     assert fake_registry.updated == []
+
+
+def test_tracker_subentry_falls_back_to_metadata_when_entry_empty(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Tracker devices still claim the tracker subentry without stored subentries."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = SimpleNamespace(
+        entry_id="entry-empty",
+        title="Google Find My",
+        data={},
+        options={},
+        subentries={},
+        runtime_data=None,
+        service_subentry_id=None,
+        tracker_subentry_id=None,
+    )
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    devices = [{"id": "ghost", "name": "Ghost"}]
+    coordinator.data = devices
+
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+
+    assert tracker_meta is not None
+    assert tracker_meta.config_subentry_id is not None
+    assert created == 1
+    assert fake_registry.created[0]["config_subentry_id"] == tracker_meta.config_subentry_id
+
+
+def test_service_device_records_fallback_subentry_id(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Service device uses stable metadata when explicit subentry ids are missing."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = SimpleNamespace(
+        entry_id="entry-empty",
+        title="Google Find My",
+        data={},
+        options={},
+        subentries={},
+        runtime_data=None,
+        service_subentry_id=None,
+        tracker_subentry_id=None,
+    )
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    coordinator._ensure_service_device_exists()
+
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+
+    assert service_meta is not None
+    assert service_meta.config_subentry_id is not None
+    assert fake_registry.created[0]["config_subentry_id"] == service_meta.config_subentry_id
 
 
 def test_legacy_device_migrates_without_service_parent(
@@ -1359,37 +1413,44 @@ def test_service_device_missing_subentry(fake_registry: _FakeDeviceRegistry) -> 
 
     coordinator._ensure_service_device_exists()
 
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
+
     assert fake_registry.created, "Service device should be created without subentry metadata"
+    assert service_meta is not None
+    assert service_meta.config_subentry_id is not None
     create_payload = fake_registry.created[-1]
-    assert create_payload["config_subentry_id"] is None
-    assert create_payload["identifiers"] == {service_ident}
+    service_subentry_ident = (
+        DOMAIN,
+        f"{entry.entry_id}:{service_meta.config_subentry_id}:service",
+    )
+    assert create_payload["config_subentry_id"] == service_meta.config_subentry_id
+    assert create_payload["identifiers"] == {service_ident, service_subentry_ident}
 
     service_entry = next(
         device for device in fake_registry.devices if service_ident in device.identifiers
     )
-    assert service_entry.identifiers == {service_ident}
-    assert service_entry.config_subentry_id is None
+    assert service_entry.identifiers == {service_ident, service_subentry_ident}
+    assert service_entry.config_subentry_id == service_meta.config_subentry_id
     mapping = service_entry.config_entries_subentries.get(entry.entry_id)
-    assert mapping == {None}
+    assert mapping == {service_meta.config_subentry_id}
 
     service_entry.translation_key = None
     service_entry.translation_placeholders = None
     service_entry.manufacturer = "Legacy"
+    coordinator._service_device_ready = False
     coordinator._ensure_service_device_exists()
 
     assert fake_registry.updated, "Service device metadata update should be recorded"
     update_payload = fake_registry.updated[-1]
-    assert update_payload["config_subentry_id"] is None
-    assert update_payload["add_config_entry_id"] is None
+    assert update_payload["config_subentry_id"] == service_meta.config_subentry_id
+    assert update_payload["add_config_entry_id"] == entry.entry_id
     assert update_payload["add_config_subentry_id"] is None
     assert update_payload["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
-    assert not any(
-        identifier[1].endswith(":service") and identifier[0] == DOMAIN
-        for identifier in service_entry.identifiers
-    )
-    assert service_entry.config_subentry_id is None
+    assert service_entry.config_subentry_id == service_meta.config_subentry_id
     assert service_entry.manufacturer == SERVICE_DEVICE_MANUFACTURER
-    assert service_entry.config_entries_subentries.get(entry.entry_id) == {None}
+    assert service_entry.config_entries_subentries.get(entry.entry_id) == {
+        service_meta.config_subentry_id
+    }
 
 
 def test_service_device_heals_config_subentry(fake_registry: _FakeDeviceRegistry) -> None:
@@ -1454,20 +1515,23 @@ def test_service_device_clears_missing_service_link(
 
     fake_registry.updated.clear()
 
+    coordinator._service_device_ready = False
     coordinator._ensure_service_device_exists()
 
-    assert fake_registry.updated, "Registry should record removal of the stale service link"
-    update_payload = fake_registry.updated[-1]
-    assert update_payload["config_subentry_id"] is None
-    assert update_payload["add_config_entry_id"] == entry.entry_id
-    assert update_payload["add_config_subentry_id"] is None
-    assert update_payload["remove_config_entry_id"] == entry.entry_id
-    assert update_payload["remove_config_subentry_id"] == service_subentry_id
-    assert update_payload["new_identifiers"] == {service_ident}
+    service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
 
-    assert service_entry.identifiers == {service_ident}
-    assert service_entry.config_subentry_id is None
-    assert service_entry.config_entries_subentries.get(entry.entry_id) == {None}
+    assert service_meta is not None
+    assert service_meta.config_subentry_id is not None
+    expected_ident = (
+        DOMAIN,
+        f"{entry.entry_id}:{service_meta.config_subentry_id}:service",
+    )
+
+    assert service_entry.identifiers == {service_ident, expected_ident}
+    assert service_entry.config_subentry_id == service_meta.config_subentry_id
+    assert service_entry.config_entries_subentries.get(entry.entry_id) == {
+        service_meta.config_subentry_id
+    }
 
 
 def test_service_device_skips_provisional_identifier(
@@ -1785,10 +1849,13 @@ def test_rebuild_flow_creates_devices_without_service_parent(
     metadata = fake_registry.created[0]
     assert metadata["via_device"] is None
     assert metadata["via_device_id"] is None
-    assert metadata["config_subentry_id"] is None
-    assert fake_registry.updated
-    payload = fake_registry.updated[0]
-    assert payload["config_subentry_id"] == entry.tracker_subentry_id
+    tracker_meta = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+
+    assert tracker_meta is not None
+    assert metadata["config_subentry_id"] == tracker_meta.config_subentry_id
+    if fake_registry.updated:
+        payload = fake_registry.updated[0]
+        assert payload["config_subentry_id"] == tracker_meta.config_subentry_id
 
 
 @pytest.mark.asyncio

@@ -42,11 +42,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
-import http_ece
 from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 
+import http_ece
 from google.protobuf.json_format import MessageToJson
 from google.protobuf.message import Message as RuntimeMessage
 

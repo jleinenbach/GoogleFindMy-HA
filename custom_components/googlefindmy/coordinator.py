@@ -63,7 +63,7 @@ import time
 import warnings
 from collections import deque
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -1004,6 +1004,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             else None
         )
 
+        service_provisional_seen = False
+        tracker_provisional_seen = False
+
         raw_entries: list[tuple[str, str | None, dict[str, Any], str | None]] = []
         core_group_keys_present: set[str] = set()
         if entry and getattr(entry, "subentries", None):
@@ -1030,6 +1033,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         group_key == TRACKER_SUBENTRY_KEY
                         and identifier != entry_tracker_subentry_id
                     ):
+                        if group_key == SERVICE_SUBENTRY_KEY:
+                            service_provisional_seen = True
+                        if group_key == TRACKER_SUBENTRY_KEY:
+                            tracker_provisional_seen = True
                         identifier = None
                 raw_entries.append(
                     (
@@ -1293,7 +1300,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if SERVICE_SUBENTRY_KEY not in metadata:
             service_features = _SERVICE_SUBENTRY_FEATURES or _DEFAULT_SUBENTRY_FEATURES
             stable_service_id: str | None
-            if isinstance(entry_id, str) and entry_id:
+            if (
+                isinstance(entry_id, str)
+                and entry_id
+                and not service_provisional_seen
+            ):
                 stable_service_id = f"{entry_id}-{SERVICE_SUBENTRY_KEY}-subentry"
             else:
                 stable_service_id = None
@@ -1315,7 +1326,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             tracker_features = _TRACKER_SUBENTRY_FEATURES or _DEFAULT_SUBENTRY_FEATURES
             previous_tracker_visible = previous_visible.get(TRACKER_SUBENTRY_KEY, ())
             stable_tracker_id: str | None
-            if isinstance(entry_id, str) and entry_id:
+            if (
+                isinstance(entry_id, str)
+                and entry_id
+                and not tracker_provisional_seen
+            ):
                 stable_tracker_id = f"{entry_id}-{TRACKER_SUBENTRY_KEY}-subentry"
             else:
                 stable_tracker_id = None
@@ -1342,6 +1357,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             for feature in tracker_features:
                 feature_map.setdefault(feature, TRACKER_SUBENTRY_KEY)
+
+        if isinstance(entry_id, str) and entry_id:
+            stable_ids = {
+                SERVICE_SUBENTRY_KEY: f"{entry_id}-{SERVICE_SUBENTRY_KEY}-subentry",
+                TRACKER_SUBENTRY_KEY: f"{entry_id}-{TRACKER_SUBENTRY_KEY}-subentry",
+            }
+
+            for key, default_id in stable_ids.items():
+                if (
+                    key == SERVICE_SUBENTRY_KEY and service_provisional_seen
+                ) or (
+                    key == TRACKER_SUBENTRY_KEY and tracker_provisional_seen
+                ):
+                    continue
+                meta = metadata.get(key)
+                if meta is None or meta.config_subentry_id is not None:
+                    continue
+
+                metadata[key] = replace(meta, config_subentry_id=default_id)
 
         self._subentry_metadata = metadata
         self._feature_to_subentry = feature_map
@@ -1794,6 +1828,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         This keeps diagnostic entities (e.g. polling/auth-status) grouped under a stable
         integration-level device. Safe to call multiple times.
+
+        Subentry fallback rules and the rationale for recording the service
+        ``config_subentry_id`` are documented in ``docs/CONFIG_SUBENTRIES_HANDBOOK.md``;
+        consult the handbook before changing identifier selection to avoid regressing
+        tracker/service separation.
         """
         # Resolve hass
         hass = getattr(self, "hass", None)
@@ -1854,7 +1893,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     service_subentry_ids.add(normalized_id)
 
         def _is_real_service_subentry(candidate: Any) -> str | None:
-            """Return candidate when it matches a confirmed service subentry."""
+            """Return candidate when it matches a confirmed service subentry.
+
+            When the config entry lacks recorded subentries (for example, after
+            provisional creation), fall back to the coordinator's metadata so the
+            service device still records a stable ``config_subentry_id``.
+            """
 
             normalized_candidate = _normalize_subentry_id(candidate)
             if normalized_candidate is None:
@@ -1871,6 +1915,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return normalized_candidate
 
             if service_subentry_ids and normalized_candidate in service_subentry_ids:
+                return normalized_candidate
+
+            if not service_subentry_ids:
                 return normalized_candidate
 
             return None
@@ -2681,6 +2728,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         Returns:
             Count of devices that were created or updated.
+
+        See ``docs/CONFIG_SUBENTRIES_HANDBOOK.md`` for the full subentry lifecycle
+        and registry expectations that keep tracker devices out of the service bucket.
         """
         entry = self.config_entry or getattr(self, "entry", None)
         entry_id = getattr(entry, "entry_id", None) if entry is not None else None
@@ -2765,6 +2815,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return normalized_candidate
 
             if tracker_subentry_ids and normalized_candidate in tracker_subentry_ids:
+                return normalized_candidate
+
+            if not tracker_subentry_ids:
                 return normalized_candidate
 
             return None
@@ -3019,6 +3072,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "model": "Find My Device",
                     "name": use_name,
                 }
+
+                if tracker_config_subentry_id is not None:
+                    create_kwargs["config_subentry_id"] = tracker_config_subentry_id
 
                 dev = self._call_device_registry_api(
                     async_get_or_create,
