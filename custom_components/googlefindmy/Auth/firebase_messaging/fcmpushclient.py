@@ -29,7 +29,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import logging
 import random
@@ -43,6 +42,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
+import http_ece
 from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 else:
     MessageProto = RuntimeMessage
 
-http_decrypt = cast(Callable[..., bytes], importlib.import_module("http_ece").decrypt)
+http_decrypt = cast(Callable[..., bytes], http_ece.decrypt)
 
 _logger = logging.getLogger(__name__)
 
