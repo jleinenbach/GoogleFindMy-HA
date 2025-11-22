@@ -80,7 +80,7 @@ if TYPE_CHECKING:
 else:
     MessageProto = RuntimeMessage
 
-http_decrypt = cast(Callable[..., bytes], http_ece.decrypt)
+http_decrypt: Callable[..., bytes] = http_ece.decrypt
 
 _logger = logging.getLogger(__name__)
 
