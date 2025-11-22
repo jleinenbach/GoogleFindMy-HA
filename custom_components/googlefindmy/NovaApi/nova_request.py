@@ -80,8 +80,8 @@ if not _BS4_AVAILABLE:
     )
 
 # --- Retry constants ---
-NOVA_MAX_RETRIES = 3
-NOVA_INITIAL_BACKOFF_S = 1.0
+NOVA_MAX_RETRIES = 6
+NOVA_INITIAL_BACKOFF_S = 4.0
 NOVA_BACKOFF_FACTOR = 2.0
 NOVA_MAX_RETRY_AFTER_S = 60.0
 
@@ -118,7 +118,8 @@ def _compute_delay(attempt: int, retry_after: str | None) -> float:
     if delay is None:
         exponent = max(0, attempt - 1)
         backoff = (NOVA_BACKOFF_FACTOR**exponent) * NOVA_INITIAL_BACKOFF_S
-        delay = random.uniform(0.0, backoff)
+        next_backoff = backoff * NOVA_BACKOFF_FACTOR
+        delay = random.uniform(backoff, next_backoff)
 
     return min(delay, NOVA_MAX_RETRY_AFTER_S)
 
