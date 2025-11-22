@@ -199,7 +199,7 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 
 * **Cache cleanup:** Run `make clean` to prune `__pycache__` directories and stale bytecode before rerunning tests.
 * **Connectivity probe:** Confirm HTTP/HTTPS reachability with `python -m pip install --dry-run --no-deps pip` and capture the output for citations.
-* **Test stub install:** Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` when you need a minimal bootstrap immediately before `pytest -q`.
+* **Test stub install:** Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` when you need a minimal bootstrap immediately before `pytest -q`. Plan for several minutes of download time in the hosted environment because the Home Assistant wheels are large.
 * **Strict mypy prep:** In a fresh environment, run `make test-stubs` before `mypy --install-types --non-interactive --strict` so the Home Assistant stubs are already present and strict type checking doesn't trip over missing packages.
 * **Pytest coverage guard:** `pytest -q --cov` will raise the conftest bootstrap error if the Home Assistant stubs are missing. Run `make test-stubs` first so coverage runs complete without runtime import failures.
 * **Import normalization:** Run `python -m ruff check --select I --fix` to auto-sort import blocks (especially in `tests/`) instead of rearranging them manually. Import coroutine annotations (for example, `Coroutine`) from `collections.abc` alongside other container ABCs to avoid duplicate-definition lint errors when `typing` re-exports overlap.
