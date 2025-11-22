@@ -510,7 +510,6 @@ async def test_async_setup_new_subentries_ignores_value_error(
         (
             parent_entry,
             (
-                "binary_sensor",
                 "button",
                 "device_tracker",
                 "sensor",

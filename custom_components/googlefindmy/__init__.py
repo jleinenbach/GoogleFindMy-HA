@@ -2394,9 +2394,7 @@ async def _async_setup_new_subentries(
         return
 
     setup_calls = getattr(config_entries, "setup_calls", None)
-    platform_names: list[str] = list(
-        dict.fromkeys(SERVICE_FEATURE_PLATFORMS + TRACKER_FEATURE_PLATFORMS)
-    )
+    platform_names: list[str] = []
     for subentry in pending_subentries:
         for platform in _determine_subentry_platforms(subentry):
             name = _platform_value(platform)
@@ -5889,6 +5887,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     setattr(entry, "_gfm_parent_platforms_unloaded", False)
     setattr(entry, "_gfm_parent_unload_call_count", 0)
+    _safe_setattr(entry, "_gfm_parent_platforms_forwarded", False)
 
     _ensure_runtime_imports()
     # --- Multi-entry policy: allow MA; block duplicate-account (same email) ----
@@ -6713,13 +6712,24 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
     subentries = _collect_entry_subentries(entry)
 
-    unload_parent_platforms = True
+    forwarded_parent_platforms = bool(
+        getattr(entry, "_gfm_parent_platforms_forwarded", True)
+    )
+    unload_parent_platforms = forwarded_parent_platforms
     unload_callable = getattr(hass.config_entries, "async_unload_platforms", None)
     unload_call_count = int(getattr(entry, "_gfm_parent_unload_call_count", 0) or 0)
     in_progress = bool(getattr(entry, "_gfm_parent_unload_in_progress", False))
     unload_completed = bool(
         getattr(entry, "_gfm_parent_platforms_unloaded", False)
     )
+
+    if not forwarded_parent_platforms:
+        _LOGGER.debug(
+            "[%s] Parent platforms never forwarded; skipping parent unload",
+            entry.entry_id,
+        )
+        _safe_setattr(entry, "_gfm_parent_platforms_unloaded", True)
+        unload_parent_platforms = True
 
     if unload_completed and not in_progress:
         _LOGGER.debug(
@@ -6782,12 +6792,20 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 unload_awaitables: list[Awaitable[Any]] = []
                 for platform in platforms:
                     platform_name = getattr(platform, "value", str(platform))
-                    result = _invoke_with_optional_keyword(
-                        forward_unload,
-                        (entry, platform_name),
-                        "config_subentry_id",
-                        identifier,
-                    )
+                    try:
+                        result = _invoke_with_optional_keyword(
+                            forward_unload,
+                            (entry, platform_name),
+                            "config_subentry_id",
+                            identifier,
+                        )
+                    except ValueError:
+                        _LOGGER.debug(
+                            "[%s] Subentry platform '%s' was never loaded; skipping unload",  # noqa: G004
+                            identifier,
+                            platform_name,
+                        )
+                        continue
                     if inspect.isawaitable(result):
                         unload_awaitables.append(result)
                     else:
@@ -6801,6 +6819,13 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                     )
                     for outcome in gathered:
                         if isinstance(outcome, BaseException):
+                            if isinstance(outcome, ValueError):
+                                _LOGGER.debug(
+                                    "[%s] Subentry platform unload skipped: %s",  # noqa: G004
+                                    identifier,
+                                    outcome,
+                                )
+                                continue
                             all_unloaded = False
                             continue
                         if isinstance(outcome, bool):
