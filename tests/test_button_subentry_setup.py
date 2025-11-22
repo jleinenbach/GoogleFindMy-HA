@@ -140,14 +140,12 @@ async def test_dispatcher_adds_new_tracker_subentries(stub_coordinator_factory: 
     )
     entry.subentries[new_subentry.subentry_id] = new_subentry
 
-    async_dispatcher_send(
-        hass, f"googlefindmy_subentry_setup_{entry.entry_id}", new_subentry.subentry_id
-    )
+    signal = f"{DOMAIN}_subentry_setup_{entry.entry_id}"
+
+    async_dispatcher_send(hass, signal, new_subentry.subentry_id)
     await asyncio.gather(*pending)
 
-    async_dispatcher_send(
-        hass, f"googlefindmy_subentry_setup_{entry.entry_id}", new_subentry.subentry_id
-    )
+    async_dispatcher_send(hass, signal, new_subentry.subentry_id)
     await asyncio.gather(*pending)
 
     configs = [config for _, config in added]
@@ -155,6 +153,47 @@ async def test_dispatcher_adds_new_tracker_subentries(stub_coordinator_factory: 
     assert configs.count(new_subentry.subentry_id) == 3
     assert len({entity.unique_id for entity, _ in added}) == 6
     assert entry._unload_callbacks, "dispatcher listener should be cleaned up on unload"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_deduplicates_existing_subentry_signals(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Repeated dispatcher signals should not build duplicate buttons."""
+
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _ConfigEntryStub()
+    tracker_subentry = ConfigSubentry(
+        data={"group_key": "tracker", "features": ("button",)},
+        subentry_type="tracker",
+        title="Tracker",
+        subentry_id="tracker-subentry",
+    )
+    entry.subentries = {tracker_subentry.subentry_id: tracker_subentry}
+
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await button.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    initial_count = len(added)
+    signal = f"{DOMAIN}_subentry_setup_{entry.entry_id}"
+
+    async_dispatcher_send(hass, signal, tracker_subentry.subentry_id)
+    await asyncio.gather(*pending)
+
+    async_dispatcher_send(hass, signal, tracker_subentry.subentry_id)
+    await asyncio.gather(*pending)
+
+    assert len(added) == initial_count == 3
+    assert {config for _, config in added} == {tracker_subentry.subentry_id}
 
 
 @pytest.mark.asyncio

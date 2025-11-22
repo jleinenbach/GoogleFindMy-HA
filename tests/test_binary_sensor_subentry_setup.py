@@ -11,6 +11,7 @@ from custom_components.googlefindmy import binary_sensor
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     DATA_SECRET_BUNDLE,
+    DOMAIN,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
 )
@@ -131,14 +132,12 @@ async def test_dispatcher_adds_new_service_subentries(stub_coordinator_factory: 
     )
     entry.subentries[new_subentry.subentry_id] = new_subentry
 
-    async_dispatcher_send(
-        hass, f"googlefindmy_subentry_setup_{entry.entry_id}", new_subentry.subentry_id
-    )
+    signal = f"{DOMAIN}_subentry_setup_{entry.entry_id}"
+
+    async_dispatcher_send(hass, signal, new_subentry.subentry_id)
     await asyncio.gather(*pending)
 
-    async_dispatcher_send(
-        hass, f"googlefindmy_subentry_setup_{entry.entry_id}", new_subentry.subentry_id
-    )
+    async_dispatcher_send(hass, signal, new_subentry.subentry_id)
     await asyncio.gather(*pending)
 
     configs = [config for _, config in added]
@@ -146,3 +145,46 @@ async def test_dispatcher_adds_new_service_subentries(stub_coordinator_factory: 
     assert configs.count(new_subentry.subentry_id) == 2
     assert len({entity.unique_id for entity, _ in added}) == 4
     assert entry._unload_callbacks, "dispatcher listener should be cleaned up on unload"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_deduplicates_existing_subentry_signals(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Repeated dispatcher signals should not build entities multiple times."""
+
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _ConfigEntryStub()
+    service_subentry = ConfigSubentry(
+        data={"group_key": SERVICE_SUBENTRY_KEY, "features": ("binary_sensor",)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+        subentry_id="service-subentry",
+    )
+    entry.subentries = {service_subentry.subentry_id: service_subentry}
+
+    coordinator_cls = stub_coordinator_factory(
+        metadata_for_feature={"binary_sensor": service_subentry.subentry_id}
+    )
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await binary_sensor.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    initial_count = len(added)
+    signal = f"{DOMAIN}_subentry_setup_{entry.entry_id}"
+
+    async_dispatcher_send(hass, signal, service_subentry.subentry_id)
+    await asyncio.gather(*pending)
+
+    async_dispatcher_send(hass, signal, service_subentry.subentry_id)
+    await asyncio.gather(*pending)
+
+    assert len(added) == initial_count == 2
+    assert {config for _, config in added} == {service_subentry.subentry_id}
