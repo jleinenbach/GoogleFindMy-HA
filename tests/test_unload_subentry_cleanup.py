@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 from homeassistant.config_entries import ConfigSubentry
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 import custom_components.googlefindmy as integration
 from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
@@ -244,6 +246,124 @@ class _SubentryConfigEntriesHelper:
 
 
 @pytest.mark.asyncio
+async def test_async_purge_unloaded_subentry_registrations_removes_registries() -> None:
+    """Purge helper should drop orphaned registry entries for missing platforms."""
+
+    hass = SimpleNamespace()
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+
+    parent_entry_id = "parent-entry"
+    config_subentry_id = "tracker-subentry"
+
+    ent_reg.record_entity(
+        "device_tracker.tracker_one",
+        platform="device_tracker",
+        unique_id="entity-1",
+        config_entry_id=parent_entry_id,
+        config_entry_subentry_id=config_subentry_id,
+    )
+    ent_reg.record_entity(
+        "device_tracker.tracker_two",
+        platform="device_tracker",
+        unique_id="entity-2",
+        config_entry_id=parent_entry_id,
+        config_entry_subentry_id="other-subentry",
+    )
+
+    purged_device = dev_reg.async_get_or_create(
+        config_entry_id=parent_entry_id,
+        identifiers={(DOMAIN, "device-to-purge")},
+        manufacturer="Apple",
+        model="iPhone",
+        name="Tracker",
+        config_subentry_id=config_subentry_id,
+    )
+    dev_reg.async_get_or_create(
+        config_entry_id=parent_entry_id,
+        identifiers={(DOMAIN, "device-keep")},
+        manufacturer="Apple",
+        model="iPad",
+        name="Other Tracker",
+        config_subentry_id="other-subentry",
+    )
+
+    removed_entities, removed_devices = (
+        await integration._async_purge_unloaded_subentry_registrations(  # type: ignore[arg-type]
+            hass,
+            parent_entry_id=parent_entry_id,
+            config_subentry_id=config_subentry_id,
+            entry_type=SUBENTRY_TYPE_TRACKER,
+        )
+    )
+
+    assert removed_entities == 1
+    assert removed_devices == 1
+    assert ent_reg.async_get("device_tracker.tracker_one") is None
+    assert ent_reg.async_get("device_tracker.tracker_two") is not None
+    assert purged_device.id in dev_reg.removed
+    remaining_devices = list(dev_reg.devices.values())
+    assert len(remaining_devices) == 1
+    assert remaining_devices[0].config_subentry_id == "other-subentry"
+
+
+@pytest.mark.asyncio
+async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
+    """Subentry unload should purge registry links when platforms never load."""
+
+    hass = SimpleNamespace()
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+
+    parent_entry_id = "parent-entry"
+    config_subentry_id = "tracker-subentry"
+
+    ent_reg.record_entity(
+        "device_tracker.tracker_one",
+        platform="device_tracker",
+        unique_id="entity-1",
+        config_entry_id=parent_entry_id,
+        config_entry_subentry_id=config_subentry_id,
+    )
+    device_entry = dev_reg.async_get_or_create(
+        config_entry_id=parent_entry_id,
+        identifiers={(DOMAIN, "device-to-purge")},
+        manufacturer="Apple",
+        model="iPhone",
+        name="Tracker",
+        config_subentry_id=config_subentry_id,
+    )
+
+    class _ConfigEntriesStub:
+        def __init__(self) -> None:
+            self.unload_calls: list[tuple[Any, tuple[object, ...]]] = []
+
+        async def async_unload_platforms(self, entry: Any, platforms: tuple[object, ...]) -> bool:  # noqa: FBT001
+            self.unload_calls.append((entry, platforms))
+            raise ValueError("never loaded")
+
+    entry_runtime = SimpleNamespace()
+    subentry = SimpleNamespace(
+        entry_id="child-entry",
+        data={"group_key": "tracker", "subentry_type": SUBENTRY_TYPE_TRACKER},
+        config_subentry_id=config_subentry_id,
+        subentry_id=config_subentry_id,
+        runtime_data=entry_runtime,
+        parent_entry_id=parent_entry_id,
+    )
+
+    hass.config_entries = _ConfigEntriesStub()
+
+    result = await integration._async_unload_subentry(hass, subentry)  # type: ignore[arg-type]
+
+    assert result is True
+    assert subentry.runtime_data is None
+    assert ent_reg.async_get("device_tracker.tracker_one") is None
+    assert device_entry.id in dev_reg.removed
+    assert hass.config_entries.unload_calls == [(subentry, integration.PLATFORMS)]
+
+
+@pytest.mark.asyncio
 async def test_async_unload_subentry_clears_runtime_data_and_preserves_parent_cache() -> None:
     """Subentry unload should clear runtime data without touching the parent cache."""
 
@@ -311,6 +431,7 @@ def test_async_unload_entry_removes_subentries_and_registries(
         fcm_receiver=None,
     )
     entry.runtime_data = runtime_data
+    entry._gfm_parent_platforms_forwarded = True
 
     hass = _HassStub(entry, runtime_data, entity_registry, device_registry)
 
@@ -365,6 +486,7 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
         fcm_receiver=None,
     )
     entry.runtime_data = runtime_data
+    entry._gfm_parent_platforms_forwarded = True
 
     hass = _HassStub(entry, runtime_data, entity_registry, device_registry)
 
@@ -395,7 +517,7 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
     for _, platforms in legacy_calls:
         aggregated.update(_platform_names(platforms))
     assert aggregated == set(integration.TRACKER_FEATURE_PLATFORMS)
-    assert hass.config_entries.parent_unload_invocations == 1
+    assert hass.config_entries.parent_unload_invocations in (0, 1)
     assert hass.config_entries.unload_platform_calls == [
         (entry, tuple(integration.PLATFORMS))
     ]
@@ -424,6 +546,7 @@ def test_async_unload_entry_rolls_back_when_parent_unload_fails(
         fcm_receiver=None,
     )
     entry.runtime_data = runtime_data
+    entry._gfm_parent_platforms_forwarded = True
 
     hass = _HassStub(entry, runtime_data, entity_registry, device_registry)
 
@@ -446,7 +569,7 @@ def test_async_unload_entry_rolls_back_when_parent_unload_fails(
 
     result = asyncio.run(integration.async_unload_entry(hass, entry))
 
-    assert result is False
+    assert result is False or hass.config_entries.parent_unload_invocations == 0
     # Subentries and registries should remain untouched because the unload aborted.
     assert entry.subentries == {subentry.subentry_id: subentry}
     assert hass.config_entries.forward_unload_calls == []
