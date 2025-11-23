@@ -156,6 +156,11 @@ async def async_setup_entry(
     - Optionally create diagnostic stat sensors when enabled via options.
     - Dynamically add per-device sensors when new devices appear.
     """
+    _LOGGER.debug(
+        "Sensor setup invoked for entry=%s config_subentry_id=%s",
+        getattr(entry, "entry_id", None),
+        config_subentry_id,
+    )
     coordinator = resolve_coordinator(entry)
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
@@ -352,10 +357,12 @@ async def async_setup_entry(
             candidate_subentry_id,
         )
         if sanitized_config_id is None:
+            sanitized_config_id = candidate_subentry_id or scope.subentry_key
             _LOGGER.debug(
-                "Sensor setup: awaiting config_subentry_id for tracker key '%s'", scope.subentry_key
+                "Sensor setup: synthesized config_subentry_id '%s' for tracker key '%s'",
+                sanitized_config_id,
+                scope.subentry_key,
             )
-            return
 
         tracker_identifier = scope.identifier or sanitized_config_id or scope.subentry_key
         if tracker_identifier in processed_tracker_identifiers:
@@ -477,6 +484,11 @@ async def async_setup_entry(
             )
 
         subentry_type = _subentry_type(subentry)
+        _LOGGER.debug(
+            "Sensor setup: processing subentry '%s' (type=%s)",
+            subentry_identifier,
+            subentry_type,
+        )
         if subentry_type not in (None, "service", "tracker"):
             _LOGGER.debug(
                 "Sensor setup skipped for unrelated subentry '%s' (type '%s')",
@@ -557,13 +569,15 @@ async def async_setup_entry(
     runtime_data = getattr(entry, "runtime_data", None)
     subentry_manager = getattr(runtime_data, "subentry_manager", None)
     managed_subentries = getattr(subentry_manager, "managed_subentries", None)
-    if isinstance(managed_subentries, Mapping):
-        if config_subentry_id is not None:
-            for managed_subentry in managed_subentries.values():
-                async_add_subentry(managed_subentry)
-    elif isinstance(getattr(entry, "subentries", None), Mapping):
-        for managed_subentry in entry.subentries.values():
+    if isinstance(managed_subentries, Mapping) and managed_subentries:
+        for managed_subentry in managed_subentries.values():
             async_add_subentry(managed_subentry)
+    elif isinstance(getattr(entry, "subentries", None), Mapping):
+        if entry.subentries:
+            for managed_subentry in entry.subentries.values():
+                async_add_subentry(managed_subentry)
+        else:
+            async_add_subentry(config_subentry_id)
     else:
         async_add_subentry(config_subentry_id)
 

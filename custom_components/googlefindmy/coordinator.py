@@ -3195,18 +3195,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if reuse_device is not None:
                     dev = reuse_device
                     reuse_device_id = getattr(dev, "id", None)
-                    if reuse_device_id and ns_ident not in getattr(
-                        dev, "identifiers", set()
-                    ):
-                        updated_identifiers = set(getattr(dev, "identifiers", set()))
-                        updated_identifiers.add(ns_ident)
-                        _update_device_with_kwargs(
-                            {
-                                "device_id": reuse_device_id,
-                                "new_identifiers": updated_identifiers,
-                            }
-                        )
-                        dev = _refresh_device_entry(reuse_device_id, dev)
+                    if reuse_device_id:
+                        update_kwargs: dict[str, Any] = {"device_id": reuse_device_id}
+                        if ns_ident not in getattr(dev, "identifiers", set()):
+                            updated_identifiers = set(getattr(dev, "identifiers", set()))
+                            updated_identifiers.add(ns_ident)
+                            update_kwargs["new_identifiers"] = updated_identifiers
+
+                        if len(update_kwargs) > 1:
+                            _update_device_with_kwargs(update_kwargs)
+                            dev = _refresh_device_entry(reuse_device_id, dev)
 
                 create_kwargs: dict[str, Any] = {
                     "config_entry_id": entry_id,

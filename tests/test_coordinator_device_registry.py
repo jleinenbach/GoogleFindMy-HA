@@ -1388,6 +1388,56 @@ def test_hub_name_collision_reuse_adds_namespaced_identifier(
     assert existing_tracker.via_device_id == hub.id
 
 
+def test_hub_name_collision_reuse_attaches_tracker_link(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reused hub devices gain tracker config links when missing."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-link")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hub = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Hub Anchor",
+        config_subentry_id=entry.service_subentry_id,
+    )
+
+    existing_tracker = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:existing")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Pixel",
+        via_device_id=hub.id,
+        config_subentry_id=None,
+    )
+
+    baseline_updates = len(registry.updated)
+    devices = [{"id": "new-device", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created >= 1
+    assert len(registry.updated) >= baseline_updates + 1
+    assert existing_tracker.config_entries_subentries[entry.entry_id] == {
+        entry.tracker_subentry_id
+    }
+    assert existing_tracker.config_subentry_id == entry.tracker_subentry_id
+    assert any(
+        update.get("add_config_subentry_id") == entry.tracker_subentry_id
+        or update.get("config_subentry_id") == entry.tracker_subentry_id
+        for update in registry.updated
+    )
+    assert any("Healing device" in record.message for record in caplog.records)
+
+
 def test_hub_name_collision_disambiguates_multiple_new_devices(
     stub_registry: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
