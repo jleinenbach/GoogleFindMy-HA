@@ -308,3 +308,38 @@ async def test_recovery_skips_hidden_buttons(stub_coordinator_factory: Any) -> N
 
     assert {entity.unique_id for entity in recovered} == visible_unique_ids
     assert all(config == tracker_subentry.subentry_id for _, config in added)
+
+
+@pytest.mark.asyncio
+async def test_button_setup_ignores_non_tracker_subentry(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Button platform should skip service or unrelated subentry types."""
+
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _ConfigEntryStub()
+    service_subentry = ConfigSubentry(
+        data={"group_key": "service", "features": ("service",)},
+        subentry_type="service",
+        title="Service",
+        subentry_id="service-subentry",
+    )
+    entry.subentries = {service_subentry.subentry_id: service_subentry}
+
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await button.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    signal = f"{DOMAIN}_subentry_setup_{entry.entry_id}"
+    async_dispatcher_send(hass, signal, service_subentry)
+    await asyncio.gather(*pending)
+
+    assert added == []

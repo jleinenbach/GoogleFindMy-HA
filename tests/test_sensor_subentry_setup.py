@@ -348,3 +348,40 @@ async def test_recovery_skips_hidden_tracker_sensors(
     assert config_by_unique_id.get(visible_unique_id) == tracker_subentry.subentry_id
     if service_unique_id in config_by_unique_id:
         assert config_by_unique_id[service_unique_id] in {None, "service"}
+
+
+@pytest.mark.asyncio
+async def test_sensor_setup_ignores_mismatched_subentry_type(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Tracker sensors should not attach to service-only subentries and vice versa."""
+
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _ConfigEntryStub()
+    service_subentry = ConfigSubentry(
+        data={"group_key": "service", "features": ("sensor",)},
+        subentry_type="service",
+        title="Service",
+        subentry_id="service-subentry",
+    )
+    entry.subentries = {service_subentry.subentry_id: service_subentry}
+
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await sensor.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    signal = f"{DOMAIN}_subentry_setup_{entry.entry_id}"
+    async_dispatcher_send(hass, signal, service_subentry)
+    await asyncio.gather(*pending)
+
+    assert added
+    assert all(config == service_subentry.subentry_id for _, config in added)
+    assert not any("last_seen" in getattr(entity, "unique_id", "") for entity, _ in added)

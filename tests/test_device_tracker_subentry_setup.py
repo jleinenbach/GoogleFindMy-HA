@@ -183,3 +183,38 @@ async def test_dispatcher_deduplicates_existing_subentry_signals(
 
     assert len(added) == initial_count == 1
     assert {config for _, config in added} == {tracker_subentry.subentry_id}
+
+
+@pytest.mark.asyncio
+async def test_device_tracker_ignores_non_tracker_subentry(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Dispatcher should ignore service or unknown subentry types."""
+
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _ConfigEntryStub()
+    service_subentry = ConfigSubentry(
+        data={"group_key": "service", "features": ("service",)},
+        subentry_type="service",
+        title="Service",
+        subentry_id="service-subentry",
+    )
+    entry.subentries = {service_subentry.subentry_id: service_subentry}
+
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await device_tracker.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    signal = f"{DOMAIN}_subentry_setup_{entry.entry_id}"
+    async_dispatcher_send(hass, signal, service_subentry)
+    await asyncio.gather(*pending)
+
+    assert added == []
