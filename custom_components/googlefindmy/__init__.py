@@ -6983,38 +6983,41 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
             return True
 
-        unload_results = await asyncio.gather(
-            *(_unload_config_subentry(subentry) for subentry in subentries),
-            return_exceptions=True,
-        )
+        unload_success = True
+        # Parent platforms never forwarded: treat subentry unload as a no-op.
+        if forwarded_parent_platforms:
+            unload_results = await asyncio.gather(
+                *(_unload_config_subentry(subentry) for subentry in subentries),
+                return_exceptions=True,
+            )
 
-        unload_success = all(
-            isinstance(result, bool) and result for result in unload_results
-        )
-        if not unload_success:
-            _LOGGER.error(
-                "[%s] Failed to unload one or more subentries; aborting parent unload",
-                entry.entry_id,
+            unload_success = all(
+                isinstance(result, bool) and result for result in unload_results
             )
-            for index, result in enumerate(unload_results):
-                if isinstance(result, Exception):
-                    sub_obj = subentries[index]
-                    sub_id = _resolve_config_subentry_identifier(sub_obj) or getattr(
-                        sub_obj, "entry_id", f"index {index}"
-                    )
-                    _LOGGER.debug(
-                        "[%s] Subentry %s unload failed: %s",
-                        entry.entry_id,
-                        sub_id,
-                        result,
-                    )
-            if runtime_data is not None:
-                entries_bucket[entry.entry_id] = runtime_data
-            _LOGGER.debug(
-                "[%s] Subentry unload failed; runtime data restored for HA retry",  # noqa: G004
-                entry.entry_id,
-            )
-            return False
+            if not unload_success:
+                _LOGGER.error(
+                    "[%s] Failed to unload one or more subentries; aborting parent unload",
+                    entry.entry_id,
+                )
+                for index, result in enumerate(unload_results):
+                    if isinstance(result, Exception):
+                        sub_obj = subentries[index]
+                        sub_id = _resolve_config_subentry_identifier(sub_obj) or getattr(
+                            sub_obj, "entry_id", f"index {index}"
+                        )
+                        _LOGGER.debug(
+                            "[%s] Subentry %s unload failed: %s",
+                            entry.entry_id,
+                            sub_id,
+                            result,
+                        )
+                if runtime_data is not None:
+                    entries_bucket[entry.entry_id] = runtime_data
+                _LOGGER.debug(
+                    "[%s] Subentry unload failed; runtime data restored for HA retry",  # noqa: G004
+                    entry.entry_id,
+                )
+                return False
 
         if runtime_data is not None:
             coordinator = runtime_data.coordinator
