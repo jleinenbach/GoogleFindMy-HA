@@ -310,12 +310,6 @@ async def async_setup_entry(
                 name = device.get("name")
                 if not dev_id or not name:
                     continue
-                finder = getattr(coordinator, "find_tracker_entity_entry", None)
-                if callable(finder):
-                    try:
-                        finder(dev_id)
-                    except Exception:  # pragma: no cover - best effort recovery hook
-                        _LOGGER.debug("Registry lookup failed for tracker %s", dev_id)
                 if dev_id in known_ids:
                     continue
                 entity = GoogleFindMyDeviceTracker(
@@ -347,6 +341,35 @@ async def async_setup_entry(
             if to_add:
                 _LOGGER.info("Adding %d newly discovered Find My tracker(s)", len(to_add))
                 _schedule_tracker_entities(to_add, True)
+
+                registry_lookup = getattr(coordinator, "find_tracker_entity_entry", None)
+                if callable(registry_lookup):
+                    all_registered = True
+
+                    for entity in to_add:
+                        dev_id = getattr(entity, "device_id", None)
+
+                        try:
+                            if not dev_id or registry_lookup(dev_id) is None:
+                                all_registered = False
+                                break
+                        except Exception:  # pragma: no cover - best effort registry probe
+                            _LOGGER.debug(
+                                "Registry lookup failed for tracker %s", dev_id
+                            )
+                            all_registered = False
+                            break
+
+                    if all_registered:
+                        _LOGGER.debug(
+                            "Device tracker setup: all %d tracker(s) already registered; skipping discovery",
+                            len(to_add),
+                        )
+                        return
+                else:
+                    _LOGGER.debug(
+                        "Device tracker setup: registry helper unavailable; treating trackers as new"
+                    )
 
                 email = _extract_email_from_entry(config_entry) or None
                 token = config_entry.data.get(CONF_OAUTH_TOKEN)

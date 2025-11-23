@@ -27,9 +27,12 @@ updates like the subentry unload reminder easy to place without scrolling throug
 ### Quick-start reminder: avoid false-positive tracker discovery
 
 When restoring `device_tracker` entities on startup, confirm the cloud discovery trigger only fires for **truly new** tracker
-entities. Reuse the coordinator's registry helpers (for example, `find_tracker_entity_entry`) to detect whether each scheduled
-entity already exists in the entity registry and skip the discovery flow when all restored devices are known. This prevents the
-"X devices found" notification from reappearing after restarts when no new hardware has been added.
+entities. Reuse the coordinator's registry helpers (for example, `find_tracker_entity_entry`) **after** entities are scheduled
+to detect whether each scheduled entity already exists in the entity registry and skip the discovery flow when all restored
+devices are known. Centralizing this post-scheduling gate prevents redundant pre-checks and keeps the "X devices found"
+notification from reappearing after restarts when no new hardware has been added. Cross-link:
+[`agents/runtime_patterns/AGENTS.md`](agents/runtime_patterns/AGENTS.md#tracker-registry-gating)
+tracks the canonical post-scheduling gate that platform guides should mirror.
 
 ### Import deferral reminder
 

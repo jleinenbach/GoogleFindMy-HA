@@ -61,6 +61,19 @@ should consult that cached instance before calling
 `entity_registry.async_get(...)` so recovery logic inspects the same
 registry object as the fixture.
 
+### Tracker discovery gating expectations
+
+Registry-aware tracker discovery checks belong **after** entities are
+scheduled. Tests that simulate tracker restoration should assert the
+coordinator reuses `find_tracker_entity_entry` (or the equivalent helper)
+in this post-scheduling gate and skips cloud discovery when every
+scheduled tracker already exists in the registry. Avoid pre-scheduling
+registry probes in new helpers to keep discovery behavior and
+notifications consistent with the runtime-patterns guidance. For the
+canonical wording and runtime location of this gate, see the
+[runtime-patterns tracker registry gating reminder](../custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md#tracker-registry-gating)
+and keep platform-level AGENTS aligned with it.
+
 ### CoordinatorEntity stub overrides
 
 The suite replaces `homeassistant.helpers.update_coordinator.CoordinatorEntity`
