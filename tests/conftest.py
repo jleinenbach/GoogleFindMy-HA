@@ -966,6 +966,7 @@ def _stub_homeassistant() -> None:
             self.devices: dict[str, _StubDeviceEntry] = {}
             self.created: list[dict[str, object]] = []
             self.updated: list[dict[str, object]] = []
+            self.removed: list[str] = []
 
         def async_get(self, device_id: str | None) -> _StubDeviceEntry | None:
             if not device_id:
@@ -1042,6 +1043,20 @@ def _stub_homeassistant() -> None:
                 }
             )
             return entry
+
+        def async_entries_for_config_entry(
+            self, config_entry_id: str
+        ) -> list[_StubDeviceEntry]:
+            return [
+                device
+                for device in self.devices.values()
+                if config_entry_id in getattr(device, "config_entries", set())
+            ]
+
+        def async_remove_device(self, device_id: str) -> None:
+            if device_id in self.devices:
+                self.devices.pop(device_id, None)
+                self.removed.append(device_id)
 
         def async_update_device(
             self,
@@ -1185,6 +1200,15 @@ def _stub_homeassistant() -> None:
         return _StubDeviceRegistry()
 
     device_registry_module.async_get = _device_registry_for
+
+    def _async_device_entries_for_config_entry(
+        registry: _StubDeviceRegistry, config_entry_id: str
+    ) -> list[_StubDeviceEntry]:
+        return registry.async_entries_for_config_entry(config_entry_id)
+
+    device_registry_module.async_entries_for_config_entry = (
+        _async_device_entries_for_config_entry
+    )
 
     cv_module = ModuleType("homeassistant.helpers.config_validation")
 
@@ -1334,6 +1358,7 @@ def _stub_homeassistant() -> None:
             "unique_id",
             "config_entry_id",
             "config_entry_subentry_id",
+            "config_subentry_id",
             "device_id",
         )
 
@@ -1351,6 +1376,7 @@ def _stub_homeassistant() -> None:
             self.unique_id = unique_id
             self.config_entry_id = config_entry_id
             self.config_entry_subentry_id = config_entry_subentry_id
+            self.config_subentry_id = config_entry_subentry_id
             self.device_id: str | None = None
 
     class _StubEntityRegistry:
@@ -1358,6 +1384,7 @@ def _stub_homeassistant() -> None:
 
         def __init__(self) -> None:
             self.entities: dict[str, _StubEntityRegistryEntry] = {}
+            self.removed: list[str] = []
 
         def async_get(self, entity_id: str) -> _StubEntityRegistryEntry | None:
             return self.entities.get(entity_id)
@@ -1387,6 +1414,20 @@ def _stub_homeassistant() -> None:
             self.entities[entity_id] = entry
             return entry
 
+        def async_entries_for_config_entry(
+            self, config_entry_id: str
+        ) -> list[_StubEntityRegistryEntry]:
+            return [
+                entry
+                for entry in self.entities.values()
+                if entry.config_entry_id == config_entry_id
+            ]
+
+        def async_remove(self, entity_id: str) -> None:
+            if entity_id in self.entities:
+                self.entities.pop(entity_id, None)
+                self.removed.append(entity_id)
+
     def _entity_registry_for(
         hass: Any | None = None,
     ) -> _StubEntityRegistry:  # pragma: no cover - stub behaviour
@@ -1400,6 +1441,15 @@ def _stub_homeassistant() -> None:
 
     entity_registry_module.RegistryEntry = _StubEntityRegistryEntry
     entity_registry_module.async_get = _entity_registry_for
+
+    def _async_entries_for_config_entry(
+        registry: _StubEntityRegistry, config_entry_id: str
+    ) -> list[_StubEntityRegistryEntry]:
+        return registry.async_entries_for_config_entry(config_entry_id)
+
+    entity_registry_module.async_entries_for_config_entry = (
+        _async_entries_for_config_entry
+    )
 
     util_pkg = sys.modules.setdefault(
         "homeassistant.util", ModuleType("homeassistant.util")
