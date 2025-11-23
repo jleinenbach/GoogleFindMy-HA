@@ -188,3 +188,38 @@ async def test_dispatcher_deduplicates_existing_subentry_signals(
 
     assert len(added) == initial_count == 2
     assert {config for _, config in added} == {service_subentry.subentry_id}
+
+
+@pytest.mark.asyncio
+async def test_binary_sensor_skips_tracker_subentry(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Service-only binary sensor platform ignores tracker subentries."""
+
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _ConfigEntryStub()
+    tracker_subentry = ConfigSubentry(
+        data={"group_key": "tracker", "features": ("binary_sensor",)},
+        subentry_type="tracker",
+        title="Tracker",
+        subentry_id="tracker-subentry",
+    )
+    entry.subentries = {tracker_subentry.subentry_id: tracker_subentry}
+
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await binary_sensor.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    signal = f"{DOMAIN}_subentry_setup_{entry.entry_id}"
+    async_dispatcher_send(hass, signal, tracker_subentry)
+    await asyncio.gather(*pending)
+
+    assert added == []

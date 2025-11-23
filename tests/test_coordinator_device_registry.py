@@ -768,6 +768,15 @@ def frozen_registry(monkeypatch: pytest.MonkeyPatch) -> _FrozenDeviceRegistry:
     return registry
 
 
+@pytest.fixture
+def stub_registry(monkeypatch: pytest.MonkeyPatch):
+    """Expose the shared stub registry with mapping access for hub tests."""
+
+    registry = dr.async_get(None)
+    monkeypatch.setattr(dr, "async_get", lambda _hass: registry)
+    return registry
+
+
 def _build_entry_with_subentries(entry_id: str) -> SimpleNamespace:
     service_subentry = ConfigSubentry(
         data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
@@ -1170,6 +1179,48 @@ def test_existing_device_backfills_config_subentry(
     assert existing.via_device_id is None
 
 
+def test_existing_device_removes_extraneous_tracker_links(
+    fake_registry: _FakeDeviceRegistry, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Extraneous tracker links for the current entry are removed during healing."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-extraneous")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    coordinator._service_device_id = "svc-device-1"
+
+    existing = _FakeDeviceEntry(
+        identifiers={(DOMAIN, f"{entry.entry_id}:abc123")},
+        config_entry_id=entry.entry_id,
+        name="Pixel",
+        via_device_id=None,
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+    existing.config_entries_subentries[entry.entry_id].add("orphan-subentry")
+    existing._sync_config_subentry_id(entry.entry_id)
+    fake_registry.devices.append(existing)
+
+    devices = [{"id": "abc123", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    removal_payload = next(
+        payload
+        for payload in fake_registry.updated
+        if payload.get("remove_config_subentry_id") == "orphan-subentry"
+    )
+    assert removal_payload["remove_config_entry_id"] == entry.entry_id
+
+    refreshed_links = existing.config_entries_subentries.get(entry.entry_id)
+    assert refreshed_links == {entry.tracker_subentry_id}
+    assert any(
+        "Removed extraneous config_subentry_id links" in record.message
+        for record in caplog.records
+    )
+
+
 def test_existing_device_name_refresh_does_not_readd_hub_link(
     fake_registry: _FakeDeviceRegistry,
 ) -> None:
@@ -1207,6 +1258,302 @@ def test_existing_device_name_refresh_does_not_readd_hub_link(
     assert payload["remove_config_entry_id"] is None
     assert existing.via_device_id is None
     assert existing.config_subentry_id == entry.tracker_subentry_id
+
+
+def test_stub_registry_tracks_mapping_view(stub_registry: Any) -> None:
+    """Shared stub keeps mapping and legacy subentry views in sync."""
+
+    registry = stub_registry
+    entry_id = "entry-stub-sync"
+    device = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry_id,
+        identifiers={(DOMAIN, f"{entry_id}:device-1")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Anchor",
+        config_subentry_id="tracker-subentry",
+    )
+
+    assert device.config_entries_subentries == {entry_id: {"tracker-subentry"}}
+    assert device.config_subentry_id == "tracker-subentry"
+
+    registry.async_update_device(  # type: ignore[attr-defined]
+        device_id=device.id,
+        add_config_entry_id="other-entry",
+        add_config_subentry_id=None,
+    )
+
+    assert device.config_entries_subentries["other-entry"] == {None}
+
+    registry.async_update_device(  # type: ignore[attr-defined]
+        device_id=device.id,
+        remove_config_entry_id=entry_id,
+        remove_config_subentry_id=None,
+    )
+
+    assert entry_id not in device.config_entries_subentries
+    assert device.config_subentry_id is None
+
+
+def test_hub_name_collision_reuses_existing_tracker(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Tracker creation reuses an existing hub-linked device on name collisions."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-reuse")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hub = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Hub Anchor",
+        config_subentry_id=entry.service_subentry_id,
+    )
+
+    existing_tracker = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:existing")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Pixel",
+        via_device_id=hub.id,
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+    baseline_created = len(registry.created)
+
+    devices = [{"id": "new-device", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created >= 1
+    assert len(registry.created) == baseline_created
+    assert any("Reusing hub device" in record.message for record in caplog.records)
+    assert existing_tracker.via_device_id == hub.id
+    assert existing_tracker.config_subentry_id == entry.tracker_subentry_id
+
+
+def test_hub_name_collision_reuse_adds_namespaced_identifier(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reused hub devices gain the requesting tracker's namespaced identifier."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-ident")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hub = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Hub Anchor",
+        config_subentry_id=entry.service_subentry_id,
+    )
+
+    existing_tracker = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:existing")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Pixel",
+        via_device_id=hub.id,
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+    baseline_created = len(registry.created)
+    baseline_updates = len(registry.updated)
+
+    devices = [{"id": "new-device", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created >= 1
+    assert len(registry.created) == baseline_created
+    assert len(registry.updated) >= baseline_updates + 1
+    assert (DOMAIN, f"{entry.entry_id}:new-device") in existing_tracker.identifiers
+    assert any(
+        update.get("new_identifiers")
+        and (DOMAIN, f"{entry.entry_id}:new-device") in update["new_identifiers"]
+        for update in registry.updated
+    )
+    assert existing_tracker.config_subentry_id == entry.tracker_subentry_id
+    assert existing_tracker.via_device_id == hub.id
+
+
+def test_hub_name_collision_reuse_attaches_tracker_link(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reused hub devices gain tracker config links when missing."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-link")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hub = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Hub Anchor",
+        config_subentry_id=entry.service_subentry_id,
+    )
+
+    existing_tracker = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:existing")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Pixel",
+        via_device_id=hub.id,
+        config_subentry_id=None,
+    )
+
+    baseline_updates = len(registry.updated)
+    devices = [{"id": "new-device", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created >= 1
+    assert len(registry.updated) >= baseline_updates + 1
+    assert existing_tracker.config_entries_subentries[entry.entry_id] == {
+        entry.tracker_subentry_id
+    }
+    assert existing_tracker.config_subentry_id == entry.tracker_subentry_id
+    assert any(
+        update.get("add_config_subentry_id") == entry.tracker_subentry_id
+        or update.get("config_subentry_id") == entry.tracker_subentry_id
+        for update in registry.updated
+    )
+    assert any("Healing device" in record.message for record in caplog.records)
+
+
+def test_hub_name_collision_does_not_reuse_hub_device(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Tracker collisions with the hub/device anchor are disambiguated."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-handoff")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hub = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Pixel",  # Matches the tracker label and should be disambiguated
+        config_subentry_id=entry.service_subentry_id,
+    )
+
+    baseline_created = len(registry.created)
+    devices = [{"id": "hub-collide", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created == 1
+    assert len(registry.created) == baseline_created + 1
+    created_payload = registry.created[-1]
+    suffix = entry.tracker_subentry_id[-6:]
+    assert created_payload["name"] == f"Pixel ({suffix})"
+    assert hub.config_subentry_id == entry.service_subentry_id
+    assert hub.config_entries_subentries[entry.entry_id] == {entry.service_subentry_id}
+    assert not any("Reusing hub device" in record.message for record in caplog.records)
+    assert any("Disambiguated device name" in record.message for record in caplog.records)
+
+
+def test_hub_name_collision_disambiguates_multiple_new_devices(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Trackers with duplicate hub labels disambiguate deterministically."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-multi")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Hub Anchor",
+        config_subentry_id=entry.service_subentry_id,
+    )
+
+    devices = [
+        {"id": "tracker-one", "name": "Pixel"},
+        {"id": "tracker-two", "name": "Pixel"},
+    ]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    baseline_created = len(registry.created)
+
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created >= 1
+    assert len(registry.created) == baseline_created + 1
+    tracker_payload = registry.created[-1]
+    assert tracker_payload["name"] == "Pixel"
+    assert any("Reusing hub device" in record.message for record in caplog.records)
+
+
+def test_hub_name_collision_disambiguates_foreign_device(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Tracker creation disambiguates names when another hub device owns the label."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-disambiguate")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hub = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Hub Anchor",
+        config_subentry_id=entry.service_subentry_id,
+    )
+
+    registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id="other-entry",
+        identifiers={(DOMAIN, "foreign-tracker")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Pixel",
+        via_device_id=hub.id,
+        config_subentry_id=None,
+    )
+    baseline_created = len(registry.created)
+
+    devices = [{"id": "new-device", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created == 1
+    assert len(registry.created) == baseline_created + 1
+    created_payload = registry.created[-1]
+    suffix = entry.tracker_subentry_id[-6:]
+    assert created_payload["name"] == f"Pixel ({suffix})"
+    assert any("Disambiguated device name" in record.message for record in caplog.records)
 
 
 def test_existing_device_parent_clear_keeps_subentry(

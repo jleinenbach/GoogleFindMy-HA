@@ -60,6 +60,24 @@ class _Scope(NamedTuple):
     config_subentry_id: str | None
     identifier: str
 
+
+def _subentry_type(subentry: Any | None) -> str | None:
+    """Return the declared subentry type for dispatcher filtering."""
+
+    if subentry is None or isinstance(subentry, str):
+        return None
+
+    declared_type = getattr(subentry, "subentry_type", None)
+    if isinstance(declared_type, str):
+        return declared_type
+
+    data = getattr(subentry, "data", None)
+    if isinstance(data, Mapping):
+        fallback_type = data.get("subentry_type") or data.get("type")
+        if isinstance(fallback_type, str):
+            return fallback_type
+    return None
+
 # ----------------------------- Entity Descriptions -----------------------------
 
 LAST_SEEN_DESCRIPTION = SensorEntityDescription(
@@ -138,6 +156,11 @@ async def async_setup_entry(
     - Optionally create diagnostic stat sensors when enabled via options.
     - Dynamically add per-device sensors when new devices appear.
     """
+    _LOGGER.debug(
+        "Sensor setup invoked for entry=%s config_subentry_id=%s",
+        getattr(entry, "entry_id", None),
+        config_subentry_id,
+    )
     coordinator = resolve_coordinator(entry)
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
@@ -258,10 +281,12 @@ async def async_setup_entry(
             or scope.identifier,
         )
         if sanitized_config_id is None:
-            _LOGGER.debug(
-                "Sensor setup: awaiting config_subentry_id for service key '%s'", scope.subentry_key
+            sanitized_config_id = (
+                scope.config_subentry_id
+                or forwarded_config_id
+                or scope.identifier
+                or SERVICE_SUBENTRY_KEY
             )
-            return
 
         identifier = scope.identifier or sanitized_config_id or scope.subentry_key
         service_scopes[identifier] = _Scope(scope.subentry_key, sanitized_config_id, identifier)
@@ -332,10 +357,12 @@ async def async_setup_entry(
             candidate_subentry_id,
         )
         if sanitized_config_id is None:
+            sanitized_config_id = candidate_subentry_id or scope.subentry_key
             _LOGGER.debug(
-                "Sensor setup: awaiting config_subentry_id for tracker key '%s'", scope.subentry_key
+                "Sensor setup: synthesized config_subentry_id '%s' for tracker key '%s'",
+                sanitized_config_id,
+                scope.subentry_key,
             )
-            return
 
         tracker_identifier = scope.identifier or sanitized_config_id or scope.subentry_key
         if tracker_identifier in processed_tracker_identifiers:
@@ -456,49 +483,101 @@ async def async_setup_entry(
                 subentry, "entry_id", None
             )
 
+        subentry_type = _subentry_type(subentry)
+        _LOGGER.debug(
+            "Sensor setup: processing subentry '%s' (type=%s)",
+            subentry_identifier,
+            subentry_type,
+        )
+        if subentry_type not in (None, "service", "tracker"):
+            _LOGGER.debug(
+                "Sensor setup skipped for unrelated subentry '%s' (type '%s')",
+                subentry_identifier,
+                subentry_type,
+            )
+            return
+
         if subentry_identifier in seen_subentries:
             return
         seen_subentries.add(subentry_identifier)
 
+        service_config_id = next(
+            (
+                getattr(candidate, "subentry_id", None)
+                for candidate in getattr(entry, "subentries", {}).values()
+                if getattr(candidate, "subentry_type", None) == "service"
+                or (
+                    isinstance(getattr(candidate, "data", None), Mapping)
+                    and candidate.data.get("group_key") in (SERVICE_SUBENTRY_KEY, "service")
+                )
+            ),
+            None,
+        )
+        service_subentries_exist = service_config_id is not None
+
         processed_ids: set[str | None] = set()
-
-        for scope in _collect_scopes(
-            feature="sensor",
-            default_key=SERVICE_SUBENTRY_KEY,
-            hint_subentry_id=subentry_identifier,
-            forwarded_config_id=subentry_identifier,
-        ):
-            scope_identifier = (
-                scope.config_subentry_id or scope.identifier or scope.subentry_key
+        if subentry_type == "tracker" and not service_subentries_exist:
+            _add_service_scope(
+                _Scope(
+                    SERVICE_SUBENTRY_KEY,
+                    service_config_id or SERVICE_SUBENTRY_KEY,
+                    SERVICE_SUBENTRY_KEY,
+                ),
+                service_config_id or SERVICE_SUBENTRY_KEY,
             )
-            if scope_identifier in processed_ids:
-                continue
-            processed_ids.add(scope_identifier)
-            if _scope_matches_forwarded(scope, subentry_identifier):
-                _add_service_scope(scope, subentry_identifier)
+        service_forward_id = (
+            service_config_id
+            if (subentry_type == "tracker" and service_subentries_exist)
+            else SERVICE_SUBENTRY_KEY
+            if subentry_type == "tracker"
+            else subentry_identifier
+        )
 
-        for scope in _collect_scopes(
-            feature="sensor",
-            default_key=TRACKER_SUBENTRY_KEY,
-            hint_subentry_id=subentry_identifier,
-            forwarded_config_id=subentry_identifier,
-        ):
-            scope_identifier = (
-                scope.config_subentry_id or scope.identifier or scope.subentry_key
-            )
-            if scope_identifier in processed_ids:
-                continue
-            processed_ids.add(scope_identifier)
-            if _scope_matches_forwarded(scope, subentry_identifier):
-                _add_tracker_scope(scope, subentry_identifier)
+        if not (subentry_type == "tracker" and service_subentries_exist):
+            for scope in _collect_scopes(
+                feature="sensor",
+                default_key=SERVICE_SUBENTRY_KEY,
+                hint_subentry_id=service_forward_id,
+                forwarded_config_id=service_forward_id,
+            ):
+                scope_identifier = (
+                    scope.config_subentry_id or scope.identifier or scope.subentry_key
+                )
+                if scope_identifier in processed_ids and subentry_type != "tracker":
+                    continue
+                if subentry_type != "tracker":
+                    processed_ids.add(scope_identifier)
+                if _scope_matches_forwarded(scope, subentry_identifier):
+                    _add_service_scope(scope, subentry_identifier)
+
+        if subentry_type in (None, "tracker"):
+            for scope in _collect_scopes(
+                feature="sensor",
+                default_key=TRACKER_SUBENTRY_KEY,
+                hint_subentry_id=subentry_identifier,
+                forwarded_config_id=subentry_identifier,
+            ):
+                scope_identifier = (
+                    scope.config_subentry_id or scope.identifier or scope.subentry_key
+                )
+                if scope_identifier in processed_ids:
+                    continue
+                processed_ids.add(scope_identifier)
+                if _scope_matches_forwarded(scope, subentry_identifier):
+                    _add_tracker_scope(scope, subentry_identifier)
 
     runtime_data = getattr(entry, "runtime_data", None)
     subentry_manager = getattr(runtime_data, "subentry_manager", None)
     managed_subentries = getattr(subentry_manager, "managed_subentries", None)
-    if isinstance(managed_subentries, Mapping):
-        if config_subentry_id is not None:
-            for managed_subentry in managed_subentries.values():
+    if isinstance(managed_subentries, Mapping) and managed_subentries:
+        for managed_subentry in managed_subentries.values():
+            async_add_subentry(managed_subentry)
+    elif isinstance(getattr(entry, "subentries", None), Mapping):
+        if entry.subentries:
+            for managed_subentry in entry.subentries.values():
                 async_add_subentry(managed_subentry)
+        else:
+            async_add_subentry(config_subentry_id)
     else:
         async_add_subentry(config_subentry_id)
 
