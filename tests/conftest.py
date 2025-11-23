@@ -929,9 +929,29 @@ def _stub_homeassistant() -> None:
             self.translation_key = translation_key
             self.translation_placeholders = dict(translation_placeholders or {})
             self.config_subentry_id = config_subentry_id
+            self.config_entries_subentries: dict[str, set[str | None]] = {
+                config_entry_id: {config_subentry_id} if config_subentry_id else {None}
+            }
             self.via_device_id = via_device_id
             self.via_device = via_device
             self.disabled_by = None
+
+        def _sync_config_subentry_id(self, entry_id: str | None) -> None:
+            """Keep legacy shortcut aligned with mapping-based links."""
+
+            if not entry_id:
+                return
+            subentries = self.config_entries_subentries.get(entry_id)
+            if not subentries:
+                self.config_subentry_id = None
+                return
+            non_null = [item for item in subentries if item is not None]
+            if len(subentries) == 1 and not non_null:
+                self.config_subentry_id = None
+            elif len(non_null) == 1:
+                self.config_subentry_id = non_null[0]
+            else:
+                self.config_subentry_id = None
 
         def update(self, **changes: object) -> None:
             for key, value in changes.items():
@@ -979,6 +999,10 @@ def _stub_homeassistant() -> None:
             translation_placeholders: Mapping[str, str] | None = None,
             config_subentry_id: str | None = None,
         ) -> _StubDeviceEntry:
+            # Hub-collision regression tests rely on the mapping-aware
+            # ``config_entries_subentries`` view staying in sync with the
+            # legacy ``config_subentry_id`` shortcut. Keep both populated here
+            # so downstream name-deduplication logic sees hub-linked devices.
             entry = _StubDeviceEntry(
                 identifiers=identifiers,
                 config_entry_id=config_entry_id,
@@ -1010,6 +1034,11 @@ def _stub_homeassistant() -> None:
                     "translation_key": translation_key,
                     "translation_placeholders": dict(translation_placeholders or {}),
                     "config_subentry_id": config_subentry_id,
+                    "config_entries_subentries": {
+                        config_entry_id: {config_subentry_id}
+                        if config_subentry_id
+                        else {None}
+                    },
                 }
             )
             return entry
@@ -1050,15 +1079,14 @@ def _stub_homeassistant() -> None:
             if add_config_entry_id is not _MISSING:
                 if add_config_entry_id is None:
                     device.config_entries = set()
+                    device.config_entries_subentries.clear()
                 else:
                     entries = set(
                         getattr(device, "config_entries", set()) or set()
                     )
                     entries.add(cast(str, add_config_entry_id))
                     device.config_entries = entries
-                updates["add_config_entry_id"] = cast(
-                    str | None, add_config_entry_id
-                )
+                updates["add_config_entry_id"] = cast(str | None, add_config_entry_id)
             if remove_config_entry_id is not _MISSING:
                 entries = set(getattr(device, "config_entries", set()) or set())
                 if remove_config_entry_id is None:
@@ -1066,6 +1094,9 @@ def _stub_homeassistant() -> None:
                 else:
                     entries.discard(cast(str, remove_config_entry_id))
                 device.config_entries = entries
+                device.config_entries_subentries.pop(
+                    cast(str, remove_config_entry_id), None
+                )
             effective_subentry = _MISSING
             if config_subentry_id is not _MISSING:
                 effective_subentry = config_subentry_id
@@ -1074,7 +1105,18 @@ def _stub_homeassistant() -> None:
             elif remove_config_subentry_id is not _MISSING:
                 effective_subentry = None
             if effective_subentry is not _MISSING:
-                device.config_subentry_id = cast(str | None, effective_subentry)
+                target_entries: set[str] = set()
+                if add_config_entry_id is not _MISSING and add_config_entry_id is not None:
+                    target_entries.add(cast(str, add_config_entry_id))
+                elif config_entry_id is not _MISSING and config_entry_id is not None:
+                    target_entries.add(cast(str, config_entry_id))
+                if not target_entries:
+                    target_entries.update(device.config_entries)
+                for entry_id in target_entries:
+                    bucket = device.config_entries_subentries.setdefault(entry_id, set())
+                    bucket.clear()
+                    bucket.add(cast(str | None, effective_subentry))
+                    device._sync_config_subentry_id(entry_id)
                 updates["config_subentry_id"] = cast(str | None, effective_subentry)
             for attr, value in (
                 ("via_device_id", via_device_id),
