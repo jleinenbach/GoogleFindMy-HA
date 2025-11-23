@@ -24,6 +24,13 @@ child directory overrides it.
 When adding new guidance, prefer creating another `agents/<topic>/AGENTS.md` file instead of expanding this index. This keeps
 updates like the subentry unload reminder easy to place without scrolling through unrelated instructions.
 
+### Quick-start reminder: avoid false-positive tracker discovery
+
+When restoring `device_tracker` entities on startup, confirm the cloud discovery trigger only fires for **truly new** tracker
+entities. Reuse the coordinator's registry helpers (for example, `find_tracker_entity_entry`) to detect whether each scheduled
+entity already exists in the entity registry and skip the discovery flow when all restored devices are known. This prevents the
+"X devices found" notification from reappearing after restarts when no new hardware has been added.
+
 ### Import deferral reminder
 
 Heavyweight runtime dependencies (for example, browser drivers such as `undetected_chromedriver`) must be imported lazily inside
