@@ -131,6 +131,9 @@ MIGRATE_DATA_KEYS_TO_OPTIONS: tuple[str, ...] = OPTION_KEYS
 # Defaults (aligned with the current implementation; adjust carefully)
 # --------------------------------------------------------------------------------------
 UPDATE_INTERVAL: int = 60  # seconds; DataUpdateCoordinator "tick" (lightweight)
+# Minimum spacing for full device list refreshes (seconds); keeps discovery cheap
+# while allowing per-device polling to stay responsive.
+DEVICE_LIST_POLL_INTERVAL: int = 300
 
 # Polling cadence
 DEFAULT_LOCATION_POLL_INTERVAL: int = 300  # seconds; start a new polling cycle
