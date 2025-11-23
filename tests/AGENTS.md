@@ -553,6 +553,11 @@ The helper documents the canonical keyword support (`add_config_entry_id`,
 and records each payload so coordinator- and service-level tests observe the
 same removal behavior.
 
+When expanding purge or cleanup coverage, mirror Home Assistant's registry
+helper API surface (including `async_entries_for_config_entry` and
+`async_remove`) instead of inventing bespoke stubs so new tests continue to use
+the shared registry doubles.
+
 Reuse `tests.helpers.service_device_stub` whenever a test needs a
 `SimpleNamespace`-based service-device object with
 `config_entries_subentries` metadata. The shared factory keeps identifier

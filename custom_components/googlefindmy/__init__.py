@@ -2418,10 +2418,12 @@ async def _async_setup_new_subentries(
             parent_entry.entry_id,
             platforms,
         )
+        _safe_setattr(parent_entry, "_gfm_parent_platforms_forwarded", True)
     else:
         if inspect.isawaitable(result):
             await result
 
+        _safe_setattr(parent_entry, "_gfm_parent_platforms_forwarded", True)
         _LOGGER.debug(
             "[%s] Forwarded setup for config subentries to platforms: %s",
             parent_entry.entry_id,
@@ -2431,6 +2433,79 @@ async def _async_setup_new_subentries(
     signal = f"{DOMAIN}_subentry_setup_{parent_entry.entry_id}"
     for subentry in pending_subentries:
         async_dispatcher_send(hass, signal, subentry)
+
+
+async def _async_purge_unloaded_subentry_registrations(
+    hass: HomeAssistant,
+    *,
+    parent_entry_id: str | None,
+    config_subentry_id: str | None,
+    entry_type: str | None,
+) -> tuple[int, int]:
+    """Remove registry entries for a subentry that never finished loading."""
+
+    if not parent_entry_id or not config_subentry_id:
+        return (0, 0)
+
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+
+    removed_entities = 0
+    removed_devices = 0
+
+    for entity in er.async_entries_for_config_entry(ent_reg, parent_entry_id):
+        if getattr(entity, "config_subentry_id", None) != config_subentry_id:
+            continue
+        ent_reg.async_remove(entity.entity_id)
+        removed_entities += 1
+
+    devices_for_entry = dr.async_entries_for_config_entry(dev_reg, parent_entry_id)
+    for device in devices_for_entry:
+        links_raw = getattr(device, "config_entries_subentries", None)
+        linked_subentries: set[str] = set()
+        if isinstance(links_raw, Mapping):
+            linked_subentries = {
+                link
+                for link in links_raw.get(parent_entry_id, set())
+                if isinstance(link, str)
+            }
+        if config_subentry_id not in linked_subentries:
+            continue
+
+        dev_reg.async_update_device(
+            device_id=device.id,
+            remove_config_entry_id=parent_entry_id,
+            remove_config_subentry_id=config_subentry_id,
+        )
+        refreshed = dev_reg.async_get(device.id)
+
+        refreshed_links_raw = getattr(refreshed, "config_entries_subentries", None)
+        refreshed_links: set[str] = set()
+        if isinstance(refreshed_links_raw, Mapping):
+            refreshed_links = {
+                link
+                for link in refreshed_links_raw.get(parent_entry_id, set())
+                if isinstance(link, str)
+            }
+        if (
+            refreshed is not None
+            and not refreshed.config_entries
+            and not refreshed_links
+        ):
+            dev_reg.async_remove_device(device.id)
+        removed_devices += 1
+
+    if removed_entities or removed_devices:
+        _LOGGER.debug(
+            "[%s] Purged unloaded subentry %s (type=%s): %d entities, %d devices",  # noqa: G004
+            parent_entry_id,
+            config_subentry_id,
+            entry_type,
+            removed_entities,
+            removed_devices,
+        )
+
+    return removed_entities, removed_devices
 
 def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
     """Return the shared FCM lock, creating it if missing."""
@@ -2651,19 +2726,29 @@ def _iter_config_entry_entities(
 
     helper = getattr(er, "async_entries_for_config_entry", None)
     if callable(helper):
-        entries_iterable = helper(entity_registry, entry_id)
+        try:
+            entries_iterable = helper(entity_registry, entry_id)
+        except AttributeError:
+            entries_iterable = None
     else:
+        entries_iterable = None
+
+    if entries_iterable is None:
         registry_helper = getattr(
             entity_registry, "async_entries_for_config_entry", None
         )
         if callable(registry_helper):
-            entries_iterable = registry_helper(entry_id)
-        else:
-            entries_iterable = [
-                entity_entry
-                for entity_entry in getattr(entity_registry, "entities", {}).values()
-                if getattr(entity_entry, "config_entry_id", None) == entry_id
-            ]
+            try:
+                entries_iterable = registry_helper(entry_id)
+            except AttributeError:
+                entries_iterable = None
+
+    if entries_iterable is None:
+        entries_iterable = [
+            entity_entry
+            for entity_entry in getattr(entity_registry, "entities", {}).values()
+            if getattr(entity_entry, "config_entry_id", None) == entry_id
+        ]
 
     entries = tuple(entries_iterable)
     if entries:
@@ -6673,7 +6758,27 @@ async def _async_unload_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> b
         getattr(entry, "subentry_type", None),
         entry.data.get("group_key"),
     )
-    result: Any = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    parent_entry_id = getattr(entry, "parent_entry_id", None)
+    config_subentry_id = _resolve_config_subentry_identifier(entry)
+    entry_type = entry.data.get("subentry_type") if isinstance(entry.data, Mapping) else None
+
+    try:
+        result: Any = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    except ValueError:
+        _LOGGER.debug(
+            "[%s] Subentry platforms never loaded; purging registry links (type=%s)",
+            entry.entry_id,
+            entry_type,
+        )
+        await _async_purge_unloaded_subentry_registrations(
+            hass,
+            parent_entry_id=parent_entry_id,
+            config_subentry_id=config_subentry_id,
+            entry_type=entry_type,
+        )
+        if hasattr(entry, "runtime_data"):
+            setattr(entry, "runtime_data", None)
+        return True
     # Home Assistant returns ``False`` when any platform refuses to unload; keep
     # the runtime data so retry attempts can reuse the existing coordinator.
     unload_success = bool(result)
@@ -6712,9 +6817,15 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
     subentries = _collect_entry_subentries(entry)
 
-    forwarded_parent_platforms = bool(
-        getattr(entry, "_gfm_parent_platforms_forwarded", True)
+    forwarded_parent_platforms_flag = getattr(
+        entry, "_gfm_parent_platforms_forwarded", None
     )
+    # Legacy parent entries may not persist the tracking flag; default to True so
+    # parent platforms unload per the subentry teardown rules documented in
+    # docs/CONFIG_SUBENTRIES_HANDBOOK.md.
+    forwarded_parent_platforms = True
+    if forwarded_parent_platforms_flag is not None:
+        forwarded_parent_platforms = bool(forwarded_parent_platforms_flag)
     unload_parent_platforms = forwarded_parent_platforms
     unload_callable = getattr(hass.config_entries, "async_unload_platforms", None)
     unload_call_count = int(getattr(entry, "_gfm_parent_unload_call_count", 0) or 0)
@@ -6730,8 +6841,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         )
         _safe_setattr(entry, "_gfm_parent_platforms_unloaded", True)
         unload_parent_platforms = True
-
-    if unload_completed and not in_progress:
+    elif unload_completed and not in_progress:
         _LOGGER.debug(
             "[%s] Parent platforms already unloaded; skipping duplicate call",
             entry.entry_id,
@@ -6747,29 +6857,32 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
     overall_success = False
     _safe_setattr(entry, "_gfm_parent_unload_in_progress", True)
     try:
-        if callable(unload_callable):
-            _safe_setattr(entry, "_gfm_parent_unload_call_count", unload_call_count + 1)
-            try:
-                result = unload_callable(entry, tuple(PLATFORMS))
-                if isinstance(result, Awaitable):
-                    result = await result
-                unload_parent_platforms = bool(result) if result is not None else True
-            except Exception as err:  # noqa: BLE001 - defensive logging
-                _LOGGER.error(
-                    "[%s] Failed to unload parent platforms: %s",  # noqa: G004
-                    entry.entry_id,
-                    err,
+        if forwarded_parent_platforms:
+            if callable(unload_callable):
+                _safe_setattr(
+                    entry, "_gfm_parent_unload_call_count", unload_call_count + 1
                 )
-                unload_parent_platforms = False
+                try:
+                    result = unload_callable(entry, tuple(PLATFORMS))
+                    if isinstance(result, Awaitable):
+                        result = await result
+                    unload_parent_platforms = bool(result) if result is not None else True
+                except Exception as err:  # noqa: BLE001 - defensive logging
+                    _LOGGER.error(
+                        "[%s] Failed to unload parent platforms: %s",  # noqa: G004
+                        entry.entry_id,
+                        err,
+                    )
+                    unload_parent_platforms = False
+                else:
+                    if unload_parent_platforms:
+                        _safe_setattr(entry, "_gfm_parent_platforms_unloaded", True)
             else:
-                if unload_parent_platforms:
-                    _safe_setattr(entry, "_gfm_parent_platforms_unloaded", True)
-        else:
-            _LOGGER.debug(
-                "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
-                entry.entry_id,
-            )
-            _safe_setattr(entry, "_gfm_parent_platforms_unloaded", True)
+                _LOGGER.debug(
+                    "[%s] Home Assistant instance lacks async_unload_platforms; skipping parent unload",
+                    entry.entry_id,
+                )
+                _safe_setattr(entry, "_gfm_parent_platforms_unloaded", True)
 
         if not unload_parent_platforms:
             if runtime_data is not None:
@@ -6783,6 +6896,12 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         async def _unload_config_subentry(subentry: Any) -> bool:
             identifier = _resolve_config_subentry_identifier(subentry)
             platforms = _determine_subentry_platforms(subentry)
+            entry_type = None
+            data_obj = getattr(subentry, "data", None)
+            if isinstance(data_obj, Mapping):
+                entry_type = data_obj.get("subentry_type") or data_obj.get("group_key")
+
+            purge_on_missing_platform = False
 
             forward_unload = getattr(
                 hass.config_entries, "async_forward_entry_unload", None
@@ -6805,6 +6924,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                             identifier,
                             platform_name,
                         )
+                        purge_on_missing_platform = True
                         continue
                     if inspect.isawaitable(result):
                         unload_awaitables.append(result)
@@ -6825,6 +6945,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                                     identifier,
                                     outcome,
                                 )
+                                purge_on_missing_platform = True
                                 continue
                             all_unloaded = False
                             continue
@@ -6832,6 +6953,14 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                             all_unloaded = all_unloaded and outcome
                         else:
                             all_unloaded = all_unloaded and True
+
+                if purge_on_missing_platform:
+                    await _async_purge_unloaded_subentry_registrations(
+                        hass,
+                        parent_entry_id=entry.entry_id,
+                        config_subentry_id=identifier,
+                        entry_type=entry_type,
+                    )
 
                 return all_unloaded
 
