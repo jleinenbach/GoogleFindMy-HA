@@ -2849,6 +2849,109 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         get_device_by_id = getattr(dev_reg, "async_get", None)
         created_or_updated = 0
 
+        def _normalized_name(name: Any) -> str | None:
+            if isinstance(name, str) and name.strip():
+                return name.strip().casefold()
+            return None
+
+        hub_device = None
+        hub_device_id: str | None = None
+        hub_device_names: set[str] = set()
+        hub_devices_by_name: dict[str, Any] = {}
+        if callable(get_device):
+            try:
+                hub_device = get_device(identifiers={parent_identifier})
+            except TypeError:
+                hub_device = None
+        if hub_device is not None:
+            hub_device_id = getattr(hub_device, "id", None)
+            _hub_base_name = (
+                getattr(hub_device, "name_by_user", None)
+                or getattr(hub_device, "name", None)
+            )
+            normalized_base = _normalized_name(_hub_base_name)
+            if normalized_base:
+                hub_device_names.add(normalized_base)
+                hub_devices_by_name[normalized_base] = hub_device
+
+        devices_map = getattr(dev_reg, "devices", None)
+        if isinstance(devices_map, Mapping) and hub_device_id:
+            for device_entry in devices_map.values():
+                if getattr(device_entry, "via_device_id", None) != hub_device_id:
+                    continue
+                candidate_name = (
+                    getattr(device_entry, "name_by_user", None)
+                    or getattr(device_entry, "name", None)
+                )
+                normalized_candidate = _normalized_name(candidate_name)
+                if normalized_candidate:
+                    hub_device_names.add(normalized_candidate)
+                    hub_devices_by_name.setdefault(normalized_candidate, device_entry)
+
+        def _track_hub_name(name: str | None, device: Any | None) -> None:
+            normalized = _normalized_name(name)
+            if not normalized:
+                return
+            hub_device_names.add(normalized)
+            if device is not None:
+                hub_devices_by_name.setdefault(normalized, device)
+
+        def _is_hub_device(device: Any | None) -> bool:
+            """Return True when ``device`` represents the hub/service anchor."""
+
+            if device is None:
+                return False
+            if hub_device_id is not None and getattr(device, "id", None) == hub_device_id:
+                return True
+            identifiers = getattr(device, "identifiers", None)
+            if isinstance(identifiers, Collection) and not isinstance(
+                identifiers, (str, bytes, Mapping)
+            ):
+                return parent_identifier in identifiers
+            return False
+
+        def _resolve_hub_name(
+            use_name: str | None, *, device_label: str, device_id: str | None
+        ) -> tuple[str | None, Any | None]:
+            if not use_name:
+                return None, None
+
+            normalized = _normalized_name(use_name)
+            if normalized is None:
+                return use_name, None
+
+            existing = hub_devices_by_name.get(normalized)
+            if normalized not in hub_device_names or (
+                existing is not None and getattr(existing, "id", None) == device_id
+            ):
+                return use_name, None
+
+            if (
+                existing is not None
+                and entry_id in getattr(existing, "config_entries", set())
+                and not _is_hub_device(existing)
+            ):
+                _LOGGER.debug(
+                    "[%s] Reusing hub device '%s' (id=%s) for label '%s' due to name collision",
+                    entry_id,
+                    use_name,
+                    getattr(existing, "id", ""),
+                    device_label,
+                )
+                return use_name, existing
+
+            suffix_source = tracker_config_subentry_id or device_id or entry_id
+            suffix = str(suffix_source)[-6:]
+            disambiguated = f"{use_name} ({suffix})"
+            _LOGGER.debug(
+                "[%s] Disambiguated device name for '%s' from '%s' to '%s' (hub collision)",
+                entry_id,
+                device_label,
+                use_name,
+                disambiguated,
+            )
+            return disambiguated, None
+
         def _subentry_links(device: Any) -> set[str | None]:
             """Return tracker subentry links associated with ``entry_id``."""
 
@@ -2941,9 +3044,39 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 device_id = device_id_hint or None
             if not isinstance(device_id, str) or not device_id:
                 return device, False
+            subentry_links = _subentry_links(device)
+            needs_tracker_link = tracker_config_subentry_id not in subentry_links
+            extraneous_links = {
+                link
+                for link in subentry_links
+                if link is not None and link != tracker_config_subentry_id
+            }
+            changed = False
+
+            if extraneous_links:
+                for link in sorted(extraneous_links):
+                    self._call_device_registry_api(
+                        update_device,
+                        base_kwargs={
+                            "device_id": device_id,
+                            "remove_config_entry_id": entry_id,
+                            "remove_config_subentry_id": link,
+                        },
+                    )
+                device = _refresh_device_entry(device_id, device)
+                _LOGGER.debug(
+                    "[%s] Removed extraneous config_subentry_id links for device '%s': %s",
+                    entry_id,
+                    device_label,
+                    ", ".join(sorted(str(link) for link in extraneous_links)),
+                )
+                subentry_links = _subentry_links(device)
+                needs_tracker_link = tracker_config_subentry_id not in subentry_links
+                changed = True
+
             current_subentry_id = getattr(device, "config_subentry_id", None)
-            if current_subentry_id == tracker_config_subentry_id:
-                return device, False
+            if not needs_tracker_link:
+                return device, changed
             _LOGGER.debug(
                 "[%s] Healing device '%s': correcting config_subentry_id from %s to %s",
                 entry_id,
@@ -3010,6 +3143,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             if raw_name and raw_name != "Google Find My Device"
                             else None
                         )
+                        use_name, _ = _resolve_hub_name(
+                            use_name,
+                            device_label=device_label,
+                            device_id=getattr(legacy_dev, "id", None),
+                        )
                         needs_name = (
                             bool(use_name)
                             and not getattr(legacy_dev, "name_by_user", None)
@@ -3065,6 +3203,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     else None
                 )
 
+                use_name, reuse_device = _resolve_hub_name(
+                    use_name,
+                    device_label=device_label,
+                    device_id=dev_id,
+                )
+                if reuse_device is not None:
+                    dev = reuse_device
+                    reuse_device_id = getattr(dev, "id", None)
+                    if reuse_device_id:
+                        reuse_update_kwargs: dict[str, Any] = {"device_id": reuse_device_id}
+                        if ns_ident not in getattr(dev, "identifiers", set()):
+                            updated_identifiers = set(getattr(dev, "identifiers", set()))
+                            updated_identifiers.add(ns_ident)
+                            reuse_update_kwargs["new_identifiers"] = updated_identifiers
+
+                        if len(reuse_update_kwargs) > 1:
+                            _update_device_with_kwargs(reuse_update_kwargs)
+                            dev = _refresh_device_entry(reuse_device_id, dev)
+
                 create_kwargs: dict[str, Any] = {
                     "config_entry_id": entry_id,
                     "identifiers": {ns_ident},
@@ -3076,10 +3233,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if tracker_config_subentry_id is not None:
                     create_kwargs["config_subentry_id"] = tracker_config_subentry_id
 
-                dev = self._call_device_registry_api(
-                    async_get_or_create,
-                    base_kwargs=create_kwargs,
-                )
+                if dev is None:
+                    dev = self._call_device_registry_api(
+                        async_get_or_create,
+                        base_kwargs=create_kwargs,
+                    )
                 dev, _ = _heal_tracker_device_subentry(
                     dev,
                     device_label=device_label,
@@ -3104,6 +3262,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     raw_label
                     if raw_label and raw_label != "Google Find My Device"
                     else None
+                )
+
+                use_name, _ = _resolve_hub_name(
+                    use_name,
+                    device_label=device_label,
+                    device_id=getattr(dev, "id", None),
                 )
 
                 device_id = getattr(dev, "id", "")
@@ -3166,6 +3330,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 ):
                     dev = _remove_hub_link(dev)
                     created_or_updated += 1
+
+            if dev is not None:
+                _track_hub_name(
+                    getattr(dev, "name_by_user", None) or getattr(dev, "name", None),
+                    dev,
+                )
 
         self._apply_pending_via_updates()
         return created_or_updated

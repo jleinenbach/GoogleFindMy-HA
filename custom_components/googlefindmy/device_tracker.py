@@ -75,6 +75,24 @@ class _TrackerScope:
     config_subentry_id: str | None
     identifier: str | None
 
+
+def _subentry_type(subentry: Any | None) -> str | None:
+    """Return the declared subentry type, if present."""
+
+    if subentry is None or isinstance(subentry, str):
+        return None
+
+    declared_type = getattr(subentry, "subentry_type", None)
+    if isinstance(declared_type, str):
+        return declared_type
+
+    data = getattr(subentry, "data", None)
+    if isinstance(data, Mapping):
+        fallback_type = data.get("subentry_type") or data.get("type")
+        if isinstance(fallback_type, str):
+            return fallback_type
+    return None
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -98,6 +116,11 @@ async def async_setup_entry(
     - On setup, create entities for all devices in the coordinator snapshot (if any).
     - Listen for coordinator updates and add entities for newly discovered devices.
     """
+    _LOGGER.debug(
+        "Device tracker setup invoked for entry=%s config_subentry_id=%s",
+        getattr(config_entry, "entry_id", None),
+        config_subentry_id,
+    )
     coordinator = resolve_coordinator(config_entry)
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
@@ -314,6 +337,9 @@ async def async_setup_entry(
         def _scan_available_trackers_from_coordinator() -> None:
             snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
             if not snapshot:
+                _LOGGER.debug(
+                    "Device tracker setup: no coordinator snapshot for subentry %s", tracker_subentry_key
+                )
                 _schedule_tracker_entities([], True)
                 return
 
@@ -493,6 +519,20 @@ async def async_setup_entry(
                 subentry, "entry_id", None
             )
 
+        subentry_type = _subentry_type(subentry)
+        _LOGGER.debug(
+            "Device tracker setup: processing subentry '%s' (type=%s)",
+            subentry_identifier,
+            subentry_type,
+        )
+        if subentry_type is not None and subentry_type != "tracker":
+            _LOGGER.debug(
+                "Device tracker setup skipped for unrelated subentry '%s' (type '%s')",
+                subentry_identifier,
+                subentry_type,
+            )
+            return
+
         if subentry_identifier in seen_subentries:
             return
         seen_subentries.add(subentry_identifier)
@@ -505,9 +545,15 @@ async def async_setup_entry(
     runtime_data = getattr(config_entry, "runtime_data", None)
     subentry_manager = getattr(runtime_data, "subentry_manager", None)
     managed_subentries = getattr(subentry_manager, "managed_subentries", None)
-    if isinstance(managed_subentries, Mapping):
+    if isinstance(managed_subentries, Mapping) and managed_subentries:
         for managed_subentry in managed_subentries.values():
             async_add_subentry(managed_subentry)
+    elif isinstance(getattr(config_entry, "subentries", None), Mapping):
+        if config_entry.subentries:
+            for managed_subentry in config_entry.subentries.values():
+                async_add_subentry(managed_subentry)
+        else:
+            async_add_subentry(config_subentry_id)
     else:
         async_add_subentry(config_subentry_id)
 

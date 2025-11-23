@@ -60,6 +60,24 @@ class _TrackerScope(NamedTuple):
     identifier: str
 
 
+def _subentry_type(subentry: Any | None) -> str | None:
+    """Return the declared subentry type for dispatcher filtering."""
+
+    if subentry is None or isinstance(subentry, str):
+        return None
+
+    declared_type = getattr(subentry, "subentry_type", None)
+    if isinstance(declared_type, str):
+        return declared_type
+
+    data = getattr(subentry, "data", None)
+    if isinstance(data, Mapping):
+        fallback_type = data.get("subentry_type") or data.get("type")
+        if isinstance(fallback_type, str):
+            return fallback_type
+    return None
+
+
 def _derive_device_label(device: dict[str, Any]) -> str | None:
     """Return a stable device label without mutating the coordinator snapshot."""
 
@@ -109,6 +127,11 @@ async def async_setup_entry(
     config_subentry_id: str | None = None,
 ) -> None:
     """Set up Google Find My Device button entities."""
+    _LOGGER.debug(
+        "Button setup invoked for entry=%s config_subentry_id=%s",
+        getattr(config_entry, "entry_id", None),
+        config_subentry_id,
+    )
     coordinator = resolve_coordinator(config_entry)
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
@@ -210,10 +233,10 @@ async def async_setup_entry(
             config_entry, "button", scope.config_subentry_id or forwarded_config_id
         )
         if sanitized_config_id is None:
+            sanitized_config_id = scope.identifier or forwarded_config_id or scope.subentry_key
             _LOGGER.debug(
-                "Button setup: awaiting config_subentry_id for key '%s'; deferring", scope.subentry_key
+                "Button setup: synthesized config_subentry_id '%s' for key '%s'", sanitized_config_id, scope.subentry_key
             )
-            return
 
         tracker_identifier = scope.identifier or sanitized_config_id or scope.subentry_key
 
@@ -295,6 +318,11 @@ async def async_setup_entry(
             )
             _schedule_button_entities(initial_entities, True)
         else:
+            _LOGGER.debug(
+                "Button setup: no devices available for subentry %s (config_subentry_id=%s)",
+                scope.subentry_key,
+                sanitized_config_id,
+            )
             _schedule_button_entities([], True)
 
         @callback
@@ -323,6 +351,20 @@ async def async_setup_entry(
                 subentry, "entry_id", None
             )
 
+        subentry_type = _subentry_type(subentry)
+        _LOGGER.debug(
+            "Button setup: processing subentry '%s' (type=%s)",
+            subentry_identifier,
+            subentry_type,
+        )
+        if subentry_type is not None and subentry_type != "tracker":
+            _LOGGER.debug(
+                "Button setup skipped for unrelated subentry '%s' (type '%s')",
+                subentry_identifier,
+                subentry_type,
+            )
+            return
+
         if subentry_identifier in seen_subentries:
             return
         seen_subentries.add(subentry_identifier)
@@ -335,10 +377,30 @@ async def async_setup_entry(
     runtime_data = getattr(config_entry, "runtime_data", None)
     subentry_manager = getattr(runtime_data, "subentry_manager", None)
     managed_subentries = getattr(subentry_manager, "managed_subentries", None)
-    if isinstance(managed_subentries, Mapping):
-        if config_subentry_id is not None:
-            for managed_subentry in managed_subentries.values():
-                async_add_subentry(managed_subentry)
+    known_subentries: Iterable[Any] = ()
+    if isinstance(managed_subentries, Mapping) and managed_subentries:
+        known_subentries = managed_subentries.values()
+    elif isinstance(getattr(config_entry, "subentries", None), Mapping) and config_entry.subentries:
+        known_subentries = config_entry.subentries.values()
+
+    if config_subentry_id is None and known_subentries and subentry_manager is not None:
+        _LOGGER.debug(
+            "Button setup: deferring subentry processing until dispatcher signal for entry %s",
+            getattr(config_entry, "entry_id", None),
+        )
+        schedule_add_entities(
+            coordinator.hass,
+            async_add_entities,
+            entities=[],
+            update_before_add=False,
+            log_owner="Button setup",
+            logger=_LOGGER,
+        )
+    elif known_subentries:
+        for managed_subentry in known_subentries:
+            async_add_subentry(managed_subentry)
+    elif isinstance(getattr(config_entry, "subentries", None), Mapping):
+        async_add_subentry(config_subentry_id)
     else:
         async_add_subentry(config_subentry_id)
 
