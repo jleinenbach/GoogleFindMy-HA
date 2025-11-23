@@ -114,6 +114,7 @@ from .const import (
     # Core / options
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
+    DEVICE_LIST_POLL_INTERVAL,
     DOMAIN,
     # Required symbols provided by const.py (5.1-A)
     EVENT_AUTH_ERROR,
@@ -685,6 +686,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._is_polling = False
         self._startup_complete = False
         self._last_poll_mono: float = 0.0  # monotonic timestamp for scheduling
+        self._last_list_poll_mono: float = 0.0  # monotonic timestamp for discovery pacing
 
         # Push readiness deferral/escalation bookkeeping
         self._fcm_defer_started_mono: float = 0.0
@@ -4023,7 +4025,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Provide cached device data; trigger background poll if due.
 
         Discovery semantics:
-        - Always fetch the **full** lightweight device list (no executor).
+        - Refresh the **full** lightweight device list (no executor) on a paced interval
+          and reuse the cached list between refreshes.
         - Update presence and metadata caches for **all** devices.
         - The published snapshot (`self.data`) contains **all** devices (for dynamic entity creation).
         - The sequential **polling cycle** polls devices that are enabled in HA's Device Registry
@@ -4061,78 +4064,105 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     reason="Push transport not ready; continuing with cached data",
                 )
 
-            # 1) Always fetch the lightweight FULL device list using native async API
-            payload = await self.api.async_get_basic_device_list()
+            list_check_mono = time.monotonic()
+            list_due = (
+                list_check_mono - self._last_list_poll_mono
+            ) >= DEVICE_LIST_POLL_INTERVAL
+            use_cached_list = not list_due and bool(self._last_device_list)
 
-            # Success path: if we were in an auth error state, clear it now.
-            self._set_auth_state(failed=False)
-            self._set_api_status(ApiStatus.OK)
-
-            # Normalize payloads that may arrive as mappings or sequences.
-            devices_source: Any
-            if isinstance(payload, Mapping):
-                devices_source = payload.get("devices")
+            filtered_devices: list[dict[str, Any]]
+            if use_cached_list:
+                filtered_devices = list(self._last_device_list)
+                self._set_api_status(ApiStatus.OK)
+                _LOGGER.debug(
+                    "Skipping device list refresh (next in %.0fs); using cached list (%d devices)",
+                    max(
+                        0.0,
+                        DEVICE_LIST_POLL_INTERVAL
+                        - (list_check_mono - self._last_list_poll_mono),
+                    ),
+                    len(filtered_devices),
+                )
             else:
-                devices_source = payload
+                # 1) Fetch the lightweight FULL device list using the native async API
+                payload = await self.api.async_get_basic_device_list()
 
-            if devices_source is None:
-                device_candidates: list[Any] = []
-            elif isinstance(devices_source, Mapping):
-                device_candidates = [devices_source]
-            elif isinstance(devices_source, Sequence) and not isinstance(
-                devices_source, (str, bytes, bytearray)
-            ):
-                device_candidates = list(devices_source)
-            else:
-                device_candidates = []
+                # Success path: if we were in an auth error state, clear it now.
+                self._set_auth_state(failed=False)
+                self._set_api_status(ApiStatus.OK)
 
-            filtered_devices: list[dict[str, Any]] = []
-            seen_ids: set[str] = set()
-            for item in device_candidates:
-                if not isinstance(item, Mapping):
-                    continue
-                normalized = dict(item)
-                dev_id_value = normalized.get("id")
-                if not isinstance(dev_id_value, str) or not dev_id_value.strip():
-                    _LOGGER.debug(
-                        "Skipping device without valid id (keys=%s)",
-                        list(normalized)[:6],
-                    )
-                    continue
-                dev_id = dev_id_value.strip()
-                normalized["id"] = dev_id
-                if dev_id in seen_ids:
-                    # Duplicate policy: first-wins (skip subsequent duplicates).
-                    _LOGGER.debug("Skipping duplicate device entry for id=%s", dev_id)
-                    continue
-                seen_ids.add(dev_id)
-                filtered_devices.append(normalized)
-
-            # Minimal hardening against false empties (keep prior behaviour)
-            if not filtered_devices:
-                self._empty_list_streak += 1
-                if (
-                    self._empty_list_streak < _EMPTY_LIST_QUORUM
-                    and self._last_device_list
-                ):
-                    # Defer clearing once; keep previous view stable.
-                    _LOGGER.debug(
-                        "Successful empty device list received (%d/%d). Deferring clear until quorum is met.",
-                        self._empty_list_streak,
-                        _EMPTY_LIST_QUORUM,
-                    )
-                    filtered_devices = list(self._last_device_list)
+                # Normalize payloads that may arrive as mappings or sequences.
+                devices_source: Any
+                if isinstance(payload, Mapping):
+                    devices_source = payload.get("devices")
                 else:
-                    _LOGGER.debug(
-                        "Accepting empty device list after %d consecutive empties.",
-                        self._empty_list_streak,
-                    )
-                    # Once accepted, forget any prior list so snapshot becomes empty below.
-                    self._last_device_list = []
-            else:
-                # Non-empty result: reset streak and remember latest good list.
-                self._empty_list_streak = 0
-                self._last_device_list = list(filtered_devices)
+                    devices_source = payload
+
+                if devices_source is None:
+                    device_candidates: list[Any] = []
+                elif isinstance(devices_source, Mapping):
+                    device_candidates = [devices_source]
+                elif isinstance(devices_source, Sequence) and not isinstance(
+                    devices_source, (str, bytes, bytearray)
+                ):
+                    device_candidates = list(devices_source)
+                else:
+                    device_candidates = []
+
+                filtered_devices = []
+                seen_ids: set[str] = set()
+                for item in device_candidates:
+                    if not isinstance(item, Mapping):
+                        continue
+                    normalized = dict(item)
+                    dev_id_value = normalized.get("id")
+                    if not isinstance(dev_id_value, str) or not dev_id_value.strip():
+                        _LOGGER.debug(
+                            "Skipping device without valid id (keys=%s)",
+                            list(normalized)[:6],
+                        )
+                        continue
+                    dev_id = dev_id_value.strip()
+                    normalized["id"] = dev_id
+                    if dev_id in seen_ids:
+                        # Duplicate policy: first-wins (skip subsequent duplicates).
+                        _LOGGER.debug(
+                            "Skipping duplicate device entry for id=%s", dev_id
+                        )
+                        continue
+                    seen_ids.add(dev_id)
+                    filtered_devices.append(normalized)
+
+                # Minimal hardening against false empties (keep prior behaviour)
+                if not filtered_devices:
+                    self._empty_list_streak += 1
+                    if (
+                        self._empty_list_streak < _EMPTY_LIST_QUORUM
+                        and self._last_device_list
+                    ):
+                        # Defer clearing once; keep previous view stable.
+                        _LOGGER.debug(
+                            "Successful empty device list received (%d/%d). Deferring clear until quorum is met.",
+                            self._empty_list_streak,
+                            _EMPTY_LIST_QUORUM,
+                        )
+                        filtered_devices = list(self._last_device_list)
+                        _LOGGER.debug(
+                            "Deferring discovery throttle; retrying device list before pacing interval applies.",
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Accepting empty device list after %d consecutive empties.",
+                            self._empty_list_streak,
+                        )
+                        # Once accepted, forget any prior list so snapshot becomes empty below.
+                        self._last_device_list = []
+                        self._last_list_poll_mono = list_check_mono
+                else:
+                    # Non-empty result: reset streak and remember latest good list.
+                    self._empty_list_streak = 0
+                    self._last_device_list = list(filtered_devices)
+                    self._last_list_poll_mono = list_check_mono
 
             # Presence TTL derives from the effective poll cadence
             effective_interval = max(
