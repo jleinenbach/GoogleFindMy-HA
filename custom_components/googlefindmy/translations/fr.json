@@ -183,14 +183,24 @@
           "google_home_filter_enabled": "Filtrer les appareils Google Home",
           "google_home_filter_keywords": "Mots-clés du filtre (séparés par des virgules)",
           "enable_stats_entities": "Créer des entités de statistiques",
+          "delete_caches_on_remove": "Supprimer les caches lors de la suppression de l’entrée",
           "map_view_token_expiration": "Activer l’expiration du jeton de la vue carte",
           "contributor_mode": "Mode de contribution de localisation",
           "subentry": "Feature group"
         },
         "data_description": {
+          "delete_caches_on_remove": "Supprime les jetons mis en cache et les métadonnées des appareils lors de la suppression de cette entrée.",
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas.",
           "contributor_mode": "\"high_traffic\" conserve le mode agrégé par défaut de Google. \"in_all_areas\" active des signalements participatifs plus rapides.",
           "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
+        },
+        "select": {
+          "contributor_mode": {
+            "options": {
+              "high_traffic": "Trafic élevé (par défaut)",
+              "in_all_areas": "Contributions participatives (toutes les zones)"
+            }
+          }
         }
       },
       "visibility": {
