@@ -59,13 +59,20 @@ from typing import (
 
 import voluptuous as vol
 from homeassistant import config_entries, data_entry_flow
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_call_later
+
+try:
+    from homeassistant.config_entries import ConfigEntry, OperationNotAllowed
+except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
+    from homeassistant.config_entries import ConfigEntry
+
+    OperationNotAllowed = type("OperationNotAllowed", (HomeAssistantError,), {})
 
 from .const import (
     CONF_GOOGLE_EMAIL,
@@ -3024,12 +3031,10 @@ class ConfigFlow(
                         )
                         setattr(entry_for_update, "options", fallback_options)
 
-                    self.hass.async_create_task(
-                        self.hass.config_entries.async_reload(entry_for_update.entry_id)
-                    )
                     self.context.pop("is_reconfigure", None)
                     self.context.pop("reauth_success_reason_override", None)
                     self.context.pop("reconfigure_options", None)
+                    await self._async_reload_entry_after_reconfigure(entry_for_update)
                     return self.async_abort(reason="reconfigure_successful")
             else:
                 subentry_context.setdefault(self._subentry_key_core_tracking, None)
@@ -3057,6 +3062,39 @@ class ConfigFlow(
         return self.async_show_form(
             step_id="device_selection", data_schema=schema_with_defaults, errors=errors
         )
+
+    async def _async_reload_entry_after_reconfigure(
+        self, entry_for_update: ConfigEntry
+    ) -> None:
+        """Reload the updated entry, deferring when the core forbids it."""
+
+        async def _async_call_reload() -> None:
+            reload_result = self.hass.config_entries.async_reload(
+                entry_for_update.entry_id
+            )
+            if inspect.isawaitable(reload_result):
+                await reload_result
+
+        try:
+            await _async_call_reload()
+        except OperationNotAllowed:
+            def _schedule_reload(_: Any) -> None:
+                reload_result = self.hass.config_entries.async_reload(
+                    entry_for_update.entry_id
+                )
+                if inspect.isawaitable(reload_result):
+                    create_task = getattr(self.hass, "async_create_task", None)
+                    if callable(create_task):
+                        try:
+                            create_task(reload_result)
+                        except TypeError:
+                            create_task(reload_result)
+                    else:
+                        loop = getattr(self.hass, "loop", None)
+                        if loop is not None:
+                            loop.create_task(reload_result)
+
+            async_call_later(self.hass, 0, _schedule_reload)
 
     # ------------------ Reauthentication ------------------
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
