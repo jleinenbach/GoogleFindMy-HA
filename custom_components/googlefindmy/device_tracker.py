@@ -508,15 +508,36 @@ async def async_setup_entry(
         scope_states[scope_identifier] = {"scan": _scan_available_trackers_from_coordinator}
 
     seen_subentries: set[str | None] = set()
+    seen_subentry_keys: set[str] = set()
 
     @callback
     def async_add_subentry(subentry: Any | None = None) -> None:
+        subentry_key = TRACKER_SUBENTRY_KEY
         subentry_identifier = None
         if isinstance(subentry, str):
             subentry_identifier = subentry
         else:
             subentry_identifier = getattr(subentry, "subentry_id", None) or getattr(
                 subentry, "entry_id", None
+            )
+            data = getattr(subentry, "data", None)
+            if isinstance(data, Mapping):
+                data_group_key = data.get("group_key")
+                if isinstance(data_group_key, str) and data_group_key.strip():
+                    subentry_key = data_group_key.strip()
+
+        if not subentry_identifier:
+            try:
+                stable_identifier = coordinator.stable_subentry_identifier(
+                    key=subentry_key
+                )
+            except Exception:  # pragma: no cover - best effort fallback
+                stable_identifier = None
+
+            subentry_identifier = (
+                stable_identifier
+                if isinstance(stable_identifier, str) and stable_identifier
+                else subentry_key
             )
 
         subentry_type = _subentry_type(subentry)
@@ -533,29 +554,15 @@ async def async_setup_entry(
             )
             return
 
-        if subentry_identifier in seen_subentries:
+        if subentry_identifier in seen_subentries or subentry_key in seen_subentry_keys:
             return
         seen_subentries.add(subentry_identifier)
+        seen_subentry_keys.add(subentry_key)
 
         for scope in _collect_tracker_scopes(
             subentry_identifier, forwarded_config_id=subentry_identifier
         ):
             _add_scope(scope, subentry_identifier)
-
-    runtime_data = getattr(config_entry, "runtime_data", None)
-    subentry_manager = getattr(runtime_data, "subentry_manager", None)
-    managed_subentries = getattr(subentry_manager, "managed_subentries", None)
-    if isinstance(managed_subentries, Mapping) and managed_subentries:
-        for managed_subentry in managed_subentries.values():
-            async_add_subentry(managed_subentry)
-    elif isinstance(getattr(config_entry, "subentries", None), Mapping):
-        if config_entry.subentries:
-            for managed_subentry in config_entry.subentries.values():
-                async_add_subentry(managed_subentry)
-        else:
-            async_add_subentry(config_subentry_id)
-    else:
-        async_add_subentry(config_subentry_id)
 
     @callback
     def _handle_subentry_setup(subentry: Any | None = None) -> None:
@@ -576,6 +583,26 @@ async def async_setup_entry(
             return
 
         async_add_subentry(subentry)
+
+    runtime_data = getattr(config_entry, "runtime_data", None)
+    subentry_manager = getattr(runtime_data, "subentry_manager", None)
+    managed_subentries = getattr(subentry_manager, "managed_subentries", None)
+    entry_subentries = (
+        config_entry.subentries
+        if isinstance(getattr(config_entry, "subentries", None), Mapping)
+        else None
+    )
+
+    if isinstance(managed_subentries, Mapping) and managed_subentries:
+        for managed_subentry in managed_subentries.values():
+            async_add_subentry(managed_subentry)
+    elif isinstance(managed_subentries, Mapping):
+        async_add_subentry(config_subentry_id)
+    elif isinstance(entry_subentries, Mapping) and entry_subentries:
+        for managed_subentry in entry_subentries.values():
+            async_add_subentry(managed_subentry)
+    else:
+        async_add_subentry(config_subentry_id)
 
     config_entry.async_on_unload(
         async_dispatcher_connect(
