@@ -193,14 +193,6 @@
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire.",
           "contributor_mode": "Choose \"high_traffic\" for aggregated network-only updates (Google's default) or \"in_all_areas\" to opt into crowdsourced reports for faster coverage.",
           "subentry": "Store these options on the selected feature group. See [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) for examples."
-        },
-        "select": {
-          "contributor_mode": {
-            "options": {
-              "high_traffic": "High traffic (default)",
-              "in_all_areas": "Crowdsourced (all areas)"
-            }
-          }
         }
       },
       "visibility": {

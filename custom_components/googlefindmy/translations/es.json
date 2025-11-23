@@ -193,14 +193,6 @@
           "map_view_token_expiration": "Si está activado, los tokens de la vista de mapa caducan tras 1 semana. Si está desactivado (por defecto), no caducan.",
           "contributor_mode": "\"high_traffic\" mantiene el modo agregado predeterminado de Google. \"in_all_areas\" habilita informes colaborativos más rápidos.",
           "subentry": "Guarda estas opciones en el grupo de funciones seleccionado. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver ejemplos."
-        },
-        "select": {
-          "contributor_mode": {
-            "options": {
-              "high_traffic": "Tráfico alto (predeterminado)",
-              "in_all_areas": "Colaborativo (todas las zonas)"
-            }
-          }
         }
       },
       "visibility": {

@@ -193,14 +193,6 @@
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas.",
           "contributor_mode": "\"high_traffic\" conserve le mode agrégé par défaut de Google. \"in_all_areas\" active des signalements participatifs plus rapides.",
           "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
-        },
-        "select": {
-          "contributor_mode": {
-            "options": {
-              "high_traffic": "Trafic élevé (par défaut)",
-              "in_all_areas": "Contributions participatives (toutes les zones)"
-            }
-          }
         }
       },
       "visibility": {

@@ -193,14 +193,6 @@
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
           "contributor_mode": "\"high_traffic\" utrzymuje domyślny tryb agregacji Google. \"in_all_areas\" włącza szybsze zgłoszenia crowdsourcingowe.",
           "subentry": "Zapisz te opcje w wybranej grupie funkcji. Zobacz [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups), aby poznać przykłady."
-        },
-        "select": {
-          "contributor_mode": {
-            "options": {
-              "high_traffic": "Wysokie obciążenie (domyślnie)",
-              "in_all_areas": "Crowdsourcing (wszystkie obszary)"
-            }
-          }
         }
       },
       "visibility": {
