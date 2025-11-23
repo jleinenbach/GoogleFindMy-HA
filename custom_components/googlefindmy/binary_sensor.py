@@ -68,6 +68,24 @@ class _ServiceScope(NamedTuple):
     config_subentry_id: str | None
     identifier: str
 
+
+def _subentry_type(subentry: Any | None) -> str | None:
+    """Return the declared subentry type for dispatcher filtering."""
+
+    if subentry is None or isinstance(subentry, str):
+        return None
+
+    declared_type = getattr(subentry, "subentry_type", None)
+    if isinstance(declared_type, str):
+        return declared_type
+
+    data = getattr(subentry, "data", None)
+    if isinstance(data, Mapping):
+        fallback_type = data.get("subentry_type") or data.get("type")
+        if isinstance(fallback_type, str):
+            return fallback_type
+    return None
+
 # --------------------------------------------------------------------------------------
 # Entity descriptions
 # --------------------------------------------------------------------------------------
@@ -267,6 +285,15 @@ async def async_setup_entry(  # noqa: PLR0915
                 subentry, "entry_id", None
             )
 
+        subentry_type = _subentry_type(subentry)
+        if subentry_type is not None and subentry_type != "service":
+            _LOGGER.debug(
+                "Binary sensor setup skipped for unrelated subentry '%s' (type '%s')",
+                subentry_identifier,
+                subentry_type,
+            )
+            return
+
         if subentry_identifier in seen_subentries:
             return
         seen_subentries.add(subentry_identifier)
@@ -283,6 +310,9 @@ async def async_setup_entry(  # noqa: PLR0915
         if config_subentry_id is not None:
             for managed_subentry in managed_subentries.values():
                 async_add_subentry(managed_subentry)
+    elif isinstance(getattr(entry, "subentries", None), Mapping):
+        for managed_subentry in entry.subentries.values():
+            async_add_subentry(managed_subentry)
     else:
         async_add_subentry(config_subentry_id)
 

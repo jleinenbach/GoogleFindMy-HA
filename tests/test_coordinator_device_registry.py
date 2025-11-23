@@ -1338,6 +1338,56 @@ def test_hub_name_collision_reuses_existing_tracker(
     assert existing_tracker.config_subentry_id == entry.tracker_subentry_id
 
 
+def test_hub_name_collision_reuse_adds_namespaced_identifier(
+    stub_registry: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reused hub devices gain the requesting tracker's namespaced identifier."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-hub-ident")
+    registry = stub_registry
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    hub = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={service_device_identifier(entry.entry_id)},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Hub Anchor",
+        config_subentry_id=entry.service_subentry_id,
+    )
+
+    existing_tracker = registry.async_get_or_create(  # type: ignore[attr-defined]
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{entry.entry_id}:existing")},
+        manufacturer=SERVICE_DEVICE_MANUFACTURER,
+        model=SERVICE_DEVICE_MODEL,
+        name="Pixel",
+        via_device_id=hub.id,
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+    baseline_created = len(registry.created)
+    baseline_updates = len(registry.updated)
+
+    devices = [{"id": "new-device", "name": "Pixel"}]
+    coordinator.data = devices
+
+    caplog.set_level("DEBUG")
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created >= 1
+    assert len(registry.created) == baseline_created
+    assert len(registry.updated) >= baseline_updates + 1
+    assert (DOMAIN, f"{entry.entry_id}:new-device") in existing_tracker.identifiers
+    assert any(
+        update.get("new_identifiers")
+        and (DOMAIN, f"{entry.entry_id}:new-device") in update["new_identifiers"]
+        for update in registry.updated
+    )
+    assert existing_tracker.config_subentry_id == entry.tracker_subentry_id
+    assert existing_tracker.via_device_id == hub.id
+
+
 def test_hub_name_collision_disambiguates_multiple_new_devices(
     stub_registry: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
