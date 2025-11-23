@@ -305,6 +305,7 @@ async def async_setup_entry(  # noqa: PLR0915
             _add_scope(scope, subentry_identifier)
 
     runtime_data = getattr(entry, "runtime_data", None)
+
     subentry_manager = getattr(runtime_data, "subentry_manager", None)
     managed_subentries = getattr(subentry_manager, "managed_subentries", None)
     if isinstance(managed_subentries, Mapping) and managed_subentries:

@@ -2365,6 +2365,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 ent_registry_values = ()
 
         canonical_unique_id: str | None = None
+        tracker_subentry_identifier: str | None = None
         if entry_id:
             tracker_subentry_key = TRACKER_SUBENTRY_KEY
             tracker_meta: Any | None = None
@@ -2381,7 +2382,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if isinstance(candidate_key, str) and candidate_key.strip():
                     tracker_subentry_key = candidate_key.strip()
 
-            tracker_subentry_identifier: str | None = None
             identifier_getter = getattr(self, "stable_subentry_identifier", None)
             if callable(identifier_getter):
                 try:
@@ -2465,6 +2465,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         candidate_unique_ids: list[str] = []
         if entry_id:
+            if tracker_subentry_identifier:
+                candidate_unique_ids.append(
+                    f"{entry_id}:{tracker_subentry_identifier}:{device_id}"
+                )
+            if tracker_subentry_key:
+                candidate_unique_ids.append(
+                    f"{entry_id}:{tracker_subentry_key}:{device_id}"
+                )
             candidate_unique_ids.append(f"{entry_id}:{device_id}")
             candidate_unique_ids.append(f"{DOMAIN}_{entry_id}_{device_id}")
         candidate_unique_ids.append(f"{DOMAIN}_{device_id}")
