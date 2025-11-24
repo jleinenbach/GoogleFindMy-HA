@@ -529,6 +529,7 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
     hass = _HassStub(entry, runtime_data, entity_registry, device_registry)
 
     legacy_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
+    purge_calls: list[dict[str, object]] = []
 
     def legacy_forward(entry_obj: _EntryStub, platforms: object) -> bool:
         if isinstance(platforms, (list, tuple, set)):
@@ -540,6 +541,10 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
 
     hass.config_entries.async_forward_entry_unload = legacy_forward  # type: ignore[attr-defined]
 
+    async def _record_purge(*args: object, **kwargs: object) -> tuple[int, int]:
+        purge_calls.append({"args": args, "kwargs": kwargs})
+        return (0, 0)
+
     async def _fake_release_fcm(hass_obj: Any) -> None:
         hass_obj.data[DOMAIN]["fcm_refcount"] = 0
 
@@ -547,15 +552,27 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
     monkeypatch.setattr(integration, "loc_unregister_fcm_provider", lambda: None)
     monkeypatch.setattr(integration, "api_unregister_fcm_provider", lambda: None)
+    monkeypatch.setattr(
+        integration,
+        "_async_purge_unloaded_subentry_registrations",
+        _record_purge,
+    )
 
     result = asyncio.run(integration.async_unload_entry(hass, entry))
 
     assert result is True
-    assert legacy_calls == []
+    assert legacy_calls == [
+        (
+            entry,
+            (platform.value if hasattr(platform, "value") else str(platform),),
+        )
+        for platform in integration.PLATFORMS
+    ]
     assert hass.config_entries.parent_unload_invocations in (0, 1)
     assert hass.config_entries.unload_platform_calls == [
         (entry, tuple(integration.PLATFORMS))
     ]
+    assert purge_calls == []
 
 
 def test_async_unload_entry_rolls_back_when_parent_unload_fails(

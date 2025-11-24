@@ -6921,7 +6921,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
         async def _unload_config_subentry(subentry: Any) -> bool:
             identifier = _resolve_config_subentry_identifier(subentry)
-            platforms = _determine_subentry_platforms(subentry)
+            platforms = tuple(PLATFORMS)
             entry_type = None
             data_obj = getattr(subentry, "data", None)
             if isinstance(data_obj, Mapping):
@@ -6933,19 +6933,25 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 hass.config_entries, "async_forward_entry_unload", None
             )
             if isinstance(identifier, str) and identifier and callable(forward_unload):
+                if inspect.iscoroutinefunction(forward_unload):
+                    _LOGGER.debug(
+                        "[%s] Home Assistant manages coroutine-based subentry unloads; skipping manual forward calls",  # noqa: G004
+                        identifier,
+                    )
+                    await _async_purge_unloaded_subentry_registrations(
+                        hass,
+                        parent_entry_id=entry.entry_id,
+                        config_subentry_id=identifier,
+                        entry_type=entry_type,
+                    )
+                    return True
+
                 all_unloaded = True
-                unload_awaitables: list[Awaitable[Any]] = []
+                unload_awaitables: list[tuple[str, Awaitable[Any]]] = []
                 for platform in platforms:
                     platform_name = getattr(platform, "value", str(platform))
                     try:
-                        result, rejected_keyword = _invoke_with_optional_keyword(
-                            forward_unload,
-                            (entry, platform_name),
-                            "config_subentry_id",
-                            identifier,
-                            allow_fallback=False,
-                            signal_keyword_rejection=True,
-                        )
+                        result = forward_unload(entry, platform_name)
                     except ValueError:
                         _LOGGER.debug(
                             "[%s] Subentry platform '%s' was never loaded; skipping unload",  # noqa: G004
@@ -6954,31 +6960,28 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                         )
                         purge_on_missing_platform = True
                         continue
-                    if rejected_keyword:
-                        _LOGGER.debug(
-                            "[%s] Home Assistant forward unload helper lacks config_subentry_id support; purging registry links for platform '%s'",  # noqa: G004
-                            identifier,
-                            platform_name,
-                        )
-                        purge_on_missing_platform = True
-                        continue
                     if inspect.isawaitable(result):
-                        unload_awaitables.append(result)
+                        unload_awaitables.append((platform_name, result))
                     else:
                         all_unloaded = all_unloaded and (
                             bool(result) if result is not None else True
                         )
 
                 if unload_awaitables:
+                    platform_names = [
+                        platform_name for platform_name, _ in unload_awaitables
+                    ]
                     gathered = await asyncio.gather(
-                        *unload_awaitables, return_exceptions=True
+                        *(awaitable for _, awaitable in unload_awaitables),
+                        return_exceptions=True,
                     )
-                    for outcome in gathered:
+                    for platform_name, outcome in zip(platform_names, gathered):
                         if isinstance(outcome, BaseException):
                             if isinstance(outcome, ValueError):
                                 _LOGGER.debug(
-                                    "[%s] Subentry platform unload skipped: %s",  # noqa: G004
+                                    "[%s] Subentry platform '%s' unload skipped: %s",  # noqa: G004
                                     identifier,
+                                    platform_name,
                                     outcome,
                                 )
                                 purge_on_missing_platform = True
@@ -7056,7 +7059,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 return False
 
         if runtime_data is not None:
-            coordinator = runtime_data.coordinator
+            coordinator = getattr(runtime_data, "coordinator", None)
             if coordinator is not None:
                 shutdown = getattr(coordinator, "async_shutdown", None)
                 if callable(shutdown):
@@ -7064,13 +7067,13 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                     if inspect.isawaitable(result):
                         await result
 
-            if runtime_data.subentry_manager is not None:
+            if getattr(runtime_data, "subentry_manager", None) is not None:
                 try:
                     await runtime_data.subentry_manager.async_remove_all()
                 except Exception as err:
                     _LOGGER.debug("Subentry cleanup raised during unload: %s", err)
 
-            cache = runtime_data.token_cache
+            cache = getattr(runtime_data, "token_cache", None)
             if cache is not None:
                 fallback_cache = _unregister_instance(entry.entry_id)
                 try:
