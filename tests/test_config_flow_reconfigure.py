@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -178,3 +180,127 @@ async def test_reconfigure_reload_recreates_subentries_and_platforms() -> None:
 
     assert recreated_ids == created_ids
     assert setup_calls_first == created_ids
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_reload_logs_false(caplog: pytest.LogCaptureFixture) -> None:
+    """Warn when a synchronous reload returns False after reconfigure."""
+
+    caplog.set_level(logging.WARNING)
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    flow = config_flow.ConfigFlow()
+
+    class _ConfigEntries:
+        def async_reload(self, entry_id: str) -> bool:
+            assert entry_id == entry.entry_id
+            return False
+
+    hass = SimpleNamespace(config_entries=_ConfigEntries())
+    flow.hass = hass  # type: ignore[assignment]
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert any(
+        "returned False" in record.message and "deferred" not in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_reload_logs_deferred_failures(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Warn when a deferred reload resolves to False."""
+
+    caplog.set_level(logging.WARNING)
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    flow = config_flow.ConfigFlow()
+    hass = SimpleNamespace(tasks=[])
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            assert entry_id == entry.entry_id
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+
+            async def _retry() -> bool:
+                return False
+
+            return _retry()
+
+    hass.config_entries = _ConfigEntries()
+
+    def _async_create_task(coro: Any) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coro)
+        hass.tasks.append(task)
+        return task
+
+    hass.async_create_task = _async_create_task
+
+    def _immediate_call_later(_hass: Any, _delay: Any, callback: Callable[[Any], None]):
+        callback(None)
+
+    monkeypatch.setattr(config_flow, "async_call_later", _immediate_call_later)
+
+    flow.hass = hass  # type: ignore[assignment]
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+    await asyncio.gather(*hass.tasks)
+
+    assert any(
+        "returned False" in record.message and "deferred" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_reload_logs_when_scheduler_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Emit an error when a deferred reload cannot be scheduled."""
+
+    caplog.set_level(logging.ERROR)
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    flow = config_flow.ConfigFlow()
+    hass = SimpleNamespace()
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            assert entry_id == entry.entry_id
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+
+            async def _retry() -> bool:
+                return True
+
+            return _retry()
+
+    hass.config_entries = _ConfigEntries()
+
+    def _immediate_call_later(_hass: Any, _delay: Any, callback: Callable[[Any], None]):
+        callback(None)
+
+    monkeypatch.setattr(config_flow, "async_call_later", _immediate_call_later)
+
+    flow.hass = hass  # type: ignore[assignment]
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert any("could not be scheduled" in record.message for record in caplog.records)
