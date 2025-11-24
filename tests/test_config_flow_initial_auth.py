@@ -1131,3 +1131,159 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
     assert entry.options[OPT_LOCATION_POLL_INTERVAL] == 120
     assert entry.options[OPT_MAP_VIEW_TOKEN_EXPIRATION] is True
     assert hass.config_entries.reloaded == [entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconfigure must reseed subentry context and drop stale IDs."""
+
+    class _Entry:
+        def __init__(self) -> None:
+            self.entry_id = "entry-1"
+            self.unique_id = "existing@example.com"
+            self.title = "Existing"
+            self.data: dict[str, Any] = {
+                CONF_GOOGLE_EMAIL: "existing@example.com",
+                CONF_OAUTH_TOKEN: "old-token",
+                DATA_AUTH_METHOD: config_flow._AUTH_METHOD_INDIVIDUAL,
+            }
+            self.options: dict[str, Any] = {
+                OPT_LOCATION_POLL_INTERVAL: 300,
+                OPT_DEVICE_POLL_DELAY: 10,
+                OPT_MIN_ACCURACY_THRESHOLD: 150,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
+                OPT_OPTIONS_SCHEMA_VERSION: 1,
+            }
+            self.subentries: dict[str, ConfigSubentry] = {}
+
+    entry = _Entry()
+
+    tracker = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type="tracker",
+        title="Tracker",
+        unique_id=f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}",
+        subentry_id=_stable_subentry_id(entry.entry_id, TRACKER_SUBENTRY_KEY),
+    )
+    service = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type="service",
+        title="Service",
+        unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
+        subentry_id=_stable_subentry_id(entry.entry_id, SERVICE_SUBENTRY_KEY),
+    )
+    stale_tracker = ConfigSubentry(
+        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type="tracker",
+        title="Stale tracker",
+        unique_id="legacy-tracker",
+        subentry_id="legacy-tracker-id",
+    )
+    stale_service = ConfigSubentry(
+        data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY, "feature_flags": {}}),
+        subentry_type="service",
+        title="Stale service",
+        unique_id="legacy-service",
+        subentry_id="legacy-service-id",
+    )
+
+    entry.subentries[tracker.subentry_id] = tracker
+    entry.subentries[service.subentry_id] = service
+    entry.subentries[stale_tracker.subentry_id] = stale_tracker
+    entry.subentries[stale_service.subentry_id] = stale_service
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            self.updated: list[tuple[Any, dict[str, Any]]] = []
+            self.reloaded: list[str] = []
+            self.removed: list[str] = []
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return [entry]
+
+        def async_get_entry(self, entry_id: str) -> _Entry | None:
+            if entry_id != entry.entry_id:
+                return None
+            return entry
+
+        def async_update_entry(self, target: Any, **updates: Any) -> None:
+            assert target is entry
+            self.updated.append((target, dict(updates)))
+            if "data" in updates:
+                entry.data = dict(updates["data"])
+            if "options" in updates:
+                entry.options = dict(updates["options"])
+
+        async def async_reload(self, entry_id: str) -> None:
+            self.reloaded.append(entry_id)
+
+        async def async_remove_subentry(
+            self, target: Any, *, subentry_id: str
+        ) -> bool:
+            assert target is entry
+            self.removed.append(subentry_id)
+            entry.subentries.pop(subentry_id, None)
+            return True
+
+    class _Hass:
+        def __init__(self) -> None:
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
+
+    hass = _Hass()
+
+    async def _fake_build_api(self: config_flow.ConfigFlow) -> tuple[Any, str, str]:
+        return object(), "existing@example.com", "old-token"
+
+    async def _fake_probe(_api: Any, *, email: str, token: str) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(
+        config_flow.ConfigFlow,
+        "_async_build_api_and_username",
+        _fake_build_api,
+    )
+    monkeypatch.setattr(
+        config_flow,
+        "_try_probe_devices",
+        _fake_probe,
+    )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {
+        "source": getattr(ha_config_entries, "SOURCE_RECONFIGURE", "reconfigure"),
+        "entry_id": entry.entry_id,
+        "subentry_ids": {"legacy": "legacy-id"},
+    }
+    set_config_flow_unique_id(flow, None)
+
+    initial_result = await flow.async_step_reconfigure()
+    result = await flow.async_step_device_selection(
+        {
+            OPT_LOCATION_POLL_INTERVAL: 120,
+            OPT_DEVICE_POLL_DELAY: 5,
+            OPT_MIN_ACCURACY_THRESHOLD: 90,
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+        }
+    )
+
+    assert initial_result["type"] == "form"
+    assert result["type"] == "abort"
+    assert result["reason"] == "reconfigure_successful"
+
+    context_map = flow.context.get("subentry_ids", {})
+    assert context_map[TRACKER_SUBENTRY_KEY] == tracker.subentry_id
+    assert context_map[SERVICE_SUBENTRY_KEY] == service.subentry_id
+    assert set(hass.config_entries.removed) == {
+        stale_tracker.subentry_id,
+        stale_service.subentry_id,
+    }
+
