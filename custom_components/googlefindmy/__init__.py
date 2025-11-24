@@ -5631,31 +5631,45 @@ def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> boo
     return False
 
 
-def _invoke_with_optional_keyword(
+def _invoke_with_optional_keyword(  # noqa: PLR0913
     callback: Callable[..., Any],
     args: tuple[Any, ...],
     keyword: str,
     value: Any,
+    *,
+    allow_fallback: bool = True,
+    signal_keyword_rejection: bool = False,
 ) -> Any:
     """Invoke ``callback`` while gracefully handling a legacy signature.
 
     When ``callback`` does not accept ``keyword`` the value is ignored and the
     callable is executed without it. This mirrors the Home Assistant 2025.10+
     helpers that accept ``config_subentry_id`` while remaining compatible with
-    earlier releases.
+    earlier releases. When ``allow_fallback`` is ``False`` the callable is not
+    retried without the keyword; callers can opt-in to rejection reporting via
+    ``signal_keyword_rejection`` to handle compatibility gaps themselves.
     """
 
+    rejected_keyword = False
+
     if value is None:
-        return callback(*args)
+        result = callback(*args)
+        if signal_keyword_rejection:
+            return result, False
+        return result
 
     accepts_keyword = _callable_accepts_keyword(callback, keyword)
     callback_name = getattr(callback, "__qualname__", repr(callback))
 
     try:
-        return callback(*args, **{keyword: value})
+        result = callback(*args, **{keyword: value})
+        if signal_keyword_rejection:
+            return result, False
+        return result
     except TypeError as err:
         if keyword not in str(err):
             raise
+        rejected_keyword = True
         if accepts_keyword:
             _LOGGER.debug(
                 "%s advertised keyword '%s' but raised TypeError; retrying without it",  # noqa: G004
@@ -5668,7 +5682,19 @@ def _invoke_with_optional_keyword(
                 callback_name,
                 keyword,
             )
-        return callback(*args)
+
+        if not allow_fallback:
+            if signal_keyword_rejection:
+                return None, True
+            raise
+
+        result = callback(*args)
+        if signal_keyword_rejection:
+            return result, rejected_keyword
+        return result
+
+    if signal_keyword_rejection:
+        return None, rejected_keyword
 
 
 def _collect_entry_subentries(entry: ConfigEntry) -> tuple[Any, ...]:
@@ -6912,15 +6938,25 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 for platform in platforms:
                     platform_name = getattr(platform, "value", str(platform))
                     try:
-                        result = _invoke_with_optional_keyword(
+                        result, rejected_keyword = _invoke_with_optional_keyword(
                             forward_unload,
                             (entry, platform_name),
                             "config_subentry_id",
                             identifier,
+                            allow_fallback=False,
+                            signal_keyword_rejection=True,
                         )
                     except ValueError:
                         _LOGGER.debug(
                             "[%s] Subentry platform '%s' was never loaded; skipping unload",  # noqa: G004
+                            identifier,
+                            platform_name,
+                        )
+                        purge_on_missing_platform = True
+                        continue
+                    if rejected_keyword:
+                        _LOGGER.debug(
+                            "[%s] Home Assistant forward unload helper lacks config_subentry_id support; purging registry links for platform '%s'",  # noqa: G004
                             identifier,
                             platform_name,
                         )
