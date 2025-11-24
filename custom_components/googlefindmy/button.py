@@ -29,18 +29,22 @@ from homeassistant.components.button import ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_platform
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import EntityRecoveryManager
 from .const import (
     DOMAIN,
     SERVICE_LOCATE_DEVICE,
+    SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator
 from .entity import (
     GoogleFindMyDeviceEntity,
+    GoogleFindMyEntity,
     ensure_config_subentry_id,
     ensure_dispatcher_dependencies,
     resolve_coordinator,
@@ -54,6 +58,14 @@ _LOGGER = logging.getLogger(__name__)
 
 class _TrackerScope(NamedTuple):
     """Resolved tracker subentry scope for entity creation."""
+
+    subentry_key: str
+    config_subentry_id: str | None
+    identifier: str
+
+
+class _ServiceScope(NamedTuple):
+    """Resolved service subentry scope for entity creation."""
 
     subentry_key: str
     config_subentry_id: str | None
@@ -115,6 +127,13 @@ LOCATE_DEVICE_DESCRIPTION = ButtonEntityDescription(
     key="locate_device",
     translation_key="locate_device",
     icon="mdi:radar",
+)
+
+RESET_STATISTICS_DESCRIPTION = ButtonEntityDescription(
+    key="reset_statistics",
+    translation_key="reset_statistics",
+    icon="mdi:restart",
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 
@@ -222,9 +241,127 @@ async def async_setup_entry(
             )
         ]
 
+    def _collect_service_scopes(
+        hint_subentry_id: str | None = None,
+        forwarded_config_id: str | None = None,
+    ) -> list[_ServiceScope]:
+        scopes: dict[str, _ServiceScope] = {}
+
+        subentry_metas = getattr(coordinator, "_subentry_metadata", None)
+        if isinstance(subentry_metas, Mapping):
+            for key, meta in subentry_metas.items():
+                if key not in (SERVICE_SUBENTRY_KEY, "service"):
+                    continue
+                meta_features = getattr(meta, "features", ())
+                if "button" not in meta_features:
+                    continue
+
+                stable_identifier = getattr(meta, "stable_identifier", None)
+                identifier = (
+                    stable_identifier() if callable(stable_identifier) else None
+                    or getattr(meta, "config_subentry_id", None)
+                    or coordinator.stable_subentry_identifier(key=key)
+                )
+                scopes[identifier] = _ServiceScope(
+                    key,
+                    getattr(meta, "config_subentry_id", None),
+                    identifier,
+                )
+
+        subentries = getattr(config_entry, "subentries", None)
+        if isinstance(subentries, Mapping):
+            for subentry in subentries.values():
+                data = getattr(subentry, "data", {})
+                group_key = SERVICE_SUBENTRY_KEY
+                subentry_features: Iterable[Any] = ()
+                if isinstance(data, Mapping):
+                    group_key = data.get("group_key", group_key)
+                    subentry_features = data.get("features", ())
+
+                if group_key not in (SERVICE_SUBENTRY_KEY, "service"):
+                    continue
+                if "button" not in subentry_features:
+                    continue
+
+                config_id = (
+                    getattr(subentry, "subentry_id", None)
+                    or getattr(subentry, "entry_id", None)
+                )
+                identifier = (
+                    config_id
+                    or coordinator.stable_subentry_identifier(key=group_key)
+                    or SERVICE_SUBENTRY_KEY
+                )
+                scopes.setdefault(
+                    identifier,
+                    _ServiceScope(group_key or SERVICE_SUBENTRY_KEY, config_id, identifier),
+                )
+
+        return list(scopes.values())
+
     added_unique_ids: set[str] = set()
+    seen_service_subentries: set[str | None] = set()
     primary_scope: _TrackerScope | None = None
     primary_scheduler: Callable[[Iterable[ButtonEntity], bool], None] | None = None
+
+    def _add_service_scope(scope: _ServiceScope, forwarded_config_id: str | None) -> None:
+        sanitized_config_id = ensure_config_subentry_id(
+            config_entry,
+            "button_service",
+            scope.config_subentry_id or forwarded_config_id or scope.identifier,
+        )
+        if sanitized_config_id is None:
+            sanitized_config_id = (
+                scope.config_subentry_id
+                or forwarded_config_id
+                or scope.identifier
+                or SERVICE_SUBENTRY_KEY
+            )
+
+        identifier = scope.identifier or sanitized_config_id or scope.subentry_key
+
+        def _schedule_service_entities(
+            new_entities: Iterable[ButtonEntity],
+            update_before_add: bool = True,
+        ) -> None:
+            schedule_add_entities(
+                coordinator.hass,
+                async_add_entities,
+                entities=new_entities,
+                update_before_add=update_before_add,
+                config_subentry_id=sanitized_config_id,
+                log_owner="Button setup (service)",
+                logger=_LOGGER,
+            )
+
+        entities: list[ButtonEntity] = []
+        entity = GoogleFindMyStatsResetButton(
+            coordinator,
+            subentry_key=scope.subentry_key,
+            subentry_identifier=identifier,
+        )
+        unique_id = getattr(entity, "unique_id", None)
+        if isinstance(unique_id, str):
+            if unique_id in added_unique_ids:
+                _LOGGER.debug(
+                    "Button setup (service): skipping duplicate unique_id %s", unique_id
+                )
+            else:
+                added_unique_ids.add(unique_id)
+                entities.append(entity)
+        else:
+            entities.append(entity)
+
+        if entities:
+            _LOGGER.debug(
+                "Button setup (service): subentry_key=%s, config_subentry_id=%s (count=%d)",
+                scope.subentry_key,
+                sanitized_config_id,
+                len(entities),
+            )
+            _schedule_service_entities(entities, True)
+        else:
+            _schedule_service_entities([], True)
 
     def _add_scope(scope: _TrackerScope, forwarded_config_id: str | None) -> None:
         nonlocal primary_scope, primary_scheduler
@@ -342,6 +479,43 @@ async def async_setup_entry(
     seen_subentries: set[str | None] = set()
 
     @callback
+    def async_add_service_subentry(subentry: Any | None = None) -> None:
+        subentry_identifier = None
+        if isinstance(subentry, str):
+            subentry_identifier = subentry
+        else:
+            subentry_identifier = getattr(subentry, "subentry_id", None) or getattr(
+                subentry, "entry_id", None
+            )
+
+        subentry_type = _subentry_type(subentry)
+        _LOGGER.debug(
+            "Button setup (service): processing subentry '%s' (type=%s)",
+            subentry_identifier,
+            subentry_type,
+        )
+        if subentry_type is not None and subentry_type != "service":
+            _LOGGER.debug(
+                "Button setup (service) skipped for unrelated subentry '%s' (type '%s')",
+                subentry_identifier,
+                subentry_type,
+            )
+            return
+
+        scopes = _collect_service_scopes(
+            subentry_identifier, forwarded_config_id=subentry_identifier
+        )
+        if not scopes:
+            return
+
+        if subentry_identifier in seen_service_subentries:
+            return
+        seen_service_subentries.add(subentry_identifier)
+
+        for scope in scopes:
+            _add_service_scope(scope, subentry_identifier)
+
+    @callback
     def async_add_subentry(subentry: Any | None = None) -> None:
         subentry_identifier = None
         if isinstance(subentry, str):
@@ -399,10 +573,13 @@ async def async_setup_entry(
         )
     elif known_subentries:
         for managed_subentry in known_subentries:
+            async_add_service_subentry(managed_subentry)
             async_add_subentry(managed_subentry)
     elif isinstance(getattr(config_entry, "subentries", None), Mapping):
+        async_add_service_subentry(config_subentry_id)
         async_add_subentry(config_subentry_id)
     else:
+        async_add_service_subentry(config_subentry_id)
         async_add_subentry(config_subentry_id)
 
     config_entry.async_on_unload(
@@ -410,6 +587,13 @@ async def async_setup_entry(
             hass,
             f"{DOMAIN}_subentry_setup_{config_entry.entry_id}",
             async_add_subentry,
+        )
+    )
+    config_entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            f"{DOMAIN}_subentry_setup_{config_entry.entry_id}",
+            async_add_service_subentry,
         )
     )
 
@@ -494,6 +678,119 @@ async def async_setup_entry(
             expected_unique_ids=_expected_unique_ids,
             entity_factory=_build_entities,
             add_entities=_recovery_add_entities,
+        )
+
+
+class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity):
+    """Button to reset integration statistics counters."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_description = RESET_STATISTICS_DESCRIPTION
+    _attr_has_entity_name = True
+    _attr_icon = RESET_STATISTICS_DESCRIPTION.icon
+    _attr_translation_key = RESET_STATISTICS_DESCRIPTION.translation_key
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            "reset_statistics",
+            separator="_",
+        )
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Attach the reset control to the per-entry service device."""
+
+        return self.service_device_info(include_subentry_identifier=True)
+
+    async def async_press(self) -> None:
+        """Reset coordinator statistics and refresh listeners."""
+
+        hass = self.coordinator.hass
+        stats = getattr(self.coordinator, "stats", None)
+        if isinstance(stats, dict):
+            for key in list(stats.keys()):
+                stats[key] = 0
+        else:
+            _LOGGER.debug("Stats reset skipped: coordinator stats missing or invalid")
+
+        diag_buffer = getattr(self.coordinator, "_diag", None)
+        if diag_buffer is not None:
+            warnings_bucket = getattr(diag_buffer, "warnings", None)
+            errors_bucket = getattr(diag_buffer, "errors", None)
+            if isinstance(warnings_bucket, dict):
+                warnings_bucket.clear()
+            if isinstance(errors_bucket, dict):
+                errors_bucket.clear()
+
+        domain_data = hass.data.get(DOMAIN)
+        if isinstance(domain_data, dict):
+            if "fcm_lock_contention_count" in domain_data:
+                domain_data["fcm_lock_contention_count"] = 0
+            if "services_lock_contention_count" in domain_data:
+                domain_data["services_lock_contention_count"] = 0
+
+        registry = ir.async_get(hass)
+        issues_attr = getattr(registry, "issues", None)
+        if isinstance(issues_attr, Mapping):
+            issues_iterable = list(issues_attr.items())
+        else:
+            private_issues = getattr(registry, "_issues", None)
+            issues_iterable = list(private_issues.items()) if isinstance(private_issues, Mapping) else []
+
+        expected_issue_key_size = 2
+
+        for key, payload in issues_iterable:
+            domain = DOMAIN
+            issue_id: str | None = None
+            if isinstance(key, tuple) and len(key) == expected_issue_key_size:
+                domain = str(key[0])
+                issue_id = str(key[1])
+            else:
+                issue_id = str(key)
+                if isinstance(payload, Mapping):
+                    domain = str(payload.get("domain", domain))
+
+            if domain != DOMAIN or issue_id is None:
+                continue
+
+            try:
+                ir.async_delete_issue(hass, DOMAIN, issue_id)
+            except Exception as err:  # pragma: no cover - defensive cleanup
+                _LOGGER.debug("Stats reset: failed to delete issue %s: %s", issue_id, err)
+
+        schedule_persist = getattr(self.coordinator, "_schedule_stats_persist", None)
+        if callable(schedule_persist):
+            try:
+                schedule_persist()
+            except Exception as err:  # pragma: no cover - defensive logging
+                _LOGGER.debug("Stats persistence scheduling failed after reset: %s", err)
+
+        try:
+            self.coordinator.async_update_listeners()
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug("Stats listener notification failed after reset: %s", err)
+
+        entry_id = self.entry_id or getattr(
+            getattr(self.coordinator, "config_entry", None), "entry_id", None
+        )
+        _LOGGER.info(
+            "Statistics reset requested via button for entry %s",
+            entry_id or "unknown",
         )
 
 

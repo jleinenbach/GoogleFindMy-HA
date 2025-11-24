@@ -329,6 +329,9 @@
       },
       "locate_device": {
         "name": "Locate now"
+      },
+      "reset_statistics": {
+        "name": "Reset Statistics"
       }
     },
     "binary_sensor": {

@@ -62,6 +62,7 @@ TRACKER_FEATURE_PLATFORMS: tuple[str, ...] = (
 )
 SERVICE_FEATURE_PLATFORMS: tuple[str, ...] = (
     "binary_sensor",
+    "button",
     "sensor",
 )
 
