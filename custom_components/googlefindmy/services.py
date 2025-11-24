@@ -889,7 +889,16 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             )
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
-            await runtime.coordinator.async_play_sound(canonical_id)
+            ok = await runtime.coordinator.async_play_sound(canonical_id)
+            if not ok:
+                placeholders = {"device_id": str(raw_device_id)}
+                raise _service_validation_error(
+                    "Play sound suppressed for device '{device_id}'".format(
+                        **placeholders
+                    ),
+                    translation_key="play_sound_failed",
+                    translation_placeholders=placeholders,
+                )
         except ServiceValidationError:
             raise
         except Exception as err:
@@ -917,7 +926,16 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             )
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
-            await runtime.coordinator.async_stop_sound(canonical_id)
+            ok = await runtime.coordinator.async_stop_sound(canonical_id)
+            if not ok:
+                placeholders = {"device_id": str(raw_device_id)}
+                raise _service_validation_error(
+                    "Stop sound suppressed for device '{device_id}'".format(
+                        **placeholders
+                    ),
+                    translation_key="stop_sound_failed",
+                    translation_placeholders=placeholders,
+                )
         except ServiceValidationError:
             raise
         except Exception as err:
