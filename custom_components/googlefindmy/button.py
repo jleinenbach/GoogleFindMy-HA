@@ -38,6 +38,8 @@ from . import EntityRecoveryManager
 from .const import (
     DOMAIN,
     SERVICE_LOCATE_DEVICE,
+    SERVICE_PLAY_SOUND,
+    SERVICE_STOP_SOUND,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
@@ -959,16 +961,13 @@ class GoogleFindMyPlaySoundButton(GoogleFindMyButtonEntity):
 
         _LOGGER.debug("Play Sound: attempting on %s (%s)", device_name, device_id)
         try:
-            result = await self.coordinator.async_play_sound(device_id)
-            if result:
-                _LOGGER.info(
-                    "Successfully submitted Play Sound request for %s", device_name
-                )
-            else:
-                _LOGGER.warning(
-                    "Failed to play sound on %s (request may have been rejected)",
-                    device_name,
-                )
+            await self.hass.services.async_call(
+                DOMAIN,
+                SERVICE_PLAY_SOUND,
+                {"device_id": device_id},
+                blocking=True,
+            )
+            _LOGGER.info("Successfully submitted Play Sound request for %s", device_name)
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error playing sound on %s: %s", device_name, err)
 
@@ -1056,16 +1055,13 @@ class GoogleFindMyStopSoundButton(GoogleFindMyButtonEntity):
 
         _LOGGER.debug("Stop Sound: attempting on %s (%s)", device_name, device_id)
         try:
-            result = await self.coordinator.async_stop_sound(device_id)
-            if result:
-                _LOGGER.info(
-                    "Successfully submitted Stop Sound request for %s", device_name
-                )
-            else:
-                _LOGGER.warning(
-                    "Failed to stop sound on %s (request may have been rejected)",
-                    device_name,
-                )
+            await self.hass.services.async_call(
+                DOMAIN,
+                SERVICE_STOP_SOUND,
+                {"device_id": device_id},
+                blocking=True,
+            )
+            _LOGGER.info("Successfully submitted Stop Sound request for %s", device_name)
         except Exception as err:
             _LOGGER.error("Error stopping sound on %s: %s", device_name, err)
 
