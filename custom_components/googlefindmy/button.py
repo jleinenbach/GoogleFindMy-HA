@@ -39,6 +39,8 @@ from .const import (
     DOMAIN,
     SERVICE_LOCATE_DEVICE,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator
@@ -155,6 +157,32 @@ async def async_setup_entry(
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = config_entry
+
+    def _known_ids_for_type(expected_type: str) -> set[str]:
+        ids: set[str] = set()
+        subentries = getattr(config_entry, "subentries", None)
+        if isinstance(subentries, Mapping):
+            for subentry in subentries.values():
+                if _subentry_type(subentry) == expected_type:
+                    candidate = getattr(subentry, "subentry_id", None) or getattr(
+                        subentry, "entry_id", None
+                    )
+                    if isinstance(candidate, str) and candidate:
+                        ids.add(candidate)
+
+        runtime_data = getattr(config_entry, "runtime_data", None)
+        subentry_manager = getattr(runtime_data, "subentry_manager", None)
+        managed_subentries = getattr(subentry_manager, "managed_subentries", None)
+        if isinstance(managed_subentries, Mapping):
+            for subentry in managed_subentries.values():
+                if _subentry_type(subentry) == expected_type:
+                    candidate = getattr(subentry, "subentry_id", None) or getattr(
+                        subentry, "entry_id", None
+                    )
+                    if isinstance(candidate, str) and candidate:
+                        ids.add(candidate)
+
+        return ids
 
     platform_getter = getattr(entity_platform, "async_get_current_platform", None)
     if callable(platform_getter):
@@ -305,18 +333,27 @@ async def async_setup_entry(
     primary_scheduler: Callable[[Iterable[ButtonEntity], bool], None] | None = None
 
     def _add_service_scope(scope: _ServiceScope, forwarded_config_id: str | None) -> None:
+        service_ids = _known_ids_for_type(SUBENTRY_TYPE_SERVICE)
         sanitized_config_id = ensure_config_subentry_id(
             config_entry,
             "button_service",
             scope.config_subentry_id or forwarded_config_id or scope.identifier,
+            known_ids=service_ids,
         )
         if sanitized_config_id is None:
-            sanitized_config_id = (
-                scope.config_subentry_id
-                or forwarded_config_id
-                or scope.identifier
-                or SERVICE_SUBENTRY_KEY
-            )
+            if not service_ids:
+                sanitized_config_id = (
+                    scope.config_subentry_id
+                    or forwarded_config_id
+                    or scope.identifier
+                    or SERVICE_SUBENTRY_KEY
+                )
+            else:
+                _LOGGER.debug(
+                    "Button setup (service): skipping subentry '%s' because the config_subentry_id is unknown",
+                    forwarded_config_id or scope.config_subentry_id or scope.identifier,
+                )
+                return
 
         identifier = scope.identifier or sanitized_config_id or scope.subentry_key
 
@@ -366,13 +403,27 @@ async def async_setup_entry(
     def _add_scope(scope: _TrackerScope, forwarded_config_id: str | None) -> None:
         nonlocal primary_scope, primary_scheduler
 
+        tracker_ids = _known_ids_for_type(SUBENTRY_TYPE_TRACKER)
         sanitized_config_id = ensure_config_subentry_id(
-            config_entry, "button", scope.config_subentry_id or forwarded_config_id
+            config_entry,
+            "button",
+            scope.config_subentry_id or forwarded_config_id,
+            known_ids=tracker_ids,
         )
         if sanitized_config_id is None:
-            sanitized_config_id = scope.identifier or forwarded_config_id or scope.subentry_key
+            if tracker_ids:
+                _LOGGER.debug(
+                    "Button setup: skipping subentry '%s' because the config_subentry_id is unknown",
+                    forwarded_config_id or scope.config_subentry_id or scope.subentry_key,
+                )
+                return
+            sanitized_config_id = (
+                scope.identifier or forwarded_config_id or scope.subentry_key
+            )
             _LOGGER.debug(
-                "Button setup: synthesized config_subentry_id '%s' for key '%s'", sanitized_config_id, scope.subentry_key
+                "Button setup: synthesized config_subentry_id '%s' for key '%s'",
+                sanitized_config_id,
+                scope.subentry_key,
             )
 
         tracker_identifier = scope.identifier or sanitized_config_id or scope.subentry_key

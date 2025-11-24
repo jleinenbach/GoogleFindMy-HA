@@ -37,6 +37,8 @@ from .const import (
     DOMAIN,
     OPT_ENABLE_STATS_ENTITIES,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
@@ -166,6 +168,33 @@ async def async_setup_entry(
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = entry
 
+    def _known_ids_for_type(expected_type: str) -> set[str]:
+        ids: set[str] = set()
+
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, Mapping):
+            for subentry in subentries.values():
+                if _subentry_type(subentry) == expected_type:
+                    candidate = getattr(subentry, "subentry_id", None) or getattr(
+                        subentry, "entry_id", None
+                    )
+                    if isinstance(candidate, str) and candidate:
+                        ids.add(candidate)
+
+        runtime_data = getattr(entry, "runtime_data", None)
+        subentry_manager = getattr(runtime_data, "subentry_manager", None)
+        managed_subentries = getattr(subentry_manager, "managed_subentries", None)
+        if isinstance(managed_subentries, Mapping):
+            for subentry in managed_subentries.values():
+                if _subentry_type(subentry) == expected_type:
+                    candidate = getattr(subentry, "subentry_id", None) or getattr(
+                        subentry, "entry_id", None
+                    )
+                    if isinstance(candidate, str) and candidate:
+                        ids.add(candidate)
+
+        return ids
+
     def _collect_scopes(
         *,
         feature: str,
@@ -273,20 +302,29 @@ async def async_setup_entry(
         )
 
     def _add_service_scope(scope: _Scope, forwarded_config_id: str | None) -> None:
+        service_ids = _known_ids_for_type(SUBENTRY_TYPE_SERVICE)
         sanitized_config_id = ensure_config_subentry_id(
             entry,
             "sensor_service",
             scope.config_subentry_id
             or forwarded_config_id
             or scope.identifier,
+            known_ids=service_ids,
         )
         if sanitized_config_id is None:
-            sanitized_config_id = (
-                scope.config_subentry_id
-                or forwarded_config_id
-                or scope.identifier
-                or SERVICE_SUBENTRY_KEY
-            )
+            if not service_ids:
+                sanitized_config_id = (
+                    scope.config_subentry_id
+                    or forwarded_config_id
+                    or scope.identifier
+                    or SERVICE_SUBENTRY_KEY
+                )
+            else:
+                _LOGGER.debug(
+                    "Sensor setup (service): skipping subentry '%s' because the config_subentry_id is unknown",
+                    forwarded_config_id or scope.config_subentry_id or scope.identifier,
+                )
+                return
 
         identifier = scope.identifier or sanitized_config_id or scope.subentry_key
         service_scopes[identifier] = _Scope(scope.subentry_key, sanitized_config_id, identifier)
@@ -351,12 +389,20 @@ async def async_setup_entry(
             candidate_subentry_id = forwarded_config_id
         candidate_subentry_id = candidate_subentry_id or scope.identifier
 
+        tracker_ids = _known_ids_for_type(SUBENTRY_TYPE_TRACKER)
         sanitized_config_id = ensure_config_subentry_id(
             entry,
             "sensor_tracker",
             candidate_subentry_id,
+            known_ids=tracker_ids,
         )
         if sanitized_config_id is None:
+            if tracker_ids:
+                _LOGGER.debug(
+                    "Sensor setup: skipping tracker subentry '%s' because the config_subentry_id is unknown",
+                    candidate_subentry_id or forwarded_config_id,
+                )
+                return
             sanitized_config_id = candidate_subentry_id or scope.subentry_key
             _LOGGER.debug(
                 "Sensor setup: synthesized config_subentry_id '%s' for tracker key '%s'",

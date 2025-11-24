@@ -244,11 +244,20 @@ def deterministic_config_subentry_id(
 
     assigned: dict[tuple[str, str], str] = {}
 
-    def _assign(entry: Any, platform: str, candidate: str | None) -> str:
+    def _assign(entry: Any, platform: str, candidate: str | None, **kwargs: Any) -> str:
+        known_ids = kwargs.get("known_ids")
+        if isinstance(known_ids, Iterable):
+            known_ids = [value for value in known_ids if isinstance(value, str) and value]
+        else:
+            known_ids = []
+
         if isinstance(candidate, str):
             normalized = candidate.strip()
             if normalized:
                 return normalized
+
+        if known_ids:
+            return known_ids[0]
 
         entry_id = getattr(entry, "entry_id", "<unknown-entry>")
         if not isinstance(entry_id, str) or not entry_id:

@@ -6354,8 +6354,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     )
 
     config_entries = getattr(hass, "config_entries", None)
+    auto_schedule_subentries = _core_auto_schedules_subentries(config_entries)
     suppress_subentry_forwarding = False
-    if _core_auto_schedules_subentries(config_entries):
+    if auto_schedule_subentries:
         suppress_subentry_forwarding = True
         _LOGGER.debug(
             "[%s] Suppressing manual subentry forwarding during setup; Home Assistant auto-schedules registered subentries",
@@ -6591,10 +6592,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     _register_instance(entry.entry_id, cache)
 
-    auto_schedule_subentries = _core_auto_schedules_subentries(hass.config_entries)
+    parent_platforms_forwarded = bool(
+        getattr(entry, "_gfm_parent_platforms_forwarded", False)
+    )
     registered_subentries = list(entry.subentries.values())
     if registered_subentries:
-        if auto_schedule_subentries:
+        if parent_platforms_forwarded:
+            _LOGGER.debug(
+                "[%s] Skipping registered subentry forward; parent platforms already forwarded during setup",
+                entry.entry_id,
+            )
+        elif auto_schedule_subentries:
+            _safe_setattr(entry, "_gfm_parent_platforms_forwarded", True)
             _LOGGER.debug(
                 "[%s] Subentry forward suppressed; %s registered subentries will be scheduled by Home Assistant (auto-scheduling detected)",
                 entry.entry_id,
