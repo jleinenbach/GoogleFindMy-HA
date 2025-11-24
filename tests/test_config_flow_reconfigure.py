@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigSubentry
 
 from custom_components.googlefindmy import _async_setup_new_subentries, config_flow
 from custom_components.googlefindmy.const import (
