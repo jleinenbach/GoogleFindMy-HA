@@ -2628,32 +2628,61 @@ class ConfigFlow(
     ) -> FlowResult:
         """Ask the user to choose how to provide credentials."""
 
-        # CRITICAL FIX (ROOT CAUSE 1): Prevent duplicate entries.
-        # This integration only supports a *single* config entry, which acts
-        # as the parent for all accounts (Hubs).
-        # If *any* entry for this domain already exists, abort immediately.
-        # Do not wait for auth data; the presence of an entry is enough.
+        context_obj = getattr(self, "context", None)
+        context_snapshot: dict[str, Any]
+        context_entry_id: str | None = None
+        context_source: str | None = None
+        if isinstance(context_obj, Mapping):
+            context_snapshot = {str(key): context_obj[key] for key in context_obj}
+            raw_context_entry = context_obj.get("entry_id")
+            if isinstance(raw_context_entry, str) and raw_context_entry:
+                context_entry_id = raw_context_entry
+            context_source = context_obj.get("source")
+        else:
+            context_snapshot = {}
+        _LOGGER.info("Flow start: async_step_user (context=%s)", context_snapshot)
+
+        bound_entry = getattr(self, "config_entry", None)
+        bound_entry_id = bound_entry.entry_id if isinstance(bound_entry, ConfigEntry) else None
+
         config_entries = getattr(self.hass, "config_entries", None)
         async_entries = getattr(config_entries, "async_entries", None)
 
         existing_entries = async_entries(DOMAIN) if callable(async_entries) else []
+        matching_entry = (
+            next(
+                (entry for entry in existing_entries if entry.entry_id == context_entry_id),
+                None,
+            )
+            if context_entry_id
+            else None
+        )
 
-        if existing_entries:
+        is_reconfigure_context = (
+            context_source == SOURCE_RECONFIGURE
+            or matching_entry is not None
+            or (bound_entry_id is not None and bound_entry_id == context_entry_id)
+        )
+        bound_to_existing_entry = bool(bound_entry_id or context_entry_id)
+
+        if existing_entries and not is_reconfigure_context:
             _LOGGER.debug(
                 "async_step_user: Aborting new flow, an entry already exists (found %d entries)",
                 len(existing_entries),
             )
+            # Preserve the single parent-entry contract for fresh setups; only
+            # reconfigure flows may bypass this guard because they target the
+            # already-linked entry instead of creating a new parent.
             return self.async_abort(reason="already_configured")
 
-        # Do NOT check for duplicates here; self._auth_data is not yet populated.
+        if is_reconfigure_context:
+            if matching_entry is not None:
+                self.context["entry_id"] = matching_entry.entry_id
+            elif bound_entry_id is not None:
+                self.context.setdefault("entry_id", bound_entry_id)
+            return await self.async_step_reconfigure(None)
 
-        context_obj = getattr(self, "context", None)
-        context_snapshot: dict[str, Any]
-        if isinstance(context_obj, Mapping):
-            context_snapshot = {str(key): context_obj[key] for key in context_obj}
-        else:
-            context_snapshot = {}
-        _LOGGER.info("Flow start: async_step_user (context=%s)", context_snapshot)
+        # Do NOT check for duplicates here; self._auth_data is not yet populated.
 
         if user_input is not None:
             method = user_input.get("auth_method")
@@ -2674,7 +2703,10 @@ class ConfigFlow(
                 # CRITICAL FIX: Check for duplicates *after* auth data is present.
                 email = cast(str, self._auth_data.get(CONF_GOOGLE_EMAIL))
                 try:
-                    await self._async_prepare_account_context(email=email)
+                    await self._async_prepare_account_context(
+                        email=email,
+                        abort_on_duplicate=not bound_to_existing_entry,
+                    )
                 except data_entry_flow.AbortFlow:
                     return self.async_abort(reason="already_configured")
 
