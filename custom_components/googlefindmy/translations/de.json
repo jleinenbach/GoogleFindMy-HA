@@ -191,7 +191,13 @@
         "data_description": {
           "delete_caches_on_remove": "Löscht zwischengespeicherte Tokens und Gerätemetadaten, wenn dieser Eintrag entfernt wird.",
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab.",
-          "contributor_mode": "\"high_traffic\" entspricht dem standardmäßigen Aggregationsmodus von Google. \"in_all_areas\" aktiviert schnellere Crowdsource-Ortungen.",
+          "contributor_mode": {
+            "description": "Wähle, wie dein Gerät zum Google-Netzwerk beiträgt:",
+            "options": {
+              "high_traffic": "Hochfrequentierte Bereiche (Standard)",
+              "in_all_areas": "Alle Bereiche (Crowdsourcing)"
+            }
+          },
           "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
         }
       },
@@ -285,14 +291,19 @@
         }
       }
     },
-    "refresh_device_urls": {
-      "name": "Geräte-URLs aktualisieren",
-      "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
-      "fields": {}
-    },
-    "locate_external": {
-      "name": "Gerät orten (extern)",
-      "description": "Ortung über den externen Helfer; delegiert an die normale Ortung.",
+  "refresh_device_urls": {
+    "name": "Geräte-URLs aktualisieren",
+    "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
+    "fields": {}
+  },
+  "rebuild_device_registry": {
+    "name": "Geräteregistrierung neu aufbauen",
+    "description": "Wartung: baut die Geräteregistrierung für Google Find My Hubs neu auf und entfernt Tracker-Geräte, die fälschlicherweise dem übergeordneten Eintrag zugeordnet sind.",
+    "fields": {}
+  },
+  "locate_external": {
+    "name": "Gerät orten (extern)",
+    "description": "Ortung über den externen Helfer; delegiert an die normale Ortung.",
       "fields": {
         "device_id": {
           "name": "Gerät",

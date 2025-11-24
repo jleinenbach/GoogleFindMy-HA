@@ -191,7 +191,13 @@
         "data_description": {
           "delete_caches_on_remove": "Supprime les jetons mis en cache et les métadonnées des appareils lors de la suppression de cette entrée.",
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas.",
-          "contributor_mode": "\"high_traffic\" conserve le mode agrégé par défaut de Google. \"in_all_areas\" active des signalements participatifs plus rapides.",
+          "contributor_mode": {
+            "description": "Choisissez comment votre appareil contribue au réseau Google :",
+            "options": {
+              "high_traffic": "Zones à forte affluence (par défaut)",
+              "in_all_areas": "Toutes les zones (participatif)"
+            }
+          },
           "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
         }
       },
@@ -285,16 +291,21 @@
         }
       }
     },
-    "refresh_device_urls": {
-      "name": "Actualiser les URL des appareils",
-      "description": "Actualise les URL de configuration des appareils Google Find My pour qu’elles pointent vers la vue carte intégrée.",
-      "fields": {}
-    },
-    "locate_external": {
-      "name": "Localiser l’appareil (externe)",
-      "description": "Localiser un appareil à l’aide de l’assistant externe ; délègue à la localisation normale.",
-      "fields": {
-        "device_id": {
+  "refresh_device_urls": {
+    "name": "Actualiser les URL des appareils",
+    "description": "Actualise les URL de configuration des appareils Google Find My pour qu’elles pointent vers la vue carte intégrée.",
+    "fields": {}
+  },
+  "rebuild_device_registry": {
+    "name": "Reconstruire le registre des appareils",
+    "description": "Maintenance : reconstruit les liens du registre des appareils pour les hubs Google Find My et supprime les traqueurs incorrectement liés à l’entrée parente.",
+    "fields": {}
+  },
+  "locate_external": {
+    "name": "Localiser l’appareil (externe)",
+    "description": "Localiser un appareil à l’aide de l’assistant externe ; délègue à la localisation normale.",
+    "fields": {
+      "device_id": {
           "name": "Appareil",
           "description": "Sélectionnez un appareil Google Find My (ou transmettez un ID canonique via les Outils de développement)."
         },
