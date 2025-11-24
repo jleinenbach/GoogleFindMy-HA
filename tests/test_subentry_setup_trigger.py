@@ -809,9 +809,12 @@ async def test_async_unload_entry_cancels_retry_handles() -> None:
 
     config_entries = FakeConfigEntriesManager([parent_entry])
     config_entries.async_unload_platforms = lambda entry, platforms: True  # type: ignore[attr-defined]
-    config_entries.async_forward_entry_unload = (  # type: ignore[attr-defined]
-        lambda entry, platform, **kwargs: True
-    )
+
+    def _forward_unload(entry: Any, platform: Any, **kwargs: Any) -> bool:
+        assert kwargs == {}
+        return True
+
+    config_entries.async_forward_entry_unload = _forward_unload  # type: ignore[attr-defined]
     hass = FakeHass(config_entries=config_entries)
 
     assert await _async_unload_parent_entry(hass, parent_entry) is True
