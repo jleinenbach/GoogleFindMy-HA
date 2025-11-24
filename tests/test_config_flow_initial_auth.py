@@ -1025,7 +1025,6 @@ async def test_async_step_reconfigure_defers_reload_and_logs_warning(
     ) -> None:
         scheduled.append((hass_obj, delay))
         action(None)
-        return None
 
     monkeypatch.setattr(config_flow, "async_call_later", _immediate_call_later)
 
