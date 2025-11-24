@@ -453,11 +453,7 @@ def test_async_unload_entry_removes_subentries_and_registries(
     assert device_registry.removals == [first.subentry_id, second.subentry_id]
     assert not entry.subentries
     calls = hass.config_entries.forward_unload_calls
-    aggregated: set[str] = set()
-    for recorded_entry, platforms in calls:
-        assert recorded_entry is entry
-        aggregated.update(_platform_names(platforms))
-    assert aggregated == set(integration.TRACKER_FEATURE_PLATFORMS)
+    assert calls == []
     assert hass.config_entries.parent_unload_invocations == 1
     assert hass.config_entries.unload_platform_calls == [
         (entry, tuple(integration.PLATFORMS))
@@ -508,7 +504,7 @@ def test_async_unload_entry_defaults_parent_forward_flag(monkeypatch: Any) -> No
 
 
 def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -> None:
-    """Unload should fall back when Home Assistant lacks config_subentry_id support."""
+    """Unload should skip fallback when Home Assistant lacks subentry keyword support."""
 
     entry = _EntryStub()
     subentry = entry.add_subentry("legacy", ("dev-legacy",))
@@ -555,10 +551,7 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
     result = asyncio.run(integration.async_unload_entry(hass, entry))
 
     assert result is True
-    aggregated: set[str] = set()
-    for _, platforms in legacy_calls:
-        aggregated.update(_platform_names(platforms))
-    assert aggregated == set(integration.TRACKER_FEATURE_PLATFORMS)
+    assert legacy_calls == []
     assert hass.config_entries.parent_unload_invocations in (0, 1)
     assert hass.config_entries.unload_platform_calls == [
         (entry, tuple(integration.PLATFORMS))

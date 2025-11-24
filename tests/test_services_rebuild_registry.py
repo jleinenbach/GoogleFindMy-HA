@@ -11,11 +11,12 @@ from typing import Any
 import pytest
 from homeassistant.core import ServiceCall
 
-from custom_components.googlefindmy import services
+from custom_components.googlefindmy import _async_unload_parent_entry, dr, er, services
 from custom_components.googlefindmy.const import (
     DOMAIN,
     SERVICE_REBUILD_REGISTRY,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
 from tests.helpers import (
@@ -23,6 +24,7 @@ from tests.helpers import (
     FakeConfigEntry,
     FakeEntityRegistry,
     FakeHass,
+    config_entry_with_runtime_managed_subentries,
     device_registry_async_entries_for_config_entry,
     service_device_stub,
 )
@@ -333,6 +335,143 @@ async def test_rebuild_registry_detaches_orphaned_tracker(
     }
     assert service_device.config_subentry_id == service_subentry_id
     assert entry.entry_id in service_device.config_entries
+
+
+@pytest.mark.asyncio
+async def test_rebuild_registry_reload_skips_subentry_keyword_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat missing ``config_subentry_id`` support as a successful unload."""
+
+    subentry_id = "tracker-subentry"
+    subentry = SimpleNamespace(
+        subentry_id=subentry_id,
+        config_subentry_id=subentry_id,
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        data={"subentry_type": SUBENTRY_TYPE_TRACKER},
+    )
+    entry = config_entry_with_runtime_managed_subentries(
+        entry_id="parent-entry", subentries=[subentry]
+    )
+
+    class RecordingEntityRegistry:
+        def __init__(self, entries: Iterable[Any]) -> None:
+            self._entries = {entry.entity_id: entry for entry in entries}
+            self.removed: list[str] = []
+
+        def async_entries_for_config_entry(self, entry_id: str) -> tuple[Any, ...]:
+            return tuple(
+                entity
+                for entity in self._entries.values()
+                if getattr(entity, "config_entry_id", None) == entry_id
+            )
+
+        def async_remove(self, entity_id: str) -> None:
+            self.removed.append(entity_id)
+            self._entries.pop(entity_id, None)
+
+    class RecordingDeviceRegistry:
+        def __init__(self, devices: Iterable[Any]) -> None:
+            self._devices = {device.id: device for device in devices}
+            self.updated: list[tuple[str, dict[str, Any]]] = []
+
+        def async_entries_for_config_entry(self, entry_id: str) -> tuple[Any, ...]:
+            return tuple(
+                device
+                for device in self._devices.values()
+                if entry_id in getattr(device, "config_entries", set())
+            )
+
+        def async_get(self, device_id: str) -> Any | None:
+            return self._devices.get(device_id)
+
+        def async_update_device(self, device_id: str, **changes: Any) -> None:
+            device = self._devices[device_id]
+            mapping = getattr(device, "config_entries_subentries", {})
+            if "remove_config_entry_id" in changes:
+                entry_to_remove = changes["remove_config_entry_id"]
+                subset = mapping.get(entry_to_remove)
+                subentry_to_remove = changes.get("remove_config_subentry_id")
+                if isinstance(subset, set):
+                    if subentry_to_remove is None:
+                        subset.discard(None)
+                        subset.clear()
+                    else:
+                        subset.discard(subentry_to_remove)
+                    if not subset:
+                        mapping.pop(entry_to_remove, None)
+                getattr(device, "config_entries", set()).discard(entry_to_remove)
+                if not mapping.get(entry_to_remove):
+                    device.config_subentry_id = None
+
+            self.updated.append((device_id, dict(changes)))
+
+    class LegacyForwardUnloadManager(FakeConfigEntriesManager):
+        async def async_forward_entry_unload(self, entry: Any, domain: str) -> bool:
+            raise ValueError("unexpected fallback execution")
+
+        async def async_unload_platforms(
+            self, entry: FakeConfigEntry, platforms: Iterable[str]
+        ) -> bool:
+            return True
+
+    manager = LegacyForwardUnloadManager([entry])
+    hass = FakeHass(manager)
+    hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})[entry.entry_id] = (
+        entry.runtime_data
+    )
+
+    tracker_device = SimpleNamespace(
+        id="tracker-device",
+        identifiers={(DOMAIN, "tracker-device")},
+        config_entries={entry.entry_id},
+        config_entries_subentries={entry.entry_id: {subentry_id}},
+        config_subentry_id=subentry_id,
+    )
+    entity_entry = SimpleNamespace(
+        entity_id="device_tracker.tracker",
+        config_entry_id=entry.entry_id,
+        config_subentry_id=subentry_id,
+    )
+
+    entity_registry = RecordingEntityRegistry([entity_entry])
+    device_registry = RecordingDeviceRegistry([tracker_device])
+
+    monkeypatch.setattr(er, "async_get", lambda hass: entity_registry)
+    monkeypatch.setattr(
+        er,
+        "async_entries_for_config_entry",
+        lambda registry, entry_id: registry.async_entries_for_config_entry(entry_id),
+    )
+    monkeypatch.setattr(dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(
+        dr,
+        "async_entries_for_config_entry",
+        device_registry_async_entries_for_config_entry,
+        raising=False,
+    )
+
+    async def _reload(entry_id: str) -> bool:
+        manager.reload_calls.append(entry_id)
+        return await _async_unload_parent_entry(hass, entry)
+
+    manager.async_reload = _reload  # type: ignore[assignment]
+
+    handler = await _register_rebuild_service(hass, {})
+    await handler(ServiceCall({services.ATTR_ENTRY_ID: entry.entry_id}))
+
+    assert manager.reload_calls == [entry.entry_id]
+    assert entity_registry.removed == [entity_entry.entity_id]
+    assert not tracker_device.config_entries_subentries.get(entry.entry_id)
+    assert device_registry.updated == [
+        (
+            tracker_device.id,
+            {
+                "remove_config_entry_id": entry.entry_id,
+                "remove_config_subentry_id": subentry_id,
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
