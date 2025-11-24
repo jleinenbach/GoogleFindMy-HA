@@ -195,6 +195,8 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 
 ## Environment verification
 
+> **Quickstart:** Run `make test-stubs` once per fresh environment to install `homeassistant` and `pytest-homeassistant-custom-component` before `pytest -q`, `mypy --strict`, or `ruff check`; the download/build step typically finishes in about five minutes, so plan lint/test runs with that buffer in mind.
+
 ### Quickstart checks (fast path before `pytest -q`)
 
 * **Cache cleanup:** Run `make clean` to prune `__pycache__` directories and stale bytecode before rerunning tests.

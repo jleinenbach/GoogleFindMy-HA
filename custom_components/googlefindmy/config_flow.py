@@ -34,6 +34,7 @@ Docstring & comments:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -3109,33 +3110,94 @@ class ConfigFlow(
     ) -> None:
         """Reload the updated entry, deferring when the core forbids it."""
 
-        async def _async_call_reload() -> None:
+        def _log_failed_reload(result: Any, *, deferred: bool) -> None:
+            if result is False:
+                _LOGGER.warning(
+                    (
+                        "Reload%s after reconfigure for entry %s returned False; "
+                        "entities may remain unavailable until the next attempt"
+                    ),
+                    " (deferred)" if deferred else "",
+                    entry_for_update.entry_id,
+                )
+
+        def _log_task_result(task: asyncio.Future[Any]) -> None:
+            try:
+                task_result = task.result()
+            except Exception:  # noqa: BLE001 - log unexpected task failures
+                _LOGGER.exception(
+                    "Deferred reload after reconfigure for entry %s raised an exception",
+                    entry_for_update.entry_id,
+                )
+                return
+
+            _log_failed_reload(task_result, deferred=True)
+
+        async def _async_call_reload() -> Any:
             reload_result = self.hass.config_entries.async_reload(
                 entry_for_update.entry_id
             )
             if inspect.isawaitable(reload_result):
-                await reload_result
+                reload_result = await reload_result
+
+            return reload_result
 
         try:
-            await _async_call_reload()
+            reload_result = await _async_call_reload()
         except OperationNotAllowed:
             def _schedule_reload(_: Any) -> None:
-                reload_result = self.hass.config_entries.async_reload(
-                    entry_for_update.entry_id
-                )
-                if inspect.isawaitable(reload_result):
+                try:
+                    reload_result_inner = self.hass.config_entries.async_reload(
+                        entry_for_update.entry_id
+                    )
+                except OperationNotAllowed:
+                    _LOGGER.warning(
+                        (
+                            "Deferred reload after reconfigure for entry %s was "
+                            "rejected by Home Assistant"
+                        ),
+                        entry_for_update.entry_id,
+                    )
+                    return
+                except Exception:  # noqa: BLE001 - logged for visibility
+                    _LOGGER.exception(
+                        "Deferred reload after reconfigure for entry %s failed",
+                        entry_for_update.entry_id,
+                    )
+                    return
+
+                if inspect.isawaitable(reload_result_inner):
                     create_task = getattr(self.hass, "async_create_task", None)
                     if callable(create_task):
-                        try:
-                            create_task(reload_result)
-                        except TypeError:
-                            create_task(reload_result)
-                    else:
-                        loop = getattr(self.hass, "loop", None)
-                        if loop is not None:
-                            loop.create_task(reload_result)
+                        task = create_task(reload_result_inner)
+                        if hasattr(task, "add_done_callback"):
+                            task.add_done_callback(_log_task_result)
+                        return
+
+                    loop = getattr(self.hass, "loop", None)
+                    if loop is not None:
+                        task = loop.create_task(reload_result_inner)
+                        if hasattr(task, "add_done_callback"):
+                            task.add_done_callback(_log_task_result)
+                        return
+
+                    if inspect.iscoroutine(reload_result_inner):
+                        reload_result_inner.close()
+                    _LOGGER.error(
+                        (
+                            "Deferred reload after reconfigure for entry %s could "
+                            "not be scheduled; no task runner available"
+                        ),
+                        entry_for_update.entry_id,
+                    )
+                    return
+
+                _log_failed_reload(reload_result_inner, deferred=True)
 
             async_call_later(self.hass, 0, _schedule_reload)
+            return
+
+        _log_failed_reload(reload_result, deferred=False)
 
     # ------------------ Reauthentication ------------------
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
