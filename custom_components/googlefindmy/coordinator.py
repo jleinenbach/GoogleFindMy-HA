@@ -751,6 +751,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._async_load_stats(), name=f"{DOMAIN}.load_stats"
         )
 
+        # One-shot device list refresh trigger (used after reconfigure)
+        self._force_device_list_refresh: bool = False
+        self._force_device_list_reason: str | None = None
+
+        # Marker for diagnostics after reconfigure-triggered reloads
+        self._recent_reconfigure_at: float | None = None
+
         # Short-retry scheduling handle (coalesced)
         self._short_retry_cancel: Callable[[], None] | None = None
 
@@ -787,6 +794,50 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._entry_id() or "unknown",
         )
         await self.async_refresh()
+
+    def mark_recent_reconfigure(self, when: float | None = None) -> None:
+        """Record that a reconfigure just completed for diagnostics."""
+
+        when_ts = when if when is not None else time.time()
+        try:
+            self._recent_reconfigure_at = float(when_ts)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            self._recent_reconfigure_at = None
+
+    @property
+    def recent_reconfigure_at(self) -> float | None:
+        """Return the most recent reconfigure marker if present."""
+
+        return self._recent_reconfigure_at
+
+    def request_device_list_refresh(
+        self, *, reason: str | None = None, schedule_refresh: bool = True
+    ) -> None:
+        """Force the next update cycle to refetch the device list immediately."""
+
+        if not self._is_on_hass_loop():
+            self._run_on_hass_loop(
+                self.request_device_list_refresh,
+                reason=reason,
+                schedule_refresh=schedule_refresh,
+            )
+            return
+
+        if not self._force_device_list_refresh:
+            self._force_device_list_refresh = True
+            self._force_device_list_reason = reason
+
+            _LOGGER.debug(
+                "[%s] Forcing device list refresh%s",
+                self._entry_id() or "unknown",
+                f" ({reason})" if reason else "",
+            )
+
+        if schedule_refresh:
+            self._dispatch_async_request_refresh(
+                task_name=f"{DOMAIN}.force_device_list_refresh",
+                log_context="request_device_list_refresh",
+            )
 
     @property
     def cache(self) -> CacheProtocol:
@@ -4066,7 +4117,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             list_due = (
                 list_check_mono - self._last_list_poll_mono
             ) >= DEVICE_LIST_POLL_INTERVAL
-            use_cached_list = not list_due and bool(self._last_device_list)
+            force_list_refresh = self._force_device_list_refresh
+            if force_list_refresh:
+                self._force_device_list_refresh = False
+                force_reason = self._force_device_list_reason
+                self._force_device_list_reason = None
+                use_cached_list = False
+                self._last_list_poll_mono = 0.0
+                _LOGGER.debug(
+                    "[%s] Device list refresh forced%s",
+                    self._entry_id() or "unknown",
+                    f" ({force_reason})" if force_reason else "",
+                )
+            else:
+                use_cached_list = not list_due and bool(self._last_device_list)
 
             filtered_devices: list[dict[str, Any]]
             if use_cached_list:

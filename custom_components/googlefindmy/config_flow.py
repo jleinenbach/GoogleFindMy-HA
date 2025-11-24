@@ -40,9 +40,11 @@ import json
 import logging
 import re
 import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from collections.abc import Iterable as CollIterable
 from collections.abc import Mapping as CollMapping
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import lru_cache
@@ -3110,6 +3112,59 @@ class ConfigFlow(
     ) -> None:
         """Reload the updated entry, deferring when the core forbids it."""
 
+        hass_data = getattr(self.hass, "data", None)
+        if not isinstance(hass_data, dict):
+            hass_data = {}
+            with suppress(Exception):
+                setattr(self.hass, "data", hass_data)
+
+        domain_bucket = cast(dict[str, Any], hass_data.setdefault(DOMAIN, {}))
+        pending_refresh = domain_bucket.setdefault(
+            "pending_reconfigure_device_list_refresh", set()
+        )
+        if isinstance(pending_refresh, set):
+            pending_refresh.add(entry_for_update.entry_id)
+
+        markers = domain_bucket.setdefault("recent_reconfigure_markers", {})
+        reconfigure_ts = time.time()
+        if isinstance(markers, dict):
+            markers[entry_for_update.entry_id] = reconfigure_ts
+
+        runtime_entries = domain_bucket.get("entries")
+        runtime = runtime_entries.get(entry_for_update.entry_id) if isinstance(
+            runtime_entries, dict
+        ) else None
+        coordinator = getattr(runtime, "coordinator", None)
+        mark_reconfigure = getattr(coordinator, "mark_recent_reconfigure", None)
+        if callable(mark_reconfigure):
+            mark_reconfigure(reconfigure_ts)
+        request_list_refresh = getattr(
+            coordinator, "request_device_list_refresh", None
+        )
+        if callable(request_list_refresh):
+            request_list_refresh(reason="reconfigure")
+
+        def _schedule_reload_via_manager(reason: str) -> None:
+            schedule_reload = getattr(
+                self.hass.config_entries, "async_schedule_reload", None
+            )
+            if not callable(schedule_reload):
+                _LOGGER.debug(
+                    "Reload after reconfigure (%s) not scheduled for entry %s; helper missing",
+                    reason,
+                    entry_for_update.entry_id,
+                )
+                return
+
+            try:
+                schedule_reload(entry_for_update.entry_id)
+            except Exception:  # noqa: BLE001 - surface scheduler failures
+                _LOGGER.exception(
+                    "Failed to schedule reload after reconfigure (%s) for entry %s",
+                    reason,
+                    entry_for_update.entry_id,
+                )
+
         def _log_failed_reload(result: Any, *, deferred: bool) -> None:
             if result is False:
                 _LOGGER.warning(
@@ -3133,6 +3188,9 @@ class ConfigFlow(
 
             _log_failed_reload(task_result, deferred=True)
 
+            if task_result is False:
+                _schedule_reload_via_manager("reload_returned_false_deferred_task")
+
         async def _async_call_reload() -> Any:
             reload_result = self.hass.config_entries.async_reload(
                 entry_for_update.entry_id
@@ -3145,6 +3203,8 @@ class ConfigFlow(
         try:
             reload_result = await _async_call_reload()
         except OperationNotAllowed:
+            _schedule_reload_via_manager("operation_not_allowed")
+
             def _schedule_reload(_: Any) -> None:
                 try:
                     reload_result_inner = self.hass.config_entries.async_reload(
@@ -3194,10 +3254,16 @@ class ConfigFlow(
 
                 _log_failed_reload(reload_result_inner, deferred=True)
 
+                if reload_result_inner is False:
+                    _schedule_reload_via_manager("reload_returned_false_deferred")
+
             async_call_later(self.hass, 0, _schedule_reload)
             return
 
         _log_failed_reload(reload_result, deferred=False)
+
+        if reload_result is False:
+            _schedule_reload_via_manager("reload_returned_false")
 
     # ------------------ Reauthentication ------------------
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:

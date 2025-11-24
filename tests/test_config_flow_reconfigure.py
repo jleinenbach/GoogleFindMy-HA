@@ -193,10 +193,15 @@ async def test_reconfigure_reload_logs_false(caplog: pytest.LogCaptureFixture) -
 
     flow = config_flow.ConfigFlow()
 
+    scheduled: list[str] = []
+
     class _ConfigEntries:
         def async_reload(self, entry_id: str) -> bool:
             assert entry_id == entry.entry_id
             return False
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            scheduled.append(entry_id)
 
     hass = SimpleNamespace(config_entries=_ConfigEntries())
     flow.hass = hass  # type: ignore[assignment]
@@ -207,6 +212,67 @@ async def test_reconfigure_reload_logs_false(caplog: pytest.LogCaptureFixture) -
         "returned False" in record.message and "deferred" not in record.message
         for record in caplog.records
     )
+    assert scheduled == [entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_forces_device_list_refresh() -> None:
+    """Mark forced device list refresh on reconfigure and call coordinator hook."""
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    refresh_calls: list[tuple[str | None, bool]] = []
+    marked: list[float | None] = []
+
+    def _request_device_list_refresh(
+        *, reason: str | None = None, schedule_refresh: bool = True
+    ) -> None:
+        refresh_calls.append((reason, schedule_refresh))
+
+    def _mark_recent_reconfigure(marker: float | None = None) -> None:
+        marked.append(marker)
+
+    coordinator = SimpleNamespace(
+        request_device_list_refresh=_request_device_list_refresh,
+        mark_recent_reconfigure=_mark_recent_reconfigure,
+    )
+    runtime = SimpleNamespace(coordinator=coordinator)
+
+    class _ConfigEntries:
+        def async_reload(self, entry_id: str) -> bool:
+            assert entry_id == entry.entry_id
+            return True
+
+    hass = SimpleNamespace(
+        data={config_flow.DOMAIN: {"entries": {entry.entry_id: runtime}}},
+        config_entries=_ConfigEntries(),
+        async_create_task=asyncio.create_task,
+    )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {"entry_id": entry.entry_id}
+    flow._auth_data = {
+        DATA_AUTH_METHOD: "manual",
+        CONF_OAUTH_TOKEN: "token",
+        CONF_GOOGLE_EMAIL: entry.data[CONF_GOOGLE_EMAIL],
+    }
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert refresh_calls == [("reconfigure", True)]
+    assert marked and marked[0] is not None
+
+    pending_refresh = hass.data[config_flow.DOMAIN][
+        "pending_reconfigure_device_list_refresh"
+    ]
+    assert isinstance(pending_refresh, set)
+    assert entry.entry_id in pending_refresh
+
+    markers = hass.data[config_flow.DOMAIN]["recent_reconfigure_markers"]
+    assert isinstance(markers, dict)
+    assert entry.entry_id in markers
 
 
 @pytest.mark.asyncio
@@ -222,6 +288,7 @@ async def test_reconfigure_reload_logs_deferred_failures(
 
     flow = config_flow.ConfigFlow()
     hass = SimpleNamespace(tasks=[])
+    scheduled: list[str] = []
 
     class _ConfigEntries:
         def __init__(self) -> None:
@@ -237,6 +304,9 @@ async def test_reconfigure_reload_logs_deferred_failures(
                 return False
 
             return _retry()
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            scheduled.append(entry_id)
 
     hass.config_entries = _ConfigEntries()
 
@@ -261,6 +331,7 @@ async def test_reconfigure_reload_logs_deferred_failures(
         "returned False" in record.message and "deferred" in record.message
         for record in caplog.records
     )
+    assert scheduled == [entry.entry_id, entry.entry_id]
 
 
 @pytest.mark.asyncio

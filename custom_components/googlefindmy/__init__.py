@@ -2128,6 +2128,8 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     views_registered: bool
     _subentry_forward_helper_logs: set[str]
     _subentry_setup_history: dict[str, set[str]]
+    pending_reconfigure_device_list_refresh: set[str]
+    recent_reconfigure_markers: dict[str, float]
 
 
 def _domain_data(hass: HomeAssistant) -> GoogleFindMyDomainData:
@@ -2600,6 +2602,30 @@ def _ensure_entries_bucket(bucket: GoogleFindMyDomainData) -> dict[str, RuntimeD
         entries = {}
         bucket["entries"] = entries
     return entries
+
+
+def _ensure_pending_reconfigure_refresh(
+    bucket: GoogleFindMyDomainData,
+) -> set[str]:
+    """Return the set of entry_ids awaiting a forced device list refresh."""
+
+    pending = bucket.get("pending_reconfigure_device_list_refresh")
+    if not isinstance(pending, set):
+        pending = set()
+        bucket["pending_reconfigure_device_list_refresh"] = pending
+    return pending
+
+
+def _ensure_recent_reconfigure_markers(
+    bucket: GoogleFindMyDomainData,
+) -> dict[str, float]:
+    """Return the mapping of entry_id -> reconfigure timestamp markers."""
+
+    markers = bucket.get("recent_reconfigure_markers")
+    if not isinstance(markers, dict):
+        markers = {}
+        bucket["recent_reconfigure_markers"] = markers
+    return markers
 
 
 def _ensure_device_owner_index(bucket: GoogleFindMyDomainData) -> dict[str, str]:
@@ -6343,6 +6369,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     entry.runtime_data = runtime_data
     entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
     entries_bucket[entry.entry_id] = runtime_data
+
+    pending_reconfigure_refresh = _ensure_pending_reconfigure_refresh(domain_bucket)
+    recent_reconfigure_markers = _ensure_recent_reconfigure_markers(domain_bucket)
+    marker = recent_reconfigure_markers.pop(entry.entry_id, None)
+    if marker is not None:
+        coordinator.mark_recent_reconfigure(marker)
+    if entry.entry_id in pending_reconfigure_refresh:
+        pending_reconfigure_refresh.discard(entry.entry_id)
+        coordinator.request_device_list_refresh(
+            reason="reconfigure", schedule_refresh=False
+        )
     # Attach runtime data before subentry sync/setup so _async_setup_new_subentries
     # retry bookkeeping can access the per-entry container during parent setup.
     _subentry_setup_tracker(hass, entry).clear()
