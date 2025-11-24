@@ -25,6 +25,9 @@
       },
       "locate_device": {
         "default": "mdi:radar"
+      },
+      "reset_statistics": {
+        "default": "mdi:restart"
       }
     },
     "sensor": {

@@ -329,6 +329,9 @@
       },
       "locate_device": {
         "name": "Jetzt orten"
+      },
+      "reset_statistics": {
+        "name": "Statistiken zurücksetzen"
       }
     },
     "binary_sensor": {
