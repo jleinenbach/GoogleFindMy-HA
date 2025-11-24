@@ -704,6 +704,147 @@ def test_ephemeral_probe_cache_allows_missing_namespace(
     assert hasattr(cache, "async_set_cached_value")
 
 
+def test_async_step_user_reconfigure_context_bypasses_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconfigure contexts must skip the already_configured abort and route to reconfigure."""
+
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        unique_id="existing@example.com",
+        data={CONF_GOOGLE_EMAIL: "existing@example.com"},
+        options={},
+        subentries={},
+    )
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return []
+
+    class _Hass:
+        def __init__(self) -> None:
+            self.config_entries = _ConfigEntries()
+            self.tasks: list[asyncio.Task[Any]] = []
+
+        def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
+            task = asyncio.create_task(coro)
+            self.tasks.append(task)
+            return task
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _Hass()  # type: ignore[assignment]
+    flow.context = {
+        "source": getattr(ha_config_entries, "SOURCE_RECONFIGURE", "reconfigure"),
+        "entry_id": entry.entry_id,
+    }
+    set_config_flow_unique_id(flow, None)
+
+    reconfigure_calls: list[dict[str, Any] | None] = []
+
+    async def _fake_reconfigure(
+        self: config_flow.ConfigFlow, user_input: dict[str, Any] | None = None
+    ) -> dict[str, str]:
+        reconfigure_calls.append(user_input)
+        return {"type": "form", "step_id": "reconfigure"}
+
+    monkeypatch.setattr(
+        flow,
+        "async_step_reconfigure",
+        _fake_reconfigure.__get__(flow, config_flow.ConfigFlow),
+    )
+
+    async def _exercise() -> dict[str, str]:
+        result = await flow.async_step_user()
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    result = asyncio.run(_exercise())
+
+    assert reconfigure_calls == [None]
+    assert result["type"] == "form"
+    assert result["step_id"] == "reconfigure"
+
+
+def test_async_step_user_bound_entry_relaxes_duplicate_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flows bound to an entry must not abort duplicate checks during reconfigure."""
+
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        unique_id="existing@example.com",
+        data={CONF_GOOGLE_EMAIL: "existing@example.com"},
+        options={},
+        subentries={},
+    )
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return []
+
+    class _Hass:
+        def __init__(self) -> None:
+            self.config_entries = _ConfigEntries()
+            self.tasks: list[asyncio.Task[Any]] = []
+
+        def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
+            task = asyncio.create_task(coro)
+            self.tasks.append(task)
+            return task
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = _Hass()  # type: ignore[assignment]
+    flow.context = {"entry_id": entry.entry_id}
+    set_config_flow_unique_id(flow, None)
+
+    flow._auth_data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+    flow._auth_data[CONF_OAUTH_TOKEN] = "token"
+
+    prepare_calls: list[bool] = []
+
+    async def _fake_prepare_account_context(
+        self: config_flow.ConfigFlow,
+        *,
+        email: str,
+        preferred_unique_id: str | None = None,
+        updates: Mapping[str, Any] | None = None,
+        coalesce: bool = True,
+        abort_on_duplicate: bool = True,
+    ) -> None:
+        prepare_calls.append(abort_on_duplicate)
+
+    async def _fake_device_selection(
+        self: config_flow.ConfigFlow, user_input: dict[str, Any] | None = None
+    ) -> dict[str, str]:
+        return {"type": "form", "step_id": "device_selection"}
+
+    monkeypatch.setattr(
+        flow,
+        "_async_prepare_account_context",
+        _fake_prepare_account_context.__get__(flow, config_flow.ConfigFlow),
+    )
+    monkeypatch.setattr(
+        flow,
+        "async_step_device_selection",
+        _fake_device_selection.__get__(flow, config_flow.ConfigFlow),
+    )
+
+    result = asyncio.run(flow.async_step_user({"auth_method": None}))
+
+    assert prepare_calls == [False]
+    assert result["type"] == "form"
+    assert result["step_id"] == "device_selection"
+
+
 def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reconfigure flows should reuse device selection and update existing entries."""
 
