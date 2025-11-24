@@ -89,7 +89,7 @@
       "reauth_successful": "Erneute Authentifizierung erfolgreich.",
       "migration_successful": "Migration abgeschlossen.",
       "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu.",
-      "reconfigure_successful": "Integration ist bereits konfiguriert. Es können keine weiteren Konten hinzugefügt werden.",
+      "reconfigure_successful": "Neukonfiguration erfolgreich.",
       "no_hubs_configured": "Es sind noch keine Google Find My Hubs konfiguriert."
     },
     "progress": {
