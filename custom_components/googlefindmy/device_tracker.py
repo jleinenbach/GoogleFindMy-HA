@@ -94,6 +94,19 @@ def _subentry_type(subentry: Any | None) -> str | None:
             return fallback_type
     return None
 
+
+def _normalize_identifier_set(candidate: Iterable[Any] | None) -> list[str]:
+    """Return a sorted list of identifier strings extracted from an iterable."""
+
+    if not candidate:
+        return []
+
+    normalized: set[str] = set()
+    for item in candidate:
+        if isinstance(item, str) and item:
+            normalized.add(item)
+    return sorted(normalized)
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -346,8 +359,33 @@ async def async_setup_entry(
         def _scan_available_trackers_from_coordinator() -> None:
             snapshot = coordinator.get_subentry_snapshot(tracker_subentry_key)
             if not snapshot:
+                meta = coordinator.get_subentry_metadata(key=tracker_subentry_key)
+                visible_ids = _normalize_identifier_set(
+                    getattr(meta, "visible_device_ids", None)
+                )
+                enabled_ids = _normalize_identifier_set(
+                    getattr(meta, "enabled_device_ids", None)
+                )
+                snapshot_map = getattr(coordinator, "_subentry_snapshots", {})
+                snapshot_keys = _normalize_identifier_set(snapshot_map.keys())
+                reconfigure_marker = getattr(
+                    coordinator, "recent_reconfigure_at", None
+                )
                 _LOGGER.debug(
-                    "Device tracker setup: no coordinator snapshot for subentry %s", tracker_subentry_key
+                    (
+                        "Device tracker setup: no coordinator snapshot for subentry %s "
+                        "(config_subentry_id=%s, visible_device_ids=%s, "
+                        "enabled_device_ids=%s, snapshot_keys=%s, snapshot_cache_size=%d, "
+                        "initial_discovery_done=%s, post_reconfigure=%s)"
+                    ),
+                    tracker_subentry_key,
+                    getattr(meta, "config_subentry_id", None),
+                    ", ".join(visible_ids) or "<empty>",
+                    ", ".join(enabled_ids) or "<empty>",
+                    ", ".join(snapshot_keys) or "<empty>",
+                    len(snapshot_map) if isinstance(snapshot_map, Mapping) else 0,
+                    getattr(coordinator, "_initial_discovery_done", None),
+                    bool(reconfigure_marker),
                 )
                 _schedule_tracker_entities([], True)
                 return
@@ -734,6 +772,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
         # Persist a "last good" fix to keep map position usable when current accuracy is filtered
         self._last_good_accuracy_data: dict[str, Any] | None = None
+        self._logged_visibility_block = False
 
     async def async_added_to_hass(self) -> None:
         """Restore last known location and seed the coordinator cache.
@@ -820,6 +859,30 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         """
         if not super().available:
             return False
+        if not self.coordinator.is_device_visible_in_subentry(
+            self.subentry_key, self.device_id
+        ):
+            if not self._logged_visibility_block:
+                meta = self.coordinator.get_subentry_metadata(
+                    key=self.subentry_key
+                )
+                visible_ids = _normalize_identifier_set(
+                    getattr(meta, "visible_device_ids", None)
+                )
+                _LOGGER.debug(
+                    (
+                        "Tracker '%s' unavailable: device '%s' is not visible in subentry %s "
+                        "(config_subentry_id=%s, visible_device_ids=%s)"
+                    ),
+                    self.entity_id,
+                    self.device_id,
+                    self.subentry_key,
+                    getattr(meta, "config_subentry_id", None),
+                    ", ".join(visible_ids) or "<empty>",
+                )
+                self._logged_visibility_block = True
+            return False
+        self._logged_visibility_block = False
         if not self.coordinator_has_device():
             return False
         # Prefer coordinator presence; fall back to previous behavior if API is missing.
