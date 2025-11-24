@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import logging
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from types import MappingProxyType, SimpleNamespace
@@ -90,6 +91,116 @@ def _stable_subentry_id(entry_id: str, key: str) -> str:
     """Return deterministic config_subentry_id values for tests."""
 
     return f"{entry_id}-{key}-subentry"
+
+
+def _prepare_reconfigure_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[config_flow.ConfigFlow, Any, Any, list[tuple[Any, dict[str, Any]]]]:
+    """Create a configured flow ready for reconfigure assertions."""
+
+    class _Entry:
+        def __init__(self) -> None:
+            self.entry_id = "entry-1"
+            self.unique_id = "existing@example.com"
+            self.title = "Existing"
+            self.data: dict[str, Any] = {
+                CONF_GOOGLE_EMAIL: "existing@example.com",
+                CONF_OAUTH_TOKEN: "old-token",
+                DATA_AUTH_METHOD: config_flow._AUTH_METHOD_INDIVIDUAL,
+            }
+            self.options: dict[str, Any] = {
+                OPT_LOCATION_POLL_INTERVAL: 300,
+                OPT_DEVICE_POLL_DELAY: 10,
+                OPT_MIN_ACCURACY_THRESHOLD: 150,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
+                OPT_OPTIONS_SCHEMA_VERSION: 1,
+            }
+            self.subentries: dict[str, Any] = {}
+
+    entry = _Entry()
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            self.updated: list[tuple[Any, dict[str, Any]]] = []
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return [entry]
+
+        def async_get_entry(self, entry_id: str) -> _Entry | None:
+            if entry_id != entry.entry_id:
+                return None
+            return entry
+
+        def async_update_entry(self, target: Any, **updates: Any) -> None:
+            assert target is entry
+            self.updated.append((target, dict(updates)))
+            if "data" in updates:
+                entry.data = dict(updates["data"])
+            if "options" in updates:
+                entry.options = dict(updates["options"])
+
+        async def async_reload(self, entry_id: str) -> None:  # pragma: no cover - overridden
+            raise AssertionError("Override async_reload per test")
+
+    class _Hass:
+        def __init__(self) -> None:
+            prepare_flow_hass_config_entries(
+                self,
+                lambda: _ConfigEntries(),
+                frame_module=frame,
+            )
+            self.tasks: list[asyncio.Task[Any]] = []
+            self.loop = asyncio.get_event_loop()
+
+        def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
+            task = asyncio.create_task(coro)
+            self.tasks.append(task)
+            return task
+
+    hass = _Hass()
+
+    sync_calls: list[tuple[Any, dict[str, Any]]]
+    sync_calls = []
+
+    async def _fake_sync(
+        self: config_flow.ConfigFlow,
+        entry_obj: Any,
+        *,
+        options_payload: dict[str, Any],
+        defaults: dict[str, Any],
+        context_map: dict[str, Any],
+    ) -> None:
+        sync_calls.append((entry_obj, dict(options_payload)))
+
+    async def _fake_build_api(self: config_flow.ConfigFlow) -> tuple[Any, str, str]:
+        return object(), "existing@example.com", "old-token"
+
+    async def _fake_probe(_api: Any, *, email: str, token: str) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(
+        config_flow.ConfigFlow,
+        "_async_sync_feature_subentries",
+        _fake_sync,
+    )
+    monkeypatch.setattr(
+        config_flow.ConfigFlow,
+        "_async_build_api_and_username",
+        _fake_build_api,
+    )
+    monkeypatch.setattr(config_flow, "_try_probe_devices", _fake_probe)
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {
+        "source": getattr(ha_config_entries, "SOURCE_RECONFIGURE", "reconfigure"),
+        "entry_id": entry.entry_id,
+    }
+    set_config_flow_unique_id(flow, None)
+
+    return flow, entry, hass, sync_calls
 
 
 def test_async_pick_working_token_accepts_guard(
@@ -843,6 +954,185 @@ def test_async_step_user_bound_entry_relaxes_duplicate_abort(
     assert prepare_calls == [False]
     assert result["type"] == "form"
     assert result["step_id"] == "device_selection"
+
+
+@pytest.mark.asyncio
+async def test_async_step_reconfigure_awaits_reload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reconfigure should await reload results before finishing."""
+
+    flow, entry, hass, _ = _prepare_reconfigure_flow(monkeypatch)
+
+    reload_calls: list[str] = []
+
+    async def _async_reload(entry_id: str) -> bool:
+        reload_calls.append(entry_id)
+        await asyncio.sleep(0)
+        return True
+
+    hass.config_entries.async_reload = _async_reload  # type: ignore[assignment]
+
+    caplog.set_level(logging.WARNING)
+
+    async def _exercise() -> tuple[dict[str, Any], dict[str, Any]]:
+        initial = await flow.async_step_reconfigure()
+        flow._auth_data[CONF_OAUTH_TOKEN] = "new-token"
+        flow._auth_data[DATA_AUTH_METHOD] = config_flow._AUTH_METHOD_INDIVIDUAL
+        final = await flow.async_step_device_selection(
+            {
+                OPT_LOCATION_POLL_INTERVAL: 120,
+                OPT_DEVICE_POLL_DELAY: 5,
+                OPT_MIN_ACCURACY_THRESHOLD: 90,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+            }
+        )
+        return initial, final
+
+    initial_result, final_result = await _exercise()
+
+    assert initial_result["type"] == "form"
+    assert final_result["type"] == "abort"
+    assert final_result["reason"] == "reconfigure_successful"
+    assert final_result.get("description_placeholders") is None
+
+    assert reload_calls == [entry.entry_id]
+    assert not any("Reload" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_async_step_reconfigure_defers_reload_and_logs_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Deferred reloads should emit warnings when they fail."""
+
+    flow, entry, hass, _ = _prepare_reconfigure_flow(monkeypatch)
+
+    reload_calls: list[str] = []
+
+    def _async_reload(entry_id: str) -> bool:
+        reload_calls.append(entry_id)
+        if len(reload_calls) == 1:
+            raise config_flow.OperationNotAllowed
+        return False
+
+    hass.config_entries.async_reload = _async_reload  # type: ignore[assignment]
+
+    scheduled: list[tuple[Any, float]] = []
+
+    def _immediate_call_later(
+        hass_obj: Any, delay: float, action: Callable[[Any], Any]
+    ) -> None:
+        scheduled.append((hass_obj, delay))
+        action(None)
+
+    monkeypatch.setattr(config_flow, "async_call_later", _immediate_call_later)
+
+    caplog.set_level(logging.WARNING)
+
+    async def _exercise() -> tuple[dict[str, Any], dict[str, Any]]:
+        initial = await flow.async_step_reconfigure()
+        flow._auth_data[CONF_OAUTH_TOKEN] = "new-token"
+        flow._auth_data[DATA_AUTH_METHOD] = config_flow._AUTH_METHOD_INDIVIDUAL
+        final = await flow.async_step_device_selection(
+            {
+                OPT_LOCATION_POLL_INTERVAL: 120,
+                OPT_DEVICE_POLL_DELAY: 5,
+                OPT_MIN_ACCURACY_THRESHOLD: 90,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+            }
+        )
+        return initial, final
+
+    initial_result, final_result = await _exercise()
+
+    assert initial_result["type"] == "form"
+    assert final_result["reason"] == "reconfigure_successful"
+    assert final_result["type"] == "abort"
+
+    assert scheduled and scheduled[0][0] is hass
+    assert reload_calls == [entry.entry_id, entry.entry_id]
+    assert any(
+        "Reload (deferred) after reconfigure for entry entry-1 returned False"
+        in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_step_reconfigure_defers_reload_and_logs_exception(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Deferred reload task exceptions must be logged."""
+
+    flow, entry, hass, _ = _prepare_reconfigure_flow(monkeypatch)
+
+    reload_calls: list[str] = []
+
+    async def _async_reload(entry_id: str) -> Any:
+        reload_calls.append(entry_id)
+        if len(reload_calls) == 1:
+            raise config_flow.OperationNotAllowed
+
+        async def _raise() -> None:
+            raise RuntimeError("reload boom")
+
+        return _raise()
+
+    hass.config_entries.async_reload = _async_reload  # type: ignore[assignment]
+
+    scheduled_tasks: list[_FakeTask] = []
+
+    class _FakeTask:
+        def __init__(self, exc: Exception) -> None:
+            self._exc = exc
+
+        def add_done_callback(self, cb: Callable[[Any], Any]) -> None:
+            cb(self)
+
+        def result(self) -> Any:
+            raise self._exc
+
+    def _fake_create_task(coro: Any) -> _FakeTask:
+        if inspect.iscoroutine(coro):
+            coro.close()
+        task = _FakeTask(RuntimeError("reload boom"))
+        scheduled_tasks.append(task)
+        return task
+
+    hass.async_create_task = _fake_create_task  # type: ignore[assignment]
+
+    monkeypatch.setattr(config_flow, "async_call_later", lambda hass_obj, delay, action: action(None))
+
+    caplog.set_level(logging.ERROR)
+
+    async def _exercise() -> tuple[dict[str, Any], dict[str, Any]]:
+        initial = await flow.async_step_reconfigure()
+        flow._auth_data[CONF_OAUTH_TOKEN] = "new-token"
+        flow._auth_data[DATA_AUTH_METHOD] = config_flow._AUTH_METHOD_INDIVIDUAL
+        final = await flow.async_step_device_selection(
+            {
+                OPT_LOCATION_POLL_INTERVAL: 120,
+                OPT_DEVICE_POLL_DELAY: 5,
+                OPT_MIN_ACCURACY_THRESHOLD: 90,
+                OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+            }
+        )
+        return initial, final
+
+    initial_result, final_result = await _exercise()
+
+    assert initial_result["type"] == "form"
+    assert final_result["reason"] == "reconfigure_successful"
+    assert final_result["type"] == "abort"
+
+    assert reload_calls and reload_calls[0] == entry.entry_id
+    assert scheduled_tasks
+    assert any(
+        "Deferred reload after reconfigure for entry entry-1 raised an exception"
+        in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -> None:

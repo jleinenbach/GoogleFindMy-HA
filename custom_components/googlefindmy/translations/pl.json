@@ -191,7 +191,7 @@
         "data_description": {
           "delete_caches_on_remove": "Usuwa buforowane tokeny i metadane urządzeń podczas usuwania tego wpisu.",
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
-          "contributor_mode": "\"high_traffic\" utrzymuje domyślny tryb agregacji Google. \"in_all_areas\" włącza szybsze zgłoszenia crowdsourcingowe.",
+          "contributor_mode": "Wybierz, jak urządzenie współpracuje z siecią Google (domyślnie obszary o dużym ruchu lub Wszystkie obszary w trybie crowdsourcingu).",
           "subentry": "Zapisz te opcje w wybranej grupie funkcji. Zobacz [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups), aby poznać przykłady."
         }
       },
@@ -285,16 +285,21 @@
         }
       }
     },
-    "refresh_device_urls": {
-      "name": "Odśwież adresy URL urządzeń",
-      "description": "Odświeża adresy URL konfiguracji urządzeń Google Find My tak, aby wskazywały na zintegrowany widok mapy.",
-      "fields": {}
-    },
-    "locate_external": {
-      "name": "Zlokalizuj urządzenie (zewnętrznie)",
-      "description": "Zlokalizuj urządzenie przy użyciu zewnętrznego pomocnika; deleguje do zwykłej lokalizacji.",
-      "fields": {
-        "device_id": {
+  "refresh_device_urls": {
+    "name": "Odśwież adresy URL urządzeń",
+    "description": "Odświeża adresy URL konfiguracji urządzeń Google Find My tak, aby wskazywały na zintegrowany widok mapy.",
+    "fields": {}
+  },
+  "rebuild_device_registry": {
+    "name": "Odbuduj rejestr urządzeń",
+    "description": "Konserwacja: odbudowuje powiązania rejestru urządzeń dla hubów Google Find My i usuwa trackery błędnie powiązane z wpisem nadrzędnym.",
+    "fields": {}
+  },
+  "locate_external": {
+    "name": "Zlokalizuj urządzenie (zewnętrznie)",
+    "description": "Zlokalizuj urządzenie przy użyciu zewnętrznego pomocnika; deleguje do zwykłej lokalizacji.",
+    "fields": {
+      "device_id": {
           "name": "Urządzenie",
           "description": "Wybierz urządzenie Google Find My (lub przekaż kanoniczny identyfikator przez Narzędzia deweloperskie)."
         },

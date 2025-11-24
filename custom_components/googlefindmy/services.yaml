@@ -82,6 +82,12 @@ refresh_device_urls:
   name: Refresh Device URLs
   description: "Refresh the configuration URLs for Google Find My devices to point to the integrated map view."
 
+rebuild_device_registry:
+  name: Rebuild Device Registry
+  description: >-
+    Maintenance: rebuilds device registry links for Google Find My hubs and removes
+    tracker devices incorrectly tied to the parent entry.
+
 rebuild_registry:
   name: Rebuild / Migrate Registry
   description: "Maintenance: Run targeted migrations (data→options, unique IDs, button relinking) or rebuild entities/devices for this integration."
