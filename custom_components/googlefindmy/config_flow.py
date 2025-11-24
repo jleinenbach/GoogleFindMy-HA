@@ -3010,11 +3010,16 @@ class ConfigFlow(
                 2  # bump schema version at creation
             )
 
-            subentry_context = self._ensure_subentry_context()
             entry_for_update: ConfigEntry | None = None
             entry_id = self.context.get("entry_id")
             if isinstance(entry_id, str):
                 entry_for_update = self.hass.config_entries.async_get_entry(entry_id)
+            if self.context.get("is_reconfigure") and entry_for_update is not None:
+                subentry_context = self._reset_reconfigure_subentry_context(
+                    entry_for_update
+                )
+            else:
+                subentry_context = self._ensure_subentry_context()
             if entry_for_update is not None:
                 await self._async_trigger_core_subentry_repair(
                     self.hass, entry_for_update
@@ -3062,6 +3067,10 @@ class ConfigFlow(
                             data=fallback_payload,
                         )
                         setattr(entry_for_update, "options", fallback_options)
+
+                    await self._async_cleanup_stale_subentries(
+                        entry_for_update, subentry_context
+                    )
 
                     self.context.pop("is_reconfigure", None)
                     self.context.pop("reauth_success_reason_override", None)
@@ -3612,6 +3621,39 @@ class ConfigFlow(
         self.context["subentry_ids"] = mapping
         return mapping
 
+    def _reset_reconfigure_subentry_context(
+        self, entry: ConfigEntry
+    ) -> dict[str, str | None]:
+        """Reseed subentry context for reconfigure flows.
+
+        Config Subentry Handbook: keep the flow context aligned with the
+        registry-backed service/tracker IDs before dispatchers are rebound so
+        listeners never target stale config_subentry_id values.
+        """
+
+        mapping: dict[str, str | None] = {
+            self._subentry_key_core_tracking: None,
+            self._subentry_key_service: None,
+        }
+
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, Mapping):
+            for subentry in subentries.values():
+                data = getattr(subentry, "data", {}) or {}
+                group_key = data.get("group_key")
+                subentry_id = getattr(subentry, "subentry_id", None)
+                if (
+                    isinstance(group_key, str)
+                    and group_key in mapping
+                    and mapping[group_key] is None
+                ):
+                    mapping[group_key] = (
+                        subentry_id if isinstance(subentry_id, str) else None
+                    )
+
+        self.context["subentry_ids"] = mapping
+        return mapping
+
     @staticmethod
     def _ensure_service_device_binding(
         hass: HomeAssistant,
@@ -3830,6 +3872,70 @@ class ConfigFlow(
                 translation_key=tracker_translation_key,
             )
             context_map[tracker_key] = tracker_subentry.subentry_id
+
+    async def _async_cleanup_stale_subentries(
+        self, entry: ConfigEntry, context_map: Mapping[str, str | None]
+    ) -> None:
+        """Remove stale tracker/service subentries before reloading."""
+
+        if not isinstance(context_map, Mapping):
+            return
+
+        expected_ids = {
+            subentry_id
+            for subentry_id in context_map.values()
+            if isinstance(subentry_id, str) and subentry_id
+        }
+        if not expected_ids:
+            return
+
+        subentries = getattr(entry, "subentries", None)
+        if not isinstance(subentries, Mapping):
+            return
+
+        allowed_keys = {
+            self._subentry_key_core_tracking,
+            self._subentry_key_service,
+        }
+        stale_ids: list[str] = []
+        for subentry_id, subentry in subentries.items():
+            if not isinstance(subentry_id, str) or subentry_id in expected_ids:
+                continue
+            data = getattr(subentry, "data", {}) or {}
+            group_key = data.get("group_key")
+            if isinstance(group_key, str) and group_key in allowed_keys:
+                stale_ids.append(subentry_id)
+
+        if not stale_ids:
+            return
+
+        runtime = getattr(entry, "runtime_data", None)
+        manager = getattr(runtime, "subentry_manager", None)
+        if manager is not None:
+            managed_subentries = getattr(manager, "managed_subentries", None)
+            remove = getattr(manager, "async_remove", None)
+            if isinstance(managed_subentries, Mapping) and callable(remove):
+                for key, subentry in managed_subentries.items():
+                    managed_id = getattr(subentry, "subentry_id", None)
+                    if managed_id in stale_ids:
+                        removal = remove(key)
+                        if inspect.isawaitable(removal):
+                            await removal
+                        stale_ids.remove(managed_id)
+                        if not stale_ids:
+                            return
+
+        remove_fn = getattr(self.hass.config_entries, "async_remove_subentry", None)
+        if not callable(remove_fn):
+            return
+
+        for subentry_id in tuple(stale_ids):
+            try:
+                removal = remove_fn(entry, subentry_id)
+            except TypeError:
+                removal = remove_fn(entry, subentry_id=subentry_id)
+            if inspect.isawaitable(removal):
+                await removal
 
     async def _async_create_subentry(
         self,
