@@ -1677,9 +1677,18 @@ class ConfigEntrySubEntryManager:
             self._visibility_update_task = None
 
     async def async_sync(
-        self, definitions: Iterable[ConfigEntrySubentryDefinition]
+        self,
+        definitions: Iterable[ConfigEntrySubentryDefinition],
+        *,
+        suppress_registered_forwarding: bool = False,
     ) -> None:
-        """Ensure subentries match the provided definitions."""
+        """Ensure subentries match the provided definitions.
+
+        ``suppress_registered_forwarding`` prevents manual platform forwarding
+        when the caller knows Home Assistant will schedule subentry platforms
+        automatically (for example, during parent entry setup on modern cores)
+        or when the subentries are already registered.
+        """
 
         desired: dict[str, ConfigEntrySubentryDefinition] = {}
         for definition in definitions:
@@ -2004,6 +2013,7 @@ class ConfigEntrySubEntryManager:
                 self._hass,
                 self._entry,
                 created_subentries,
+                skip_registered=suppress_registered_forwarding,
             )
 
     async def async_remove(self, key: str) -> None:
@@ -2359,13 +2369,36 @@ def _registered_subentry_ids(
     return registered
 
 
-async def _async_setup_new_subentries(
+def _core_auto_schedules_subentries(config_entries: Any) -> bool:
+    """Return True if Home Assistant schedules subentry setups automatically."""
+
+    if config_entries is None:
+        return False
+
+    if not (
+        callable(getattr(config_entries, "async_setup_subentry", None))
+        and callable(getattr(config_entries, "async_get_subentries", None))
+    ):
+        # 2025.11.3 interface snapshot (see HA SSoT excerpt) does not expose
+        # async_setup_subentry/async_get_subentries. Maintain compatibility by
+        # short-circuiting instead of assuming auto-scheduling support.
+        return False
+
+    schedule_setup = getattr(config_entries, "async_schedule_entry_setup", None)
+    if schedule_setup is None:
+        schedule_setup = getattr(config_entries, "async_schedule_reload", None)
+
+    return callable(schedule_setup)
+
+
+async def _async_setup_new_subentries(  # noqa: PLR0913
     hass: HomeAssistant,
     parent_entry: MyConfigEntry,
     subentries: Iterable[ConfigSubentry | Any] | None,
     *,
     enforce_registration: bool = False,
     retry_entry_ids: Iterable[str] | None = None,
+    skip_registered: bool = False,
 ) -> None:
     """Trigger Home Assistant setup for newly created subentries.
 
@@ -2375,6 +2408,10 @@ async def _async_setup_new_subentries(
     so Core can run ``_async_setup_subentry`` and pass the correct
     ``config_subentry_id`` context. See docs/CONFIG_SUBENTRIES_HANDBOOK.md for
     the canonical lifecycle.
+
+    When ``skip_registered`` is True, forwarding is suppressed once Home
+    Assistant already advertises every pending subentry, relying on Core's
+    automatic platform scheduling after parent setup completes.
     """
 
     if subentries is None:
@@ -2390,6 +2427,34 @@ async def _async_setup_new_subentries(
         _LOGGER.debug(
             "[%s] async_setup_entry: Subentry forward helper missing; skipping setup",
             parent_entry.entry_id,
+        )
+        return
+
+    registered = _registered_subentry_ids(hass, parent_entry)
+    identifiers: list[str] = []
+    for subentry in pending_subentries:
+        identifier = _resolve_config_subentry_identifier(subentry)
+        if identifier is not None:
+            identifiers.append(identifier)
+
+    registered_all = bool(identifiers) and all(
+        identifier in registered for identifier in identifiers
+    )
+    auto_schedules_subentries = _core_auto_schedules_subentries(config_entries)
+    suppression_reasons: list[str] = []
+
+    if skip_registered and registered_all:
+        if auto_schedules_subentries:
+            suppression_reasons.append("Home Assistant auto-schedules subentries")
+        else:
+            suppression_reasons.append("registered during setup")
+
+    if suppression_reasons:
+        _LOGGER.debug(
+            "[%s] Skipping manual forward for %s registered subentries (%s)",
+            parent_entry.entry_id,
+            len(identifiers),
+            "; ".join(suppression_reasons),
         )
         return
 
@@ -6288,6 +6353,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         runtime_subentry_manager, is_reload=is_reload
     )
 
+    config_entries = getattr(hass, "config_entries", None)
+    suppress_subentry_forwarding = False
+    if _core_auto_schedules_subentries(config_entries):
+        suppress_subentry_forwarding = True
+        _LOGGER.debug(
+            "[%s] Suppressing manual subentry forwarding during setup; Home Assistant auto-schedules registered subentries",
+            entry.entry_id,
+        )
+
     # STEP 2: Create and Synchronize Sub-Entries (RUNNING NOW)
     # This is necessary so the coordinator knows the Sub-Entry-IDs in Step 3.
     tracker_features = sorted(TRACKER_FEATURE_PLATFORMS)
@@ -6325,7 +6399,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 unique_id=f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}",
                 translation_key=SERVICE_SUBENTRY_TRANSLATION_KEY,
             ),
-        ]
+        ],
+        suppress_registered_forwarding=suppress_subentry_forwarding,
     )
 
     # STEP 3: Run First Refresh (AFTER Sub-Entries exist)
@@ -6516,25 +6591,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     _register_instance(entry.entry_id, cache)
 
-    # After the parent runtime bucket exists, explicitly set up all known subentries.
-    # Home Assistant will handle per-subentry platform forwarding automatically;
-    # the integration must only trigger config entry setup here and after
-    # programmatic creation (see docs/CONFIG_SUBENTRIES_HANDBOOK.md).
-    # Subentries are already registered locally; rely on Home Assistant to
-    # finalize their registry state without forcing ConfigEntryNotReady loops.
-    await _async_setup_new_subentries(
-        hass,
-        entry,
-        entry.subentries.values(),
-    )
-
-    # Home Assistant will fan out platform setup per subentry after this returns
-    # (see docs/CONFIG_SUBENTRIES_HANDBOOK.md). Forwarding here would drop the
-    # subentry context and block the subsequent per-subentry setup calls.
-    _LOGGER.debug(
-        "[%s] Skipping parent platform forward; waiting for Home Assistant to schedule subentry platforms",
-        entry.entry_id,
-    )
+    auto_schedule_subentries = _core_auto_schedules_subentries(hass.config_entries)
+    registered_subentries = list(entry.subentries.values())
+    if registered_subentries:
+        if auto_schedule_subentries:
+            _LOGGER.debug(
+                "[%s] Subentry forward suppressed; %s registered subentries will be scheduled by Home Assistant (auto-scheduling detected)",
+                entry.entry_id,
+                len(registered_subentries),
+            )
+        else:
+            _LOGGER.debug(
+                "[%s] Forwarding setup for %s registered subentries after reload/startup",
+                entry.entry_id,
+                len(registered_subentries),
+            )
+            await _async_setup_new_subentries(hass, entry, registered_subentries)
+    elif auto_schedule_subentries:
+        _LOGGER.debug(
+            "[%s] Subentry forward suppressed; Home Assistant auto-schedules subentry platforms after setup",
+            entry.entry_id,
+        )
 
     return True
 
