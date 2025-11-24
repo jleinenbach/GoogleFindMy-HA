@@ -89,7 +89,7 @@
       "reauth_successful": "Reautenticación correcta.",
       "migration_successful": "Migración completada.",
       "migration_failed": "Migración fallida. Elimina la integración y vuelve a agregarla.",
-      "reconfigure_successful": "La integración ya está configurada. No se pueden añadir más cuentas.",
+      "reconfigure_successful": "Reconfiguración correcta.",
       "no_hubs_configured": "Todavía no hay hubs de Google Find My configurados."
     },
     "progress": {
@@ -244,7 +244,7 @@
       "invalid_subentry": "Elige un grupo de funciones válido."
     },
     "abort": {
-      "reconfigure_successful": "Reconfiguración correcto.",
+      "reconfigure_successful": "Reconfiguración correcta.",
       "no_ignored_devices": "No hay dispositivos ignorados para restaurar.",
       "repairs_no_subentries": "No hay grupos de funciones que reparar.",
       "repair_no_devices": "Selecciona al menos un dispositivo para mover.",

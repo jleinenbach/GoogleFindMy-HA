@@ -89,7 +89,7 @@
       "reauth_successful": "Réauthentification réussie.",
       "migration_successful": "Migration terminée.",
       "migration_failed": "Échec de la migration. Supprimez puis réajoutez l’intégration.",
-      "reconfigure_successful": "L’intégration est déjà configurée. Aucun autre compte ne peut être ajouté.",
+      "reconfigure_successful": "Reconfiguration réussie.",
       "no_hubs_configured": "Aucun hub Google Find My n’est encore configuré."
     },
     "progress": {

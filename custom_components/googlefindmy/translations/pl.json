@@ -89,7 +89,7 @@
       "reauth_successful": "Ponowne uwierzytelnienie zakończone pomyślnie.",
       "migration_successful": "Migracja zakończona.",
       "migration_failed": "Migracja nie powiodła się. Usuń integrację i dodaj ją ponownie.",
-      "reconfigure_successful": "Integracja jest już skonfigurowana. Nie można dodać kolejnych kont.",
+      "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie.",
       "no_hubs_configured": "Nie skonfigurowano jeszcze żadnych hubów Google Find My."
     },
     "progress": {
