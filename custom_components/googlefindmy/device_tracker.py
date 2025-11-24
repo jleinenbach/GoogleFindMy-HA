@@ -59,6 +59,7 @@ from .entity import (
     _entry_option,
     ensure_config_subentry_id,
     ensure_dispatcher_dependencies,
+    known_config_subentry_ids,
     resolve_coordinator,
     schedule_add_entities,
 )
@@ -125,6 +126,9 @@ async def async_setup_entry(
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = config_entry
+
+    def _known_subentry_ids() -> set[str]:
+        return known_config_subentry_ids(config_entry)
 
     def _collect_tracker_scopes(
         hint_subentry_id: str | None = None,
@@ -217,10 +221,22 @@ async def async_setup_entry(
                 config_entry,
                 "device_tracker",
                 candidate_subentry_id,
+                known_ids=_known_subentry_ids(),
             )
             if candidate_subentry_id is not None
             else None
         )
+
+        if (
+            candidate_subentry_id is not None
+            and tracker_config_subentry_id is None
+            and _known_subentry_ids()
+        ):
+            _LOGGER.debug(
+                "Device tracker setup: skipping subentry '%s' because the config_subentry_id is unknown",
+                candidate_subentry_id,
+            )
+            return
 
         tracker_identifier = (
             tracker_config_subentry_id
@@ -245,19 +261,18 @@ async def async_setup_entry(
             and expected_config_subentry_id
             and forwarded_config_id != expected_config_subentry_id
         ):
+            current_known_ids = _known_subentry_ids()
+            if current_known_ids and forwarded_config_id not in current_known_ids:
+                _LOGGER.debug(
+                    "Device tracker setup skipped for unknown forwarded subentry '%s' (known: %s)",
+                    forwarded_config_id,
+                    ", ".join(sorted(current_known_ids)),
+                )
+                return
             _LOGGER.debug(
                 "Device tracker setup ignored for unrelated subentry '%s' (expected '%s')",
                 forwarded_config_id,
                 expected_config_subentry_id,
-            )
-            schedule_add_entities(
-                coordinator.hass,
-                async_add_entities,
-                entities=[],
-                update_before_add=True,
-                config_subentry_id=forwarded_config_id,
-                log_owner="Device tracker setup",
-                logger=_LOGGER,
             )
             return
 

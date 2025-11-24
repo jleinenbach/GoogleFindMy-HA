@@ -30,6 +30,7 @@ import time
 from collections.abc import (
     Awaitable,
     Callable,
+    Collection,
     Coroutine,
     Iterable,
     Mapping,
@@ -111,15 +112,70 @@ def _entry_option(entry: ConfigEntry | None, key: str, default: Any) -> Any:
     return default
 
 
+def known_config_subentry_ids(entry: ConfigEntry) -> set[str]:
+    """Return the set of known ``config_subentry_id`` values for ``entry``."""
+
+    known_ids: set[str] = set()
+
+    subentries = getattr(entry, "subentries", None)
+    if isinstance(subentries, Mapping):
+        for subentry_id, subentry in subentries.items():
+            if isinstance(subentry_id, str) and subentry_id:
+                known_ids.add(subentry_id)
+
+            candidate = getattr(subentry, "subentry_id", None) or getattr(
+                subentry, "entry_id", None
+            )
+            if isinstance(candidate, str) and candidate:
+                known_ids.add(candidate)
+
+    runtime_data = getattr(entry, "runtime_data", None)
+    subentry_manager = getattr(runtime_data, "subentry_manager", None)
+    managed_subentries = getattr(subentry_manager, "managed_subentries", None)
+    if isinstance(managed_subentries, Mapping):
+        for subentry in managed_subentries.values():
+            candidate = getattr(subentry, "subentry_id", None) or getattr(
+                subentry, "entry_id", None
+            )
+            if isinstance(candidate, str) and candidate:
+                known_ids.add(candidate)
+
+    return known_ids
+
+
 def ensure_config_subentry_id(
-    entry: ConfigEntry, platform: str, candidate: str | None
+    entry: ConfigEntry,
+    platform: str,
+    candidate: str | None,
+    *,
+    known_ids: Collection[str] | None = None,
 ) -> str | None:
     """Return a sanitized config_subentry_id or log why it is unavailable."""
+
+    valid_ids = {item for item in known_ids or () if isinstance(item, str) and item}
 
     if isinstance(candidate, str):
         normalized = candidate.strip()
         if normalized:
+            if valid_ids and normalized not in valid_ids:
+                _LOGGER.debug(
+                    "[%s] %s platform deferred because config_subentry_id '%s' is not registered (known: %s)",
+                    getattr(entry, "entry_id", "<unknown>"),
+                    platform,
+                    normalized,
+                    ", ".join(sorted(valid_ids)),
+                )
+                return None
             return normalized
+
+    if valid_ids:
+        _LOGGER.debug(
+            "[%s] %s platform deferred because config_subentry_id is unavailable (known: %s)",
+            getattr(entry, "entry_id", "<unknown>"),
+            platform,
+            ", ".join(sorted(valid_ids)),
+        )
+        return None
 
     _LOGGER.warning(
         "[%s] %s platform deferred because config_subentry_id is unavailable; "

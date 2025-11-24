@@ -45,6 +45,7 @@ from .const import (
     EVENT_AUTH_ERROR,
     EVENT_AUTH_OK,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_SERVICE,
     TRANSLATION_KEY_AUTH_STATUS,
     issue_id_for,
 )
@@ -123,6 +124,33 @@ async def async_setup_entry(  # noqa: PLR0915
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = entry
+
+    def _known_ids_for_type(expected_type: str) -> set[str]:
+        ids: set[str] = set()
+
+        subentries = getattr(entry, "subentries", None)
+        if isinstance(subentries, Mapping):
+            for subentry in subentries.values():
+                if _subentry_type(subentry) == expected_type:
+                    candidate = getattr(subentry, "subentry_id", None) or getattr(
+                        subentry, "entry_id", None
+                    )
+                    if isinstance(candidate, str) and candidate:
+                        ids.add(candidate)
+
+        runtime_data = getattr(entry, "runtime_data", None)
+        subentry_manager = getattr(runtime_data, "subentry_manager", None)
+        managed_subentries = getattr(subentry_manager, "managed_subentries", None)
+        if isinstance(managed_subentries, Mapping):
+            for subentry in managed_subentries.values():
+                if _subentry_type(subentry) == expected_type:
+                    candidate = getattr(subentry, "subentry_id", None) or getattr(
+                        subentry, "entry_id", None
+                    )
+                    if isinstance(candidate, str) and candidate:
+                        ids.add(candidate)
+
+        return ids
 
     def _collect_service_scopes(
         hint_subentry_id: str | None = None,
@@ -207,10 +235,20 @@ async def async_setup_entry(  # noqa: PLR0915
 
     def _add_scope(scope: _ServiceScope, forwarded_config_id: str | None) -> None:
         nonlocal primary_scope, primary_scheduler
+        service_ids = _known_ids_for_type(SUBENTRY_TYPE_SERVICE)
         sanitized_config_id = ensure_config_subentry_id(
-            entry, "binary_sensor", scope.config_subentry_id or forwarded_config_id
+            entry,
+            "binary_sensor",
+            scope.config_subentry_id or forwarded_config_id,
+            known_ids=service_ids,
         )
         if sanitized_config_id is None:
+            if service_ids:
+                _LOGGER.debug(
+                    "Binary sensor setup: skipping subentry '%s' because the config_subentry_id is unknown",
+                    forwarded_config_id or scope.config_subentry_id or scope.subentry_key,
+                )
+                return
             sanitized_config_id = scope.identifier or scope.subentry_key
             _LOGGER.debug(
                 "Binary sensor setup: synthesized config_subentry_id '%s' for key '%s'",
