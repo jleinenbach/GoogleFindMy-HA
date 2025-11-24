@@ -191,13 +191,7 @@
         "data_description": {
           "delete_caches_on_remove": "Usuwa buforowane tokeny i metadane urządzeń podczas usuwania tego wpisu.",
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
-          "contributor_mode": {
-            "description": "Wybierz, jak urządzenie współpracuje z siecią Google:",
-            "options": {
-              "high_traffic": "Obszary o dużym natężeniu ruchu (domyślnie)",
-              "in_all_areas": "Wszystkie obszary (crowdsourcing)"
-            }
-          },
+          "contributor_mode": "Wybierz, jak urządzenie współpracuje z siecią Google (domyślnie obszary o dużym ruchu lub Wszystkie obszary w trybie crowdsourcingu).",
           "subentry": "Zapisz te opcje w wybranej grupie funkcji. Zobacz [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups), aby poznać przykłady."
         }
       },

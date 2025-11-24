@@ -191,13 +191,7 @@
         "data_description": {
           "delete_caches_on_remove": "Supprime les jetons mis en cache et les métadonnées des appareils lors de la suppression de cette entrée.",
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas.",
-          "contributor_mode": {
-            "description": "Choisissez comment votre appareil contribue au réseau Google :",
-            "options": {
-              "high_traffic": "Zones à forte affluence (par défaut)",
-              "in_all_areas": "Toutes les zones (participatif)"
-            }
-          },
+          "contributor_mode": "Choisissez comment votre appareil contribue au réseau Google (par défaut les zones à forte affluence ou Toutes les zones pour une contribution participative).",
           "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
         }
       },

@@ -191,13 +191,7 @@
         "data_description": {
           "delete_caches_on_remove": "Löscht zwischengespeicherte Tokens und Gerätemetadaten, wenn dieser Eintrag entfernt wird.",
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab.",
-          "contributor_mode": {
-            "description": "Wähle, wie dein Gerät zum Google-Netzwerk beiträgt:",
-            "options": {
-              "high_traffic": "Hochfrequentierte Bereiche (Standard)",
-              "in_all_areas": "Alle Bereiche (Crowdsourcing)"
-            }
-          },
+          "contributor_mode": "Lege fest, wie dein Gerät zum Google-Netzwerk beiträgt (standardmäßig stark frequentierte Bereiche oder Alle Bereiche für Crowdsourcing).",
           "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
         }
       },
