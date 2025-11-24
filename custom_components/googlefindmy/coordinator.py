@@ -3944,7 +3944,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
           1) Ask API (single source of truth if available).
           2) Receiver-level booleans.
           3) Push-client heuristic (run_state + do_listen).
-          4) Token presence as last resort.
         """
         try:
             # 1) API knowledge (preferred)
@@ -3971,15 +3970,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 state_name = getattr(state, "name", state)
                 if state_name == "STARTED" and bool(getattr(pc, "do_listen", False)):
                     return True
-
-            # 4) Token as last resort
-            try:
-                entry_id = self.config_entry.entry_id if self.config_entry else None
-                token = fcm.get_fcm_token(entry_id)
-                if isinstance(token, str) and len(token) >= 10:
-                    return True
-            except Exception:
-                pass
 
             return False
         except Exception:

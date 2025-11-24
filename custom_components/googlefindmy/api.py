@@ -1101,7 +1101,6 @@ class GoogleFindMyAPI:
         Heuristics (no I/O, no blocking):
           1) Use receiver-level readiness flags when available (is_ready/ready).
           2) Inspect push client state on the receiver (pc.run_state == STARTED and pc.do_listen).
-          3) Fall back to token presence via a quiet probe (no ERROR-level spam).
 
         This keeps API- and coordinator-level gating consistent while avoiding tight
         coupling to specific FCM client classes and enums.
@@ -1132,8 +1131,7 @@ class GoogleFindMyAPI:
             if state_name == "STARTED" and bool(getattr(pc, "do_listen", False)):
                 return True
 
-        # 3) Quiet token probe as last resort
-        return self._peek_fcm_token_quietly() is not None
+        return False
 
     @property
     def push_ready(self) -> bool:
