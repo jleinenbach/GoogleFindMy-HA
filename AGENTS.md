@@ -111,6 +111,7 @@ Always keep any `from __future__` imports immediately after the module docstring
 ## Linting reminders
 
 * After editing coordinator helpers (for example, `GoogleFindMyDataUpdateCoordinator` routines), rerun `ruff check` and `mypy --strict --install-types --non-interactive` before launching the full test suite so linting and typing regressions surface early.
+* When moving entities between categories (for example, dropping `entity_category=EntityCategory.DIAGNOSTIC` to surface a control), re-run `ruff check --fix` to prune stale imports before the follow-up `ruff check` confirmation.
 * Prefer importing container abstract base classes (for example, `Iterable`, `Mapping`, `Sequence`) from `collections.abc` instead of duplicating the names from `typing`. This mirrors the integration guidance under `custom_components/googlefindmy/AGENTS.md` (and the topical guides it references under `custom_components/googlefindmy/agents/`) and helps avoid ruff F811 redefinition warnings.
 * Pytest warning filter: `pyproject.toml` configures `filterwarnings = ["ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning:homeassistant.components.http"]` to silence an upstream aiohttp deprecation emitted by the current Home Assistant release. Remove the filter only after Home Assistant stops subclassing `aiohttp.web.Application` (or drops the warning entirely) and a full `pytest` run verifies the warning no longer appears without the suppression.
 
