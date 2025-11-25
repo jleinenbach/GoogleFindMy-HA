@@ -1361,8 +1361,20 @@ class ConfigEntrySubEntryManager:
             else:
                 key = None
 
-            if isinstance(key, str):
-                self._index_managed_subentry(key, subentry)
+            if isinstance(key, str) and key:
+                canonical_key = key
+            else:
+                canonical_key = None
+
+            subentry_type = getattr(subentry, "subentry_type", None)
+            if isinstance(subentry_type, str):
+                if subentry_type == SUBENTRY_TYPE_SERVICE:
+                    canonical_key = SERVICE_SUBENTRY_KEY
+                elif subentry_type == SUBENTRY_TYPE_TRACKER:
+                    canonical_key = TRACKER_SUBENTRY_KEY
+
+            if isinstance(canonical_key, str):
+                self._index_managed_subentry(canonical_key, subentry)
 
     async def _async_adopt_existing_unique_id(
         self,
