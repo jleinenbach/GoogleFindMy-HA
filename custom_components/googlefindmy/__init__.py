@@ -1046,6 +1046,7 @@ class ConfigEntrySubEntryManager:
         "_entry",
         "_hass",
         "_key_field",
+        "_key_aliases",
         "_managed",
         "_managed_by_subentry_id",
         "_visibility_update_task",
@@ -1063,6 +1064,7 @@ class ConfigEntrySubEntryManager:
         self._entry = entry
         self._key_field = key_field
         self._default_subentry_type = default_subentry_type
+        self._key_aliases: dict[str, str] = {}
         self._managed: dict[str, ConfigSubentry] = {}
         self._managed_by_subentry_id: dict[str, str] = {}
         self._cleanup: dict[str, CleanupCallback | None] = {}
@@ -1173,6 +1175,37 @@ class ConfigEntrySubEntryManager:
 
         if isinstance(subentry_id, str) and subentry_id:
             self._managed_by_subentry_id[subentry_id] = key
+
+    def _candidate_score(self, subentry: ConfigSubentry) -> tuple[int, int, int]:
+        """Return preference tuple for resolving duplicate managed keys."""
+
+        entry_match = int(
+            getattr(subentry, "entry_id", None) == getattr(self._entry, "entry_id", None)
+        )
+        unique_id = getattr(subentry, "unique_id", None)
+        unique_match = int(
+            isinstance(unique_id, str)
+            and isinstance(self._entry.entry_id, str)
+            and self._entry.entry_id in unique_id
+        )
+        subentry_id_present = int(
+            isinstance(getattr(subentry, "subentry_id", None), str)
+        )
+        return (entry_match, unique_match, subentry_id_present)
+
+    def _select_preferred_managed(
+        self, existing: ConfigSubentry, candidate: ConfigSubentry
+    ) -> ConfigSubentry:
+        """Return the preferred managed subentry when keys collide."""
+
+        if not self._is_subentry_like(existing):
+            return candidate
+        if not self._is_subentry_like(candidate):
+            return existing
+
+        if self._candidate_score(candidate) > self._candidate_score(existing):
+            return candidate
+        return existing
 
     def _resolve_updated_subentry(
         self,
@@ -1343,6 +1376,7 @@ class ConfigEntrySubEntryManager:
 
         self._managed.clear()
         self._managed_by_subentry_id.clear()
+        self._key_aliases.clear()
         subentries = getattr(self._entry, "subentries", None)
         if not isinstance(subentries, Mapping):
             return
@@ -1361,6 +1395,7 @@ class ConfigEntrySubEntryManager:
             else:
                 key = None
 
+            canonical_key: str | None
             if isinstance(key, str) and key:
                 canonical_key = key
             else:
@@ -1372,9 +1407,30 @@ class ConfigEntrySubEntryManager:
                     canonical_key = SERVICE_SUBENTRY_KEY
                 elif subentry_type == SUBENTRY_TYPE_TRACKER:
                     canonical_key = TRACKER_SUBENTRY_KEY
+                elif canonical_key is None:
+                    canonical_key = subentry_type
 
-            if isinstance(canonical_key, str):
-                self._index_managed_subentry(canonical_key, subentry)
+            if canonical_key is None:
+                canonical_key = self._default_subentry_type
+
+            if (
+                isinstance(key, str)
+                and key
+                and isinstance(canonical_key, str)
+                and canonical_key != key
+            ):
+                self._key_aliases.setdefault(key, canonical_key)
+
+            existing = self._managed.get(canonical_key)
+            preferred = (
+                self._select_preferred_managed(existing, subentry)
+                if existing is not None
+                else subentry
+            )
+            if preferred is existing:
+                continue
+
+            self._index_managed_subentry(canonical_key, preferred)
 
     async def _async_adopt_existing_unique_id(
         self,
@@ -1586,14 +1642,16 @@ class ConfigEntrySubEntryManager:
     def get(self, key: str) -> ConfigSubentry | None:
         """Return the managed subentry for a key when present."""
 
-        return self._managed.get(key)
+        return self._managed.get(self._key_aliases.get(key, key))
 
     def update_visible_device_ids(
         self, key: str, visible_device_ids: Sequence[str]
     ) -> None:
         """Update the visible device identifiers stored in a subentry."""
 
-        subentry = self._managed.get(key)
+        resolved_key = self._key_aliases.get(key, key)
+
+        subentry = self._managed.get(resolved_key)
         if subentry is None:
             return
 
@@ -1619,7 +1677,7 @@ class ConfigEntrySubEntryManager:
             return
 
         payload = dict(subentry.data)
-        payload[self._key_field] = key
+        payload[self._key_field] = resolved_key
         payload["visible_device_ids"] = list(normalized)
 
         update_result = self._hass.config_entries.async_update_subentry(
@@ -1646,7 +1704,14 @@ class ConfigEntrySubEntryManager:
                         candidate=resolved_subentry,
                         original=subentry,
                     )
-                    self._index_managed_subentry(key, refreshed_subentry)
+                    self._index_managed_subentry(resolved_key, refreshed_subentry)
+                    refreshed_subentry_id = getattr(refreshed_subentry, "subentry_id", None)
+                    if (
+                        key != resolved_key
+                        and isinstance(refreshed_subentry_id, str)
+                        and refreshed_subentry_id
+                    ):
+                        self._managed_by_subentry_id[refreshed_subentry_id] = key
 
             task = self._hass.async_create_task(
                 _await_visibility_update(),
@@ -1663,7 +1728,14 @@ class ConfigEntrySubEntryManager:
             original=subentry,
         )
         # Ensure local view reflects Home Assistant's stored subentry.
-        self._index_managed_subentry(key, refreshed)
+        self._index_managed_subentry(resolved_key, refreshed)
+        refreshed_subentry_id = getattr(refreshed, "subentry_id", None)
+        if (
+            key != resolved_key
+            and isinstance(refreshed_subentry_id, str)
+            and refreshed_subentry_id
+        ):
+            self._managed_by_subentry_id[refreshed_subentry_id] = key
         self._visibility_update_task = None
 
     async def async_wait_visible_device_updates(self) -> None:
@@ -1927,6 +1999,26 @@ class ConfigEntrySubEntryManager:
                     key,
                     unique_id,
                 )
+                existing_group_key = None
+                existing_data = getattr(existing, "data", None)
+                if isinstance(existing_data, Mapping):
+                    existing_group_key = existing_data.get(self._key_field)
+                if isinstance(existing_group_key, str) and existing_group_key != key:
+                    _LOGGER.debug(
+                        "[%s] async_sync: Adopting owner subentry for key '%s'"
+                        " with mismatched group_key '%s'",
+                        self._entry.entry_id,
+                        key,
+                        existing_group_key,
+                    )
+                    stored_existing = await self._async_adopt_existing_unique_id(
+                        key,
+                        definition,
+                        unique_id,
+                        payload,
+                    )
+                    existing = stored_existing
+                    break
                 try:
                     update_kwargs: dict[str, Any] = {
                         "data": payload,
@@ -4990,7 +5082,7 @@ def _resolve_entry_email(entry: ConfigEntry) -> tuple[str | None, str | None]:
     """Return the raw and normalized e-mail associated with a config entry."""
 
     raw_email: str | None = None
-    for container in (entry.data, entry.options):
+    for container in (getattr(entry, "data", {}), getattr(entry, "options", {})):
         if not isinstance(container, Mapping):
             continue
         email_value = container.get(CONF_GOOGLE_EMAIL)
@@ -5000,7 +5092,7 @@ def _resolve_entry_email(entry: ConfigEntry) -> tuple[str | None, str | None]:
 
     if raw_email is None:
         secrets_bundle = None
-        for container in (entry.data, entry.options):
+        for container in (getattr(entry, "data", {}), getattr(entry, "options", {})):
             if isinstance(container, Mapping):
                 bundle_candidate = container.get(DATA_SECRET_BUNDLE)
                 if isinstance(bundle_candidate, Mapping):

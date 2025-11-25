@@ -2321,7 +2321,7 @@ class ConfigFlow(
                 existing_entry = self._pending_discovery_existing_entry
                 self._clear_discovery_confirmation_state()
 
-                if existing_entry and updates is not None and pending_payload is not None:
+                if updates is not None and pending_payload is not None:
                     try:
                         await self._async_prepare_account_context(
                             email=pending_payload.email,
@@ -3783,11 +3783,18 @@ class ConfigFlow(
             if manager_cls is not None:
                 managed = manager_cls(self.hass, entry)
                 for group_key, managed_subentry in managed.managed_subentries.items():
-                    if group_key not in mapping or mapping[group_key] is not None:
+                    target_key = group_key
+                    if target_key not in mapping:
+                        subentry_type = getattr(managed_subentry, "subentry_type", None)
+                        if subentry_type == SUBENTRY_TYPE_SERVICE:
+                            target_key = SERVICE_SUBENTRY_KEY
+                        elif subentry_type == SUBENTRY_TYPE_TRACKER:
+                            target_key = self._subentry_key_core_tracking
+                    if target_key not in mapping or mapping[target_key] is not None:
                         continue
 
                     subentry_id = getattr(managed_subentry, "subentry_id", None)
-                    mapping[group_key] = (
+                    mapping[target_key] = (
                         subentry_id if isinstance(subentry_id, str) else None
                     )
 
