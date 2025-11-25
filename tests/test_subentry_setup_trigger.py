@@ -668,6 +668,48 @@ async def test_async_setup_new_subentries_requires_registration_when_not_enforce
 
 
 @pytest.mark.asyncio
+async def test_async_setup_new_subentries_forwards_placeholder_with_skip_registered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forward placeholder subentries lacking IDs even when skipping registered ones."""
+
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    placeholder_subentry = SimpleNamespace(
+        entry_id="child-entry",
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        data={"features": TRACKER_FEATURE_PLATFORMS},
+    )
+    parent_entry.subentries[placeholder_subentry.entry_id] = placeholder_subentry
+
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    hass = FakeHass(config_entries=config_entries)
+    _attach_runtime(parent_entry)
+
+    monkeypatch.setattr(
+        "homeassistant.helpers.dispatcher.async_dispatcher_send",
+        capture_async_dispatcher_send,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.async_dispatcher_send",
+        capture_async_dispatcher_send,
+    )
+
+    await _async_setup_new_subentries(
+        hass,
+        parent_entry,
+        [placeholder_subentry],
+        skip_registered=True,
+    )
+
+    assert config_entries.forward_setup_calls == [
+        (parent_entry, ("button", "device_tracker", "sensor")),
+    ]
+    assert hass.dispatcher_signals == [
+        (f"googlefindmy_subentry_setup_{parent_entry.entry_id}", (placeholder_subentry,)),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_async_setup_new_subentries_requires_registration_when_enforced() -> None:
     """Subentry scheduling should proceed when the registry exposes the subentry."""
 

@@ -2430,7 +2430,10 @@ def _registered_subentry_ids(
     Home Assistant raises ``UnknownSubEntry`` when a subentry setup is triggered
     before the subentry is registered. To catch that early, gather every
     identifier the parent entry advertises so callers can log and abort before
-    scheduling setup attempts.
+    scheduling setup attempts. Identifiers only count as "registered" once a
+    stable config subentry id (for example, ``subentry_id`` or
+    ``stable_identifier``) exists, preventing placeholder objects from short-
+    circuiting setup.
     """
 
     config_entries = getattr(hass, "config_entries", None)
@@ -2459,12 +2462,34 @@ def _registered_subentry_ids(
     parent_subentries = getattr(parent, "subentries", None)
     if isinstance(parent_subentries, Mapping):
         for subentry_id, subentry in parent_subentries.items():
-            if isinstance(subentry_id, str) and subentry_id:
-                registered.add(subentry_id)
-
             identifier = _resolve_config_subentry_identifier(subentry)
             if identifier:
                 registered.add(identifier)
+                continue
+
+            stable_candidate: str | None = None
+            if isinstance(subentry, Mapping):
+                stable_candidate = cast(
+                    str | None,
+                    subentry.get("config_subentry_id")
+                    or subentry.get("subentry_id")
+                    or subentry.get("stable_identifier"),
+                )
+            else:
+                stable_candidate = cast(
+                    str | None,
+                    getattr(subentry, "config_subentry_id", None)
+                    or getattr(subentry, "subentry_id", None)
+                    or getattr(subentry, "stable_identifier", None),
+                )
+
+            if (
+                isinstance(subentry_id, str)
+                and subentry_id
+                and isinstance(stable_candidate, str)
+                and stable_candidate
+            ):
+                registered.add(subentry_id)
 
     async_get_subentries = getattr(config_entries, "async_get_subentries", None)
     if callable(async_get_subentries):
@@ -2518,7 +2543,10 @@ async def _async_setup_new_subentries(  # noqa: PLR0913
 
     When ``skip_registered`` is True, forwarding is suppressed once Home
     Assistant already advertises every pending subentry, relying on Core's
-    automatic platform scheduling after parent setup completes.
+    automatic platform scheduling after parent setup completes. Placeholder
+    identifiers that fall back to the parent ``entry_id`` are ignored so
+    unregistered children without a stable identifier still trigger the initial
+    forward pass.
     """
 
     if subentries is None:
@@ -2547,6 +2575,11 @@ async def _async_setup_new_subentries(  # noqa: PLR0913
     registered_all = bool(identifiers) and all(
         identifier in registered for identifier in identifiers
     )
+    parent_identifier = getattr(parent_entry, "entry_id", None)
+    if registered_all and parent_identifier and all(
+        identifier == parent_identifier for identifier in identifiers
+    ):
+        registered_all = False
     auto_schedules_subentries = _core_auto_schedules_subentries(config_entries)
     suppression_reasons: list[str] = []
 
@@ -5748,24 +5781,46 @@ def _self_heal_device_registry(hass: HomeAssistant, entry: MyConfigEntry) -> Non
         )
 
 
-def _resolve_config_subentry_identifier(subentry: Any) -> str | None:
-    """Return the unique identifier for ``subentry`` when available."""
+def _resolve_config_subentry_identifier(
+    subentry: Any, *, allow_entry_id: bool = False
+) -> str | None:
+    """Return a stable identifier for ``subentry`` when available.
 
-    if isinstance(subentry, Mapping):
-        candidate = subentry.get("config_subentry_id") or subentry.get("subentry_id")
-        if isinstance(candidate, str) and candidate:
-            return candidate
+    The resolver prefers explicit subentry identifiers (``config_subentry_id``
+    and ``subentry_id``) or a ``stable_identifier`` attribute provided by the
+    caller. ``entry_id`` values are only considered when ``allow_entry_id`` is
+    ``True`` so placeholder objects do not masquerade as registered subentries
+    during setup bookkeeping.
+    """
 
-    for attribute in (
+    mapping_keys = (
         "config_subentry_id",
         "subentry_id",
         "stable_identifier",
         "key",
-        "entry_id",
-    ):
-        value = getattr(subentry, attribute, None)
+    )
+    attribute_keys = mapping_keys
+
+    def _coerce_identifier(value: Any) -> str | None:
         if isinstance(value, str) and value:
             return value
+        return None
+
+    if isinstance(subentry, Mapping):
+        for key in mapping_keys:
+            candidate = _coerce_identifier(subentry.get(key))
+            if candidate:
+                return candidate
+        if allow_entry_id:
+            return _coerce_identifier(subentry.get("entry_id"))
+
+    for attribute in attribute_keys:
+        candidate = _coerce_identifier(getattr(subentry, attribute, None))
+        if candidate:
+            return candidate
+
+    if allow_entry_id:
+        return _coerce_identifier(getattr(subentry, "entry_id", None))
 
     return None
 
@@ -7214,7 +7269,7 @@ async def _async_unload_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> b
         entry.data.get("group_key"),
     )
     parent_entry_id = getattr(entry, "parent_entry_id", None)
-    config_subentry_id = _resolve_config_subentry_identifier(entry)
+    config_subentry_id = _resolve_config_subentry_identifier(entry, allow_entry_id=True)
     entry_type = entry.data.get("subentry_type") if isinstance(entry.data, Mapping) else None
 
     try:
