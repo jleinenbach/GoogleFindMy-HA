@@ -992,6 +992,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         async def _repair() -> None:
             try:
+                if not self._config_entry_exists(entry_id):
+                    _LOGGER.debug(
+                        "Skipping core subentry repair for %s: entry removed", entry_id
+                    )
+                    return
+
                 definitions = self._build_core_subentry_definitions()
                 if not definitions:
                     _LOGGER.debug(
@@ -1018,6 +1024,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             finally:
                 self._pending_subentry_repair = None
 
+            if not self._config_entry_exists(entry_id):
+                _LOGGER.debug(
+                    "Skipping core subentry post-processing for %s: entry removed",
+                    entry_id,
+                )
+                return
+
             self._ensure_service_device_exists()
             self._refresh_subentry_index()
             _LOGGER.debug("Core subentry repair completed for entry %s", entry_id)
@@ -1029,6 +1042,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         else:  # pragma: no cover - fallback for legacy stubs
             task = asyncio.create_task(_repair(), name=task_name)
         self._pending_subentry_repair = task
+
+    def _cancel_pending_subentry_repair(self) -> None:
+        """Cancel any pending core subentry repair task."""
+
+        pending = self._pending_subentry_repair
+        if pending is None:
+            return
+
+        if not pending.done():
+            pending.cancel()
+
+        self._pending_subentry_repair = None
 
     def _refresh_subentry_index(
         self,
@@ -1668,24 +1693,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     async def async_shutdown(self) -> None:
         """Clean up listeners and timers on entry unload to avoid leaks."""
+        self._cancel_pending_subentry_repair()
         # Unsubscribe DR listener
-        if self._dr_unsub is not None:
+        dr_unsub = getattr(self, "_dr_unsub", None)
+        if dr_unsub is not None:
             try:
-                self._dr_unsub()
+                dr_unsub()
             except Exception:
                 pass
             self._dr_unsub = None
         # Cancel short-retry callback if scheduled
-        if self._short_retry_cancel is not None:
+        short_retry_cancel = getattr(self, "_short_retry_cancel", None)
+        if short_retry_cancel is not None:
             try:
-                self._short_retry_cancel()
+                short_retry_cancel()
             except Exception:
                 pass
             finally:
                 self._short_retry_cancel = None
         # Cancel pending debounced stats write
-        if self._stats_save_task and not self._stats_save_task.done():
-            self._stats_save_task.cancel()
+        stats_save_task = getattr(self, "_stats_save_task", None)
+        if stats_save_task and not stats_save_task.done():
+            stats_save_task.cancel()
 
     # --- BEGIN: Add/Replace inside Coordinator class ------------------------------
     def _redact_text(self, value: str | None, max_len: int = 120) -> str:
@@ -1703,6 +1732,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Small helper to read the bound ConfigEntry ID (None at very early startup)."""
         entry = self.config_entry
         return getattr(entry, "entry_id", None)
+
+    def _config_entry_exists(self, entry_id: str | None = None) -> bool:
+        """Return True when the coordinator's entry is still registered."""
+
+        hass = getattr(self, "hass", None)
+        config_entries = getattr(hass, "config_entries", None)
+        if entry_id is None:
+            entry_id = self._entry_id()
+
+        if entry_id is None:
+            return False
+
+        getter = getattr(config_entries, "async_get_entry", None)
+        if callable(getter):
+            try:
+                return getter(entry_id) is not None
+            except Exception:  # pragma: no cover - defensive guard
+                return True
+
+        return True
 
     def _extract_our_identifier(self, device: dr.DeviceEntry) -> str | None:
         """Return the first valid (DOMAIN, identifier) from a device, else None.

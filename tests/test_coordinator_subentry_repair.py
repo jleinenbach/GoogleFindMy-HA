@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
@@ -81,8 +82,36 @@ class _ManagerStub:
         return None
 
 
+class _BlockingManager(_ManagerStub):
+    """Block repair sync until explicitly released."""
+
+    def __init__(self, entry: Any) -> None:
+        super().__init__(entry)
+        self.started = asyncio.Event()
+        self.blocker = asyncio.Event()
+
+    async def async_sync(self, definitions: list[Any]) -> None:
+        self.started.set()
+        await self.blocker.wait()
+        await super().async_sync(definitions)
+
+
+class _EntryRemovalManager(_ManagerStub):
+    """Toggle entry existence during the repair sync."""
+
+    def __init__(self, entry: Any, *, entry_present: dict[str, bool]) -> None:
+        super().__init__(entry)
+        self.entry_present = entry_present
+
+    async def async_sync(self, definitions: list[Any]) -> None:
+        self.entry_present["value"] = False
+        await super().async_sync(definitions)
+
+
 def _initialize_repair_coordinator(
     loop: asyncio.AbstractEventLoop,
+    *,
+    apply_teardown_defaults: Callable[[Any], None] | None = None,
 ) -> tuple[
     HomeAssistant,
     Any,
@@ -171,6 +200,9 @@ def _initialize_repair_coordinator(
     coordinator._service_device_id = None
     runtime_data.coordinator = coordinator
 
+    if apply_teardown_defaults is not None:
+        apply_teardown_defaults(coordinator, loop=loop)
+
     return (
         hass,
         entry,
@@ -183,7 +215,9 @@ def _initialize_repair_coordinator(
 
 
 @pytest.mark.asyncio
-async def test_coordinator_repairs_missing_core_subentries_on_cold_start() -> None:
+async def test_coordinator_repairs_missing_core_subentries_on_cold_start(
+    coordinator_teardown_defaults: Callable[[Any], None],
+) -> None:
     """Cold-start refresh should schedule and execute core subentry repairs."""
 
     loop = asyncio.get_running_loop()
@@ -195,7 +229,9 @@ async def test_coordinator_repairs_missing_core_subentries_on_cold_start() -> No
         created_tasks,
         tracker_subentry,
         service_subentry,
-    ) = _initialize_repair_coordinator(loop)
+    ) = _initialize_repair_coordinator(
+        loop, apply_teardown_defaults=coordinator_teardown_defaults
+    )
 
     coordinator.attach_subentry_manager(manager, is_reload=False)
 
@@ -236,7 +272,9 @@ async def test_coordinator_repairs_missing_core_subentries_on_cold_start() -> No
 
 
 @pytest.mark.asyncio
-async def test_coordinator_skips_repair_during_reload_refresh() -> None:
+async def test_coordinator_skips_repair_during_reload_refresh(
+    coordinator_teardown_defaults: Callable[[Any], None]
+) -> None:
     """Reload-driven refresh should skip scheduling core subentry repairs."""
 
     loop = asyncio.get_running_loop()
@@ -248,7 +286,9 @@ async def test_coordinator_skips_repair_during_reload_refresh() -> None:
         created_tasks,
         _tracker_subentry,
         service_subentry,
-    ) = _initialize_repair_coordinator(loop)
+    ) = _initialize_repair_coordinator(
+        loop, apply_teardown_defaults=coordinator_teardown_defaults
+    )
 
     coordinator.attach_subentry_manager(manager, is_reload=True)
 
@@ -278,3 +318,92 @@ async def test_coordinator_skips_repair_during_reload_refresh() -> None:
     registry = dr.async_get(hass)
     current_created = getattr(registry, "created", [])
     assert list(current_created) == baseline_created
+
+
+@pytest.mark.asyncio
+async def test_coordinator_cancels_pending_repair_on_shutdown(
+    coordinator_teardown_defaults: Callable[[Any], None]
+) -> None:
+    """Queued repair tasks should be cancelled during unload."""
+
+    loop = asyncio.get_running_loop()
+    (
+        hass,
+        entry,
+        coordinator,
+        _manager,
+        created_tasks,
+        _tracker_subentry,
+        service_subentry,
+    ) = _initialize_repair_coordinator(
+        loop, apply_teardown_defaults=coordinator_teardown_defaults
+    )
+
+    manager = _BlockingManager(entry)
+    coordinator.attach_subentry_manager(manager, is_reload=False)
+
+    entry.subentries.pop(service_subentry.subentry_id)
+
+    coordinator._refresh_subentry_index()
+    assert coordinator._pending_subentry_repair is not None
+
+    await coordinator.async_shutdown()
+    await asyncio.gather(*created_tasks, return_exceptions=True)
+
+    assert coordinator._pending_subentry_repair is None
+    assert not manager.calls
+
+
+@pytest.mark.asyncio
+async def test_repair_skips_post_processing_after_entry_removal(
+    coordinator_teardown_defaults: Callable[[Any], None]
+) -> None:
+    """Repair finalization should bail out when the entry disappears."""
+
+    loop = asyncio.get_running_loop()
+    (
+        hass,
+        entry,
+        coordinator,
+        _manager,
+        created_tasks,
+        _tracker_subentry,
+        service_subentry,
+    ) = _initialize_repair_coordinator(
+        loop, apply_teardown_defaults=coordinator_teardown_defaults
+    )
+
+    entry_present = {"value": True}
+    hass.config_entries = SimpleNamespace(  # type: ignore[attr-defined]
+        async_get_entry=lambda _entry_id: entry if entry_present["value"] else None
+    )
+
+    ensure_calls: list[None] = []
+    refresh_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    coordinator._ensure_service_device_exists = (  # type: ignore[assignment]
+        lambda: ensure_calls.append(None)
+    )
+    original_refresh = coordinator._refresh_subentry_index
+
+    def _refresh_wrapper(*args: Any, **kwargs: Any) -> None:
+        refresh_calls.append((args, kwargs))
+        original_refresh(*args, **kwargs)
+
+    coordinator._refresh_subentry_index = _refresh_wrapper  # type: ignore[assignment]
+
+    manager = _EntryRemovalManager(entry, entry_present=entry_present)
+    coordinator.attach_subentry_manager(manager, is_reload=False)
+
+    ensure_baseline = len(ensure_calls)
+    refresh_baseline = len(refresh_calls)
+
+    entry.subentries.pop(service_subentry.subentry_id)
+    coordinator._refresh_subentry_index()
+
+    await asyncio.gather(*created_tasks)
+
+    assert coordinator._pending_subentry_repair is None
+    assert manager.calls
+    assert len(ensure_calls) == ensure_baseline
+    assert len(refresh_calls) == refresh_baseline + 1
