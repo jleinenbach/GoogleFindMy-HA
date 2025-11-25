@@ -199,6 +199,12 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 
 ## Environment verification
 
+### Quick-reference (per-task checklist)
+
+* Connectivity probe: `python -m pip install --dry-run --no-deps pip` (record the chunk for citations).
+* Dependency bootstrap: `python -m pip install --upgrade homeassistant pytest-homeassistant-custom-component` or run `make test-stubs` before linting or tests.
+* Required checks (in order): `python -m ruff check --fix`, `python -m mypy --strict`, `python -m pytest --cov -q`.
+
 > **Quickstart:** Run `make test-stubs` once per fresh environment to install `homeassistant` and `pytest-homeassistant-custom-component` before `pytest -q`, `mypy --strict`, or `ruff check`; the download/build step typically finishes in about five minutes, so plan lint/test runs with that buffer in mind.
 
 ### Quickstart checks (fast path before `pytest -q`)

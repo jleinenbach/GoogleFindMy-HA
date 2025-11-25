@@ -6191,6 +6191,134 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     if parent_entry_id:
         return await _async_setup_subentry(hass, entry)
 
+    legacy_cache: TokenCache | None = None
+    cached_snapshot: Mapping[str, Any] | None = None
+    legacy_secrets_keys = (DATA_SECRET_BUNDLE, "scanned_data", CONF_OAUTH_TOKEN)
+    legacy_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json"
+    )
+
+    legacy_keys_present = any(key in entry.data for key in legacy_secrets_keys)
+
+    if legacy_keys_present:
+        try:
+            legacy_cache = await TokenCache.create(
+                hass, entry.entry_id, legacy_path=legacy_path
+            )
+        except Exception as err:  # pragma: no cover - defensive migration guard
+            _LOGGER.debug(
+                "[%s] Legacy migration cache load failed: %s", entry.entry_id, err
+            )
+        else:
+            try:
+                cached_snapshot = await legacy_cache.all()
+            except Exception as err:  # pragma: no cover - defensive migration guard
+                _LOGGER.debug(
+                    "[%s] Legacy migration cache read failed: %s", entry.entry_id, err
+                )
+                cached_snapshot = None
+
+    legacy_cache_primed = bool(cached_snapshot)
+    legacy_candidate = legacy_keys_present and not legacy_cache_primed
+
+    if legacy_candidate:
+        raw_secrets = entry.data.get(DATA_SECRET_BUNDLE) or entry.data.get(
+            "scanned_data"
+        )
+        secrets_bundle: dict[str, Any] = {}
+
+        if isinstance(raw_secrets, str):
+            try:
+                parsed_secrets = json.loads(raw_secrets)
+            except (json.JSONDecodeError, TypeError) as err:
+                _LOGGER.debug(
+                    "[%s] Legacy secrets_data parse failed: %s", entry.entry_id, err
+                )
+            else:
+                if isinstance(parsed_secrets, Mapping):
+                    secrets_bundle = dict(parsed_secrets)
+        elif isinstance(raw_secrets, Mapping):
+            secrets_bundle = dict(raw_secrets)
+
+        oauth_token_maybe = entry.data.get(CONF_OAUTH_TOKEN)
+        if not isinstance(oauth_token_maybe, str):
+            oauth_token_maybe = secrets_bundle.get(CONF_OAUTH_TOKEN)
+        oauth_token_recovered = (
+            oauth_token_maybe if isinstance(oauth_token_maybe, str) else None
+        )
+
+        aas_token_maybe = secrets_bundle.get(DATA_AAS_TOKEN)
+        aas_token_recovered = aas_token_maybe if isinstance(aas_token_maybe, str) else None
+
+        google_email = entry.data.get(CONF_GOOGLE_EMAIL) or entry.data.get("email")
+
+        def _walk_for_email(value: Any) -> str | None:
+            stack: list[Any] = [value]
+            while stack:
+                current = stack.pop()
+                if isinstance(current, Mapping):
+                    for key, candidate in current.items():
+                        if not isinstance(key, str):
+                            continue
+                        if isinstance(candidate, str) and "@" in candidate:
+                            if key.lower() in {"user", "username", "email", "account_name"}:
+                                return candidate
+                        elif isinstance(candidate, (Mapping, Sequence)) and not isinstance(
+                            candidate, (str, bytes, bytearray)
+                        ):
+                            stack.append(candidate)
+                elif isinstance(current, Sequence) and not isinstance(
+                    current, (str, bytes, bytearray)
+                ):
+                    stack.extend(current)
+            return None
+
+        if (not isinstance(google_email, str) or "@" not in google_email) and secrets_bundle:
+            email_candidate = _walk_for_email(secrets_bundle)
+            google_email = email_candidate if isinstance(email_candidate, str) else None
+
+        if not isinstance(google_email, str) or "@" not in google_email:
+            _LOGGER.error("[%s] Legacy migration failed to recover account email", entry.entry_id)
+            raise ConfigEntryNotReady("Legacy migration missing email")
+
+        normalized_email = normalize_email(google_email)
+        auth_method_value = entry.data.get(DATA_AUTH_METHOD) or "secrets_json"
+
+        if legacy_cache is None:
+            legacy_cache = await TokenCache.create(
+                hass, entry.entry_id, legacy_path=legacy_path
+            )
+
+        await legacy_cache.async_set_cached_value(DATA_SECRET_BUNDLE, secrets_bundle)
+        await legacy_cache.async_set_cached_value(username_string, normalized_email)
+        await legacy_cache.async_set_cached_value(DATA_AUTH_METHOD, auth_method_value)
+        if oauth_token_recovered:
+            await legacy_cache.async_set_cached_value(
+                CONF_OAUTH_TOKEN, oauth_token_recovered
+            )
+        if aas_token_recovered:
+            await legacy_cache.async_set_cached_value(DATA_AAS_TOKEN, aas_token_recovered)
+
+        updated_data = dict(entry.data)
+        updated_data.pop(DATA_SECRET_BUNDLE, None)
+        updated_data.pop("scanned_data", None)
+        updated_data.pop(CONF_OAUTH_TOKEN, None)
+        updated_data[CONF_GOOGLE_EMAIL] = normalized_email
+        updated_data[DATA_AUTH_METHOD] = auth_method_value
+
+        hass.config_entries.async_update_entry(
+            entry, data=MappingProxyType(updated_data), options={}
+        )
+        _LOGGER.info(
+            "[%s] Migrated legacy configuration and reset entry for subentry setup", entry.entry_id
+        )
+
+    elif legacy_cache_primed:
+        _LOGGER.debug(
+            "[%s] Legacy payload detected but cache is already primed; skipping reset",
+            entry.entry_id,
+        )
+
     setattr(entry, "_gfm_parent_platforms_unloaded", False)
     setattr(entry, "_gfm_parent_unload_call_count", 0)
     _safe_setattr(entry, "_gfm_parent_platforms_forwarded", False)
@@ -6223,10 +6351,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         _set_nova_refcount(domain_bucket, 0)
 
     # 1) Token cache: create/register early (ENTRY-SCOPED ONLY)
-    legacy_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "Auth", "secrets.json"
+    cache = legacy_cache or await TokenCache.create(
+        hass, entry.entry_id, legacy_path=legacy_path
     )
-    cache = await TokenCache.create(hass, entry.entry_id, legacy_path=legacy_path)
 
     # Ensure deferred writes are flushed on HA shutdown
     async def _flush_on_stop(event: Event) -> None:
@@ -6384,6 +6511,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
     aas_token_entry = entry.data.get(DATA_AAS_TOKEN)
     google_email = entry.data.get(CONF_GOOGLE_EMAIL)
+
+    cache_snapshot: Mapping[str, Any] | None = None
+    try:
+        cache_snapshot = await cache.all()
+    except Exception as err:  # pragma: no cover - defensive cache read
+        _LOGGER.debug("[%s] TokenCache snapshot read failed: %s", entry.entry_id, err)
+
+    if not secrets_data and cache_snapshot:
+        secrets_data = cache_snapshot.get(DATA_SECRET_BUNDLE)
+    if not oauth_token and cache_snapshot:
+        oauth_token = cache_snapshot.get(CONF_OAUTH_TOKEN)
+    if not aas_token_entry and cache_snapshot:
+        aas_token_entry = cache_snapshot.get(DATA_AAS_TOKEN)
 
     if secrets_data:
         await _async_save_secrets_data(cache, secrets_data)
