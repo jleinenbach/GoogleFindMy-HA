@@ -1034,6 +1034,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     ) -> None:
         """Refresh internal subentry metadata caches."""
 
+        if not hasattr(self, "_present_last_seen"):
+            self._present_last_seen = {}
+        if not hasattr(self, "_present_device_ids"):
+            self._present_device_ids = set()
+
         reload_skip_active = bool(
             getattr(self, "_skip_repair_during_reload_refresh", False)
         )
