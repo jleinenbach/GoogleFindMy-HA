@@ -4,3 +4,5 @@ pytest_output.log
 .coverage
 .wheelhouse/
 .bootstrap/
+node_modules/
+.npm-cache/

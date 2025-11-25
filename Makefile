@@ -1,13 +1,15 @@
-.PHONY: bootstrap-base-deps clean clean-wheelhouse install-ha-stubs lint test-ha test-single test-stubs wheelhouse
+.PHONY: bootstrap-base-deps clean clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse
 
 VENV ?= .venv
 PYTHON ?= python3
+NPM ?= npm
 PYTEST_ARGS ?=
 PYTEST_COV_FLAGS ?= --cov-report=term-missing
 SKIP_WHEELHOUSE_REFRESH ?= 0
 WHEELHOUSE ?= .wheelhouse
 WHEELHOUSE_SENTINEL := $(WHEELHOUSE)/.requirements-dev.stamp
 BOOTSTRAP_SENTINEL := .bootstrap/homeassistant-preinstall.stamp
+NPM_CACHE ?= .npm-cache
 
 clean:
 	@python script/clean_pycache.py
@@ -18,6 +20,12 @@ clean:
 
 lint:
 	@ruff check . --fix
+
+doctoc:
+	@echo "[make doctoc] Installing DocToc dev dependency (cached via $(NPM_CACHE))"
+	@$(NPM) ci --prefer-offline --no-fund --no-audit --cache $(NPM_CACHE) --include=dev
+	@echo "[make doctoc] Regenerating AGENTS.md table of contents"
+	@$(NPM) run doctoc -- AGENTS.md
 
 wheelhouse: $(WHEELHOUSE_SENTINEL)
 	@echo "[make wheelhouse] Wheel cache is ready at $(WHEELHOUSE)"
