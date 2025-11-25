@@ -84,7 +84,12 @@ from homeassistant.components.recorder import (
 from homeassistant.components.recorder import (
     history as recorder_history,
 )
-from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigEntryAuthFailed,
+    UnknownEntry,
+    UnknownSubEntry,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
@@ -1267,9 +1272,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             raw_allowed = data.get("visible_device_ids")
             normalized_allowed: set[str] | None = None
             if isinstance(raw_allowed, (list, tuple, set)):
-                collected = {
-                    str(item) for item in raw_allowed if isinstance(item, str) and item
-                }
+                collected: set[str] = set()
+                for item in raw_allowed:
+                    if not isinstance(item, str) or not item:
+                        continue
+                    cleaned = item.rsplit(":", 1)[-1] if ":" in item else item
+                    if cleaned:
+                        collected.add(cleaned)
                 if collected:
                     normalized_allowed = set(collected)
                     if registry_lookup is not None:
@@ -1767,7 +1776,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         try:
             return call(**kwargs)
         except TypeError as err:
-            if not self._device_registry_kwargs_need_legacy_retry(err, kwargs):
+            if not self._device_registry_kwargs_need_legacy_retry(
+                call, err, kwargs
+            ):
                 raise
 
             legacy_kwargs = self._device_registry_build_legacy_kwargs(kwargs)
@@ -1777,12 +1788,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 err,
             )
             return call(**legacy_kwargs)
+        except (UnknownEntry, UnknownSubEntry) as err:
+            kwarg_name = self._device_registry_config_subentry_kwarg_name(call)
+            if kwarg_name == "add_config_subentry_id" or "config_subentry_id" not in kwargs:
+                raise
+            _LOGGER.debug(
+                "Device registry call %s rejected config_subentry_id (%s); retrying without it",
+                getattr(call, "__qualname__", repr(call)),
+                err,
+            )
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs.pop("config_subentry_id", None)
+            return call(**fallback_kwargs)
 
-    @staticmethod
     def _device_registry_kwargs_need_legacy_retry(
-        err: TypeError, kwargs: Mapping[str, Any]
+        self, call: Callable[..., Any], err: TypeError, kwargs: Mapping[str, Any]
     ) -> bool:
         """Return True when ``kwargs`` must be rewritten for legacy cores."""
+
+        # Modern registries accept the renamed ``add_config_subentry_id`` keyword
+        # and should surface the original TypeError to callers. Only older
+        # versions that reject the new keyword should trigger a legacy rewrite.
+        kwarg_name = self._device_registry_config_subentry_kwarg_name(call)
+        if kwarg_name == "add_config_subentry_id":
+            return False
 
         err_str = str(err)
         if "add_config_entry_id" in kwargs and "add_config_entry_id" in err_str:
@@ -1985,6 +2014,31 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if resolved is not None:
                 service_config_subentry_id = resolved
                 break
+
+        current_subentries = getattr(entry, "subentries", None)
+        if (
+            service_config_subentry_id is not None
+            and isinstance(current_subentries, Mapping)
+            and service_config_subentry_id
+            not in {_normalize_subentry_id(key) for key in current_subentries}
+        ):
+            stable_default: str | None = None
+            if isinstance(entry_id, str) and entry_id:
+                stable_default = f"{entry_id}-{SERVICE_SUBENTRY_KEY}-subentry"
+
+            if stable_default is not None and service_config_subentry_id == stable_default:
+                _LOGGER.debug(
+                    "[%s] Applying stable default service config_subentry_id %s (registry not ready)",
+                    entry.entry_id,
+                    service_config_subentry_id,
+                )
+            else:
+                _LOGGER.debug(
+                    "[%s] Deferring unknown service config_subentry_id %s until registry catches up",
+                    entry.entry_id,
+                    service_config_subentry_id,
+                )
+                service_config_subentry_id = None
 
         service_subentry_identifier: tuple[str, str] | None = None
         if service_config_subentry_id is not None:

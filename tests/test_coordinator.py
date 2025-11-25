@@ -198,7 +198,7 @@ def test_device_registry_wrapper_retries_with_legacy_config_entry_kwarg() -> Non
 def test_device_registry_wrapper_retries_with_legacy_config_subentry_kwarg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The wrapper retries with ``config_subentry_id`` when modern kwarg fails."""
+    """Modern kwarg failures bubble when registry already prefers new keyword."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     recorder = _AddConfigSubentryFallbackRecorder()
@@ -214,21 +214,17 @@ def test_device_registry_wrapper_retries_with_legacy_config_subentry_kwarg(
         lambda call: "add_config_subentry_id",
     )
 
-    result = coordinator._call_device_registry_api(  # type: ignore[attr-defined]
-        recorder,
-        base_kwargs=payload,
-    )
+    with pytest.raises(TypeError):
+        coordinator._call_device_registry_api(  # type: ignore[attr-defined]
+            recorder,
+            base_kwargs=payload,
+        )
 
-    assert result == "ok"
     assert recorder.calls == [
         {
             "device_id": "device-id",
             "add_config_subentry_id": "service-subentry",
-        },
-        {
-            "device_id": "device-id",
-            "config_subentry_id": "service-subentry",
-        },
+        }
     ]
 
 

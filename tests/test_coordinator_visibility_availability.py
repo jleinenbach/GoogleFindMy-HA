@@ -98,6 +98,53 @@ def _build_coordinator(
     return coordinator
 
 
+def test_refresh_normalizes_prefixed_visible_ids() -> None:
+    """Visibility filters accept IDs stored with entry prefixes."""
+
+    entry_id = "entry-prefixed-visible"
+    service_subentry_id = _stable_subentry_id(entry_id, SERVICE_SUBENTRY_KEY)
+    tracker_subentry_id = _stable_subentry_id(entry_id, TRACKER_SUBENTRY_KEY)
+    entry = SimpleNamespace(
+        entry_id=entry_id,
+        title="Google Find My",
+        data={},
+        options={},
+        subentries={
+            service_subentry_id: ConfigSubentry(
+                data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
+                subentry_type=SUBENTRY_TYPE_SERVICE,
+                title="Service",
+                unique_id=f"{entry_id}-service",
+                subentry_id=service_subentry_id,
+            ),
+            tracker_subentry_id: ConfigSubentry(
+                data=MappingProxyType(
+                    {
+                        "group_key": TRACKER_SUBENTRY_KEY,
+                        "visible_device_ids": [f"{entry_id}:device-1"],
+                    }
+                ),
+                subentry_type=SUBENTRY_TYPE_TRACKER,
+                title="Core",
+                unique_id=f"{entry_id}-tracker",
+                subentry_id=tracker_subentry_id,
+            ),
+        },
+        runtime_data=None,
+    )
+    loop_stub = SimpleNamespace(call_soon_threadsafe=lambda *args, **kwargs: None)
+    hass_stub = SimpleNamespace(loop=loop_stub, data={DOMAIN: {}})
+
+    coordinator = _build_coordinator(
+        entry, hass_stub, device_id="device-1", name="Prefixed Tracker"
+    )
+    coordinator._refresh_subentry_index()
+
+    metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
+    assert metadata is not None
+    assert metadata.visible_device_ids == ("device-1",)
+
+
 def test_refresh_recovers_devices_from_empty_visible_list() -> None:
     """Refreshing with an empty visible list must repopulate device metadata."""
 

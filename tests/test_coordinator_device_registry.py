@@ -28,7 +28,10 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import (
+    GoogleFindMyCoordinator,
+    SubentryMetadata,
+)
 from tests.helpers import service_device_stub
 
 
@@ -855,6 +858,28 @@ def test_fake_registry_requires_parent_entry_for_subentry(
     ):
         fake_registry.async_update_device(  # type: ignore[attr-defined]
             device_id=device.id, config_subentry_id="tracker-subentry"
+        )
+
+
+def test_modern_registry_typeerror_does_not_trigger_legacy_retry() -> None:
+    """Modern registries propagate TypeError instead of legacy rewrites."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+
+    # Reminder: Home Assistant Core (2025.11) already injects
+    # `add_config_subentry_id` when the registry supports it. The
+    # coordinator must surface those TypeErrors directly instead of
+    # rewriting them to legacy `config_subentry_id` fallbacks here.
+
+    def modern_update_device(
+        *, device_id: str, add_config_subentry_id: str | None = None
+    ) -> None:
+        raise TypeError("add_config_subentry_id not permitted in this test")
+
+    with pytest.raises(TypeError):
+        coordinator._call_device_registry_api(
+            modern_update_device,
+            base_kwargs={"device_id": "device-1", "config_subentry_id": "sub-1"},
         )
 
 
@@ -1786,21 +1811,62 @@ def test_service_device_missing_subentry(fake_registry: _FakeDeviceRegistry) -> 
 
     service_entry.translation_key = None
     service_entry.translation_placeholders = None
-    service_entry.manufacturer = "Legacy"
-    coordinator._service_device_ready = False
+
+
+def test_service_device_defers_unknown_config_subentry(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Avoid attaching service devices to subentries not yet registered."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = SimpleNamespace(
+        entry_id="entry-race",
+        title="Google Find My",
+        data={},
+        options={},
+        subentries={},
+        runtime_data=None,
+        service_subentry_id=None,
+        tracker_subentry_id=None,
+    )
+    _prepare_coordinator_for_registry(coordinator, entry)
+
+    poll_intervals = MappingProxyType(
+        {
+            "location": coordinator.location_poll_interval,
+            "minimum": coordinator.min_poll_interval,
+            "device": coordinator.device_poll_delay,
+            "min_accuracy": coordinator._min_accuracy_threshold,
+            "movement": coordinator._movement_threshold,
+        }
+    )
+    coordinator._subentry_metadata = {
+        SERVICE_SUBENTRY_KEY: SubentryMetadata(
+            key=SERVICE_SUBENTRY_KEY,
+            config_subentry_id="missing-service",
+            features=("core",),
+            title="Service",
+            poll_intervals=poll_intervals,
+            filters=MappingProxyType({
+                "ignored_device_ids": (),
+                "allow_history_fallback": bool(coordinator.allow_history_fallback),
+            }),
+            feature_flags=MappingProxyType({}),
+            visible_device_ids=(),
+            enabled_device_ids=(),
+        )
+    }
+
+    coordinator._refresh_subentry_index = (  # type: ignore[assignment]
+        lambda *args, **kwargs: None
+    )
+
     coordinator._ensure_service_device_exists()
 
-    assert fake_registry.updated, "Service device metadata update should be recorded"
-    update_payload = fake_registry.updated[-1]
-    assert update_payload["config_subentry_id"] == service_meta.config_subentry_id
-    assert update_payload["add_config_entry_id"] == entry.entry_id
-    assert update_payload["add_config_subentry_id"] is None
-    assert update_payload["translation_key"] == SERVICE_DEVICE_TRANSLATION_KEY
-    assert service_entry.config_subentry_id == service_meta.config_subentry_id
-    assert service_entry.manufacturer == SERVICE_DEVICE_MANUFACTURER
-    assert service_entry.config_entries_subentries.get(entry.entry_id) == {
-        service_meta.config_subentry_id
-    }
+    assert fake_registry.created, "Expected service device creation without subentry link"
+    payload = fake_registry.created[-1]
+    assert payload["config_subentry_id"] is None
+    assert payload["identifiers"] == {service_device_identifier(entry.entry_id)}
 
 
 def test_service_device_heals_config_subentry(fake_registry: _FakeDeviceRegistry) -> None:
