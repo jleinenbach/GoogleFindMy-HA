@@ -56,6 +56,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    Protocol,
     TypedDict,
     TypeGuard,
     TypeVar,
@@ -3361,6 +3362,172 @@ def _iter_tracker_identifier_candidates(
     return primary, secondary, tertiary
 
 
+class _DeviceLookup(Protocol):
+    """Protocol describing the registry lookup helper used during relinks."""
+
+    def __call__(
+        self, identifier: tuple[str, str], *, allow_service: bool = True
+    ) -> dr.DeviceEntry | Any | None:
+        """Return the matching registry device when available."""
+
+
+async def _async_relink_entities_for_entry(  # noqa: PLR0913
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    *,
+    allowed_domains: Collection[str],
+    resolve_target: Callable[
+        [er.RegistryEntry, _DeviceLookup, dr.DeviceEntry | Any | None],
+        tuple[dr.DeviceEntry | Any, str | None] | None,
+    ],
+    summary_template: str,
+    registry_failure_context: str,
+    log_if_zero: bool = False,
+) -> None:
+    """Relink config entry entities using a shared registry lookup routine.
+
+    The caller supplies the entity ``domain`` filter and a resolver that maps an
+    entity registry entry to a target device (and optional expected subentry
+    identifier). The helper guards registry acquisition across a range of Home
+    Assistant versions, normalizes the device lookup path to tolerate legacy
+    ``async_get_device`` signatures, and records a short summary once the pass
+    finishes. Callers should keep resolver logic side effect free; the helper
+    itself updates registry links when the resolver provides a valid target
+    device.
+    """
+
+    entry_id = getattr(entry, "entry_id", "") or ""
+    if not entry_id:
+        return
+
+    try:
+        entity_registry = er.async_get(hass)
+        device_registry = dr.async_get(hass)
+    except Exception as err:  # noqa: BLE001 - defensive guard
+        _LOGGER.debug(
+            "googlefindmy(%s): registry acquisition failed during %s: %s",
+            entry_id,
+            registry_failure_context,
+            err,
+        )
+        return
+
+    if not getattr(entity_registry, "entities", None):
+        return
+    if not getattr(device_registry, "devices", None):
+        return
+
+    registry_entries = _iter_config_entry_entities(entity_registry, entry_id)
+
+    def lookup_device(
+        identifier: tuple[str, str], *, allow_service: bool = True
+    ) -> dr.DeviceEntry | Any | None:
+        device: dr.DeviceEntry | Any | None
+
+        get_device = getattr(device_registry, "async_get_device", None)
+        if callable(get_device):
+            try:
+                device = get_device(identifiers={identifier})
+            except TypeError:
+                try:
+                    device = cast(
+                        Callable[[Collection[tuple[str, str]]], Any], get_device
+                    )({identifier})
+                except TypeError:
+                    device = None
+        else:
+            device = None
+
+        if device is None:
+            devices_iterable = getattr(device_registry, "devices", {})
+            if isinstance(devices_iterable, Mapping):
+                candidates = cast(Iterable[Any], devices_iterable.values())
+            else:
+                candidates = cast(Iterable[Any], devices_iterable) or ()
+
+            for candidate in candidates:
+                identifiers = getattr(candidate, "identifiers", None)
+                if not isinstance(identifiers, Collection):
+                    continue
+                if identifier in identifiers:
+                    device = candidate
+                    break
+
+        if device is None:
+            return None
+
+        config_entries = cast(
+            Collection[str], getattr(device, "config_entries", ())
+        )
+        if entry_id not in config_entries:
+            return None
+        if not allow_service and _device_is_service_device(device, entry_id):
+            return None
+
+        return device
+
+    fixed = 0
+
+    for entity_entry in registry_entries:
+        try:
+            if getattr(entity_entry, "platform", None) != DOMAIN:
+                continue
+
+            domain = getattr(entity_entry, "domain", None)
+            if domain not in allowed_domains:
+                continue
+
+            current_device_id = getattr(entity_entry, "device_id", None)
+            current_device = (
+                device_registry.async_get(current_device_id)
+                if isinstance(current_device_id, str) and current_device_id
+                else None
+            )
+
+            target = resolve_target(entity_entry, lookup_device, current_device)
+            if target is None:
+                continue
+
+            target_device, expected_subentry = target
+            target_device_id = getattr(target_device, "id", None)
+            if not isinstance(target_device_id, str) or not target_device_id:
+                continue
+            if (
+                isinstance(current_device_id, str)
+                and current_device_id
+                and current_device_id == target_device_id
+            ):
+                continue
+
+            if expected_subentry:
+                device_subentry = getattr(target_device, "config_subentry_id", None)
+                if (
+                    isinstance(device_subentry, str)
+                    and device_subentry
+                    and device_subentry != expected_subentry
+                ):
+                    continue
+
+            entity_registry.async_update_entity(
+                entity_entry.entity_id, device_id=target_device_id
+            )
+            fixed += 1
+        except Exception as err:  # noqa: BLE001 - defensive guard
+            _LOGGER.debug(
+                "googlefindmy(%s): relink failed for %s: %s",
+                entry_id,
+                getattr(entity_entry, "entity_id", "<unknown>"),
+                err,
+            )
+
+    if fixed or log_if_zero:
+        _LOGGER.debug(
+            "googlefindmy(%s): " + summary_template,
+            entry_id,
+            fixed,
+        )
+
+
 def _device_is_service_device(device: dr.DeviceEntry | Any, entry_id: str) -> bool:
     """Return True if the registry device represents the integration service device."""
 
@@ -3411,131 +3578,73 @@ def _device_is_service_device(device: dr.DeviceEntry | Any, entry_id: str) -> bo
 async def _async_relink_button_devices(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Ensure button entities are linked to their physical tracker devices."""
 
-    try:
-        entity_registry = er.async_get(hass)
-        device_registry = dr.async_get(hass)
-    except Exception as err:  # noqa: BLE001 - defensive guard
-        _LOGGER.debug(
-            "googlefindmy(%s): registry acquisition failed during button relink: %s",
-            entry.entry_id,
-            err,
-        )
-        return
-
-    if not getattr(entity_registry, "entities", None):
-        return
-    if not getattr(device_registry, "devices", None):
-        return
-
     subentry_map = _resolve_subentry_identifier_map(entry)
     fallback_subentry_id = _default_button_subentry_identifier(subentry_map)
-    registry_entries = _iter_config_entry_entities(entity_registry, entry.entry_id)
 
-    fixed = 0
+    def _resolve_button_target(
+        entity_entry: er.RegistryEntry,
+        lookup_device: _DeviceLookup,
+        current_device: dr.DeviceEntry | Any | None,
+    ) -> tuple[dr.DeviceEntry | Any, str | None] | None:
+        if current_device and entry.entry_id in getattr(
+            current_device, "config_entries", ()
+        ):
+            if not _device_is_service_device(current_device, entry.entry_id):
+                return None
 
-    for entity_entry in registry_entries:
-        try:
-            if entity_entry.domain != "button" or entity_entry.platform != DOMAIN:
-                continue
-
-            current_device_id = getattr(entity_entry, "device_id", None)
-            current_device = (
-                device_registry.async_get(current_device_id)
-                if isinstance(current_device_id, str) and current_device_id
-                else None
-            )
-
-            if current_device and entry.entry_id in getattr(
-                current_device, "config_entries", ()
-            ):
-                if not _device_is_service_device(current_device, entry.entry_id):
-                    continue
-
-            parsed = _parse_button_unique_id(
-                getattr(entity_entry, "unique_id", ""),
-                entry,
-                subentry_map,
-                fallback_subentry_id,
-            )
-            if parsed is None:
-                _LOGGER.debug(
-                    "googlefindmy(%s): unable to parse button unique_id '%s'",
-                    entry.entry_id,
-                    getattr(entity_entry, "unique_id", ""),
-                )
-                continue
-
-            target_device: dr.DeviceEntry | Any | None = None
-            for candidate in _iter_tracker_identifier_candidates(parsed):
-                device = device_registry.async_get_device(identifiers={candidate})
-                if device is None:
-                    continue
-                config_entries = cast(
-                    Collection[str], getattr(device, "config_entries", ())
-                )
-                if entry.entry_id not in config_entries:
-                    continue
-                if _device_is_service_device(device, entry.entry_id):
-                    continue
-                target_device = device
-                break
-
-            if target_device is None:
-                _LOGGER.debug(
-                    "googlefindmy(%s): tracker device not found for %s (%s)",
-                    entry.entry_id,
-                    getattr(entity_entry, "entity_id", "<unknown>"),
-                    parsed.google_device_id,
-                )
-                continue
-
-            if current_device and getattr(current_device, "id", None) == getattr(
-                target_device, "id", None
-            ):
-                continue
-
-            entity_registry.async_update_entity(
-                entity_entry.entity_id, device_id=getattr(target_device, "id", None)
-            )
-            fixed += 1
-        except Exception as err:  # noqa: BLE001 - defensive guard
+        parsed = _parse_button_unique_id(
+            getattr(entity_entry, "unique_id", ""),
+            entry,
+            subentry_map,
+            fallback_subentry_id,
+        )
+        if parsed is None:
             _LOGGER.debug(
-                "googlefindmy(%s): relink failed for %s: %s",
+                "googlefindmy(%s): unable to parse button unique_id '%s'",
                 entry.entry_id,
-                getattr(entity_entry, "entity_id", "<unknown>"),
-                err,
+                getattr(entity_entry, "unique_id", ""),
             )
+            return None
 
-    _LOGGER.debug(
-        "googlefindmy(%s): relinked %d button entities",
-        entry.entry_id,
-        fixed,
+        for candidate in _iter_tracker_identifier_candidates(parsed):
+            device = lookup_device(candidate, allow_service=False)
+            if device is None:
+                continue
+            return device, None
+
+        _LOGGER.debug(
+            "googlefindmy(%s): tracker device not found for %s (%s)",
+            entry.entry_id,
+            getattr(entity_entry, "entity_id", "<unknown>"),
+            parsed.google_device_id,
+        )
+        return None
+
+    await _async_relink_entities_for_entry(
+        hass,
+        entry,
+        allowed_domains=("button",),
+        resolve_target=_resolve_button_target,
+        summary_template="relinked %d button entities",
+        registry_failure_context="button relink",
+        log_if_zero=True,
     )
 
 
 async def _async_relink_subentry_entities(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> None:
-    """Attach tracker/service entities to devices with matching subentry metadata."""
+    """Attach tracker/service entities to devices with matching subentry metadata.
+
+    Tracker sensors and device trackers migrate to their tracker device while
+    service sensors and binary sensors remain anchored to the service device.
+    The routine skips existing correct links, tolerates legacy unique ID shapes
+    that omit subentry prefixes, and ignores unrelated platforms so callers can
+    safely invoke it during reloads without disturbing non-integration entities.
+    """
 
     entry_id = getattr(entry, "entry_id", "") or ""
     if not entry_id:
-        return
-
-    try:
-        entity_registry = er.async_get(hass)
-        device_registry = dr.async_get(hass)
-    except Exception as err:  # noqa: BLE001 - defensive guard
-        _LOGGER.debug(
-            "googlefindmy(%s): registry acquisition failed during entity relink: %s",
-            entry_id,
-            err,
-        )
-        return
-
-    if not getattr(entity_registry, "entities", None):
-        return
-    if not getattr(device_registry, "devices", None):
         return
 
     subentry_map = _resolve_subentry_identifier_map(entry)
@@ -3547,107 +3656,7 @@ async def _async_relink_subentry_entities(
     if not isinstance(service_subentry_id, str) or not service_subentry_id:
         service_subentry_id = _DEFAULT_SUBENTRY_IDENTIFIER
 
-    registry_entries = _iter_config_entry_entities(entity_registry, entry.entry_id)
-
     allowed_domains: tuple[str, ...] = ("sensor", "binary_sensor", "device_tracker")
-    fixed = 0
-
-    def _lookup_device(identifier: tuple[str, str]) -> dr.DeviceEntry | Any | None:
-        """Return the registry device matching ``identifier`` when available."""
-
-        get_device = getattr(device_registry, "async_get_device", None)
-        if callable(get_device):
-            try:
-                device = get_device(identifiers={identifier})
-            except TypeError:
-                try:
-                    device = cast(Callable[[Collection[tuple[str, str]]], Any], get_device)(
-                        {identifier}
-                    )
-                except TypeError:
-                    device = None
-        else:
-            device = None
-
-        if device is not None:
-            return device
-
-        devices_iterable = getattr(device_registry, "devices", {})
-        if isinstance(devices_iterable, Mapping):
-            candidates: Iterable[Any] = devices_iterable.values()
-        else:
-            candidates = cast(Iterable[Any], devices_iterable) or ()
-
-        for candidate in candidates:
-            identifiers = getattr(candidate, "identifiers", None)
-            if not isinstance(identifiers, Collection):
-                continue
-            if identifier in identifiers:
-                return candidate
-
-        return None
-
-    service_identifiers: tuple[tuple[str, str], ...]
-    service_identifiers = (
-        service_device_identifier(entry_id),
-        (DOMAIN, f"{entry_id}:{service_subentry_id}:service"),
-    )
-
-    service_device_cache: dr.DeviceEntry | Any | None = None
-
-    def _resolve_service_device() -> dr.DeviceEntry | Any | None:
-        """Return the service device assigned to the service subentry."""
-
-        nonlocal service_device_cache
-        if service_device_cache is not None:
-            return service_device_cache
-
-        for identifier in service_identifiers:
-            device = _lookup_device(identifier)
-            if device is None:
-                continue
-            config_entries = cast(
-                Collection[str], getattr(device, "config_entries", ())
-            )
-            if entry_id not in config_entries:
-                continue
-            device_subentry = getattr(device, "config_subentry_id", None)
-            if (
-                isinstance(device_subentry, str)
-                and device_subentry
-                and device_subentry != service_subentry_id
-            ):
-                continue
-            if not _device_is_service_device(device, entry_id):
-                continue
-            service_device_cache = device
-            return service_device_cache
-
-        devices_iterable = getattr(device_registry, "devices", {})
-        if isinstance(devices_iterable, Mapping):
-            candidates = cast(Iterable[Any], devices_iterable.values())
-        else:
-            candidates = cast(Iterable[Any], devices_iterable) or ()
-
-        for device in candidates:
-            config_entries = cast(
-                Collection[str], getattr(device, "config_entries", ())
-            )
-            if entry_id not in config_entries:
-                continue
-            if not _device_is_service_device(device, entry_id):
-                continue
-            device_subentry = getattr(device, "config_subentry_id", None)
-            if (
-                isinstance(device_subentry, str)
-                and device_subentry
-                and device_subentry != service_subentry_id
-            ):
-                continue
-            service_device_cache = device
-            break
-
-        return service_device_cache
 
     known_identifiers = {
         identifier
@@ -3672,6 +3681,12 @@ async def _async_relink_subentry_entities(
                 tracker_subentry_id = identifier or tracker_subentry_id
             elif group_key == SERVICE_SUBENTRY_KEY:
                 service_subentry_id = identifier or service_subentry_id
+
+    service_identifiers: tuple[tuple[str, str], ...]
+    service_identifiers = (
+        service_device_identifier(entry_id),
+        (DOMAIN, f"{entry_id}:{service_subentry_id}:service"),
+    )
 
     def _extract_tracker_binding_from_tracker(
         entity_entry: er.RegistryEntry,
@@ -3704,52 +3719,118 @@ async def _async_relink_subentry_entities(
 
     def _extract_tracker_binding_from_sensor(
         entity_entry: er.RegistryEntry,
-    ) -> tuple[str, str] | None:
-        """Return tracker binding metadata for per-device sensors."""
+    ) -> tuple[str | None, str | None]:
+        """Return the tracker metadata encoded in a sensor unique_id."""
 
-        uid = getattr(entity_entry, "unique_id", "") or ""
-        suffix = "_last_seen"
-        if not uid or not uid.endswith(suffix):
-            return None
+        entity_unique_id = getattr(entity_entry, "unique_id", "")
+        tracker_subentry_token = f"{entry_id}_{tracker_subentry_id}_"
+        service_subentry_token = f"{entry_id}_{service_subentry_id}_"
 
-        payload = uid[: -len(suffix)]
-        if payload.endswith("_"):
-            payload = payload[:-1]
+        if not entity_unique_id:
+            return None, None
 
-        prefix = f"{DOMAIN}_{entry_id}_"
-        if entry_id and payload.startswith(prefix):
-            remainder = payload[len(prefix) :]
-        elif payload.startswith(f"{DOMAIN}_"):
-            remainder = payload[len(f"{DOMAIN}_") :]
-        elif entry_id and payload.startswith(f"{entry_id}_"):
-            remainder = payload[len(entry_id) + 1 :]
+        canonical = _strip_entry_namespace(entry_id, entity_unique_id)
+        trimmed = canonical
+
+        domain_prefix = f"{DOMAIN}_"
+        if trimmed.startswith(domain_prefix):
+            trimmed = trimmed[len(domain_prefix) :]
+
+        if trimmed.startswith(service_subentry_token):
+            return service_subentry_id, trimmed[len(service_subentry_token) :]
+
+        if trimmed.startswith(tracker_subentry_token):
+            remainder = trimmed[len(tracker_subentry_token) :]
+        elif trimmed.startswith(f"{entry_id}_"):
+            remainder = trimmed[len(f"{entry_id}_") :]
         else:
-            remainder = payload
+            remainder = trimmed
 
-        if not remainder:
-            return None
+        if remainder.startswith(f"{tracker_subentry_id}_"):
+            remainder = remainder[len(tracker_subentry_id) + 1 :]
+        elif remainder.startswith(f"{service_subentry_id}_"):
+            remainder = remainder[len(service_subentry_id) + 1 :]
 
-        subentry_candidate = tracker_subentry_id
-        google_device_id = remainder
+        google_device_id: str | None = remainder
+        subentry_id: str | None = tracker_subentry_id
 
-        for identifier in sorted(known_identifiers, key=len, reverse=True):
-            token = f"{identifier}_"
-            if remainder.startswith(token):
-                maybe_device = remainder[len(token) :]
-                if maybe_device:
-                    subentry_candidate = identifier
-                    google_device_id = maybe_device
+        if ":" in remainder:
+            maybe_subentry, maybe_device = remainder.split(":", 1)
+            subentry_id = maybe_subentry or tracker_subentry_id
+            google_device_id = maybe_device or google_device_id
+        else:
+            for candidate in sorted(known_identifiers, key=len, reverse=True):
+                token = f"{candidate}_"
+                if remainder.startswith(token):
+                    subentry_id = candidate
+                    google_device_id = remainder[len(token) :]
                     break
 
-        if not google_device_id:
-            return None
+        if google_device_id and "_" in google_device_id:
+            google_device_id = google_device_id.split("_", 1)[0]
 
-        return subentry_candidate, google_device_id
+        if not google_device_id:
+            return None, None
+
+        return subentry_id, google_device_id
+
+    try:
+        service_device_registry: dr.DeviceRegistry | Any | None = dr.async_get(hass)
+    except Exception:  # noqa: BLE001 - defensive guard
+        service_device_registry = None
+
+    def _resolve_service_device(
+        lookup_device: _DeviceLookup,
+    ) -> dr.DeviceEntry | Any | None:
+        """Return the service device assigned to the service subentry."""
+
+        for identifier in service_identifiers:
+            device = lookup_device(identifier)
+            if device is None:
+                continue
+            device_subentry = getattr(device, "config_subentry_id", None)
+            if (
+                isinstance(device_subentry, str)
+                and device_subentry
+                and device_subentry != service_subentry_id
+            ):
+                continue
+            if not _device_is_service_device(device, entry_id):
+                continue
+            return device
+
+        devices_iterable = getattr(service_device_registry, "devices", None)
+        if isinstance(devices_iterable, Mapping):
+            candidates = cast(Iterable[Any], devices_iterable.values())
+        else:
+            candidates = cast(Iterable[Any], devices_iterable) or ()
+
+        for device in candidates:
+            config_entries = cast(
+                Collection[str], getattr(device, "config_entries", ())
+            )
+            if entry_id not in config_entries:
+                continue
+            device_subentry = getattr(device, "config_subentry_id", None)
+            if (
+                isinstance(device_subentry, str)
+                and device_subentry
+                and device_subentry != service_subentry_id
+            ):
+                continue
+            if not _device_is_service_device(device, entry_id):
+                continue
+            return device
+
+        return None
 
     def _find_tracker_device(
-        subentry_id: str, google_device_id: str
+        *,
+        lookup_device: _DeviceLookup,
+        subentry_id: str,
+        google_device_id: str,
     ) -> dr.DeviceEntry | Any | None:
-        """Return the tracker device for ``google_device_id`` when present."""
+        """Return the tracker device that matches the subentry + device id pair."""
 
         parts = _ButtonUniqueIdParts(
             entry_id=entry_id,
@@ -3759,13 +3840,8 @@ async def _async_relink_subentry_entities(
         )
 
         for candidate in _iter_tracker_identifier_candidates(parts):
-            device = _lookup_device(candidate)
+            device = lookup_device(candidate, allow_service=False)
             if device is None:
-                continue
-            config_entries = cast(
-                Collection[str], getattr(device, "config_entries", ())
-            )
-            if entry_id not in config_entries:
                 continue
             device_subentry = getattr(device, "config_subentry_id", None)
             if (
@@ -3780,85 +3856,71 @@ async def _async_relink_subentry_entities(
 
         return None
 
-    for entity_entry in registry_entries:
-        try:
-            if entity_entry.platform != DOMAIN:
-                continue
+    def _resolve_target_device(
+        entity_entry: er.RegistryEntry,
+        lookup_device: _DeviceLookup,
+        _current_device: dr.DeviceEntry | Any | None,
+    ) -> tuple[dr.DeviceEntry | Any, str | None] | None:
+        domain = getattr(entity_entry, "domain", None)
+        if domain == "binary_sensor":
+            service_device = _resolve_service_device(lookup_device)
+            if service_device is None:
+                return None
+            return service_device, service_subentry_id
 
-            domain = getattr(entity_entry, "domain", None)
-            if domain not in allowed_domains:
-                continue
+        if domain == "sensor":
+            sensor_binding = _extract_tracker_binding_from_sensor(entity_entry)
+            if sensor_binding is None:
+                service_device = _resolve_service_device(lookup_device)
+                if service_device is None:
+                    return None
+                return service_device, service_subentry_id
 
-            current_device_id = getattr(entity_entry, "device_id", None)
-            target_device: dr.DeviceEntry | Any | None = None
-
-            if domain == "binary_sensor":
-                target_device = _resolve_service_device()
-                expected_subentry = service_subentry_id
-            elif domain == "sensor":
-                binding = _extract_tracker_binding_from_sensor(entity_entry)
-                if binding is None:
-                    target_device = _resolve_service_device()
-                    expected_subentry = service_subentry_id
-                else:
-                    subentry_id, google_device_id = binding
-                    subentry_id = subentry_id or tracker_subentry_id
-                    if not google_device_id:
-                        continue
-                    target_device = _find_tracker_device(subentry_id, google_device_id)
-                    expected_subentry = subentry_id
-            else:  # device_tracker
-                binding = _extract_tracker_binding_from_tracker(entity_entry)
-                if binding is None:
-                    continue
-                subentry_id, google_device_id = binding
-                subentry_id = subentry_id or tracker_subentry_id
-                if not google_device_id:
-                    continue
-                target_device = _find_tracker_device(subentry_id, google_device_id)
-                expected_subentry = subentry_id
-
-            if target_device is None:
-                continue
-
-            target_device_id = getattr(target_device, "id", None)
-            if not isinstance(target_device_id, str) or not target_device_id:
-                continue
-
-            if (
-                isinstance(current_device_id, str)
-                and current_device_id
-                and current_device_id == target_device_id
-            ):
-                continue
-
-            device_subentry = getattr(target_device, "config_subentry_id", None)
-            if (
-                isinstance(device_subentry, str)
-                and device_subentry
-                and expected_subentry
-                and device_subentry != expected_subentry
-            ):
-                continue
-
-            entity_registry.async_update_entity(
-                entity_entry.entity_id, device_id=target_device_id
+            subentry_id, google_device_id = sensor_binding
+            subentry_id = subentry_id or tracker_subentry_id
+            if subentry_id == service_subentry_id:
+                service_device = _resolve_service_device(lookup_device)
+                if service_device is None:
+                    return None
+                return service_device, service_subentry_id
+            if google_device_id is None:
+                return None
+            tracker_device = _find_tracker_device(
+                lookup_device=lookup_device,
+                subentry_id=subentry_id,
+                google_device_id=google_device_id,
             )
-            fixed += 1
-        except Exception as err:  # noqa: BLE001 - defensive guard
-            _LOGGER.debug(
-                "googlefindmy(%s): relink failed for %s: %s",
-                entry_id,
-                getattr(entity_entry, "entity_id", "<unknown>"),
-                err,
-            )
+            if tracker_device is None:
+                return None
+            return tracker_device, subentry_id
 
-    if fixed:
-        _LOGGER.debug(
-            "googlefindmy(%s): relinked %d tracker/service entit(y/ies)",
-            entry_id,
-            fixed,
-        )
+        if domain == "device_tracker":
+            tracker_binding = _extract_tracker_binding_from_tracker(entity_entry)
+            if tracker_binding is None:
+                return None
+            subentry_id, google_device_id = tracker_binding
+            subentry_id = subentry_id or tracker_subentry_id
+            if google_device_id is None:
+                return None
+            tracker_device = _find_tracker_device(
+                lookup_device=lookup_device,
+                subentry_id=subentry_id,
+                google_device_id=google_device_id,
+            )
+            if tracker_device is None:
+                return None
+            return tracker_device, subentry_id
+
+        return None
+
+    await _async_relink_entities_for_entry(
+        hass,
+        entry,
+        allowed_domains=allowed_domains,
+        resolve_target=_resolve_target_device,
+        summary_template="relinked %d tracker/service entit(y/ies)",
+        registry_failure_context="entity relink",
+    )
 
 
 def _strip_entry_namespace(entry_id: str, ident: str) -> str:
