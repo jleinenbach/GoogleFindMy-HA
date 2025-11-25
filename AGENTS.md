@@ -11,6 +11,8 @@
       - [Deprecations & migrations](#deprecations--migrations)
     - [Runtime vs. type-checking import quick reference](#runtime-vs-type-checking-import-quick-reference)
   - [Environment verification](#environment-verification)
+    - [Quick-reference (per-task checklist)](#quick-reference-per-task-checklist)
+    - [Connectivity probe](#connectivity-probe)
     - [Quickstart checks (fast path before `pytest -q`)](#quickstart-checks-fast-path-before-pytest--q)
     - [Module invocation primer](#module-invocation-primer)
   - [1) What must be in **every** PR (lean checklist)](#1-what-must-be-in-every-pr-lean-checklist)
@@ -201,17 +203,24 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 
 ### Quick-reference (per-task checklist)
 
-* Connectivity probe: `python -m pip install --dry-run --no-deps pip` (record the chunk for citations).
+* Connectivity probe: follow the [connectivity probe](#connectivity-probe) before each implementation cycle.
 * Dependency bootstrap: `python -m pip install --upgrade homeassistant pytest-homeassistant-custom-component` or run `make test-stubs` before linting or tests.
 * Required checks (in order): `python -m ruff check --fix`, `python -m mypy --strict`, `python -m pytest --cov -q`.
 * Registry helpers: when adjusting device/entity relink logic, reuse the shared helper contract documented near `_async_relink_entities_for_entry` instead of adding new lookup paths so registry fallbacks stay consistent.
 
 > **Quickstart:** Run `make test-stubs` once per fresh environment to install `homeassistant` and `pytest-homeassistant-custom-component` before `pytest -q`, `mypy --strict`, or `ruff check`; the download/build step typically finishes in about five minutes, so plan lint/test runs with that buffer in mind.
 
+### Connectivity probe
+
+* **Canonical HTTP/HTTPS check:** Run `python -m pip install --dry-run --no-deps pip` before each implementation cycle and record the output chunk or log path for citations.
+* **Citation helper:** Note the exact chunk identifier or log file path containing the probe output so future summaries can reference it without rescanning the terminal history.
+* **Alternate probes:** Prefer the [connectivity probe](#connectivity-probe) and, if you need to confirm package channels more broadly, supplement with commands such as `pip index versions pip` or a metadata refresh like `apt-get update`. Avoid ICMP-only checks (for example, `ping 8.8.8.8`), which are blocked and do not reflect HTTP/HTTPS reachability.
+* **Module-path reminder:** When a tool installs entry points outside the current `PATH`, invoke it as `python -m <module>` so the connectivity probe also confirms module availability despite interpreter differences.
+
 ### Quickstart checks (fast path before `pytest -q`)
 
 * **Cache cleanup:** Run `make clean` to prune `__pycache__` directories and stale bytecode before rerunning tests.
-* **Connectivity probe:** Confirm HTTP/HTTPS reachability with `python -m pip install --dry-run --no-deps pip` and capture the output for citations.
+* **Connectivity probe:** Follow the [connectivity probe](#connectivity-probe) and capture the output before running tests.
 * **Test stub install:** Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` when you need a minimal bootstrap immediately before `pytest -q`. Plan for several minutes of download time in the hosted environment because the Home Assistant wheels are large.
 * **Strict mypy prep:** In a fresh environment, run `make test-stubs` before `mypy --install-types --non-interactive --strict` so the Home Assistant stubs are already present and strict type checking doesn't trip over missing packages.
 * **Coverage reminder:** After adjusting registry helper fallbacks, rerun `pytest --cov -q` to confirm coverage stays intact before committing.
@@ -222,13 +231,9 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 
 * **Generated protobuf sampling.** Use `script/rg_proto_snippet.sh` to preview hits when searching massive generated files (for example, `script/rg_proto_snippet.sh encryptedMetadata custom_components/googlefindmy/ProtoDecoders`). The helper wraps `rg --max-count` and truncates each line via `cut` so shell output stays within the limit documented in this guide.
 
-* **Requirement:** Determine the current connectivity status before every implementation cycle.
-* **Preferred check:** Use `python -m pip install --dry-run --no-deps pip` so contributors document a consistent HTTP/HTTPS probe and capture the output in their summaries.
-* **Citation helper:** When recording the connectivity probe, note the exact chunk identifier or log file path that contains the dry-run output so future summaries can reference it without rescanning the terminal history.
 * **Dependency bootstrap timing:** Expect `pip install --upgrade homeassistant pytest-homeassistant-custom-component` to run for roughly five minutes in the hosted environment (downloads + wheel builds). Plan shell work accordingly so lengthy installs finish before kicking off lint or test runs.
 * **Bootstrap helper:** Run `make bootstrap-base-deps` from the repo root to pre-install `homeassistant` and `pytest-homeassistant-custom-component` once per environment. The task drops a sentinel at `.bootstrap/homeassistant-preinstall.stamp`; delete it (or run `make clean`) if you need to force a reinstall. For a faster, test-focused bootstrap immediately before running `pytest -q`, prefer `make test-stubs`, which installs only these two stub packages without the broader base toolchain.
 * **Stub refresh after upgrades:** When dependency versions change (for example, after rebasing or updating requirements), rerun `make test-stubs` so Home Assistant stubs stay in sync before invoking `pytest -q` or `mypy --strict`.
-* **Checks:** Run a quick internet-access probe that exercises the real package channels (for example, `python -m pip install --dry-run --no-deps pip`, `pip index versions pip`, or a package-manager metadata refresh such as `apt-get update`) and record the outcome in the summary. Avoid ICMP-only probes like `ping 8.8.8.8`, which are blocked in the managed environment and do not reflect HTTP/HTTPS reachability. When a tool installs command-line entry points into `~/.pyenv/versions/*/bin`, invoke it as `python -m <module>` so the connectivity probe also confirms module availability despite PATH differences.
 * **Fallback reminder:** If a CLI helper such as `pre-commit` is not yet on the PATH, rerun the command via its module form (for example, `python -m pre_commit run --all-files`) so the initial check still succeeds.
 * **Online mode:** When a network connection is available you may install or update missing development tooling (for example, `pip`, `pip-tools`, `pre-commit`, `rustup`, `node`, `jq`) whenever it is necessary for maintenance or local verification.
 * **Offline mode:** When no connection is available, limit the work to local analysis only and call out any follow-up actions that must happen once connectivity is restored.
@@ -259,7 +264,7 @@ Prefer the executable name when it is available; fall back to the module form wh
   * **Task scheduling helpers.** Home Assistant-style test doubles for `async_create_task` may accept only `(coro)` without keyword arguments like `name`. Design scheduling wrappers so they gracefully handle both signatures and still attach error-handling callbacks when a task object is returned.
   * **Discovery callbacks.** Reuse `ha_typing.callback` for new discovery helper callbacks so strict mypy keeps enforcing the typed decorator instead of drifting back to untyped shims.
 * **pre-commit.ci automation.** The GitHub App is enabled with permission to push formatting fixes to PR branches whenever the configured hooks (e.g., `ruff`, `ruff-format`) report autofixable issues; keep `.pre-commit-config.yaml` aligned with the enforced checks.
-  * **TOC upkeep.** Generate the root `AGENTS.md` overview with `pre-commit run doctoc --files AGENTS.md` whenever headings change so the local Table of Contents stays synchronized.
+* **TOC upkeep.** Generate the root `AGENTS.md` overview with the pinned DocToc dev dependency: run `make doctoc` to hydrate `node_modules` with the cached `npm ci --prefer-offline --no-fund --no-audit --cache .npm-cache --include=dev` workflow and refresh the Table of Contents, or invoke `pre-commit run doctoc --files AGENTS.md` if you want to reuse the pre-commit shim.
 * **Hassfest auto-sort workflow.** `.github/workflows/hassfest-auto-fix.yml` must remain present and operational so manifest key ordering issues are auto-corrected and pushed back to PR branches; update the workflow when hassfest or `git-auto-commit-action` inputs change upstream.
 * **Purpose & scope.** PR title/description state *what* changes and *why*, and which user scenarios are affected.
 * **Tests — creation & update (MUST).** Any code change ships unit/integration tests that cover the change; every bug fix includes a **regression test** (§3.2). Never reduce existing coverage without a follow-up to restore it.
