@@ -1659,6 +1659,35 @@ def fixture_manifest(integration_root: Path) -> dict[str, object]:
     return manifest_data
 
 
+@pytest.fixture(name="coordinator_teardown_defaults")
+def fixture_coordinator_teardown_defaults() -> Callable[[Any], None]:
+    """Populate coordinator teardown attributes with safe defaults."""
+
+    def _apply(coordinator: Any, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        if getattr(coordinator, "_dr_unsub", None) is None:
+            coordinator._dr_unsub = lambda: None
+        if getattr(coordinator, "_short_retry_cancel", None) is None:
+            coordinator._short_retry_cancel = lambda: None
+
+        if getattr(coordinator, "_stats_save_task", None) is None:
+            resolved_loop = loop
+            if resolved_loop is None:
+                try:
+                    resolved_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    resolved_loop = None
+
+            if resolved_loop is not None:
+                stats_task = resolved_loop.create_future()
+                stats_task.set_result(None)
+            else:
+                stats_task = None
+
+            coordinator._stats_save_task = stats_task
+
+    return _apply
+
+
 @pytest.fixture(name="stub_coordinator_factory")
 def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
     """Return a factory that builds coordinator stubs with async helpers."""
