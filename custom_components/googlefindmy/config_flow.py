@@ -136,6 +136,15 @@ _COALESCE_ENTRIES: _CoalesceCallable | None = None
 if TYPE_CHECKING:
     from .api import GoogleFindMyAPI
 
+
+class _SubentryManagerProto(Protocol):
+    """Protocol for the subentry manager to support strict typing."""
+
+    managed_subentries: Mapping[str, Any]
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        ...
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -1408,7 +1417,7 @@ def _resolve_entry_email_for_lookup(entry: ConfigEntry) -> tuple[str | None, str
     global _RESOLVE_ENTRY_EMAIL
     if _RESOLVE_ENTRY_EMAIL is None:
         try:
-            from . import __init__ as integration  # noqa: PLC0415
+            integration = import_module(__package__ or DOMAIN)
 
             candidate = getattr(integration, "_resolve_entry_email")
         except Exception:  # pragma: no cover - fallback for stubs
@@ -1469,7 +1478,7 @@ async def _async_coalesce_account_entries(
 
     global _COALESCE_ENTRIES
     if _COALESCE_ENTRIES is None:
-        from . import __init__ as integration  # noqa: PLC0415
+        integration = import_module(__package__ or DOMAIN)
 
         candidate = getattr(integration, "async_coalesce_account_entries", None)
 
@@ -2312,7 +2321,7 @@ class ConfigFlow(
                 existing_entry = self._pending_discovery_existing_entry
                 self._clear_discovery_confirmation_state()
 
-                if existing_entry and updates is not None and pending_payload is not None:
+                if updates is not None and pending_payload is not None:
                     try:
                         await self._async_prepare_account_context(
                             email=pending_payload.email,
@@ -3766,16 +3775,39 @@ class ConfigFlow(
 
         subentries = getattr(entry, "subentries", None)
         if isinstance(subentries, Mapping):
+            integration = import_module(__package__ or DOMAIN)
+
+            manager_cls: type[_SubentryManagerProto] | None = getattr(
+                integration, "ConfigEntrySubEntryManager", None
+            )
+            if manager_cls is not None:
+                managed = manager_cls(self.hass, entry)
+                for group_key, managed_subentry in managed.managed_subentries.items():
+                    target_key = group_key
+                    if target_key not in mapping:
+                        subentry_type = getattr(managed_subentry, "subentry_type", None)
+                        if subentry_type == SUBENTRY_TYPE_SERVICE:
+                            target_key = SERVICE_SUBENTRY_KEY
+                        elif subentry_type == SUBENTRY_TYPE_TRACKER:
+                            target_key = self._subentry_key_core_tracking
+                    if target_key not in mapping or mapping[target_key] is not None:
+                        continue
+
+                    subentry_id = getattr(managed_subentry, "subentry_id", None)
+                    mapping[target_key] = (
+                        subentry_id if isinstance(subentry_id, str) else None
+                    )
+
             for subentry in subentries.values():
                 data = getattr(subentry, "data", {}) or {}
-                group_key = data.get("group_key")
+                group_key_candidate = data.get("group_key")
                 subentry_id = getattr(subentry, "subentry_id", None)
                 if (
-                    isinstance(group_key, str)
-                    and group_key in mapping
-                    and mapping[group_key] is None
+                    isinstance(group_key_candidate, str)
+                    and group_key_candidate in mapping
+                    and mapping[group_key_candidate] is None
                 ):
-                    mapping[group_key] = (
+                    mapping[group_key_candidate] = (
                         subentry_id if isinstance(subentry_id, str) else None
                     )
 

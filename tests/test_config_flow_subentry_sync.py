@@ -373,6 +373,96 @@ async def test_subentry_manager_deduplicates_colliding_tracker_entries() -> None
     assert duplicate.subentry_id in hass.config_entries.removed
 
 
+def test_subentry_manager_normalizes_group_keys_by_type() -> None:
+    """Service/tracker subentries should use canonical group keys."""
+
+    entry = _EntryStub()
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": "owner@example.com",
+                "features": SERVICE_FEATURE_PLATFORMS,
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id="service-uid",
+        subentry_id=_stable_subentry_id(entry.entry_id, "service-stale"),
+        translation_key=SERVICE_SUBENTRY_KEY,
+    )
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": "owner@example.com",
+                "features": TRACKER_FEATURE_PLATFORMS,
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id="tracker-uid",
+        subentry_id=_stable_subentry_id(entry.entry_id, "tracker-stale"),
+        translation_key=TRACKER_SUBENTRY_KEY,
+    )
+    entry.subentries = {
+        service_subentry.subentry_id: service_subentry,
+        tracker_subentry.subentry_id: tracker_subentry,
+    }
+
+    hass = _HassStub(entry)
+
+    manager = ConfigEntrySubEntryManager(hass, entry)
+
+    assert manager.get(SERVICE_SUBENTRY_KEY) is service_subentry
+    assert manager.get(TRACKER_SUBENTRY_KEY) is tracker_subentry
+    assert set(manager.managed_subentries) == {
+        SERVICE_SUBENTRY_KEY,
+        TRACKER_SUBENTRY_KEY,
+    }
+
+
+def test_reconfigure_context_prefers_canonical_subentry_keys() -> None:
+    """Reconfigure context should seed IDs using canonical group keys."""
+
+    entry = _EntryStub()
+    service_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": "jens.leinenbach@gmail.com",
+                "features": SERVICE_FEATURE_PLATFORMS,
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        unique_id="service-uid",
+        subentry_id=_stable_subentry_id(entry.entry_id, "service-stale"),
+        translation_key=SERVICE_SUBENTRY_KEY,
+    )
+    tracker_subentry = ConfigSubentry(
+        data=MappingProxyType(
+            {
+                "group_key": "owner@example.com",
+                "features": TRACKER_FEATURE_PLATFORMS,
+            }
+        ),
+        subentry_type=SUBENTRY_TYPE_TRACKER,
+        title="Trackers",
+        unique_id="tracker-uid",
+        subentry_id=_stable_subentry_id(entry.entry_id, "tracker-stale"),
+        translation_key=TRACKER_SUBENTRY_KEY,
+    )
+    entry.subentries = {
+        service_subentry.subentry_id: service_subentry,
+        tracker_subentry.subentry_id: tracker_subentry,
+    }
+
+    flow = _build_flow(entry)
+
+    mapping = flow._reset_reconfigure_subentry_context(entry)
+
+    assert mapping[SERVICE_SUBENTRY_KEY] == service_subentry.subentry_id
+    assert mapping[TRACKER_SUBENTRY_KEY] == tracker_subentry.subentry_id
+
+
 @pytest.mark.asyncio
 async def test_device_selection_updates_existing_feature_group() -> None:
     """Sync helper should update an existing subentry with new feature flags."""
