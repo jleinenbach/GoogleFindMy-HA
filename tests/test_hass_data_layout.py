@@ -37,6 +37,9 @@ from custom_components.googlefindmy import _platform_value
 from custom_components.googlefindmy.const import (
     ATTR_MODE,
     CONF_GOOGLE_EMAIL,
+    CONF_OAUTH_TOKEN,
+    DATA_AAS_TOKEN,
+    DATA_AUTH_METHOD,
     DATA_SECRET_BUNDLE,
     DOMAIN,
     MODE_MIGRATE,
@@ -78,6 +81,9 @@ class _StubCache:
 
     async def async_set_cached_value(self, key: str, value: Any) -> None:
         self.values[key] = value
+
+    async def all(self) -> dict[str, Any]:
+        return dict(self.values)
 
     async def flush(self) -> None:  # pragma: no cover - compatibility hook
         return None
@@ -460,6 +466,88 @@ def _prepare_async_setup_entry_harness(
         cache=cache,
         coordinator_cls=coordinator_cls,
         dummy_fcm=dummy_fcm,
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_hijacks_legacy_credentials_when_cache_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """Legacy shapes with empty caches are migrated and cached once."""
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    legacy_secrets = json.dumps(
+        {
+            "email": "LegacyUser@Example.com ",
+            CONF_OAUTH_TOKEN: "legacy-oauth-token",
+            DATA_AAS_TOKEN: "legacy-aas-token",
+        }
+    )
+
+    entry.data = {
+        DATA_SECRET_BUNDLE: legacy_secrets,
+        CONF_OAUTH_TOKEN: "outer-oauth-token",
+    }
+    entry.options = {"tracked_devices": ["legacy-device"]}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    update_calls = hass.config_entries.entry_update_calls
+    assert update_calls, "Migration should rewrite the entry once"
+
+    _, payload = update_calls[0]
+    migrated_data = payload["data"]
+    assert DATA_SECRET_BUNDLE not in migrated_data
+    assert "scanned_data" not in migrated_data
+    assert CONF_OAUTH_TOKEN not in migrated_data
+    assert migrated_data[CONF_GOOGLE_EMAIL] == "legacyuser@example.com"
+    assert migrated_data[DATA_AUTH_METHOD] == "secrets_json"
+    assert payload["options"] == {}
+
+    cache = harness.cache
+    username_key = integration.username_string
+    assert cache.values[username_key] == "legacyuser@example.com"
+    assert cache.values[DATA_SECRET_BUNDLE]["email"] == "LegacyUser@Example.com "
+    assert cache.values[CONF_OAUTH_TOKEN] == "outer-oauth-token"
+    assert cache.values[DATA_AAS_TOKEN] == "legacy-aas-token"
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_leaves_modern_entries_intact(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_coordinator_factory: Callable[..., type[Any]],
+) -> None:
+    """Primed caches prevent destructive rewrites for modern entries."""
+
+    loop = asyncio.get_running_loop()
+    harness = _prepare_async_setup_entry_harness(
+        monkeypatch, stub_coordinator_factory, loop
+    )
+    integration = harness.integration
+    entry = harness.entry
+    hass = harness.hass
+
+    entry.options = {"tracked_devices": ["existing"]}
+    entry.data[DATA_SECRET_BUNDLE] = {"username": "cached@example.com"}
+    harness.cache.values = {integration.username_string: "cached@example.com"}
+
+    assert await integration.async_setup(hass, {}) is True
+    assert await integration.async_setup_entry(hass, entry) is True
+
+    assert hass.config_entries.entry_update_calls == []
+    assert entry.options == {"tracked_devices": ["existing"]}
+    assert (
+        harness.cache.values.get(integration.username_string)
+        == entry.data[CONF_GOOGLE_EMAIL]
     )
 
 

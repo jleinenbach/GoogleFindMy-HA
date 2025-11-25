@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -45,6 +45,9 @@ class _StubTokenCache:
 
     async def async_get_cached_value(self, key: str) -> Any:
         return self.values.get(key)
+
+    async def all(self) -> dict[str, Any]:
+        return dict(self.values)
 
     async def flush(self) -> None:  # pragma: no cover - exercised indirectly
         return None
@@ -225,10 +228,22 @@ class _StubConfigEntries:
         self.removed_subentries.append((entry.entry_id, subentry_id))
         return True
 
-    def async_update_entry(
-        self, entry: _StubConfigEntry, *, options: dict[str, Any]
-    ) -> None:
-        entry.options = dict(options)
+    def async_update_entry(self, entry: _StubConfigEntry, **kwargs: Any) -> None:
+        data = kwargs.get("data")
+        if isinstance(data, Mapping):
+            entry.data = dict(data)
+
+        options = kwargs.get("options")
+        if isinstance(options, Mapping):
+            entry.options = dict(options)
+
+        title = kwargs.get("title")
+        if isinstance(title, str):
+            entry.title = title
+
+        unique_id = kwargs.get("unique_id")
+        if isinstance(unique_id, str):
+            setattr(entry, "unique_id", unique_id)
 
     async def async_reload(
         self, _entry_id: str
