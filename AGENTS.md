@@ -91,6 +91,9 @@
 > **Language reminder:** Keep all inline comments, docstrings, and documentation updates in English. When user-provided snippets
 > include other languages, translate or adapt them so the committed code remains English-only.
 
+> **Environment reset reminder:** After a container or virtualenv reset, rerun `make test-stubs` so the Home Assistant and
+> pytest stubs are reinstalled before invoking linting or pytest commands.
+
 <a id="language-policy"></a>
 > **Scope & authority**
 >
