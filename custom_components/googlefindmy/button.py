@@ -137,7 +137,6 @@ RESET_STATISTICS_DESCRIPTION = ButtonEntityDescription(
     key="reset_statistics",
     translation_key="reset_statistics",
     icon="mdi:restart",
-    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 
@@ -737,7 +736,6 @@ async def async_setup_entry(
 class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity):
     """Button to reset integration statistics counters."""
 
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_description = RESET_STATISTICS_DESCRIPTION
     _attr_has_entity_name = True
     _attr_icon = RESET_STATISTICS_DESCRIPTION.icon
