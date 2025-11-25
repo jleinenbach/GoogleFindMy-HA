@@ -26,9 +26,16 @@ exception classes, call
 `tests.helpers.config_entries_stub.install_config_entries_stubs(module)`
 first and then reference the exceptions directly off the populated module
 (for example, `module.ConfigEntryAuthFailed`, `module.OperationNotAllowed`).
-The helper installs every config-entry related export in one place, so
-new tests only need to import the helper once rather than duplicating
-definitions across `tests/conftest.py` or other fixtures.
+The helper installs every config-entry related export in one place,
+including the `UnknownEntry` and `UnknownSubEntry` stubs added for
+2025.11 parity, so new tests only need to import the helper once rather
+than duplicating definitions across `tests/conftest.py` or other
+fixtures.
+
+See the modern registry TypeError propagation reminder in
+[`tests/test_coordinator_device_registry.py::test_modern_registry_typeerror_does_not_trigger_legacy_retry`](tests/test_coordinator_device_registry.py#L863-L885)
+when updating registry expectations so new coverage stays aligned with
+Home Assistant's current registry keyword surface.
 
 ## Package layout
 

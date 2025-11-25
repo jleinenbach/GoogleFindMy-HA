@@ -34,6 +34,21 @@ def install_config_entries_stubs(target: ModuleType) -> None:
         def __repr__(self) -> str:  # pragma: no cover - debugging helper
             return "UNDEFINED"
 
+    class ConfigError(Exception):
+        """Base config-entry error stub."""
+
+        pass
+
+    class UnknownEntry(ConfigError):
+        """Raised when a ConfigEntry lookup fails."""
+
+        pass
+
+    class UnknownSubEntry(ConfigError):
+        """Raised when a ConfigSubentry lookup fails."""
+
+        pass
+
     class ConfigEntry:  # minimal placeholder
         """ConfigEntry stub used by tests before HA loads."""
 
@@ -49,12 +64,12 @@ def install_config_entries_stubs(target: ModuleType) -> None:
         SETUP_IN_PROGRESS = "setup_in_progress"
         MIGRATION_ERROR = "migration_error"
 
-    class ConfigEntryAuthFailed(Exception):
+    class ConfigEntryAuthFailed(ConfigError):
         """Exception mirroring Home Assistant's auth failure error."""
 
         pass
 
-    class OperationNotAllowed(Exception):
+    class OperationNotAllowed(ConfigError):
         """Stub mirroring Home Assistant's OperationNotAllowed error."""
 
         def __init__(self, message: str = "") -> None:
@@ -273,6 +288,9 @@ def install_config_entries_stubs(target: ModuleType) -> None:
     target.ConfigEntry = ConfigEntry
     target.ConfigEntryState = ConfigEntryState
     target.ConfigEntryAuthFailed = ConfigEntryAuthFailed
+    target.ConfigError = ConfigError
+    target.UnknownEntry = UnknownEntry
+    target.UnknownSubEntry = UnknownSubEntry
     target.OperationNotAllowed = OperationNotAllowed
     target.ConfigSubentry = ConfigSubentry
     target.ConfigSubentryFlow = ConfigSubentryFlow
