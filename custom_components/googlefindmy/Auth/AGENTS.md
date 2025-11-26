@@ -20,6 +20,15 @@ Keep `TYPE_CHECKING` aliases only when the alias is referenced in the module. Re
 
 When multiple modules need the same small utility (for example, `_mask_email_for_logs`), define it once in a shared helper module and import it at module scope rather than re-importing inside functions. Centralizing helpers avoids circular-import traps and prevents Ruff from flagging inline imports.
 
+## Cache key conventions
+
+Android IDs and related identifiers stored in `TokenCache` must follow predictable, per-user keys so helpers avoid collisions between accounts:
+
+* **AAS/FCM Android IDs:** `android_id_<username>` — always the normalized username string (entry-scoped) as the suffix.
+* **FCM credential bundle:** `fcm_credentials` — contains the `gcm.android_id` value that downstream helpers normalize and cache under the key above.
+
+When adding new cache-backed helpers under this directory, reuse these patterns (prefix + username suffix) so multi-account setups remain isolated and future helpers can retrieve existing values without guessing.
+
 ## Cookie handling
 
 When reading cookies from external authentication flows (for example, Selenium-managed sessions), always validate both the presence and the expected type of each field before use. In particular, confirm that the `"value"` entry resolves to a `str` and raise a descriptive exception if validation fails so helpers consuming the data can rely on strict return contracts.

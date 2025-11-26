@@ -111,6 +111,51 @@ def test_generate_adm_token_reuses_cached_aas(monkeypatch: pytest.MonkeyPatch) -
     asyncio.run(_exercise())
 
 
+def test_resolve_android_id_for_isolated_flow_prefers_cached_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cached android_id entries must be reused before generating a new one."""
+
+    async def _exercise() -> None:
+        cache = _DummyTokenCache(
+            {"android_id_user@example.com": "0x1234", "fcm_credentials": {}}
+        )
+
+        android_id = await adm_token_retrieval._resolve_android_id_for_isolated_flow(
+            "user@example.com",
+            secrets_bundle=None,
+            cache_get=cache.get,
+            cache_set=cache.set,
+        )
+
+        assert android_id == int("0x1234", 16)
+
+    asyncio.run(_exercise())
+
+
+def test_resolve_android_id_for_isolated_flow_generates_and_persists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing android_id must be generated and stored for later reuse."""
+
+    async def _exercise() -> None:
+        cache = _DummyTokenCache()
+
+        monkeypatch.setattr(adm_token_retrieval.random, "randint", lambda *_, **__: 0xABCDEF)
+
+        android_id = await adm_token_retrieval._resolve_android_id_for_isolated_flow(
+            "user@example.com",
+            secrets_bundle=None,
+            cache_get=cache.get,
+            cache_set=cache.set,
+        )
+
+        assert android_id == 0xABCDEF
+        assert cache._data["android_id_user@example.com"] == 0xABCDEF
+
+    asyncio.run(_exercise())
+
+
 def test_normalize_service_accepts_full_scope() -> None:
     """Full OAuth scope strings must normalize back to the scope suffix."""
 
@@ -235,6 +280,46 @@ def test_generate_adm_token_uses_provider_for_oauth(
         assert exchange_calls == [("user@example.com", "oauth-token")]
         assert perform_calls == ["aas_et/NEW"]
         assert cache._data.get(DATA_AAS_TOKEN) == "aas_et/NEW"
+
+    asyncio.run(_exercise())
+
+
+def test_generate_adm_token_refreshes_android_id_from_fcm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FCM credentials must refresh cached android_id entries before token request."""
+
+    async def _exercise() -> None:
+        user = "user@example.com"
+        cache = _DummyTokenCache(
+            {
+                DATA_AUTH_METHOD: "secrets_json",
+                DATA_AAS_TOKEN: "aas_et/MASTER",
+                f"android_id_{user}": 0xDEADBEEF,
+                "fcm_credentials": {"gcm": {"android_id": "0x1234"}},
+            }
+        )
+
+        recorded_android_ids: list[int | None] = []
+
+        async def fake_request_token(
+            username: str,
+            service: str,
+            *,
+            cache: _DummyTokenCache,
+            aas_token: str | None,
+            aas_provider: Callable[[], Awaitable[str]] | None,
+        ) -> str:
+            recorded_android_ids.append(cache._data.get(f"android_id_{username}"))
+            return "adm-token"
+
+        monkeypatch.setattr(adm_token_retrieval, "async_request_token", fake_request_token)
+
+        token = await adm_token_retrieval._generate_adm_token(user, cache=cache)
+
+        assert token == "adm-token"
+        assert recorded_android_ids == [int("0x1234", 16)]
+        assert cache._data[f"android_id_{user}"] == int("0x1234", 16)
 
     asyncio.run(_exercise())
 
@@ -847,6 +932,8 @@ def test_async_get_adm_token_isolated_falls_back_without_android_id(
     async def cache_set(key: str, value: Any) -> None:
         return None
 
+    monkeypatch.setattr(adm_token_retrieval.random, "randint", lambda *_, **__: 0xABCDEF01)
+
     token = asyncio.run(
         adm_token_retrieval.async_get_adm_token_isolated(
             "user@example.com",
@@ -858,4 +945,4 @@ def test_async_get_adm_token_isolated_falls_back_without_android_id(
     )
 
     assert token == "adm-token"
-    assert recorded["android_id"] == adm_token_retrieval._ANDROID_ID
+    assert recorded["android_id"] == 0xABCDEF01

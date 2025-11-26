@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
@@ -65,7 +66,6 @@ from .username_provider import async_get_username, username_string
 _LOGGER = logging.getLogger(__name__)
 
 # Constants for gpsoauth (kept for compatibility/reference)
-_ANDROID_ID: int = 0x38918A453D071993
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 _APP_ID: str = "com.google.android.apps.adm"
 _AUTH_METHOD_INDIVIDUAL_TOKENS = "individual_tokens"
@@ -91,6 +91,22 @@ def _clip(value: object, limit: int = 200) -> str:
     """Clip long strings to a safe length for logs."""
     s = str(value)
     return s if len(s) <= limit else (s[: limit - 1] + "…")
+
+
+def _coerce_android_id(value: object, source: str) -> int | None:
+    """Normalize cached or credential Android IDs into integers."""
+
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except (TypeError, ValueError):
+            _LOGGER.debug("android_id value from %s is not numeric", source)
+            return None
+    if value is not None:
+        _LOGGER.debug("Unsupported android_id type from %s: %s", source, type(value))
+    return None
 
 
 def _summarize_response(obj: Mapping[str, Any] | object) -> str:
@@ -157,6 +173,46 @@ async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
         _LOGGER.debug("Username cache seeding skipped: %s", _clip(exc))
 
 
+async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> int:
+    """Return a per-user Android ID from cache, credentials, or a fresh value."""
+
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    cache_key = f"android_id_{username}"
+    cached_android_id = _coerce_android_id(await cache.get(cache_key), "cache")
+
+    fcm_creds = await cache.get("fcm_credentials")
+    android_id = None
+    if isinstance(fcm_creds, Mapping):
+        gcm_block = fcm_creds.get("gcm")
+        if isinstance(gcm_block, Mapping):
+            android_id = _coerce_android_id(
+                gcm_block.get("android_id"), "FCM credentials"
+            )
+
+    if android_id is not None:
+        try:
+            await cache.set(cache_key, android_id)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Failed to persist android_id from FCM credentials: %s", _clip(err))
+        return android_id
+
+    if cached_android_id is not None:
+        return cached_android_id
+
+    android_id = random.randint(0x1000000000000000, 0xFFFFFFFFFFFFFFFF)
+    _LOGGER.warning(
+        "Generated new android_id for %s; cache was missing a stored identifier.",
+        _mask_email(username),
+    )
+    try:
+        await cache.set(cache_key, android_id)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Failed to persist generated android_id: %s", _clip(err))
+    return android_id
+
+
 # ---------------------------------------------------------------------------
 # Core token generation (delegates to central token retriever)
 # ---------------------------------------------------------------------------
@@ -206,6 +262,8 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
             aas_token_direct = None
             aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
 
+    await _resolve_android_id_for_entry(username, cache=cache)
+
     return await async_request_token(
         username,
         service,
@@ -221,9 +279,11 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
 
 
 async def _resolve_android_id_for_isolated_flow(
+    username: str,
     *,
     secrets_bundle: dict[str, Any] | None,
     cache_get: Callable[[str], Awaitable[Any]] | None,
+    cache_set: Callable[[str, Any], Awaitable[None]] | None,
 ) -> int:
     """Resolve android_id for isolated exchanges using secrets or flow cache."""
 
@@ -234,23 +294,59 @@ async def _resolve_android_id_for_isolated_flow(
             secrets_bundle.get("fcm_credentials")
         )
 
-    if android_id is None and cache_get is not None:
+    cache_key = f"android_id_{username}"
+    cached_android_id: int | None = None
+    if cache_get is not None:
         try:
-            cached_fcm = await cache_get("fcm_credentials")
+            cached_android_id = _coerce_android_id(
+                await cache_get(cache_key), "cache"
+            )
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
-                "Isolated exchange: failed to read cached FCM credentials: %s",
+                "Isolated exchange: failed to read cached android_id for %s: %s",
+                _mask_email(username),
                 _clip(err),
             )
-        else:
-            android_id = _extract_android_id_from_credentials(cached_fcm)
+        if android_id is None:
+            try:
+                cached_fcm = await cache_get("fcm_credentials")
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Isolated exchange: failed to read cached FCM credentials: %s",
+                    _clip(err),
+                )
+            else:
+                android_id = _extract_android_id_from_credentials(cached_fcm)
 
-    if android_id is None:
-        _LOGGER.warning(
-            "FCM credentials missing android_id; falling back to static identifier. "
-            "Generate fresh secrets.json if authentication fails."
-        )
-        android_id = _ANDROID_ID
+    if android_id is not None:
+        if cache_set is not None:
+            try:
+                await cache_set(cache_key, android_id)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Isolated exchange: failed to persist android_id from secrets for %s: %s",
+                    _mask_email(username),
+                    _clip(err),
+                )
+        return android_id
+
+    if cached_android_id is not None:
+        return cached_android_id
+
+    android_id = random.randint(0x1000000000000000, 0xFFFFFFFFFFFFFFFF)
+    _LOGGER.warning(
+        "Generated new android_id for %s during isolated exchange; cache was missing a stored identifier.",
+        _mask_email(username),
+    )
+    if cache_set is not None:
+        try:
+            await cache_set(cache_key, android_id)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Isolated exchange: failed to persist generated android_id for %s: %s",
+                _mask_email(username),
+                _clip(err),
+            )
 
     return android_id
 
@@ -461,7 +557,7 @@ async def _perform_oauth_with_provided_aas(
     username: str,
     aas_token: str,
     *,
-    android_id: int = _ANDROID_ID,
+    android_id: int,
 ) -> str:
     """
     Perform the OAuth exchange with a provided AAS token (used for isolated validation).
@@ -566,8 +662,10 @@ async def async_get_adm_token_isolated(  # noqa: PLR0913,PLR0912
     attempts = max(1, retries + 1)
 
     android_id = await _resolve_android_id_for_isolated_flow(
+        user,
         secrets_bundle=secrets_bundle,
         cache_get=cache_get,
+        cache_set=cache_set,
     )
 
     for attempt in range(attempts):
