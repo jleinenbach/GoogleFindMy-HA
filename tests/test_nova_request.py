@@ -28,6 +28,8 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     AsyncTTLPolicy,
     NovaAuthError,
     async_nova_request,
+    register_cache_provider,
+    unregister_cache_provider,
 )
 
 
@@ -581,6 +583,69 @@ def test_async_nova_request_fetches_token_when_not_supplied(
     assert session.calls
     headers = session.calls[0]["kwargs"].get("headers", {})
     assert headers.get("Authorization") == "Bearer resolved-token"
+
+
+def test_async_nova_request_uses_registered_cache_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider fallback supplies cache when async_nova_request cache arg is omitted."""
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(200, b"\x01\x02")])
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        calls.append(
+            {
+                "username": username,
+                "cache": cache,
+                "retries": retries,
+                "backoff": backoff,
+            }
+        )
+        return "provider-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _exercise() -> str:
+        await cache.set(username_string, "user@example.com")
+        register_cache_provider(lambda: cache)
+        try:
+            return await async_nova_request(
+                "testScope",
+                "00",
+                session=session,
+            )
+        finally:
+            unregister_cache_provider()
+
+    result = asyncio.run(_exercise())
+
+    assert result == "0102"
+    assert calls and calls[0]["cache"] is cache
+    assert session.calls
+    headers = session.calls[0]["kwargs"].get("headers", {})
+    assert headers.get("Authorization") == "Bearer provider-token"
+
+
+def test_async_nova_request_requires_cache_when_provider_missing() -> None:
+    """Missing cache and provider should raise before issuing the request."""
+
+    async def _exercise() -> None:
+        with pytest.raises(ValueError):
+            await async_nova_request("testScope", "00", username="user@example.com")
+
+    asyncio.run(_exercise())
 
 
 def test_async_nova_request_invokes_adm_exchange_even_with_token(

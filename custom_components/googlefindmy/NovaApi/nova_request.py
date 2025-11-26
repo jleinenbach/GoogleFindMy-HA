@@ -262,11 +262,12 @@ async def _get_initial_token_async(
     logger: logging.Logger,
     *,
     ns_prefix: str = "",
-    cache: TokenCache,
+    cache: TokenCache | None,
 ) -> str:
     """Return an ADM token for *username* from the entry-scoped cache or API."""
 
-    if cache is None:
+    resolved_cache = cache or resolve_cache_from_provider()
+    if resolved_cache is None:
         raise ValueError("TokenCache instance is required for Nova requests.")
 
     normalized_user = (username or "").strip().lower()
@@ -279,16 +280,16 @@ async def _get_initial_token_async(
 
     cache_key = f"{prefix}adm_token_{normalized_user}"
 
-    cached = await cache.get(cache_key)
+    cached = await resolved_cache.get(cache_key)
     if isinstance(cached, str) and cached:
         return cached
 
     if prefix:
         fallback_key = f"adm_token_{normalized_user}"
-        fallback = await cache.get(fallback_key)
+        fallback = await resolved_cache.get(fallback_key)
         if isinstance(fallback, str) and fallback:
             try:
-                await cache.set(cache_key, fallback)
+                await resolved_cache.set(cache_key, fallback)
             except Exception as err:  # pragma: no cover - defensive logging
                 logger.debug(
                     "Failed to mirror ADM token to namespaced key '%s': %s",
@@ -297,11 +298,11 @@ async def _get_initial_token_async(
                 )
             return fallback
 
-    token = await async_get_adm_token_api(normalized_user, cache=cache)
+    token = await async_get_adm_token_api(normalized_user, cache=resolved_cache)
 
     if prefix:
         try:
-            await cache.set(cache_key, token)
+            await resolved_cache.set(cache_key, token)
         except Exception as err:  # pragma: no cover - defensive logging
             logger.debug(
                 "Failed to persist ADM token to namespaced key '%s': %s", cache_key, err
@@ -754,14 +755,6 @@ class AsyncTTLPolicy(TTLPolicy):
             return await self._do_refresh_async(now)
 
 
-def nova_request(*_: object, **__: object) -> str:
-    """Legacy synchronous interface removed in favor of the async implementation."""
-
-    raise RuntimeError(
-        "Legacy sync nova_request() has been removed. Use async_nova_request(..., cache=...) instead."
-    )
-
-
 async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     api_scope: str,
     hex_payload: str,
@@ -777,7 +770,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     # Optional: entry-specific namespace for cache keys (e.g., entry_id)
     namespace: str | None = None,
     # Entry-scoped TokenCache for strict multi-account separation
-    cache: TokenCache,
+    cache: TokenCache | None = None,
 ) -> str:
     """
     Asynchronous Nova API request for Home Assistant (entry-scoped capable).
@@ -805,7 +798,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             this to perform a *real* AAS→ADM refresh isolated from globals
             (e.g. via `async_get_adm_token_isolated(...)`).
         namespace: Optional key namespace (e.g., config entry_id) to avoid cache collisions.
-        cache: Entry-scoped TokenCache for strict multi-account separation.
+        cache: Optional entry-scoped TokenCache for strict multi-account separation.
 
     Returns:
         Hex-encoded response body.
@@ -822,25 +815,29 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     ns_raw = (namespace or "").strip()
     ns_prefix = f"{ns_raw}:" if ns_raw and not ns_raw.endswith(":") else ns_raw
 
+    resolved_cache = cache or resolve_cache_from_provider()
+    if resolved_cache is None:
+        raise ValueError("TokenCache instance is required for Nova requests.")
+
     async def _cache_get(key: str) -> Any:
         if cache_get is not None:
             return await cache_get(key)
-        return await cache.get(key)
+        return await resolved_cache.get(key)
 
     async def _cache_set(key: str, value: Any) -> None:
         if cache_set is not None:
             await cache_set(key, value)
             return
-        await cache.set(key, value)
+        await resolved_cache.set(key, value)
 
     user: str | None
     if isinstance(username, str) and username.strip():
         user = username.strip()
     else:
-        val = await cache.get(username_string)
+        val = await resolved_cache.get(username_string)
         user = str(val).strip() if isinstance(val, str) and val else None
         if not user:
-            fetched = await async_get_username(cache=cache)
+            fetched = await async_get_username(cache=resolved_cache)
             user = fetched.strip() if isinstance(fetched, str) and fetched else None
     if user is None:
         raise ValueError("Username is not available for async_nova_request.")
@@ -852,14 +849,14 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
         and username.strip()
     ):
         try:
-            await cache.set(DATA_AAS_TOKEN, token)
+            await resolved_cache.set(DATA_AAS_TOKEN, token)
             if ns_prefix:
-                await cache.set(f"{ns_prefix}{DATA_AAS_TOKEN}", token)
+                await resolved_cache.set(f"{ns_prefix}{DATA_AAS_TOKEN}", token)
         except Exception as err:  # noqa: BLE001 - defensive caching
             _LOGGER.debug("Failed to seed provided flow token into cache: %s", err)
 
     initial_token = await _get_initial_token_async(
-        user, _LOGGER, ns_prefix=(namespace or ""), cache=cache
+        user, _LOGGER, ns_prefix=(namespace or ""), cache=resolved_cache
     )
 
     headers = {
@@ -879,7 +876,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     if refresh_override is not None:
         rf_fn: Callable[[], Awaitable[str | None]] = refresh_override
     else:
-        rf_fn = lambda: async_get_adm_token_api(user, cache=cache)  # noqa: E731
+        rf_fn = lambda: async_get_adm_token_api(user, cache=resolved_cache)  # noqa: E731
 
     policy = AsyncTTLPolicy(
         username=user,
