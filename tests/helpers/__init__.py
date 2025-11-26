@@ -8,10 +8,12 @@ from typing import Any
 
 from .ast_extract import compile_class_method_from_module
 from .asyncio import drain_loop
+from .cache import DummyCache
 
 __all__ = [
     "compile_class_method_from_module",
     "drain_loop",
+    "DummyCache",
     "ConfigEntriesFlowManagerStub",
     "attach_config_entries_flow_manager",
     "config_entries_flow_stub",
@@ -41,6 +43,7 @@ _EXPORT_MAP = {
     "attach_config_entries_flow_manager": ".config_flow",
     "config_entries_flow_stub": ".config_flow",
     "prepare_flow_hass_config_entries": ".config_flow",
+    "DummyCache": ".cache",
     "set_config_flow_unique_id": ".config_flow",
     "FakeConfigEntriesManager": ".homeassistant",
     "FakeConfigEntry": ".homeassistant",

@@ -14,6 +14,7 @@ from importlib import import_module
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, cast
 
+from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
 from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import decrypt
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
@@ -120,7 +121,10 @@ def is_mcu_tracker(device_registration: DeviceRegistration) -> bool:
 
 
 async def async_retrieve_identity_key(
-    device_registration: DeviceRegistration, *, cache: TokenCache
+    device_registration: DeviceRegistration,
+    *,
+    cache: TokenCache,
+    _retry: bool = True,
 ) -> bytes:
     """Retrieve the device Ephemeral Identity Key (EIK) asynchronously.
 
@@ -193,6 +197,41 @@ async def async_retrieve_identity_key(
             and old_ver is not None
             and old_ver < current_owner_key_version
         ):
+            if _retry:
+                username = None
+                cache_key = None
+                try:
+                    username = await cache.get(username_string)
+                except Exception as cache_exc:
+                    _LOGGER.debug(
+                        "Failed to resolve username from cache before clearing owner key: %s",
+                        cache_exc,
+                    )
+
+                if isinstance(username, str) and username:
+                    cache_key = f"owner_key_{username}"
+
+                _LOGGER.info(
+                    "Owner key version mismatch (tracker=%s, current=%s); %s and retrying once.",
+                    old_ver,
+                    current_owner_key_version,
+                    "clearing cached owner key" if cache_key else "retrying with fresh owner key",
+                )
+
+                if cache_key:
+                    try:
+                        await cache.set(cache_key, None)
+                    except Exception as cache_exc:
+                        _LOGGER.warning(
+                            "Failed to clear cached owner key '%s': %s", cache_key, cache_exc
+                        )
+
+                return await async_retrieve_identity_key(
+                    device_registration,
+                    cache=cache,
+                    _retry=False,
+                )
+
             _LOGGER.error(
                 "Owner key version mismatch: tracker=%s, current=%s. "
                 "This typically occurs after resetting E2EE data. "
