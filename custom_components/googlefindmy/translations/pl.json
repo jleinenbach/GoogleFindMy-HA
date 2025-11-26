@@ -100,6 +100,8 @@
   "config_subentries": {
     "hub": {
       "title": "Google Find My Device Hub",
+      "entry_type": "Hub feature group",
+      "initiate_flow": "Add hub feature group",
       "step": {
         "user": {
           "title": "Dodaj grupę funkcji huba",
@@ -115,6 +117,8 @@
     },
     "service": {
       "title": "Usługa Google Find Hub",
+      "entry_type": "Service feature group",
+      "initiate_flow": "Add service feature group",
       "step": {
         "user": {
           "title": "Dodaj grupę funkcji usługi",
@@ -130,6 +134,8 @@
     },
     "core_tracking": {
       "title": "Urządzenia Google Find My",
+      "entry_type": "Device feature group",
+      "initiate_flow": "Add device feature group",
       "step": {
         "user": {
           "title": "Dodaj grupę funkcji urządzeń",
