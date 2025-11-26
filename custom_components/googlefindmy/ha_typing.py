@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
@@ -19,9 +21,22 @@ def callback(func: _CallbackT) -> _CallbackT:
     return cast(_CallbackT, ha_callback(func))
 
 
+@dataclass(slots=True)
+class CloudDiscoveryRuntime:
+    """Container for cloud-discovery runtime bookkeeping."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    active_keys: set[str] = field(default_factory=set)
+    dispatcher_unsubscribers: list[Callable[[], None]] = field(default_factory=list)
+    retry_handles: set[asyncio.Future[Any]] = field(default_factory=set)
+    results: _CloudDiscoveryResults | list[dict[str, Any]] | None = None
+
+
 if TYPE_CHECKING:
     from aiohttp import web
     from homeassistant.core import HomeAssistant
+
+    from .discovery import _CloudDiscoveryResults
 
     _CoordinatorT = TypeVar("_CoordinatorT")
     _DataT = TypeVar("_DataT")

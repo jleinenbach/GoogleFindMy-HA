@@ -47,6 +47,7 @@ def test_scanner_triggers_cloud_discovery(
         discovery_ns,
         discovery_stable_key,
         source,
+        entry=None,
     ) -> bool:  # type: ignore[no-untyped-def]
         triggered_calls.append(
             {
@@ -56,6 +57,7 @@ def test_scanner_triggers_cloud_discovery(
                 "discovery_ns": discovery_ns,
                 "discovery_stable_key": discovery_stable_key,
                 "source": source,
+                "entry": entry,
             }
         )
         return True

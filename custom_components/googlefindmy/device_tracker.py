@@ -475,6 +475,7 @@ async def async_setup_entry(
                         discovery_ns=discovery_ns,
                         discovery_stable_key=stable_key,
                         source="cloud_scanner",
+                        entry=config_entry,
                     )
                     account_ref = _redact_account_for_log(email, stable_key)
                     if triggered:

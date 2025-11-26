@@ -223,6 +223,11 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 * Required checks (in order): `python -m ruff check --fix`, `python -m mypy --strict`, `python -m pytest --cov -q`.
 * Registry helpers: when adjusting device/entity relink logic, reuse the shared helper contract documented near `_async_relink_entities_for_entry` instead of adding new lookup paths so registry fallbacks stay consistent.
 
+> **`make test-stubs` refresh (fresh checkout quick how-to):**
+> 1. Run `make test-stubs` once after cloning or after `make clean` to install the Home Assistant + pytest stubs.
+> 2. If the command reports a missing Python, activate your environment first (for example, `source .venv/bin/activate`) and rerun it.
+> 3. Reuse the same command whenever mypy/pytest import errors resurface after environment resets; the target is idempotent and completes quickly when the stubs are already present.
+
 > **Quickstart:** Run `make test-stubs` once per fresh environment to install `homeassistant` and `pytest-homeassistant-custom-component` before `pytest -q`, `mypy --strict`, or `ruff check`; the download/build step typically finishes in about five minutes, so plan lint/test runs with that buffer in mind.
 
 ### Connectivity probe
