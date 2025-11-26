@@ -54,6 +54,14 @@ stop_sound:
       selector:
         device:
           integration: googlefindmy
+    request_uuid:
+      name: Request UUID (optional)
+      description: >-
+        Pass the request UUID returned by the Play Sound service when the backend requires
+        the stop request to reference an existing sound session.
+      required: false
+      selector:
+        text:
 
 locate_external:
   name: Locate Device (External)

@@ -87,11 +87,11 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
         session: Any,
         namespace: str | None,
         cache: DummyCache,
-    ) -> str:
+    ) -> tuple[str, str]:
         submissions.append(
             ("start", device_id, token, namespace, getattr(cache, "entry_id", None))
         )
-        return "ok"
+        return "ok", f"uuid-{device_id}"
 
     async def fake_submit_stop(
         device_id: str,
@@ -100,9 +100,17 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
         session: Any,
         namespace: str | None,
         cache: DummyCache,
+        request_uuid: str | None = None,
     ) -> str:
         submissions.append(
-            ("stop", device_id, token, namespace, getattr(cache, "entry_id", None))
+            (
+                "stop",
+                device_id,
+                token,
+                namespace,
+                getattr(cache, "entry_id", None),
+                request_uuid,
+            )
         )
         return "ok"
 
@@ -126,8 +134,11 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     async def _exercise() -> None:
-        assert await api_entry_1.async_play_sound("device-1")
-        assert await api_entry_2.async_play_sound("device-2")
+        ok1, uuid1 = await api_entry_1.async_play_sound("device-1")
+        ok2, uuid2 = await api_entry_2.async_play_sound("device-2")
+        assert ok1 and ok2
+        assert uuid1 == "uuid-device-1"
+        assert uuid2 == "uuid-device-2"
         assert await api_entry_1.async_stop_sound("device-1")
         assert await api_entry_2.async_stop_sound("device-2")
 
@@ -146,6 +157,70 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
 
     caches = [entry[4] for entry in submissions]
     assert caches == ["entry-1", "entry-2", "entry-1", "entry-2"]
+
+
+def test_play_sound_returns_uuid_and_passes_to_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Play Sound returns a request UUID that Stop Sound forwards."""
+
+    submissions: list[tuple[str, ...]] = []
+
+    async def fake_submit_start(
+        device_id: str,
+        token: str,
+        *,
+        session: Any,
+        namespace: str | None,
+        cache: DummyCache,
+    ) -> tuple[str, str]:
+        submissions.append(
+            (
+                "start",
+                device_id,
+                token,
+                namespace or "",
+                getattr(cache, "entry_id", ""),
+            )
+        )
+        return "deadbeef", f"uuid-{device_id}"
+
+    async def fake_submit_stop(
+        device_id: str,
+        token: str,
+        *,
+        session: Any,
+        namespace: str | None,
+        cache: DummyCache,
+        request_uuid: str | None = None,
+    ) -> str:
+        submissions.append(("stop", request_uuid or ""))
+        return "c0ffee"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.api.async_submit_start_sound_request",
+        fake_submit_start,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.api.async_submit_stop_sound_request",
+        fake_submit_stop,
+    )
+
+    api = GoogleFindMyAPI(cache=DummyCache(entry_id="entry-uuid"))
+    monkeypatch.setattr(api, "_get_fcm_token_for_action", lambda: "tok-uuid")
+
+    async def _exercise() -> None:
+        success, request_uuid = await api.async_play_sound("device-uuid")
+        assert success is True
+        assert request_uuid == "uuid-device-uuid"
+        assert await api.async_stop_sound("device-uuid", request_uuid)
+
+    asyncio.run(_exercise())
+
+    assert submissions == [
+        ("start", "device-uuid", "tok-uuid", "entry-uuid", "entry-uuid"),
+        ("stop", "uuid-device-uuid"),
+    ]
 
 
 def test_async_get_device_location_uses_scoped_cache(

@@ -6001,7 +6001,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             return False
         try:
-            ok = await self.api.async_play_sound(device_id)
+            ok, _request_uuid = await self.api.async_play_sound(device_id)
             if not ok:
                 self._note_push_transport_problem()
             # Success implies credentials worked
@@ -6024,11 +6024,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._note_push_transport_problem()
             return False
 
-    async def async_stop_sound(self, device_id: str) -> bool:
+    async def async_stop_sound(
+        self, device_id: str, request_uuid: str | None = None
+    ) -> bool:
         """Stop sound on a device using the native async API (no executor).
 
         Args:
             device_id: The canonical ID of the device.
+            request_uuid: Optional request UUID that identifies the prior play request.
 
         Returns:
             True if the command was submitted successfully, False otherwise.
@@ -6040,7 +6043,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             return False
         try:
-            ok = await self.api.async_stop_sound(device_id)
+            ok = await self.api.async_stop_sound(device_id, request_uuid)
             if not ok:
                 self._note_push_transport_problem()
             # Success implies credentials worked

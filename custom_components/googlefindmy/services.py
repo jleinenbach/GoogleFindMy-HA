@@ -924,9 +924,29 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 translation_key="device_not_found",
                 translation_placeholders=placeholders,
             )
+        request_uuid_raw = call.data.get("request_uuid")
+        if request_uuid_raw is not None and not isinstance(request_uuid_raw, str):
+            placeholders = {
+                "device_id": str(raw_device_id),
+                "request_uuid": str(request_uuid_raw),
+            }
+            raise _service_validation_error(
+                "Stop sound request UUID for '{device_id}' is invalid ({request_uuid}).".format(
+                    **placeholders
+                ),
+                translation_key="stop_sound_failed",
+                translation_placeholders=placeholders,
+            )
+        request_uuid: str | None
+        if request_uuid_raw is None:
+            request_uuid = None
+        else:
+            request_uuid = request_uuid_raw
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
-            ok = await runtime.coordinator.async_stop_sound(canonical_id)
+            ok = await runtime.coordinator.async_stop_sound(
+                canonical_id, request_uuid
+            )
             if not ok:
                 placeholders = {"device_id": str(raw_device_id)}
                 raise _service_validation_error(

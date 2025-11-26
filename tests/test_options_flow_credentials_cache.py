@@ -374,9 +374,11 @@ def test_play_stop_sound_uses_entry_cache(  # noqa: PLR0915
         start_calls: list[tuple[str, str, dict[str, Any]]] = []
         stop_calls: list[tuple[str, str, dict[str, Any]]] = []
 
-        async def _fake_start(scope: str, payload: str, **kwargs: Any) -> str:
+        async def _fake_start(
+            scope: str, payload: str, **kwargs: Any
+        ) -> tuple[str, str]:
             start_calls.append((scope, payload, kwargs))
-            return "start-ok"
+            return "start-ok", "uuid-start"
 
         async def _fake_stop(scope: str, payload: str, **kwargs: Any) -> str:
             stop_calls.append((scope, payload, kwargs))
@@ -385,8 +387,10 @@ def test_play_stop_sound_uses_entry_cache(  # noqa: PLR0915
         monkeypatch.setattr(start_module, "async_nova_request", _fake_start)
         monkeypatch.setattr(stop_module, "async_nova_request", _fake_stop)
 
-        assert await api_primary.async_play_sound("device-42")
-        assert await api_primary.async_stop_sound("device-42")
+        success, request_uuid = await api_primary.async_play_sound("device-42")
+        assert success is True
+        assert request_uuid is not None
+        assert await api_primary.async_stop_sound("device-42", request_uuid)
 
         assert start_calls and stop_calls
 

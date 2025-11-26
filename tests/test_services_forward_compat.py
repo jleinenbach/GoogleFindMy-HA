@@ -9,9 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from homeassistant.exceptions import ServiceValidationError
 
 from custom_components.googlefindmy import services
-from custom_components.googlefindmy.const import DOMAIN, SERVICE_LOCATE_DEVICE
+from custom_components.googlefindmy.const import (
+    DOMAIN,
+    SERVICE_LOCATE_DEVICE,
+    SERVICE_STOP_SOUND,
+)
 from custom_components.googlefindmy.util_services import register_entity_service
 
 
@@ -32,6 +37,93 @@ class _PlatformRecorder:
     def async_register_entity_service(self, *args: Any) -> None:
         self.calls.append(("legacy", args))
 
+
+def _build_stop_sound_service_hass(monkeypatch: pytest.MonkeyPatch):
+    """Construct a minimal hass/runtime pair for stop sound service tests."""
+
+    class _StubCoordinator:
+        def __init__(self) -> None:
+            self.stop_calls: list[tuple[str, str | None]] = []
+            self.display_queries: list[str] = []
+
+        def get_device_display_name(self, canonical_id: str) -> str:
+            self.display_queries.append(canonical_id)
+            return "friendly"
+
+        def get_device_location_data(self, canonical_id: str) -> dict[str, Any]:
+            return {"id": canonical_id}
+
+        async def async_stop_sound(
+            self, canonical_id: str, request_uuid: str | None = None
+        ) -> bool:
+            self.stop_calls.append((canonical_id, request_uuid))
+            return True
+
+    class _StubRuntime:
+        def __init__(self, coordinator: _StubCoordinator) -> None:
+            self.coordinator = coordinator
+
+    class _StubConfigEntry:
+        def __init__(self, entry_id: str, runtime: _StubRuntime) -> None:
+            self.entry_id = entry_id
+            self.domain = DOMAIN
+            self.runtime_data = runtime
+            self.title = "stub"
+            self.options: dict[str, Any] = {}
+            self.data: dict[str, Any] = {}
+            self.subentries: dict[str, Any] = {}
+
+    class _StubConfigManager:
+        def __init__(self, entries: dict[str, _StubConfigEntry]) -> None:
+            self._entries = entries
+
+        def async_entries(self, domain: str) -> list[_StubConfigEntry]:
+            if domain != DOMAIN:
+                return []
+            return list(self._entries.values())
+
+        def async_get_entry(self, entry_id: str) -> _StubConfigEntry | None:
+            return self._entries.get(entry_id)
+
+    class _StubServices:
+        def __init__(self) -> None:
+            self.registered: dict[tuple[str, str], Any] = {}
+
+        def async_register(self, domain: str, service: str, handler: Any) -> None:
+            self.registered[(domain, service)] = handler
+
+    class _StubHass:
+        def __init__(self, config_manager: _StubConfigManager) -> None:
+            self.config_entries = config_manager
+            self.services = _StubServices()
+            self.data: dict[str, Any] = {}
+
+    class _StubDeviceRegistry:
+        def async_get(self, device_id: str) -> Any | None:
+            return None
+
+    class _StubServiceCall:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self.data = data
+
+    canonical_id = "canonical-stop"
+    coordinator = _StubCoordinator()
+    runtime = _StubRuntime(coordinator)
+    entry_id = "entry-stop"
+    config_entry = _StubConfigEntry(entry_id, runtime)
+    config_manager = _StubConfigManager({entry_id: config_entry})
+    hass = _StubHass(config_manager)
+    hass.data.setdefault(DOMAIN, {}).setdefault("entries", {})[entry_id] = runtime
+
+    device_registry = _StubDeviceRegistry()
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+
+    ctx = {
+        "resolve_canonical": lambda _hass, raw_id: (canonical_id, "friendly"),
+        "is_active_entry": lambda entry: True,
+    }
+
+    return hass, coordinator, _StubServiceCall, ctx, canonical_id
 
 def _integration_root() -> Path:
     return Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy"
@@ -223,6 +315,48 @@ def test_locate_service_handles_falsy_display_names(
         assert coordinator.location_queries == [canonical_id]
     else:
         assert coordinator.location_queries == []
+
+
+def test_stop_sound_service_forwards_request_uuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop sound handler should pass an explicit request UUID to the coordinator."""
+
+    hass, coordinator, ServiceCallStub, ctx, canonical_id = _build_stop_sound_service_hass(
+        monkeypatch
+    )
+
+    async def _invoke() -> None:
+        await services.async_register_services(hass, ctx)
+        handler = hass.services.registered[(DOMAIN, SERVICE_STOP_SOUND)]
+        await handler(
+            ServiceCallStub({"device_id": "device-42", "request_uuid": "req-77"})
+        )
+
+    asyncio.run(_invoke())
+
+    assert coordinator.display_queries == [canonical_id]
+    assert coordinator.stop_calls == [(canonical_id, "req-77")]
+
+
+def test_stop_sound_service_rejects_non_string_uuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid UUID types must raise ServiceValidationError."""
+
+    hass, coordinator, ServiceCallStub, ctx, _canonical_id = _build_stop_sound_service_hass(
+        monkeypatch
+    )
+
+    async def _invoke() -> None:
+        await services.async_register_services(hass, ctx)
+        handler = hass.services.registered[(DOMAIN, SERVICE_STOP_SOUND)]
+        with pytest.raises(ServiceValidationError):
+            await handler(ServiceCallStub({"device_id": "device-42", "request_uuid": 999}))
+
+    asyncio.run(_invoke())
+
+    assert coordinator.stop_calls == []
 
 
 @pytest.mark.parametrize(
