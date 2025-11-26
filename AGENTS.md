@@ -3,6 +3,7 @@
 **Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
 
 - [AGENTS.md — Operating Contract for `googlefindmy` (Home Assistant custom integration)](#agentsmd--operating-contract-for-googlefindmy-home-assistant-custom-integration)
+  - [Start here — platinum essentials (front page)](#start-here--platinum-essentials-front-page)
       - [Quick reminder — path headers vs. future imports](#quick-reminder--path-headers-vs-future-imports)
   - [Linting reminders](#linting-reminders)
   - [Scoped guidance index](#scoped-guidance-index)
@@ -14,6 +15,7 @@
     - [Quick-reference (per-task checklist)](#quick-reference-per-task-checklist)
     - [Connectivity probe](#connectivity-probe)
     - [Quickstart checks (fast path before `pytest -q`)](#quickstart-checks-fast-path-before-pytest--q)
+    - [Cleanup shortcuts](#cleanup-shortcuts)
     - [Module invocation primer](#module-invocation-primer)
   - [1) What must be in **every** PR (lean checklist)](#1-what-must-be-in-every-pr-lean-checklist)
   - [Home Assistant version & dependencies](#home-assistant-version--dependencies)
@@ -95,6 +97,18 @@
 
 > **Environment reset reminder:** After a container or virtualenv reset, rerun `make test-stubs` so the Home Assistant and
 > pytest stubs are reinstalled before invoking linting or pytest commands.
+
+## Start here — platinum essentials (front page)
+
+* **Quality scale in the manifest.** New or updated integrations must declare `"quality_scale": "platinum"` (with realistic
+  `iot_class` values) and stick to async-friendly requirements; see [Quality scale (practical, non-blocking)](#7-quality-scale-
+  practical-non-blocking) for the full checklist.
+* **Runtime data placement.** Keep config entry state on `entry.runtime_data` (typed) instead of ad-hoc module globals or
+  untyped `hass.data` buckets; the guardrails live under [Home Assistant specifics (must-haves)](#117-home-assistant-specifics-
+  must-haves) and [Config subentry maintenance helper](#config-subentry-maintenance-helper).
+* **Required local checks.** Before committing, run `python -m ruff check --fix`, `python -m mypy --strict --install-types --
+  non-interactive`, and `python -m pytest --cov -q` (after `make test-stubs` in new environments); see [Local commands
+  (VERIFY)](#10-local-commands-verify) for context.
 
 <a id="language-policy"></a>
 > **Scope & authority**
@@ -223,6 +237,7 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 * **Cache cleanup:** Run `make clean` to prune `__pycache__` directories and stale bytecode before rerunning tests.
 * **Connectivity probe:** Follow the [connectivity probe](#connectivity-probe) and capture the output before running tests.
 * **Test stub install:** Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` when you need a minimal bootstrap immediately before `pytest -q`. Plan for several minutes of download time in the hosted environment because the Home Assistant wheels are large.
+* **DocToc preinstall:** Run `make bootstrap-doctoc` once per environment to install the DocToc dev dependency non-interactively (cached under `.npm-cache`); subsequent `make doctoc` calls reuse the installation to refresh the AGENTS.md table of contents.
 * **Strict mypy prep:** In a fresh environment, run `make test-stubs` before `mypy --install-types --non-interactive --strict` so the Home Assistant stubs are already present and strict type checking doesn't trip over missing packages.
 * **Coverage reminder:** After adjusting registry helper fallbacks, rerun `pytest --cov -q` to confirm coverage stays intact before committing.
 * **Pytest coverage guard:** `pytest -q --cov` will raise the conftest bootstrap error if the Home Assistant stubs are missing. Run `make test-stubs` first so coverage runs complete without runtime import failures.
@@ -238,6 +253,11 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 * **Fallback reminder:** If a CLI helper such as `pre-commit` is not yet on the PATH, rerun the command via its module form (for example, `python -m pre_commit run --all-files`) so the initial check still succeeds.
 * **Online mode:** When a network connection is available you may install or update missing development tooling (for example, `pip`, `pip-tools`, `pre-commit`, `rustup`, `node`, `jq`) whenever it is necessary for maintenance or local verification.
 * **Offline mode:** When no connection is available, limit the work to local analysis only and call out any follow-up actions that must happen once connectivity is restored.
+
+### Cleanup shortcuts
+
+* **DocToc reinstall:** Run `make clean` to delete `.bootstrap/doctoc-preinstall.stamp` when you need to force a fresh DocToc install before rerunning `make doctoc`.
+* **Home Assistant stub reinstall:** Run `make clean` to delete `.bootstrap/homeassistant-preinstall.stamp` when a dependency change requires reinstalling the `homeassistant`/`pytest-homeassistant-custom-component` stubs via `make bootstrap-base-deps`.
 
 ### Module invocation primer
 
