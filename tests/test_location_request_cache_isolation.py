@@ -236,6 +236,43 @@ def test_stop_sound_request_requires_cache() -> None:
     asyncio.run(_run())
 
 
+def test_stop_sound_request_accepts_request_uuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop sound builder should forward an explicit request UUID."""
+
+    recorded: dict[str, Any] = {}
+
+    def _fake_create_sound_request(
+        should_start: bool,
+        canonic_device_id: str,
+        gcm_registration_id: str,
+        *,
+        request_uuid: str | None = None,
+    ) -> str:
+        recorded["should_start"] = should_start
+        recorded["device_id"] = canonic_device_id
+        recorded["token"] = gcm_registration_id
+        recorded["request_uuid"] = request_uuid
+        return "payload-hex"
+
+    monkeypatch.setattr(stop_sound_request, "create_sound_request", _fake_create_sound_request)
+
+    result = stop_sound_request.stop_sound_request(
+        "device-uuid",
+        "fcm-token",
+        request_uuid="stop-this",
+    )
+
+    assert result == "payload-hex"
+    assert recorded == {
+        "should_start": False,
+        "device_id": "device-uuid",
+        "token": "fcm-token",
+        "request_uuid": "stop-this",
+    }
+
+
 def test_start_sound_request_prefers_entry_scoped_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -267,7 +304,9 @@ def test_start_sound_request_prefers_entry_scoped_cache(
         start_sound_request, "async_nova_request", fake_async_nova_request
     )
     monkeypatch.setattr(
-        start_sound_request, "start_sound_request", lambda *_, **__: "payload"
+        start_sound_request,
+        "start_sound_request",
+        lambda *_, **__: ("payload", "uuid-123"),
     )
 
     async def _run() -> None:
@@ -277,7 +316,7 @@ def test_start_sound_request_prefers_entry_scoped_cache(
             cache=cache_ref,
         )
 
-        assert result == "00"
+        assert result == ("00", "uuid-123")
         assert cache_ref.calls == [
             ("set", "entry-one:ttl", "value"),
             ("get", "entry-one:ttl", None),
@@ -316,18 +355,32 @@ def test_stop_sound_request_prefers_entry_scoped_cache(
     monkeypatch.setattr(
         stop_sound_request, "async_nova_request", fake_async_nova_request
     )
+
+    recorded_uuid: list[str | None] = []
+
+    def _fake_stop_sound_request(
+        canonic_device_id: str,
+        gcm_registration_id: str,
+        *,
+        request_uuid: str | None = None,
+    ) -> str:
+        recorded_uuid.append(request_uuid)
+        return "payload"
+
     monkeypatch.setattr(
-        stop_sound_request, "stop_sound_request", lambda *_, **__: "payload"
+        stop_sound_request, "stop_sound_request", _fake_stop_sound_request
     )
 
     async def _run() -> None:
         result = await stop_sound_request.async_submit_stop_sound_request(
             "device-456",
             "token",
+            request_uuid="uuid-stop",
             cache=cache_ref,
         )
 
         assert result == "00"
+        assert recorded_uuid == ["uuid-stop"]
         assert cache_ref.calls == [
             ("set", "entry-two:ttl", "value"),
             ("get", "entry-two:ttl", None),

@@ -1219,21 +1219,20 @@ class GoogleFindMyAPI:
             # Delegate payload build + transport to the submitter; provide HA session.
             # NOTE: If Nova later requires an explicit username for action endpoints,
             # extend submitter signatures to accept and forward it consistently.
-            result_hex = await async_submit_start_sound_request(
+            result = await async_submit_start_sound_request(
                 device_id,
                 token,
                 session=self._session,
                 namespace=self._namespace(),
                 cache=cast("TokenCache | None", self._cache),
             )
-            ok = result_hex is not None
-            if ok:
-                _LOGGER.info(
-                    "Play Sound (async) submitted successfully for %s", device_id
-                )
-            else:
+            if result is None:
                 _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
-            return bool(ok)
+                return False
+
+            _response_hex, _request_uuid = result
+            _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
+            return True
 
         except NovaAuthError as err:
             _LOGGER.error(
