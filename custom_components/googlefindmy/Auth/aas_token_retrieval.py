@@ -19,7 +19,8 @@ Design:
 - Sync wrapper `get_aas_token()` is intentionally unsupported to prevent deadlocks.
 
 Notes:
-- The Android ID is a constant used by `gpsoauth` during the exchange.
+- The Android ID is resolved per-user from cached FCM credentials or generated
+  on demand to avoid reuse across accounts.
 - The username is read from the cache via `username_provider`; if an ADM fallback
   is used, we also update the username accordingly (entry-scoped when `cache` is given).
 
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
@@ -55,9 +57,6 @@ try:  # pragma: no cover - defensive optional import layout
 except Exception:  # noqa: BLE001
     gpsoauth_exceptions = None
 
-# Legacy fallback Android ID for gpsoauth exchange when FCM credentials are missing.
-# Legacy fallback Android ID for gpsoauth exchange when FCM credentials are missing.
-_ANDROID_ID: int = 0x38918A453D071993
 _JWT_SEGMENT_MIN_COUNT = 2
 
 
@@ -127,6 +126,62 @@ def _is_non_retryable_auth(err: Exception) -> bool:
     if "missing 'token' in gpsoauth response" in text:
         return True
     return False
+
+
+def _coerce_android_id(value: object, source: str) -> int | None:
+    """Normalize cached or credential Android IDs into integers."""
+
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except (TypeError, ValueError):
+            _LOGGER.debug("android_id value from %s is not numeric", source)
+            return None
+    if value is not None:
+        _LOGGER.debug("Unsupported android_id type from %s: %s", source, type(value))
+    return None
+
+
+async def _get_or_generate_android_id(
+    username: str, cache: TokenCache | None = None
+) -> int:
+    """Return a per-user Android ID from cache, FCM credentials, or a fresh value."""
+
+    if cache is None:
+        raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    cache_key = f"android_id_{username}"
+    android_id = _coerce_android_id(await cache.get(cache_key), "cache")
+    if android_id is not None:
+        return android_id
+
+    fcm_creds = await cache.get("fcm_credentials")
+    if isinstance(fcm_creds, Mapping):
+        gcm_block = fcm_creds.get("gcm")
+        if isinstance(gcm_block, Mapping):
+            android_id = _coerce_android_id(
+                gcm_block.get("android_id"), "FCM credentials"
+            )
+
+    if android_id is not None:
+        try:
+            await cache.set(cache_key, android_id)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Failed to persist android_id from FCM credentials: %s", _clip(err))
+        return android_id
+
+    android_id = random.randint(0x1000000000000000, 0xFFFFFFFFFFFFFFFF)
+    _LOGGER.warning(
+        "Generated new android_id for %s; cache was missing a stored identifier.",
+        _mask_email_for_logs(username),
+    )
+    try:
+        await cache.set(cache_key, android_id)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Failed to persist generated android_id: %s", _clip(err))
+    return android_id
 
 
 # ---------------------------------------------------------------------------
@@ -294,32 +349,7 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
             "No username available; please ensure the account e-mail is configured."
         )
 
-    # 2b) Resolve the Android ID tied to the stored FCM credentials.
-    fcm_creds = await cache.get("fcm_credentials")
-    android_id: int | None = None
-    if isinstance(fcm_creds, dict):
-        gcm_block = fcm_creds.get("gcm")
-        candidate = None
-        if isinstance(gcm_block, dict):
-            candidate = gcm_block.get("android_id")
-        if isinstance(candidate, int):
-            android_id = candidate
-        elif isinstance(candidate, str):
-            try:
-                android_id = int(candidate, 0)
-            except (TypeError, ValueError):
-                _LOGGER.debug("android_id value from FCM credentials is not numeric")
-        elif candidate is not None:
-            _LOGGER.debug(
-                "Unsupported android_id type in FCM credentials: %s", type(candidate)
-            )
-
-    if android_id is None:
-        _LOGGER.warning(
-            "FCM credentials missing android_id; falling back to static identifier. "
-            "Generate fresh secrets.json if authentication fails."
-        )
-        android_id = _ANDROID_ID
+    android_id = await _get_or_generate_android_id(username, cache=cache)
 
     # 3) Exchange OAuth → AAS (blocking call executed in executor).
     resp = await _exchange_oauth_for_aas(username, oauth_token, android_id)
