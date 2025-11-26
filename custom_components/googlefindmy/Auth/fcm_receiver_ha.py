@@ -69,8 +69,10 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
-    decrypt_locations as decrypt_locations_module,
+from custom_components.googlefindmy.NovaApi import nova_request
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    StaleOwnerKeyError,
+    async_decrypt_location_response_locations,
 )
 from custom_components.googlefindmy.ProtoDecoders import decoder as decoder_module
 
@@ -1032,8 +1034,8 @@ class FcmReceiverHA:
         enable precise fan-out in `_flush(...)`.
         """
         try:
-            location_data = await _call_in_executor(
-                self._decode_background_location, entry_id, hex_string
+            location_data = await self._decode_background_location_async(
+                entry_id, hex_string
             )
             if not location_data:
                 _LOGGER.debug(
@@ -1126,7 +1128,9 @@ class FcmReceiverHA:
 
     # -------------------- Decode helper --------------------
 
-    def _decode_background_location(self, entry_id: str, hex_string: str) -> JSONDict:
+    async def _decode_background_location_async(
+        self, entry_id: str, hex_string: str
+    ) -> JSONDict:
         """Decode background location using protobuf decoders (CPU-bound)."""
         try:
             device_update = decoder_module.parse_device_update_protobuf(hex_string)
@@ -1138,9 +1142,20 @@ class FcmReceiverHA:
                 )
                 return {}
 
-            raw_locations = decrypt_locations_module.decrypt_location_response_locations(
-                device_update, cache=cache
-            )
+            nova_request.register_cache_provider(lambda: cache)
+            try:
+                raw_locations = await async_decrypt_location_response_locations(
+                    device_update, cache=cache
+                )
+            except StaleOwnerKeyError:
+                _LOGGER.info(
+                    "Background location update skipped (stale key) for entry %s",
+                    entry_id,
+                )
+                return {}
+            finally:
+                nova_request.unregister_cache_provider()
+
             locations: list[JSONDict] = (
                 raw_locations if raw_locations is not None else []
             )

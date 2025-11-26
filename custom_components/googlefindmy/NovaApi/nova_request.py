@@ -79,6 +79,35 @@ if not _BS4_AVAILABLE:
         "BeautifulSoup4 not installed, error response beautification disabled."
     )
 
+
+def register_cache_provider(provider: Callable[[], TokenCache | None]) -> None:
+    """Register a callable that returns the active TokenCache.
+
+    Background decryptors rely on this provider to resolve credentials in
+    contexts where explicit cache wiring is not available.
+    """
+
+    _STATE["cache_provider"] = provider
+
+
+def unregister_cache_provider() -> None:
+    """Clear the registered cache provider."""
+
+    _STATE["cache_provider"] = None
+
+
+def resolve_cache_from_provider() -> TokenCache | None:
+    """Return the cache supplied by the registered provider, if any."""
+
+    provider: Callable[[], TokenCache | None] | None = _STATE.get("cache_provider")
+    if provider is None:
+        return None
+    try:
+        return provider()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        _LOGGER.warning("Cache provider callable failed: %s", exc)
+        return None
+
 # --- Retry constants ---
 NOVA_MAX_RETRIES = 6
 NOVA_INITIAL_BACKOFF_S = 4.0
@@ -197,7 +226,11 @@ class NovaHTTPError(NovaError):
 
 # ------------------------ Optional Home Assistant hooks ------------------------
 # These hooks allow the integration to supply a shared aiohttp ClientSession.
-_STATE: dict[str, Any] = {"hass": None, "async_refresh_lock": None}
+_STATE: dict[str, Any] = {
+    "hass": None,
+    "async_refresh_lock": None,
+    "cache_provider": None,
+}
 
 
 def register_hass(hass: HomeAssistant) -> None:
