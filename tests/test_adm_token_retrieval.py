@@ -361,6 +361,7 @@ def test_async_request_token_uses_cached_android_id(
 
         assert token == "adm-token"
         assert recorded["android_id"] == int("0x1A2B3C", 16)
+        assert cache._data["android_id_user@example.com"] == int("0x1A2B3C", 16)
         assert recorded["kwargs"] == {
             "service": "oauth2:https://www.googleapis.com/auth/android_device_manager",
             "app": "com.google.android.apps.adm",
@@ -370,13 +371,14 @@ def test_async_request_token_uses_cached_android_id(
     asyncio.run(_exercise())
 
 
-def test_async_request_token_uses_constant_android_id_when_missing(
+def test_async_request_token_generates_android_id_when_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If no android_id is cached, the legacy constant must be used."""
+    """A missing android_id should be generated and persisted for reuse."""
 
     async def _exercise() -> None:
         recorded: dict[str, Any] = {}
+        generated_id = 0xCAFEBABE12345678
 
         def fake_perform_oauth(
             username: str,
@@ -390,6 +392,7 @@ def test_async_request_token_uses_constant_android_id_when_missing(
         monkeypatch.setattr(
             token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
         )
+        monkeypatch.setattr(token_retrieval.random, "randint", lambda *_: generated_id)
 
         cache = _DummyTokenCache()
 
@@ -401,7 +404,8 @@ def test_async_request_token_uses_constant_android_id_when_missing(
         )
 
         assert token == "adm-token"
-        assert recorded["android_id"] == token_retrieval._ANDROID_ID
+        assert recorded["android_id"] == generated_id
+        assert cache._data["android_id_user@example.com"] == generated_id
 
     asyncio.run(_exercise())
 
@@ -427,6 +431,7 @@ def test_perform_oauth_sync_missing_keys_raises(
             "aas-token",
             "android_device_manager",
             play_services=False,
+            android_id=0x1234,
         )
 
 

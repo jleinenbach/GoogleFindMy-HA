@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -39,9 +40,6 @@ def _is_invalid_aas_error_text(text: str) -> bool:
     return False
 
 
-# Constants used by gpsoauth for the OAuth exchange flow.
-# Keep aligned with other modules in this integration.
-_ANDROID_ID: int = 0x38918A453D071993
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 
 
@@ -77,24 +75,70 @@ def _extract_android_id_from_credentials(fcm_creds: Any) -> int | None:
     return None
 
 
-async def _resolve_android_id(*, cache: TokenCache) -> int:
-    """Resolve the android_id tied to the provided cache, with fallback."""
+def _coerce_android_id(value: object, source: str) -> int | None:
+    """Normalize cached Android IDs into integers for gpsoauth."""
+
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except (TypeError, ValueError):
+            _LOGGER.debug("android_id value from %s is not numeric", source)
+            return None
+    if value is not None:
+        _LOGGER.debug("Unsupported android_id type from %s: %s", source, type(value))
+    return None
+
+
+def _mask_email(email: str) -> str:
+    """Return a privacy-friendly representation of an email for logs."""
+
+    if "@" not in email:
+        return "<unknown>"
+    local, domain = email.split("@", 1)
+    masked_local = (local[0] + "***") if len(local) > 1 else "*"
+    return f"{masked_local}@{domain}"
+
+
+async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
+    """Resolve a per-user android_id from cache, credentials, or a new value."""
+
+    cache_key = f"android_id_{username}"
 
     try:
         fcm_creds = await cache.get("fcm_credentials")
     except Exception as err:  # noqa: BLE001
         _LOGGER.debug("Failed to read FCM credentials from cache: %s", err)
-        return _ANDROID_ID
+        fcm_creds = None
 
     android_id = _extract_android_id_from_credentials(fcm_creds)
-    if android_id is None:
-        _LOGGER.warning(
-            "FCM credentials missing android_id; falling back to static identifier %s. "
-            "Generate fresh secrets.json if authentication fails.",
-            _format_android_id(_ANDROID_ID),
-        )
-        return _ANDROID_ID
+    if android_id is not None:
+        try:
+            await cache.set(cache_key, android_id)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Failed to persist android_id from FCM credentials: %s", err)
+        return android_id
 
+    try:
+        cached_android_id = await cache.get(cache_key)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Failed to read cached android_id: %s", err)
+        cached_android_id = None
+
+    android_id = _coerce_android_id(cached_android_id, "cache")
+    if android_id is not None:
+        return android_id
+
+    android_id = random.randint(0x1000000000000000, 0xFFFFFFFFFFFFFFFF)
+    _LOGGER.warning(
+        "Generated new android_id for %s; cache was missing a stored identifier.",
+        _mask_email(username),
+    )
+    try:
+        await cache.set(cache_key, android_id)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Failed to persist generated android_id: %s", err)
     return android_id
 
 
@@ -104,9 +148,9 @@ def _perform_oauth_sync(
     scope: str,
     play_services: bool,
     *,
-    android_id: int = _ANDROID_ID,
+    android_id: int,
 ) -> str:
-    f"""Blocking gpsoauth.perform_oauth call, factored for reuse.
+    """Blocking gpsoauth.perform_oauth call, factored for reuse.
 
     Args:
         username: Google account email (for request context).
@@ -114,7 +158,6 @@ def _perform_oauth_sync(
         scope: OAuth scope suffix (e.g., "android_device_manager").
         play_services: If True, use the Play Services app id; else ADM app id.
         android_id: Device-specific Android ID used for the OAuth exchange.
-            Defaults to {_format_android_id(_ANDROID_ID)}.
 
     Returns:
         The OAuth access token (string) for the requested scope.
@@ -215,7 +258,7 @@ def request_token(
     if aas_token is None:
         aas_token = asyncio.run(async_get_aas_token(cache=cache))
 
-    android_id = asyncio.run(_resolve_android_id(cache=cache))
+    android_id = asyncio.run(_resolve_android_id(cache=cache, username=username))
 
     # Perform the blocking OAuth exchange.
     return _perform_oauth_sync(
@@ -277,7 +320,7 @@ async def async_request_token(  # noqa: PLR0913
 
     # Offload the blocking OAuth exchange to a worker thread.
     loop = asyncio.get_running_loop()
-    android_id = await _resolve_android_id(cache=cache)
+    android_id = await _resolve_android_id(cache=cache, username=username)
 
     try:
         return await loop.run_in_executor(
