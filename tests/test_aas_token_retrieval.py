@@ -170,6 +170,7 @@ def test_request_token_uses_supplied_cache(monkeypatch: pytest.MonkeyPatch) -> N
         token_retrieval, "async_get_aas_token", fake_async_get_aas_token
     )
     monkeypatch.setattr(token_retrieval, "_perform_oauth_sync", fake_perform_oauth)
+    monkeypatch.setattr(token_retrieval.random, "randint", lambda *_: 0xDEADBEEFCAFED00D)
 
     sentinel_cache = _DummyCache()
     token = token_retrieval.request_token(
@@ -183,5 +184,6 @@ def test_request_token_uses_supplied_cache(monkeypatch: pytest.MonkeyPatch) -> N
         "aas-token",
         "spot",
         False,
-        token_retrieval._ANDROID_ID,
+        0xDEADBEEFCAFED00D,
     )
+    assert sentinel_cache._data["android_id_user@example.com"] == 0xDEADBEEFCAFED00D
