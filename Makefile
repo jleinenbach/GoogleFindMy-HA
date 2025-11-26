@@ -1,4 +1,4 @@
-.PHONY: bootstrap-base-deps clean clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse
+.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse
 
 VENV ?= .venv
 PYTHON ?= python3
@@ -9,6 +9,8 @@ SKIP_WHEELHOUSE_REFRESH ?= 0
 WHEELHOUSE ?= .wheelhouse
 WHEELHOUSE_SENTINEL := $(WHEELHOUSE)/.requirements-dev.stamp
 BOOTSTRAP_SENTINEL := .bootstrap/homeassistant-preinstall.stamp
+# Remove DOCTOC_SENTINEL via `make clean` to force a DocToc reinstall when the cached dev dependency changes.
+DOCTOC_SENTINEL := .bootstrap/doctoc-preinstall.stamp
 NPM_CACHE ?= .npm-cache
 
 clean:
@@ -17,13 +19,21 @@ clean:
 		echo "[make clean] Removing Home Assistant bootstrap sentinel"; \
 		rm -f "$(BOOTSTRAP_SENTINEL)"; \
 	fi
+	@if [ -f "$(DOCTOC_SENTINEL)" ]; then \
+		echo "[make clean] Removing DocToc bootstrap sentinel"; \
+		rm -f "$(DOCTOC_SENTINEL)"; \
+	fi
 
 lint:
 	@ruff check . --fix
 
-doctoc:
-	@echo "[make doctoc] Installing DocToc dev dependency (cached via $(NPM_CACHE))"
+bootstrap-doctoc:
+	@mkdir -p .bootstrap
+	@echo "[make bootstrap-doctoc] Installing DocToc dev dependency (cached via $(NPM_CACHE))"
 	@$(NPM) ci --prefer-offline --no-fund --no-audit --cache $(NPM_CACHE) --include=dev
+	@touch $(DOCTOC_SENTINEL)
+
+doctoc: bootstrap-doctoc
 	@echo "[make doctoc] Regenerating AGENTS.md table of contents"
 	@$(NPM) run doctoc -- AGENTS.md
 
