@@ -703,6 +703,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._push_ready_memo: bool | None = None
         self._push_cooldown_until: float = 0.0
 
+        # Play Sound tracking (request UUID cache per device)
+        self._sound_request_uuids: dict[str, str] = {}
+
         # Manual locate gating (UX + server protection)
         self._locate_inflight: set[str] = set()  # device_id -> in-flight flag
         self._locate_cooldown_until: dict[str, float] = {}  # device_id -> mono deadline
@@ -6001,7 +6004,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             return False
         try:
-            ok, _request_uuid = await self.api.async_play_sound(device_id)
+            ok, request_uuid = await self.api.async_play_sound(device_id)
+            if ok and request_uuid is not None:
+                self._sound_request_uuids[device_id] = request_uuid
+                _LOGGER.debug(
+                    "Stored Play Sound UUID for %s: %s", device_id, request_uuid
+                )
             if not ok:
                 self._note_push_transport_problem()
             # Success implies credentials worked
@@ -6042,12 +6050,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 "Suppressing stop_sound call for %s: push not ready", device_id
             )
             return False
+        request_uuid_to_use = request_uuid
+        if request_uuid_to_use is None:
+            request_uuid_to_use = self._sound_request_uuids.get(device_id)
+            if request_uuid_to_use is not None:
+                _LOGGER.debug(
+                    "Using cached Play Sound UUID for %s: %s",
+                    device_id,
+                    request_uuid_to_use,
+                )
+            else:
+                _LOGGER.warning(
+                    "Missing Play Sound UUID for %s; attempting stop without it",
+                    device_id,
+                )
+
         try:
-            ok = await self.api.async_stop_sound(device_id, request_uuid)
+            ok = await self.api.async_stop_sound(device_id, request_uuid_to_use)
             if not ok:
                 self._note_push_transport_problem()
             # Success implies credentials worked
             self._set_auth_state(failed=False)
+            if ok:
+                self._sound_request_uuids.pop(device_id, None)
             return bool(ok)
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(
