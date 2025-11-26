@@ -198,13 +198,14 @@ class _CallbackContext:
         self.data: list[dict[str, Any]] | None = None
 
 
-def _make_location_callback(  # noqa: PLR0915
+def _make_location_callback(  # noqa: PLR0915, PLR0913
     *,
     name: str,
     canonic_device_id: str,
     ctx: _CallbackContext,
     loop: asyncio.AbstractEventLoop,
     cache: TokenCache,
+    cache_provider: Callable[[], TokenCache] | None = None,
 ) -> Callable[[str, str], None]:
     """Factory that creates an FCM callback bound to a context object.
 
@@ -304,6 +305,25 @@ def _make_location_callback(  # noqa: PLR0915
 
             async def _decrypt_and_store() -> None:
                 """Asynchronous part of the callback to decrypt and store data."""
+                unregister_cache_provider: Callable[[], None] | None = None
+                if cache_provider is not None:
+                    try:
+                        nova_request_module = import_module(
+                            "custom_components.googlefindmy.NovaApi.nova_request"
+                        )
+                        register_cache_provider = cast(
+                            Callable[[Callable[[], TokenCache | None]], None],
+                            getattr(nova_request_module, "register_cache_provider"),
+                        )
+                        unregister_cache_provider = cast(
+                            Callable[[], None],
+                            getattr(nova_request_module, "unregister_cache_provider"),
+                        )
+                        register_cache_provider(cache_provider)
+                    except Exception as err:  # pragma: no cover - defensive
+                        _LOGGER.debug(
+                            "Failed to register cache provider for %s: %s", name, err
+                        )
                 try:
                     location_data: list[dict[str, Any]] = await async_decrypt_location_response_locations(
                         device_update, cache=cache
@@ -327,6 +347,16 @@ def _make_location_callback(  # noqa: PLR0915
                     ctx.data = cast(list[dict[str, Any]], [])
                     ctx.event.set()
                     return
+                finally:
+                    if unregister_cache_provider is not None:
+                        try:
+                            unregister_cache_provider()
+                        except Exception as err:  # pragma: no cover - defensive
+                            _LOGGER.debug(
+                                "Failed to unregister cache provider for %s: %s",
+                                name,
+                                err,
+                            )
 
                 if location_data:
                     _LOGGER.info(
@@ -427,6 +457,13 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         raise MissingTokenCacheError()
 
     cache_ref = cache
+    cache_provider: Callable[[], TokenCache] | None = None
+    if cache_ref is not None:
+
+        def _cache_provider() -> TokenCache:
+            return cache_ref
+
+        cache_provider = _cache_provider
 
     resolved_namespace = namespace or getattr(cache_ref, "entry_id", None)
     if not resolved_namespace:
@@ -537,6 +574,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 ctx=ctx,
                 loop=loop,
                 cache=cache_ref,
+                cache_provider=cache_provider,
             )
             fcm_token = await fcm_receiver.async_register_for_location_updates(
                 canonic_device_id, callback
