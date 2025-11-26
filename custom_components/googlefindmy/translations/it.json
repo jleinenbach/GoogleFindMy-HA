@@ -102,7 +102,9 @@
       "title": "Google Find My Device Hub",
       "entry_type": "Hub feature group",
       "initiate_flow": {
-        "title": "Add hub feature group"
+        "user": {
+          "title": "Add hub feature group"
+        }
       },
       "step": {
         "user": {
@@ -121,7 +123,9 @@
       "title": "Servizio Google Find Hub",
       "entry_type": "Service feature group",
       "initiate_flow": {
-        "title": "Add service feature group"
+        "user": {
+          "title": "Add service feature group"
+        }
       },
       "step": {
         "user": {
@@ -140,7 +144,9 @@
       "title": "Dispositivi Google Find My",
       "entry_type": "Device feature group",
       "initiate_flow": {
-        "title": "Add device feature group"
+        "user": {
+          "title": "Add device feature group"
+        }
       },
       "step": {
         "user": {
