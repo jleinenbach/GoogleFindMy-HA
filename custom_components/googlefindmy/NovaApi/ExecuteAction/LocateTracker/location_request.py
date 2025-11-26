@@ -566,21 +566,6 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         # Generate request UUID
         request_uuid = generate_random_uuid()
 
-        # Capture the current cache provider context for multi-account support
-        cache_provider = None
-        if cache:
-            # Use explicitly passed cache (preferred for multi-account isolation)
-            cache_provider = lambda: cache
-        else:
-            # Fallback to ContextVar for backward compatibility
-            try:
-                from custom_components.googlefindmy.NovaApi import nova_request
-                cache_obj = nova_request._get_cache_provider()
-                if cache_obj:
-                    cache_provider = lambda: cache_obj
-            except Exception:
-                pass
-
         # Register the callback with the shared receiver
         try:
             _LOGGER.debug("Registering FCM location updates for %s...", name)

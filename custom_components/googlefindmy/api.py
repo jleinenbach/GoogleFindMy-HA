@@ -42,6 +42,7 @@ from .const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DEFAULT_CONTRIBUTOR_MODE,
 )
+from .NovaApi import nova_request
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
     get_location_data_for_device,
 )
@@ -233,6 +234,8 @@ class _EphemeralCache:
         *,
         oauth_token: str | None,
         email: str | None,
+        fcm_credentials: dict[str, Any] | None = None,
+        aas_token: str | None = None,
         secrets_bundle: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the ephemeral cache with credentials.
@@ -252,64 +255,10 @@ class _EphemeralCache:
             self._data["fcm_credentials"] = fcm_credentials
         if isinstance(aas_token, str) and aas_token:
             self._data["aas_token"] = aas_token
-
-    async def get(self, name: str) -> Any:
-        """Get a value from the in-memory cache (TokenCache interface).
-
-        Args:
-            name: The key of the value to retrieve.
-
-        Returns:
-            The cached value, or None if not found.
-        """
-        return self._data.get(name)
-
-    async def set(self, name: str, value: Any) -> None:
-        """Set a value in the in-memory cache (TokenCache interface).
-
-        Args:
-            name: The key of the value to set.
-            value: The value to store. If None, the key is removed.
-        """
-        if value is None:
-            self._data.pop(name, None)
-        else:
-            self._data[name] = value
-
-    async def all(self) -> Dict[str, Any]:
-        """Return all cached values (TokenCache interface).
-
-        Returns:
-            Dictionary of all cached key-value pairs.
-        """
-        return dict(self._data)
-
-    async def get_or_set(self, name: str, generator: Callable[[], Awaitable[Any] | Any]) -> Any:
-        """Return existing value or compute/store it (TokenCache interface).
-
-        Args:
-            name: The key of the value to retrieve or generate.
-            generator: Callable that generates the value if not cached.
-
-        Returns:
-            The cached or newly generated value.
-        """
-        # Fast path: value already exists
-        if (existing := self._data.get(name)) is not None:
-            return existing
-
-        # Value doesn't exist - generate it
-        new_value = generator()
-        if asyncio.iscoroutine(new_value):
-            new_value = await new_value
-
-        await self.set(name, new_value)
-        return new_value
-
         if isinstance(secrets_bundle, dict):
             fcm_creds = secrets_bundle.get("fcm_credentials")
-            if fcm_creds is not None:
-                self._data["fcm_credentials"] = fcm_creds
+            if isinstance(fcm_creds, dict):
+                self._data.setdefault("fcm_credentials", fcm_creds)
                 _LOGGER.debug(
                     "_EphemeralCache: injected fcm_credentials for validation probe."
                 )
@@ -318,6 +267,39 @@ class _EphemeralCache:
                     "_EphemeralCache: secrets bundle provided without fcm_credentials;"
                     " validation may fall back to static android id."
                 )
+
+    async def get(self, name: str) -> Any:
+        """Get a value from the in-memory cache (TokenCache interface)."""
+
+        return self._data.get(name)
+
+    async def set(self, name: str, value: Any) -> None:
+        """Set a value in the in-memory cache (TokenCache interface)."""
+
+        if value is None:
+            self._data.pop(name, None)
+        else:
+            self._data[name] = value
+
+    async def all(self) -> dict[str, Any]:
+        """Return all cached values (TokenCache interface)."""
+
+        return dict(self._data)
+
+    async def get_or_set(
+        self, name: str, generator: Callable[[], Awaitable[Any] | Any]
+    ) -> Any:
+        """Return existing value or compute/store it (TokenCache interface)."""
+
+        if (existing := self._data.get(name)) is not None:
+            return existing
+
+        new_value = generator()
+        if asyncio.iscoroutine(new_value):
+            new_value = await new_value
+
+        await self.set(name, new_value)
+        return new_value
 
     async def async_get_cached_value(self, key: str) -> Any:
         """Get a value from the in-memory cache (CacheProtocol interface).
@@ -338,37 +320,6 @@ class _EphemeralCache:
             value: The value to store. If None, the key is removed.
         """
         await self.set(key, value)
-
-    async def get(self, name: str) -> Any:
-        """Return a cached value (TokenCache compatibility alias)."""
-
-        return await self.async_get_cached_value(name)
-
-    async def set(self, name: str, value: Any) -> None:
-        """Store a value in the cache (TokenCache compatibility alias)."""
-
-        await self.async_set_cached_value(name, value)
-
-    async def get_or_set(
-        self, name: str, generator: Callable[[], Awaitable[Any] | Any]
-    ) -> Any:
-        """Return cached value or compute/store it via the provided generator."""
-
-        existing = await self.get(name)
-        if existing is not None:
-            return existing
-
-        result = generator()
-        if asyncio.iscoroutine(result):
-            result = await result
-
-        await self.set(name, result)
-        return result
-
-    async def all(self) -> dict[str, Any]:
-        """Return a shallow copy of all cached values."""
-
-        return dict(self._data)
 
 
 # ----------------------------- API class ------------------------------------
@@ -995,15 +946,10 @@ class GoogleFindMyAPI:
             Returns an empty dictionary on failure.
         """
         # Register cache provider for multi-entry support
-        from .NovaApi import nova_request
-        nova_request.register_cache_provider(lambda: self._cache)
+        def _cache_provider() -> CacheProtocol | None:
+            return self._cache
 
-        # Get username from cache for multi-account context
-        username = None
-        try:
-            username = await self._cache.async_get_cached_value(username_string)
-        except Exception:
-            pass
+        nova_request.register_cache_provider(_cache_provider)
 
         try:
             _LOGGER.info(

@@ -34,6 +34,11 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+try:
+    from homeassistant.const import EntityCategory
+except ImportError:  # Home Assistant <2025.11
+    from homeassistant.helpers.entity import EntityCategory
+
 from . import EntityRecoveryManager
 from .const import (
     DOMAIN,

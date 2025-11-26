@@ -703,15 +703,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._push_ready_memo: bool | None = None
         self._push_cooldown_until: float = 0.0
 
-        # Play Sound tracking (request UUID cache per device)
-        self._sound_request_uuids: dict[str, str] = {}
-
         # Manual locate gating (UX + server protection)
         self._locate_inflight: set[str] = set()  # device_id -> in-flight flag
         self._locate_cooldown_until: dict[str, float] = {}  # device_id -> mono deadline
 
         # Play Sound UUID tracking (needed to properly cancel sound requests)
-        self._sound_request_uuids: Dict[str, str] = {}         # device_id -> request_uuid
+        self._sound_request_uuids: dict[str, str] = {}         # device_id -> request_uuid
 
         # Per-device poll cooldowns after owner/crowdsourced reports.
         self._device_poll_cooldown_until: dict[str, float] = {}
@@ -4424,8 +4421,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # Cold start detection: force immediate poll on first install when devices have no location data
             is_cold_start = (
                 self._last_poll_mono == 0.0
-                and all_devices
-                and not any(self._device_location_data.get(d["id"]) for d in all_devices)
+                and filtered_devices
+                and not any(
+                    self._device_location_data.get(dev["id"])
+                    for dev in filtered_devices
+                )
             )
 
             due = (now_mono - self._last_poll_mono) >= effective_interval or is_cold_start

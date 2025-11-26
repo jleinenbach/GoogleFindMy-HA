@@ -46,7 +46,7 @@ from typing import Any
 import gpsoauth
 
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
-from .token_cache import TokenCache
+from .token_cache import TokenCache, async_get_all_cached_values
 from .username_provider import username_string
 
 _LOGGER = logging.getLogger(__name__)
@@ -130,6 +130,10 @@ def _is_non_retryable_auth(err: Exception) -> bool:
 
 def _coerce_android_id(value: object, source: str) -> int | None:
     """Normalize cached or credential Android IDs into integers."""
+
+    if isinstance(value, bool):
+        _LOGGER.debug("android_id value from %s is boolean; ignoring", source)
+        return None
 
     if isinstance(value, int):
         return value
