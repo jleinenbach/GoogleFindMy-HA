@@ -32,6 +32,7 @@ This module aims to be self-documenting. All public functions include precise do
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -106,15 +107,9 @@ from homeassistant.exceptions import (
     HomeAssistantError,
 )
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import (
-    device_registry as dr,
-)
-from homeassistant.helpers import (
-    entity_registry as er,
-)
-from homeassistant.helpers import (
-    issue_registry as ir,
-)
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later
 
@@ -7069,6 +7064,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             entry.entry_id,
         )
 
+    await _async_normalize_device_names(hass)
+    await _async_refresh_device_urls(hass)
+
     return True
 
 
@@ -7088,6 +7086,24 @@ async def _async_save_secrets_data(
     if google_email:
         enhanced_data[username_string] = google_email
 
+    owner_key = secrets_data.get("owner_key")
+    shared_key = secrets_data.get("shared_key")
+    if google_email:
+        email_key = str(google_email)
+        try:
+            if owner_key is not None:
+                await cache.async_set_cached_value(f"owner_key_{email_key}", owner_key)
+            if shared_key is not None:
+                await cache.async_set_cached_value(
+                    f"shared_key_{email_key}", shared_key
+                )
+        except (OSError, TypeError) as err:
+            _LOGGER.warning(
+                "Failed to save encrypted key bundle to persistent cache for %s: %s",
+                email_key,
+                err,
+            )
+
     for key, value in enhanced_data.items():
         try:
             if isinstance(value, (str, int, float, bool, dict, list)) or value is None:
@@ -7096,6 +7112,100 @@ async def _async_save_secrets_data(
                 await cache.async_set_cached_value(key, json.dumps(value))
         except (OSError, TypeError) as err:
             _LOGGER.warning("Failed to save '%s' to persistent cache: %s", key, err)
+
+
+async def _async_normalize_device_names(hass: HomeAssistant) -> None:
+    """One-time normalization: strip legacy 'Find My - ' prefix from device names."""
+
+    try:
+        dev_reg = dr.async_get(hass)
+        updated = 0
+        for device in list(dev_reg.devices.values()):
+            try:
+                if not any(
+                    len(ident) == 2 and ident[0] == DOMAIN for ident in device.identifiers
+                ):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if device.name_by_user:
+                continue
+            name = device.name or ""
+            if name.startswith("Find My - "):
+                new_name = name[len("Find My - ") :].strip()
+                if new_name and new_name != name:
+                    dev_reg.async_update_device(device_id=device.id, name=new_name)
+                    updated += 1
+        if updated:
+            _LOGGER.info(
+                'Normalized %d device name(s) by removing legacy "Find My - " prefix',
+                updated,
+            )
+    except Exception as err:  # pragma: no cover - best-effort normalization
+        _LOGGER.debug("Device name normalization skipped due to: %s", err)
+
+
+async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
+    """Refresh configuration URLs for all Google Find My devices."""
+
+    try:
+        from homeassistant.helpers.network import get_url
+
+        base_url = get_url(
+            hass,
+            prefer_external=True,
+            allow_cloud=True,
+            allow_external=True,
+            allow_internal=True,
+        )
+    except Exception as err:  # pragma: no cover - network helper availability
+        _LOGGER.debug("Could not determine base URL for device refresh: %s", err)
+        return
+
+    ha_uuid = str(hass.data.get("core.uuid", "ha"))
+    token_exp = DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if entries:
+        token_exp = _opt(entries[0], OPT_MAP_VIEW_TOKEN_EXPIRATION, token_exp)
+
+    if token_exp:
+        week = str(int(time.time() // 604800))
+        auth_token = hashlib.md5(f"{ha_uuid}:{week}".encode()).hexdigest()[:16]
+    else:
+        auth_token = hashlib.md5(f"{ha_uuid}:static".encode()).hexdigest()[:16]
+
+    dev_reg = dr.async_get(hass)
+    updated_count = 0
+    for device in dev_reg.devices.values():
+        try:
+            if any(
+                len(identifier) >= 1 and identifier[0] == DOMAIN
+                for identifier in device.identifiers
+            ):
+                dev_id = next(
+                    (
+                        ident[1]
+                        for ident in device.identifiers
+                        if len(ident) == 2 and ident[0] == DOMAIN
+                    ),
+                    None,
+                )
+                if dev_id:
+                    if ":" in dev_id:
+                        dev_id = dev_id.split(":", 1)[1]
+
+                    new_config_url = (
+                        f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
+                    )
+                    dev_reg.async_update_device(
+                        device_id=device.id, configuration_url=new_config_url
+                    )
+                    updated_count += 1
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    if updated_count:
+        _LOGGER.debug("Refreshed URLs for %d Google Find My device(s)", updated_count)
 
 
 async def _async_seed_manual_credentials(
@@ -7280,31 +7390,6 @@ async def async_remove_config_entry_device(
 
 
 # ------------------------------- Misc helpers ---------------------------------
-
-
-async def _async_normalize_device_names(hass: HomeAssistant) -> None:
-    """One-time normalization: strip legacy 'Find My - ' prefix from device names."""
-    try:
-        dev_reg = dr.async_get(hass)
-        updated = 0
-        for device in list(dev_reg.devices.values()):
-            if not any(domain == DOMAIN for domain, _ in device.identifiers):
-                continue
-            if device.name_by_user:
-                continue  # user-chosen names stay untouched
-            name = device.name or ""
-            if name.startswith("Find My - "):
-                new_name = name[len("Find My - ") :].strip()
-                if new_name and new_name != name:
-                    dev_reg.async_update_device(device_id=device.id, name=new_name)
-                    updated += 1
-        if updated:
-            _LOGGER.info(
-                'Normalized %d device name(s) by removing legacy "Find My - " prefix',
-                updated,
-            )
-    except Exception as err:
-        _LOGGER.debug("Device name normalization skipped due to: %s", err)
 
 
 async def _async_unload_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
