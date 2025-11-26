@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 
@@ -46,7 +47,7 @@ except ImportError:  # pragma: no cover - provide a minimal fallback for tests
 from . import config_flow as config_flow_module
 from .const import CONF_GOOGLE_EMAIL, CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, DOMAIN
 from .email import normalize_email
-from .ha_typing import callback
+from .ha_typing import CloudDiscoveryRuntime, callback
 
 cf = cast(Any, config_flow_module)
 
@@ -127,11 +128,31 @@ _DEFAULT_SECRETS_SCAN_INTERVAL = timedelta(seconds=30)
 class _CloudDiscoveryResults(list[dict[str, Any]]):
     """Results container that triggers config flows on append."""
 
-    __slots__ = ("_hass",)
+    __slots__ = ("_entry", "_hass", "_runtime")
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry | None = None,
+        *,
+        runtime: CloudDiscoveryRuntime | None = None,
+    ) -> None:
         super().__init__()
         self._hass = hass
+        self._entry = entry
+        self._runtime = runtime
+
+    def bind(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry | None,
+        runtime: CloudDiscoveryRuntime,
+    ) -> None:
+        """Rebind the backing hass, entry, and runtime references."""
+
+        self._hass = hass
+        self._entry = entry
+        self._runtime = runtime
 
     def append(
         self,
@@ -162,6 +183,7 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
             discovery_stable_key=stable_key if isinstance(stable_key, str) else None,
             source=source if isinstance(source, str) else None,
             title=title if isinstance(title, str) else None,
+            entry=self._entry,
         )
         self._schedule(coro)
 
@@ -176,6 +198,7 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
             except TypeError:
                 task = create_task(coro)
             if isinstance(task, asyncio.Future):
+                self._register_handle(task)
                 task.add_done_callback(_log_task_exception)
             elif hasattr(task, "add_done_callback"):
                 try:
@@ -194,39 +217,70 @@ class _CloudDiscoveryResults(list[dict[str, Any]]):
             )
             return
 
+        self._register_handle(task)
         task.add_done_callback(_log_task_exception)
 
+    def _register_handle(self, handle: asyncio.Future[Any]) -> None:
+        if self._runtime is None:
+            return
+        try:
+            self._runtime.retry_handles.add(handle)
+        except Exception:  # noqa: BLE001 - defensive best effort
+            _LOGGER.debug("Unable to record discovery task handle", exc_info=True)
+            return
 
-def _cloud_discovery_runtime(hass: HomeAssistant) -> dict[str, Any]:
+        try:
+            handle.add_done_callback(self._runtime.retry_handles.discard)
+        except Exception:  # noqa: BLE001 - defensive best effort
+            _LOGGER.debug("Unable to attach discovery handle cleanup", exc_info=True)
+
+
+def _cloud_discovery_runtime(
+    hass: HomeAssistant, entry: ConfigEntry | None = None
+) -> CloudDiscoveryRuntime:
     """Return the mutable runtime bucket tracking cloud discovery state."""
 
-    bucket = hass.data.setdefault(DOMAIN, {})
-    runtime = bucket.get("cloud_discovery")
-    if not isinstance(runtime, dict):
-        runtime = {}
-        bucket["cloud_discovery"] = runtime
-
-    lock = runtime.get("lock")
-    if not getattr(lock, "acquire", None):
-        lock = asyncio.Lock()
-        runtime["lock"] = lock
-
-    active = runtime.get("active_keys")
-    if not isinstance(active, set):
-        active = set()
-        runtime["active_keys"] = active
-
-    results = runtime.get("results")
-    if isinstance(results, _CloudDiscoveryResults):
-        if results._hass is not hass:
-            replacement = _CloudDiscoveryResults(hass)
-            replacement.extend(results)
-            runtime["results"] = replacement
+    runtime_owner: Any | None = None
+    runtime_entry: ConfigEntry | None = entry
+    if runtime_entry is not None:
+        runtime_owner = getattr(runtime_entry, "runtime_data", None)
     else:
-        replacement = _CloudDiscoveryResults(hass)
+        manager = getattr(hass, "config_entries", None)
+        async_entries = getattr(manager, "async_entries", None)
+        if callable(async_entries):
+            try:
+                for candidate in async_entries(DOMAIN):
+                    runtime_candidate = getattr(candidate, "runtime_data", None)
+                    if runtime_candidate is None:
+                        continue
+                    runtime_entry = candidate
+                    runtime_owner = runtime_candidate
+                    break
+            except Exception:  # noqa: BLE001 - defensive best effort
+                _LOGGER.debug("Cloud discovery runtime lookup failed", exc_info=True)
+
+    if runtime_owner is None:
+        raise RuntimeError("Cloud discovery runtime requires a config entry")
+
+    runtime = getattr(runtime_owner, "cloud_discovery", None)
+    if not isinstance(runtime, CloudDiscoveryRuntime):
+        runtime = CloudDiscoveryRuntime()
+        setattr(runtime_owner, "cloud_discovery", runtime)
+
+    if not isinstance(runtime.lock, asyncio.Lock):
+        runtime.lock = asyncio.Lock()
+
+    if not isinstance(runtime.active_keys, set):
+        runtime.active_keys = set()
+
+    results = runtime.results
+    if isinstance(results, _CloudDiscoveryResults):
+        results.bind(hass, runtime_entry, runtime)
+    else:
+        replacement = _CloudDiscoveryResults(hass, runtime_entry, runtime=runtime)
         if isinstance(results, list):
             replacement.extend(results)
-        runtime["results"] = replacement
+        runtime.results = replacement
 
     return runtime
 
@@ -352,10 +406,11 @@ async def _trigger_cloud_discovery(
     discovery_stable_key: str | None = None,
     source: str | None = None,
     title: str | None = None,
+    entry: ConfigEntry | None = None,
 ) -> bool:
     """Create or resume a config flow based on cloud-scan discovery data."""
 
-    runtime = _cloud_discovery_runtime(hass)
+    runtime = _cloud_discovery_runtime(hass, entry)
     ns = discovery_ns or CLOUD_DISCOVERY_NAMESPACE
     secrets_copy = dict(secrets_bundle) if isinstance(secrets_bundle, Mapping) else None
     stable_key = discovery_stable_key or _cloud_discovery_stable_key(
@@ -374,23 +429,20 @@ async def _trigger_cloud_discovery(
         source=source,
     )
 
-    lock = runtime["lock"]
+    lock = runtime.lock
     async with lock:
-        results_list = runtime["results"]
-        if isinstance(results_list, _CloudDiscoveryResults):
-            results_list.append(payload, trigger=False)
-        else:
-            try:
-                results_list.append(dict(payload))
-            except Exception:  # noqa: BLE001 - defensive
-                pass
-        if stable_key in runtime["active_keys"]:
+        results_list = runtime.results
+        if not isinstance(results_list, _CloudDiscoveryResults):
+            return False
+
+        results_list.append(payload, trigger=False)
+        if stable_key in runtime.active_keys:
             _LOGGER.debug(
                 "Cloud discovery request deduplicated for %s (flow already active)",
                 _redact_account_for_log(email, stable_key),
             )
             return False
-        runtime["active_keys"].add(stable_key)
+        runtime.active_keys.add(stable_key)
 
     triggered = False
     try:
@@ -459,7 +511,7 @@ async def _trigger_cloud_discovery(
         return triggered
     finally:
         async with lock:
-            runtime["active_keys"].discard(stable_key)
+            runtime.active_keys.discard(stable_key)
 
 
 @dataclass(slots=True)
@@ -581,8 +633,15 @@ class SecretsJSONWatcher:
                 source=source,
             )
 
-            runtime = _cloud_discovery_runtime(self._hass)
-            results_list = runtime["results"]
+            runtime = _cloud_discovery_runtime(self._hass, existing_entry)
+            results_list = runtime.results
+
+            if not isinstance(results_list, _CloudDiscoveryResults):
+                _LOGGER.debug(
+                    "Secrets discovery results missing runtime container for %s",
+                    _redact_account_for_log(result.email, result.stable_key),
+                )
+                return
 
             try:
                 results_list.append(payload)

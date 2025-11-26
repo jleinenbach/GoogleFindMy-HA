@@ -193,7 +193,7 @@ from .const import (
     CONFIG_ENTRY_VERSION as CONFIG_ENTRY_VERSION,
 )
 from .email import normalize_email, unique_account_id
-from .ha_typing import callback
+from .ha_typing import CloudDiscoveryRuntime, callback
 
 # Shared FCM provider (HA-managed singleton)
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -255,7 +255,9 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-CloudDiscoveryRuntimeCallable = Callable[[HomeAssistant], Mapping[str, Any]]
+CloudDiscoveryRuntimeCallable = Callable[
+    [HomeAssistant, ConfigEntry | None], CloudDiscoveryRuntime
+]
 TriggerCloudDiscoveryCallable = Callable[..., Awaitable[Any]]
 RedactAccountForLogCallable = Callable[..., str]
 if TYPE_CHECKING:
@@ -476,11 +478,13 @@ def _ensure_runtime_imports() -> None:
     _RUNTIME_IMPORTS_LOADED = True
 
 
-def _cloud_discovery_runtime(hass: HomeAssistant) -> Mapping[str, Any]:
+def _cloud_discovery_runtime(
+    hass: HomeAssistant, entry: ConfigEntry | None = None
+) -> CloudDiscoveryRuntime:
     """Return the cached discovery runtime, loading dependencies if needed."""
 
     _ensure_runtime_imports()
-    return _cloud_discovery_runtime_callable(hass)
+    return _cloud_discovery_runtime_callable(hass, entry)
 
 
 async def _trigger_cloud_discovery(*args: Any, **kwargs: Any) -> Any:
@@ -2166,6 +2170,7 @@ class RuntimeData:
     fcm_receiver: FcmReceiverHAType | None = None
     google_home_filter: GoogleHomeFilterProtocol | None = None
     entity_recovery_manager: EntityRecoveryManager | None = None
+    cloud_discovery: CloudDiscoveryRuntime | None = None
     subentry_setup_history: set[str] = field(default_factory=set)
     legacy_forwarded_platforms: set[str] | None = None
     legacy_forward_notice: bool = False
@@ -2215,6 +2220,47 @@ def _safe_setattr(target: object, name: str, value: Any) -> None:
 
     with suppress(AttributeError, TypeError):
         setattr(target, name, value)
+
+
+def _cleanup_cloud_discovery_runtime(runtime_owner: Any) -> None:
+    """Reset cloud-discovery bookkeeping stored on ``runtime_owner``."""
+
+    container = getattr(runtime_owner, "cloud_discovery", None)
+    if not isinstance(container, CloudDiscoveryRuntime):
+        return
+
+    while container.dispatcher_unsubscribers:
+        unsub = container.dispatcher_unsubscribers.pop()
+        try:
+            unsub()
+        except Exception:  # noqa: BLE001 - defensive best effort
+            _LOGGER.debug("Cloud discovery dispatcher unsubscribe failed", exc_info=True)
+
+    while container.retry_handles:
+        handle = container.retry_handles.pop()
+        if inspect.iscoroutine(handle):
+            handle.close()
+            continue
+        if isinstance(handle, asyncio.Task):
+            handle.cancel()
+            continue
+        cancel = getattr(handle, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 - defensive best effort
+                _LOGGER.debug("Cloud discovery handle cancel failed", exc_info=True)
+
+    results = container.results
+    if isinstance(results, list):
+        try:
+            results.clear()
+        except Exception:  # noqa: BLE001 - defensive best effort
+            _LOGGER.debug("Cloud discovery results clear failed", exc_info=True)
+
+    container.active_keys.clear()
+    container.results = None
+    container.lock = asyncio.Lock()
 
 class GoogleFindMyDomainData(TypedDict, total=False):
     """Typed container describing objects stored under ``hass.data[DOMAIN]``."""
@@ -6727,9 +6773,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         entity_recovery_manager=entity_recovery_manager,
         google_home_filter=google_home_filter_instance,
     )
+    runtime_data.cloud_discovery = CloudDiscoveryRuntime()
     entry.runtime_data = runtime_data
     entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
     entries_bucket[entry.entry_id] = runtime_data
+
+    _cloud_discovery_runtime(hass, entry)
 
     pending_reconfigure_refresh = _ensure_pending_reconfigure_refresh(domain_bucket)
     recent_reconfigure_markers = _ensure_recent_reconfigure_markers(domain_bucket)
@@ -7324,6 +7373,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 cancel()
         runtime_data.subentry_retry_handles.clear()
         runtime_data.subentry_retry_attempts.clear()
+        _cleanup_cloud_discovery_runtime(runtime_data)
 
     subentries = _collect_entry_subentries(entry)
 
@@ -7660,6 +7710,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
         token_cache = fallback_runtime.token_cache
         if google_home_filter is None:
             google_home_filter = fallback_runtime.google_home_filter
+
+    if isinstance(runtime, RuntimeData):
+        _cleanup_cloud_discovery_runtime(runtime)
 
     if coordinator is not None:
         try:

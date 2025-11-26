@@ -12,16 +12,23 @@ from typing import Any
 
 import pytest
 
+import custom_components.googlefindmy as integration
 from custom_components.googlefindmy import config_flow, discovery
 from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.ha_typing import CloudDiscoveryRuntime
+from tests.helpers import config_entry_with_cloud_runtime
 
 
 class _FakeHass:
     """Minimal Home Assistant stub for discovery tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, entry: Any | None = None) -> None:
         self.data: dict[str, Any] = {}
-        self.config_entries = SimpleNamespace(async_entries=lambda domain: [])
+        runtime_owner = entry or config_entry_with_cloud_runtime()
+        self._entry = runtime_owner
+        self.config_entries = SimpleNamespace(
+            async_entries=lambda domain: [runtime_owner] if domain == DOMAIN else []
+        )
         self.config = SimpleNamespace(
             language="en", components=set(), top_level_components=set()
         )
@@ -110,7 +117,10 @@ def test_secrets_watcher_updates_existing_entry(
         return True
 
     def _fake_find_entry(_hass, email: str):
-        return SimpleNamespace(data={config_flow.CONF_GOOGLE_EMAIL: email})
+        return config_entry_with_cloud_runtime(
+            entry_id="entry-id",
+            data={config_flow.CONF_GOOGLE_EMAIL: email},
+        )
 
     monkeypatch.setattr(discovery, "_trigger_cloud_discovery", _fake_trigger)
     monkeypatch.setattr(
@@ -181,3 +191,54 @@ def test_cloud_discovery_results_suppress_task_exceptions(
         "Suppressed cloud discovery task exception" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_cloud_discovery_runtime_rebinds_on_reload() -> None:
+    """Reloading should rebind the runtime results to the new hass."""
+
+    entry = SimpleNamespace(
+        entry_id="entry-id",
+        runtime_data=SimpleNamespace(cloud_discovery=CloudDiscoveryRuntime()),
+    )
+    hass = _FakeHass(entry)
+    runtime = discovery._cloud_discovery_runtime(hass, entry)
+
+    runtime.results.append({"email": "persist@example.com"}, trigger=False)
+
+    new_hass = _FakeHass(entry)
+    rebound = discovery._cloud_discovery_runtime(new_hass, entry)
+
+    assert rebound is runtime
+    assert rebound.results._hass is new_hass
+    assert len(rebound.results) == 1
+
+
+def test_cleanup_cloud_discovery_runtime_cancels_handles() -> None:
+    """Cleanup should clear runtime handles and unsubscribe listeners."""
+
+    runtime_container = CloudDiscoveryRuntime()
+    runtime_container.active_keys.update({"a", "b"})
+    runtime_container.results = discovery._CloudDiscoveryResults(_FakeHass())
+
+    unsub_called: list[str] = []
+    runtime_container.dispatcher_unsubscribers.append(
+        lambda: unsub_called.append("unsub")
+    )
+
+    cancelled: list[str] = []
+
+    class _Handle:
+        def cancel(self) -> None:  # type: ignore[no-untyped-def]
+            cancelled.append("cancel")
+
+    runtime_container.retry_handles.add(_Handle())
+
+    runtime_data = SimpleNamespace(cloud_discovery=runtime_container)
+
+    integration._cleanup_cloud_discovery_runtime(runtime_data)
+
+    assert unsub_called == ["unsub"]
+    assert cancelled == ["cancel"]
+    assert not runtime_container.active_keys
+    assert not runtime_container.retry_handles
+    assert runtime_container.results is None

@@ -15,6 +15,7 @@ import pytest
 
 from custom_components.googlefindmy import config_flow, discovery
 from custom_components.googlefindmy.const import DOMAIN
+from tests.helpers import config_entry_with_cloud_runtime
 from tests.helpers.config_flow import (
     config_entries_flow_stub,
     prepare_flow_hass_config_entries,
@@ -30,6 +31,7 @@ def _make_hass() -> SimpleNamespace:
     """Return a minimal hass stub suitable for discovery tests."""
 
     hass = SimpleNamespace(data={})
+    entry = config_entry_with_cloud_runtime()
     prepare_flow_hass_config_entries(
         hass,
         lambda: config_entries_flow_stub(
@@ -39,6 +41,11 @@ def _make_hass() -> SimpleNamespace:
             }
         ),
     )
+    hass.config_entries.async_entries = (
+        lambda domain: [entry] if domain == DOMAIN else []
+    )
+    hass.config_entries.async_get_entry = lambda entry_id: entry if entry_id == entry.entry_id else None
+    hass._entry = entry
     return hass
 
 
@@ -85,8 +92,8 @@ def test_trigger_cloud_discovery_uses_helper(
     assert data["discovery_stable_key"] == "email:user@example.com"
     assert discovery_key is not None
 
-    runtime = integration._cloud_discovery_runtime(hass)
-    assert runtime["results"], "discovery payload should be recorded"
+    runtime = integration._cloud_discovery_runtime(hass, hass._entry)
+    assert runtime.results, "discovery payload should be recorded"
 
     assert any(
         "use***@example.com" in record.getMessage()
@@ -334,8 +341,8 @@ def test_results_append_triggers_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     helper = AsyncMock(return_value=None)
     monkeypatch.setattr(config_flow, "async_create_discovery_flow", helper)
 
-    runtime = integration._cloud_discovery_runtime(hass)
-    results = runtime["results"]
+    runtime = integration._cloud_discovery_runtime(hass, hass._entry)
+    results = runtime.results
     results.append({"email": "append@example.com", "token": "aas_et/APP"})
     assert scheduled, "append should schedule a discovery coroutine"
 
@@ -387,7 +394,7 @@ def test_results_append_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     async def _exercise() -> None:
-        results = integration._cloud_discovery_runtime(hass)["results"]
+        results = integration._cloud_discovery_runtime(hass, hass._entry).results
 
         results.append(payload)
         results.append(payload)
