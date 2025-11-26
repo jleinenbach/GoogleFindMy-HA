@@ -21,6 +21,7 @@ from custom_components.googlefindmy.const import (
     DOMAIN,
     service_device_identifier,
 )
+from custom_components.googlefindmy.ha_typing import CloudDiscoveryRuntime
 
 from .config_flow import attach_config_entries_flow_manager
 
@@ -38,6 +39,7 @@ __all__ = [
     "runtime_data_with_subentries",
     "config_entry_with_subentries",
     "config_entry_with_runtime_managed_subentries",
+    "config_entry_with_cloud_runtime",
     "resolve_config_entry_lookup",
     "deferred_subentry_entry_id_assignment",
     "service_device_stub",
@@ -692,6 +694,36 @@ def config_entry_with_runtime_managed_subentries(
             mapping[str(identifier)] = subentry
     entry.runtime_data = runtime_data_with_subentries(mapping)
     return entry
+
+
+def config_entry_with_cloud_runtime(
+    *,
+    entry_id: str = "entry-id",
+    domain: str = DOMAIN,
+    state: ConfigEntryState = ConfigEntryState.NOT_LOADED,
+    runtime_data: Any | None = None,
+    data: Mapping[str, Any] | None = None,
+    entry: Any | None = None,
+) -> Any:
+    """Create an entry with a populated cloud discovery runtime container."""
+
+    runtime_container = runtime_data or SimpleNamespace()
+    cloud_container = getattr(runtime_container, "cloud_discovery", None)
+    if not isinstance(cloud_container, CloudDiscoveryRuntime):
+        cloud_container = CloudDiscoveryRuntime()
+    runtime_container.cloud_discovery = cloud_container
+
+    cloud_entry = entry or FakeConfigEntry(
+        entry_id=entry_id,
+        domain=domain,
+        state=state,
+    )
+    _assign_if_present(cloud_entry, "entry_id", entry_id)
+    _assign_if_present(cloud_entry, "domain", domain)
+    _assign_if_present(cloud_entry, "state", state)
+    _assign_if_present(cloud_entry, "data", data)
+    cloud_entry.runtime_data = runtime_container
+    return cloud_entry
 
 
 @dataclass(slots=True)
