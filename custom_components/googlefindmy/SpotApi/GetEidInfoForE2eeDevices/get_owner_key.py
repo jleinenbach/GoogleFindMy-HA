@@ -58,6 +58,8 @@ from custom_components.googlefindmy.typing_utils import (
 
 _LOGGER = logging.getLogger(__name__)
 
+_USERNAME_REDACTION_MIN_LENGTH = 13
+
 # Cache key base for owner keys. We migrate from legacy "owner_key" to per-user keys.
 _OWNER_KEY_CACHE_PREFIX = "owner_key"
 _OWNER_KEY_LENGTH = 32
@@ -191,7 +193,11 @@ async def _retrieve_owner_key(
         "Retrieved owner key (version=%s, len=%s) for user=%s",
         owner_key_version,
         len(owner_key),
-        username[:3] + "***" + username[-10:] if len(username) > 13 else "***",  # Redact email for privacy
+        (
+            f"{username[:3]}***{username[-10:]}"
+            if len(username) > _USERNAME_REDACTION_MIN_LENGTH
+            else "***"
+        ),  # Redact email for privacy
     )
 
     return bytes(owner_key).hex()

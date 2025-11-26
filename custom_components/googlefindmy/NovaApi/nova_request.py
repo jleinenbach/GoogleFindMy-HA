@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import binascii
+import contextvars
 import logging
 import random
 import re
@@ -78,35 +79,6 @@ if not _BS4_AVAILABLE:
     _LOGGER.debug(
         "BeautifulSoup4 not installed, error response beautification disabled."
     )
-
-
-def register_cache_provider(provider: Callable[[], TokenCache | None]) -> None:
-    """Register a callable that returns the active TokenCache.
-
-    Background decryptors rely on this provider to resolve credentials in
-    contexts where explicit cache wiring is not available.
-    """
-
-    _STATE["cache_provider"] = provider
-
-
-def unregister_cache_provider() -> None:
-    """Clear the registered cache provider."""
-
-    _STATE["cache_provider"] = None
-
-
-def resolve_cache_from_provider() -> TokenCache | None:
-    """Return the cache supplied by the registered provider, if any."""
-
-    provider: Callable[[], TokenCache | None] | None = _STATE.get("cache_provider")
-    if provider is None:
-        return None
-    try:
-        return provider()
-    except Exception as exc:  # pragma: no cover - defensive guard
-        _LOGGER.warning("Cache provider callable failed: %s", exc)
-        return None
 
 # --- Retry constants ---
 NOVA_MAX_RETRIES = 6
@@ -246,11 +218,11 @@ def unregister_hass() -> None:
 
 
 # Cache provider hook for multi-entry support using contextvars for async safety
-_CACHE_PROVIDER: contextvars.ContextVar[Callable[[], any] | None] = contextvars.ContextVar(
-    '_cache_provider', default=None
+_CACHE_PROVIDER: contextvars.ContextVar[Callable[[], Any] | None] = contextvars.ContextVar(
+    "_cache_provider", default=None
 )
 
-def register_cache_provider(provider: Callable[[], any]) -> None:
+def register_cache_provider(provider: Callable[[], Any]) -> None:
     """Register a callable that returns the entry-specific cache (context-local).
 
     Args:
@@ -260,28 +232,38 @@ def register_cache_provider(provider: Callable[[], any]) -> None:
     instead of relying on the global cache facade. Uses contextvars to ensure
     concurrent async requests don't interfere with each other.
     """
+    _STATE["cache_provider"] = provider
     _CACHE_PROVIDER.set(provider)
 
 def unregister_cache_provider() -> None:
     """Unregister the cache provider for the current context."""
+    _STATE["cache_provider"] = None
     _CACHE_PROVIDER.set(None)
 
-def _get_cache_provider():
+
+def resolve_cache_from_provider() -> TokenCache | None:
+    """Return the cache supplied by the registered provider, if any."""
+
+    provider: Callable[[], TokenCache | None] | None = _CACHE_PROVIDER.get()
+    if provider is None:
+        provider = cast(Callable[[], TokenCache | None] | None, _STATE.get("cache_provider"))
+    if provider is None:
+        return None
+    try:
+        cache = provider()
+        if cache is not None and getattr(cache, "_closed", False):
+            return None
+        return cache
+    except Exception as exc:  # pragma: no cover - defensive guard
+        _LOGGER.warning("Cache provider callable failed: %s", exc)
+        return None
+
+def _get_cache_provider() -> TokenCache | None:
     """Get the registered cache provider for the current context or None.
 
     Returns None if no provider is registered or if the provider's cache is closed.
     """
-    provider = _CACHE_PROVIDER.get()
-    if not provider:
-        return None
-    try:
-        cache = provider()
-        # Check if cache is closed (has _closed attribute that's True)
-        if cache and getattr(cache, '_closed', False):
-            return None
-        return cache
-    except Exception:  # noqa: BLE001
-        return None
+    return resolve_cache_from_provider()
 
 # --- Refresh Locks ---
 _async_refresh_lock: asyncio.Lock | None = None

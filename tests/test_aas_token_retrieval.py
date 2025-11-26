@@ -138,6 +138,29 @@ def test_async_get_aas_token_short_circuits_for_cached_master(
     assert asyncio.run(cache.get(DATA_AAS_TOKEN)) == "aas_et/MASTER_TOKEN"
 
 
+def test_get_or_generate_android_id_ignores_boolean_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boolean android_id placeholders should be ignored and replaced."""
+
+    cache = _DummyCache()
+
+    async def _prepare() -> None:
+        await cache.set("android_id_user@example.com", True)
+
+    asyncio.run(_prepare())
+    monkeypatch.setattr(aas_token_retrieval.random, "randint", lambda *_: 0xABCDEF12)
+
+    android_id = asyncio.run(
+        aas_token_retrieval._get_or_generate_android_id(
+            "user@example.com", cache=cache
+        )
+    )
+
+    assert android_id == 0xABCDEF12
+    assert cache._data["android_id_user@example.com"] == 0xABCDEF12
+
+
 def test_request_token_uses_supplied_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """The synchronous request_token helper must forward the provided cache."""
 
