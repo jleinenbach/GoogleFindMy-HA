@@ -1207,6 +1207,20 @@ def _extract_oauth_candidates_from_secrets(
         pass
 
     return cands
+
+
+def _extract_fcm_credentials_from_secrets(
+    data: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Extract fcm_credentials from secrets.json if present."""
+
+    try:
+        fcm_creds = data.get("fcm_credentials")
+        if isinstance(fcm_creds, dict):
+            return fcm_creds
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 # ---------------------------
 # API probing helpers (signature-robust)
 # ---------------------------
@@ -1677,6 +1691,11 @@ async def _ingest_discovery_credentials(
     secrets_bundle = (
         dict(discovery.secrets_bundle) if discovery.secrets_bundle is not None else None
     )
+    fcm_credentials = (
+        _extract_fcm_credentials_from_secrets(secrets_bundle)
+        if secrets_bundle is not None
+        else None
+    )
 
     hass = cast(HomeAssistant, getattr(flow, "hass", None))
     if hass is None:
@@ -1717,8 +1736,10 @@ async def _ingest_discovery_credentials(
     }
     if secrets_bundle:
         auth_data[DATA_SECRET_BUNDLE] = secrets_bundle
-    elif DATA_SECRET_BUNDLE in auth_data:
-        auth_data.pop(DATA_SECRET_BUNDLE)
+    else:
+        auth_data.pop(DATA_SECRET_BUNDLE, None)
+    if fcm_credentials is not None:
+        auth_data["fcm_credentials"] = fcm_credentials
 
     if isinstance(to_persist, str) and to_persist.startswith("aas_et/"):
         auth_data[DATA_AAS_TOKEN] = to_persist
@@ -1731,6 +1752,8 @@ async def _ingest_discovery_credentials(
             updated.pop(DATA_SECRET_BUNDLE, None)
         if not (isinstance(to_persist, str) and to_persist.startswith("aas_et/")):
             updated.pop(DATA_AAS_TOKEN, None)
+        if fcm_credentials is not None:
+            updated["fcm_credentials"] = fcm_credentials
         updates: dict[str, Any] | None = {"data": updated}
     else:
         updates = None
@@ -2009,6 +2032,7 @@ class ConfigFlow(
             CONF_GOOGLE_EMAIL,
             DATA_SECRET_BUNDLE,
             DATA_AAS_TOKEN,
+            "fcm_credentials",
         )
         new_data: dict[str, Any] = {
             key: value
@@ -2808,6 +2832,11 @@ class ConfigFlow(
                         }
                         if parsed_secrets is not None:
                             self._auth_data[DATA_SECRET_BUNDLE] = parsed_secrets
+                            fcm_credentials = _extract_fcm_credentials_from_secrets(
+                                parsed_secrets
+                            )
+                            if fcm_credentials is not None:
+                                self._auth_data["fcm_credentials"] = fcm_credentials
                         if isinstance(to_persist, str) and to_persist.startswith(
                             "aas_et/"
                         ):
@@ -2997,6 +3026,9 @@ class ConfigFlow(
             }
             if DATA_SECRET_BUNDLE in self._auth_data:
                 data_payload[DATA_SECRET_BUNDLE] = self._auth_data[DATA_SECRET_BUNDLE]
+            fcm_credentials = self._auth_data.get("fcm_credentials")
+            if isinstance(fcm_credentials, Mapping):
+                data_payload["fcm_credentials"] = dict(fcm_credentials)
             aas_token = self._auth_data.get(DATA_AAS_TOKEN)
             if isinstance(aas_token, str) and aas_token:
                 data_payload[DATA_AAS_TOKEN] = aas_token
@@ -3513,6 +3545,15 @@ class ConfigFlow(
                                             CONF_OAUTH_TOKEN: to_persist,
                                             DATA_SECRET_BUNDLE: parsed,
                                         }
+                                        fcm_credentials = (
+                                            _extract_fcm_credentials_from_secrets(
+                                                parsed
+                                            )
+                                        )
+                                        if fcm_credentials is not None:
+                                            updated_data["fcm_credentials"] = (
+                                                fcm_credentials
+                                            )
                                         if (
                                             isinstance(to_persist, str)
                                             and to_persist.startswith("aas_et/")
@@ -3564,6 +3605,11 @@ class ConfigFlow(
                                     CONF_OAUTH_TOKEN: token_first,
                                     DATA_SECRET_BUNDLE: parsed,
                                 }
+                                fcm_credentials = (
+                                    _extract_fcm_credentials_from_secrets(parsed)
+                                )
+                                if fcm_credentials is not None:
+                                    updated_data["fcm_credentials"] = fcm_credentials
                                 if (
                                     isinstance(token_first, str)
                                     and token_first.startswith("aas_et/")
@@ -5362,6 +5408,15 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                                 CONF_OAUTH_TOKEN: to_persist,
                                                 DATA_SECRET_BUNDLE: parsed,
                                             }
+                                            fcm_credentials = (
+                                                _extract_fcm_credentials_from_secrets(
+                                                    parsed
+                                                )
+                                            )
+                                            if fcm_credentials is not None:
+                                                updated_data["fcm_credentials"] = (
+                                                    fcm_credentials
+                                                )
                                             if isinstance(
                                                 to_persist, str
                                             ) and to_persist.startswith("aas_et/"):
@@ -5394,6 +5449,11 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                     CONF_OAUTH_TOKEN: token_first,
                                     DATA_SECRET_BUNDLE: parsed,
                                 }
+                                fcm_credentials = (
+                                    _extract_fcm_credentials_from_secrets(parsed)
+                                )
+                                if fcm_credentials is not None:
+                                    updated_data["fcm_credentials"] = fcm_credentials
                                 if isinstance(
                                     token_first, str
                                 ) and token_first.startswith("aas_et/"):
