@@ -129,22 +129,19 @@ def test_run_callback_async_uses_thread(monkeypatch: pytest.MonkeyPatch) -> None
 def test_process_background_update_uses_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Background decode is executed in a worker thread helper."""
+    """Background decode is awaited directly and schedules a flush."""
 
     receiver = FcmReceiverHA()
     schedule_calls: list[tuple[str, str]] = []
+    decode_calls: list[tuple[str, str]] = []
 
-    def decode_stub(entry_id: str, payload_hex: str) -> dict[str, Any]:
+    async def decode_stub(entry_id: str, payload_hex: str) -> dict[str, Any]:
+        decode_calls.append((entry_id, payload_hex))
         return {"latitude": 1.0, "payload": payload_hex, "entry_id": entry_id}
 
-    async def fake_to_thread(
-        func: Callable[[str, str], dict[str, Any]], /, *args: str
-    ) -> dict[str, Any]:
-        assert func is decode_stub
-        return func(*args)
-
-    monkeypatch.setattr(receiver, "_decode_background_location", decode_stub)
-    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        receiver, "_decode_background_location_async", decode_stub
+    )
     monkeypatch.setattr(
         receiver, "_schedule_flush", lambda key: schedule_calls.append(key)
     )
@@ -161,3 +158,4 @@ def test_process_background_update_uses_thread(
     assert receiver._pending[key]["latitude"] == 1.0
     assert receiver._pending_targets[key] == {"entry-1", "entry-2"}
     assert schedule_calls == [key]
+    assert decode_calls == [("entry-1", "c0ffee")]

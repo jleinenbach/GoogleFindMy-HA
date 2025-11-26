@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -221,7 +222,15 @@ def test_fcm_background_decode_uses_entry_cache(
         },
     ]
 
-    def fake_sync_decrypt(device_update, *, cache):  # type: ignore[no-untyped-def]
+    def fake_register_cache_provider(provider: Callable[[], object]) -> None:
+        captured["cache_provider"] = provider
+
+    def fake_unregister_cache_provider() -> None:
+        captured["unregistered"] = True
+
+    async def fake_async_decrypt(  # type: ignore[no-untyped-def]
+        device_update, *, cache: object
+    ):
         captured["device_update"] = device_update
         captured["cache"] = cache
         return records
@@ -231,11 +240,21 @@ def test_fcm_background_decode_uses_entry_cache(
         fake_parse,
     )
     monkeypatch.setattr(
-        "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations.decrypt_location_response_locations",
-        fake_sync_decrypt,
+        "custom_components.googlefindmy.NovaApi.nova_request.register_cache_provider",
+        fake_register_cache_provider,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.unregister_cache_provider",
+        fake_unregister_cache_provider,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.Auth.fcm_receiver_ha.async_decrypt_location_response_locations",
+        fake_async_decrypt,
     )
 
-    result = receiver._decode_background_location("entry", "payload")
+    result = asyncio.run(receiver._decode_background_location_async("entry", "payload"))
 
     assert result == {
         "last_seen": 200,
@@ -248,3 +267,4 @@ def test_fcm_background_decode_uses_entry_cache(
     assert captured["hex"] == "payload"
     assert captured["device_update"] == "parsed"
     assert captured["cache"] is cache
+    assert captured["unregistered"] is True
