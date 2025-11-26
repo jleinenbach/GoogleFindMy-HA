@@ -241,6 +241,15 @@
           "delete_subentry": "Subentry to delete",
           "fallback_subentry": "Fallback feature group"
         }
+      },
+      "credentials": {
+        "title": "Update Credentials for {account_email}",
+        "description": "⚠️ This will update credentials for the current account only.\n\nTo add a different account, cancel this and use '+ Add Integration' from the Integrations page instead.",
+        "data": {
+          "new_secrets_json": "New secrets.json content (optional)",
+          "new_oauth_token": "New OAuth Token (optional)",
+          "new_google_email": "New Google Email (optional)"
+        }
       }
     },
     "error": {

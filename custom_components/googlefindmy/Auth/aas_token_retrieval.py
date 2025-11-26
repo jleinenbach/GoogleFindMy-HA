@@ -280,6 +280,9 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
         3) Exchange OAuth → AAS via gpsoauth in an executor.
         4) Update the cached username if gpsoauth returns an 'Email' field (entry-scoped when possible).
 
+    Args:
+        cache: Optional TokenCache instance for multi-account isolation.
+
     Returns:
         The AAS token string.
 
@@ -340,6 +343,21 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
                     (username or "unknown").split("@", 1)[0] + "@…",
                 )
                 break
+
+        # Fallback 3: Try global cache for ADM tokens if entry cache had none (validation scenario)
+        if not oauth_token and cache:
+            try:
+                all_cached_global = await async_get_all_cached_values()
+                for key, value in all_cached_global.items():
+                    if isinstance(key, str) and key.startswith("adm_token_") and isinstance(value, str) and value:
+                        oauth_token = value
+                        extracted_username = key.replace("adm_token_", "", 1)
+                        if extracted_username and "@" in extracted_username:
+                            username = extracted_username
+                        _LOGGER.info("Using existing ADM token from global cache for OAuth exchange (user: %s).", username or "unknown")
+                        break
+            except Exception:  # noqa: BLE001
+                pass
 
     if not oauth_token:
         raise ValueError(

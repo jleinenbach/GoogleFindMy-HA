@@ -164,6 +164,8 @@ class GoogleFindMyMapView(HomeAssistantView):
                     if dev.get("id") == device_id:
                         device_name = dev.get("name") or "Unknown Device"
                         break
+                if device_name != "Unknown Device":
+                    break
 
         # 3. Find the Entity ID (for History Lookup)
         registry = er.async_get(self.hass)

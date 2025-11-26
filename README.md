@@ -1,5 +1,12 @@
 # Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
+>[!CAUTION]
+> ## **V1.6 Semi-Breaking Change**
+>
+> After installing this update, you must delete your existing configuration and re-add the integration.  This is due to major changes for the multi-account feature.  Location history should not be affected.
+
+---
+
 A comprehensive Home Assistant custom integration for Google's FindMy Device network, enabling real-time(ish) tracking and control of FindMy devices directly within Home Assistant!
 
 >[!TIP]
@@ -9,7 +16,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ## Come join our Discord for real time help and chat!
 
-[Google FindMy Discord Server](https://discord.gg/RHvBYZ58P)
+[Google FindMy Discord Server](https://discord.gg/U3MkcbGzhc)
 
 ---
 <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Continuous integration status](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml/badge.svg)](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
@@ -107,6 +114,7 @@ When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
 - ✅ **Attribute grading system**: Best location data is selected automatically based on recency, accuracy, and source of data
 - 📍 **Historical Map-View**: Each tracker has a filterable Map-View that shows tracker movement with location data
 - 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
+- #️⃣ **Multi-Account Support**: Add multiple Find Hub Google accounts that show up separately
 - ❣️ **More to come!**
 
 The manifest classifies Google Find My Device as a **hub** integration. Home Assistant treats the integration as a central coordinator that manages multiple connected devices, aligning documentation and compliance checks with the restored 1.6.0 metadata.
@@ -438,6 +446,7 @@ message listing the available IDs so you can pick the right account.
 
 - Böttger, L. (2024). GoogleFindMyTools [Computer software]. https://github.com/leonboe1/GoogleFindMyTools
 - Firebase Cloud Messaging integration. https://github.com/home-assistant/mobile-apps-fcm-push
+- @txitxo0 for his amazing work on the MQTT based tool that I used to help kickstart this project!
 
 [1]: https://developers.home-assistant.io/blog/2019/10/05/simple-mode/?utm_source=chatgpt.com "Simple Mode in Home Assistant 1.0"
 

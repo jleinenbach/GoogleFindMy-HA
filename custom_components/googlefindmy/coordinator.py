@@ -710,6 +710,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._locate_inflight: set[str] = set()  # device_id -> in-flight flag
         self._locate_cooldown_until: dict[str, float] = {}  # device_id -> mono deadline
 
+        # Play Sound UUID tracking (needed to properly cancel sound requests)
+        self._sound_request_uuids: Dict[str, str] = {}         # device_id -> request_uuid
+
         # Per-device poll cooldowns after owner/crowdsourced reports.
         self._device_poll_cooldown_until: dict[str, float] = {}
 
@@ -4418,7 +4421,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     if now_mono >= self._device_poll_cooldown_until.get(d["id"], 0.0)
                 ]
 
-            due = (now_mono - self._last_poll_mono) >= effective_interval
+            # Cold start detection: force immediate poll on first install when devices have no location data
+            is_cold_start = (
+                self._last_poll_mono == 0.0
+                and all_devices
+                and not any(self._device_location_data.get(d["id"]) for d in all_devices)
+            )
+
+            due = (now_mono - self._last_poll_mono) >= effective_interval or is_cold_start
             if due and not self._is_polling and devices_to_poll:
                 force_poll = False
                 fcm_ready = self._is_fcm_ready_soft()
@@ -5128,7 +5138,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         # Apply type-aware **poll** cooldowns (if decrypt layer provided a hint),
         # then drop the hint to keep internal-only.
-        self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+        report_hint = slot.get("_report_hint")
+        self._apply_report_type_cooldown(device_id, report_hint)
+
+        # Track crowd-sourced updates when hint is present
+        if report_hint:
+            self.increment_stat("crowd_sourced_updates")
+
         slot.pop("_report_hint", None)
 
         # Sanitize invariants + enrich fields before gating
@@ -5413,6 +5429,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
+        self._sound_request_uuids.pop(device_id, None)
         self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
         self._present_last_seen.pop(device_id, None)
@@ -5917,7 +5934,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             slot.setdefault("last_updated", time.time())
 
             # Apply type-aware cooldowns based on internal hint (if any), then strip it.
-            self._apply_report_type_cooldown(device_id, slot.get("_report_hint"))
+            report_hint = slot.get("_report_hint")
+            self._apply_report_type_cooldown(device_id, report_hint)
+
+            # Track crowd-sourced updates when hint is present
+            if report_hint:
+                self.increment_stat("crowd_sourced_updates")
+
             slot.pop("_report_hint", None)
 
             # Sanitize invariants + derive labels before significance gating
@@ -5991,6 +6014,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         Guard with can_play_sound(); on failure, start a short cooldown to avoid repeated errors.
 
+        **IMPORTANT**: This method tracks the request UUID so that Stop Sound can properly
+        cancel the specific Play Sound request. Without UUID tracking, sounds may continue
+        ringing indefinitely even after pressing Stop.
+
         Args:
             device_id: The canonical ID of the device.
 
@@ -6036,6 +6063,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self, device_id: str, request_uuid: str | None = None
     ) -> bool:
         """Stop sound on a device using the native async API (no executor).
+
+        **IMPORTANT**: This method retrieves the UUID from the previous Play Sound request
+        and uses it to cancel that specific request. Without the UUID, Google's API may
+        not properly cancel the sound and the device will continue ringing.
 
         Args:
             device_id: The canonical ID of the device.

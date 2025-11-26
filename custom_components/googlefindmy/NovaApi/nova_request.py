@@ -245,6 +245,44 @@ def unregister_hass() -> None:
     _STATE["hass"] = None
 
 
+# Cache provider hook for multi-entry support using contextvars for async safety
+_CACHE_PROVIDER: contextvars.ContextVar[Callable[[], any] | None] = contextvars.ContextVar(
+    '_cache_provider', default=None
+)
+
+def register_cache_provider(provider: Callable[[], any]) -> None:
+    """Register a callable that returns the entry-specific cache (context-local).
+
+    Args:
+        provider: Callable that returns a TokenCache instance.
+
+    This allows multi-entry scenarios where each API instance uses its own cache
+    instead of relying on the global cache facade. Uses contextvars to ensure
+    concurrent async requests don't interfere with each other.
+    """
+    _CACHE_PROVIDER.set(provider)
+
+def unregister_cache_provider() -> None:
+    """Unregister the cache provider for the current context."""
+    _CACHE_PROVIDER.set(None)
+
+def _get_cache_provider():
+    """Get the registered cache provider for the current context or None.
+
+    Returns None if no provider is registered or if the provider's cache is closed.
+    """
+    provider = _CACHE_PROVIDER.get()
+    if not provider:
+        return None
+    try:
+        cache = provider()
+        # Check if cache is closed (has _closed attribute that's True)
+        if cache and getattr(cache, '_closed', False):
+            return None
+        return cache
+    except Exception:  # noqa: BLE001
+        return None
+
 # --- Refresh Locks ---
 _async_refresh_lock: asyncio.Lock | None = None
 

@@ -223,6 +223,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
         canonic_device_id: The canonical ID of the device to validate the response.
         ctx: The shared context object for signaling and data transfer.
         loop: The asyncio event loop of the main thread.
+        cache_provider: The cache provider for this account (captured from context).
 
     Returns:
         A callback function suitable for the FCM receiver.
@@ -565,6 +566,21 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         # Generate request UUID
         request_uuid = generate_random_uuid()
 
+        # Capture the current cache provider context for multi-account support
+        cache_provider = None
+        if cache:
+            # Use explicitly passed cache (preferred for multi-account isolation)
+            cache_provider = lambda: cache
+        else:
+            # Fallback to ContextVar for backward compatibility
+            try:
+                from custom_components.googlefindmy.NovaApi import nova_request
+                cache_obj = nova_request._get_cache_provider()
+                if cache_obj:
+                    cache_provider = lambda: cache_obj
+            except Exception:
+                pass
+
         # Register the callback with the shared receiver
         try:
             _LOGGER.debug("Registering FCM location updates for %s...", name)
@@ -661,7 +677,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             _LOGGER.info("Successfully received location data for %s", name)
             return data
         if not data:
-            _LOGGER.warning("No location data found for %s after decryption", name)
+            _LOGGER.debug("No location data found for %s after decryption", name)
         else:
             _LOGGER.warning(
                 "Received location data for unexpected device in %s flow; ignoring.",

@@ -174,7 +174,7 @@ def _perform_oauth_sync(
         auth_response: dict[str, Any] = gpsoauth.perform_oauth(
             username,
             aas_token,
-            android_id,
+            android_id,  # Use per-user Android ID
             service="oauth2:https://www.googleapis.com/auth/" + scope,
             app=request_app,
             client_sig=_CLIENT_SIG,

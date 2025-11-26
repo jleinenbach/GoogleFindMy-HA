@@ -117,6 +117,7 @@ PLAY_SOUND_DESCRIPTION = ButtonEntityDescription(
     key="play_sound",
     translation_key="play_sound",
     icon="mdi:volume-high",
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 # Entity description for stopping a sound manually
@@ -124,6 +125,7 @@ STOP_SOUND_DESCRIPTION = ButtonEntityDescription(
     key="stop_sound",
     translation_key="stop_sound",
     icon="mdi:volume-off",
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 # Entity description for the manual "Locate now" action
@@ -131,6 +133,7 @@ LOCATE_DEVICE_DESCRIPTION = ButtonEntityDescription(
     key="locate_device",
     translation_key="locate_device",
     icon="mdi:radar",
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 RESET_STATISTICS_DESCRIPTION = ButtonEntityDescription(
