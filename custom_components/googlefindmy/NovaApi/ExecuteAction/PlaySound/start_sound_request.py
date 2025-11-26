@@ -34,7 +34,9 @@ from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 
 
-def start_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
+def start_sound_request(
+    canonic_device_id: str, gcm_registration_id: str
+) -> tuple[str, str]:
     """Build the hex payload for a 'Play Sound' action (pure builder).
 
     This function performs no network I/O. It exists for backwards
@@ -45,11 +47,13 @@ def start_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str
         gcm_registration_id: The FCM registration token for push notifications.
 
     Returns:
-        Hex-encoded protobuf payload for Nova transport.
+        Tuple containing the hex-encoded protobuf payload for Nova transport and
+        the generated request UUID.
     """
     request_uuid = generate_random_uuid()
-    return create_sound_request(
-        True, canonic_device_id, gcm_registration_id, request_uuid
+    return (
+        create_sound_request(True, canonic_device_id, gcm_registration_id, request_uuid),
+        request_uuid,
     )
 
 
@@ -67,7 +71,7 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
     cache_get: Callable[[str], Awaitable[Any]] | None = None,
     cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
     refresh_override: Callable[[], Awaitable[str | None]] | None = None,
-) -> str | None:  # noqa: PLR0913
+) -> tuple[str, str] | None:  # noqa: PLR0913
     """Submit a 'Play Sound' action using the shared async Nova client.
 
     This function handles the network request and robustly catches common API
@@ -92,10 +96,13 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
         refresh_override: Optional async function to obtain a fresh ADM token.
 
     Returns:
-        Hex response payload on success (may be empty) or None on handled errors.
+        Tuple containing the hex response payload (may be empty) and the
+        request UUID on success, or None on handled errors.
     """
     # Build payload (pure)
-    hex_payload = start_sound_request(canonic_device_id, gcm_registration_id)
+    hex_payload, request_uuid = start_sound_request(
+        canonic_device_id, gcm_registration_id
+    )
 
     # Prepare optional namespaced TTL cache wrappers if requested and not overridden
     if cache is None:
@@ -132,7 +139,7 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
 
     try:
         # Submit via Nova (now entry-scoped when `cache`/`namespace` provided)
-        return await async_nova_request(
+        response_hex = await async_nova_request(
             NOVA_ACTION_API_SCOPE,
             hex_payload,
             username=username,
@@ -144,6 +151,7 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
             namespace=resolved_namespace,
             cache=cache_ref,
         )
+        return (response_hex, request_uuid) if response_hex is not None else None
     except asyncio.CancelledError:
         raise
     except NovaRateLimitError:

@@ -35,7 +35,11 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 
 
-def stop_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
+def stop_sound_request(
+    canonic_device_id: str,
+    gcm_registration_id: str,
+    request_uuid: str | None = None,
+) -> str:
     """Build the hex payload for a 'Stop Sound' action (pure builder).
 
     This function performs no network I/O. It creates the serialized protobuf
@@ -44,16 +48,23 @@ def stop_sound_request(canonic_device_id: str, gcm_registration_id: str) -> str:
     Args:
         canonic_device_id: The canonical ID of the target device.
         gcm_registration_id: The FCM registration token for push notifications.
+        request_uuid: Optional request UUID matching a prior start request.
 
     Returns:
         Hex-encoded protobuf payload for Nova transport.
     """
-    return create_sound_request(False, canonic_device_id, gcm_registration_id)
+    return create_sound_request(
+        False,
+        canonic_device_id,
+        gcm_registration_id,
+        request_uuid=request_uuid,
+    )
 
 
 async def async_submit_stop_sound_request(  # noqa: PLR0913
     canonic_device_id: str,
     gcm_registration_id: str,
+    request_uuid: str | None = None,
     *,
     session: ClientSession | None = None,
     # Entry-scope & flow-friendly optional parameters (all pass-through / optional):
@@ -83,6 +94,7 @@ async def async_submit_stop_sound_request(  # noqa: PLR0913
     Args:
         canonic_device_id: The canonical ID of the target device.
         gcm_registration_id: The FCM registration token for push notifications.
+        request_uuid: Optional request UUID matching a prior start request.
         session: Optional aiohttp ClientSession to reuse (preferred in HA).
         namespace: Optional entry-scoped namespace to avoid cross-entry cache bleed.
         username: Optional Google account e-mail for the request context.
@@ -97,7 +109,9 @@ async def async_submit_stop_sound_request(  # noqa: PLR0913
         or None on any handled error (e.g., auth, rate-limit, server error,
         or network issues).
     """
-    hex_payload = stop_sound_request(canonic_device_id, gcm_registration_id)
+    hex_payload = stop_sound_request(
+        canonic_device_id, gcm_registration_id, request_uuid=request_uuid
+    )
     if cache is None:
         raise MissingTokenCacheError()
 
