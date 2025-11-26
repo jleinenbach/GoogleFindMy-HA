@@ -34,6 +34,15 @@ notification from reappearing after restarts when no new hardware has been added
 [`agents/runtime_patterns/AGENTS.md`](agents/runtime_patterns/AGENTS.md#tracker-registry-gating)
 tracks the canonical post-scheduling gate that platform guides should mirror.
 
+### Nova API cache provider registration
+
+When decrypting FCM background location payloads, **always** register the active entry cache with
+`nova_request.register_cache_provider` immediately before calling the Nova async decryptor and **always**
+unregister it in a `finally` block. The decryptor resolves credentials via this provider, so skipping registration or
+running decryption in an executor without the surrounding context will cause multi-account setups to fail silently.
+Handle `StaleOwnerKeyError` from the decryptor by logging and skipping the update instead of crashing the pipeline so key
+rotation can proceed without interrupting other accounts.
+
 ### Import deferral reminder
 
 Heavyweight runtime dependencies (for example, browser drivers such as `undetected_chromedriver`) must be imported lazily inside
