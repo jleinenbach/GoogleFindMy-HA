@@ -12,6 +12,7 @@ from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     DATA_SECRET_BUNDLE,
     DOMAIN,
+    TRACKER_SUBENTRY_KEY,
 )
 
 
@@ -94,6 +95,57 @@ async def test_setup_iterates_tracker_subentries(stub_coordinator_factory: Any) 
     assert {entity.unique_id for entity, _ in added} == {
         f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-1"
     }
+
+
+@pytest.mark.asyncio
+async def test_placeholder_scopes_preserve_multiple_subentries(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Tracker scopes should not collapse when identifiers are missing."""
+
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _ConfigEntryStub()
+
+    meta_a = SimpleNamespace(features=("device_tracker",), config_subentry_id=None)
+    meta_b = SimpleNamespace(features=("device_tracker",), config_subentry_id=None)
+
+    def _stable_identifier(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def _snapshot_for_key(
+        self: Any, key: str | None, _feature: str | None = None
+    ) -> list[dict[str, Any]]:
+        del self
+        if not key:
+            return []
+        return [{"id": f"device-{key}", "name": f"Device {key}"}]
+
+    coordinator_cls = stub_coordinator_factory(
+        extra_attributes={"_subentry_metadata": {"alpha": meta_a, "beta": meta_b}},
+        methods={
+            "stable_subentry_identifier": _stable_identifier,
+            "get_subentry_snapshot": _snapshot_for_key,
+        },
+    )
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    coordinator.config_entry = entry
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await device_tracker.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    unique_ids = {entity.unique_id for entity, _ in added}
+    assert len(unique_ids) >= 2
+    assert unique_ids.issuperset(
+        {
+            f"{entry.entry_id}:{TRACKER_SUBENTRY_KEY}:device-alpha",
+            f"{entry.entry_id}:{TRACKER_SUBENTRY_KEY}:device-beta",
+        }
+    )
 
 
 @pytest.mark.asyncio

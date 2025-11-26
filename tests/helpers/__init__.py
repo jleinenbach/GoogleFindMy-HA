@@ -31,6 +31,8 @@ __all__ = [
     "resolve_config_entry_lookup",
     "install_homeassistant_core_callback_stub",
     "GoogleFindMyConfigEntryStub",
+    "build_stub_coordinator",
+    "get_stub_coordinator_factory",
 ]
 
 _EXPORT_MAP = {
@@ -53,6 +55,8 @@ _EXPORT_MAP = {
     "resolve_config_entry_lookup": ".homeassistant",
     "install_homeassistant_core_callback_stub": ".homeassistant_stub",
     "GoogleFindMyConfigEntryStub": ".homeassistant",
+    "build_stub_coordinator": ".stub_coordinator_debug",
+    "get_stub_coordinator_factory": ".stub_coordinator_debug",
 }
 
 

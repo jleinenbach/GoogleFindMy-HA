@@ -44,7 +44,6 @@ from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
     DOMAIN,
-    OPT_MIN_ACCURACY_THRESHOLD,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
@@ -56,7 +55,6 @@ from .discovery import (
 )
 from .entity import (
     GoogleFindMyDeviceEntity,
-    _entry_option,
     ensure_config_subentry_id,
     ensure_dispatcher_dependencies,
     known_config_subentry_ids,
@@ -147,7 +145,21 @@ async def async_setup_entry(
         hint_subentry_id: str | None = None,
         forwarded_config_id: str | None = None,
     ) -> list[_TrackerScope]:
-        scopes: dict[str, _TrackerScope] = {}
+        """Collect tracker scopes from metadata, subentries, and dispatcher hints.
+
+        The coordinator may expose tracker subentries via `_subentry_metadata` or the
+        config-entry `subentries` mapping. Because some subentries arrive without a
+        config_subentry_id (for example, placeholders surfaced through dispatcher
+        hints), scopes are indexed by a stable composite key of the subentry key and
+        identifier rather than the identifier alone. This prevents deduplication of
+        multiple tracker placeholders that have no identifier yet.
+
+        `hint_subentry_id` carries the dispatcher-provided subentry identifier, while
+        `forwarded_config_id` mirrors Home Assistant's forwarded config_subentry_id so
+        placeholder scopes can inherit the forwarded value when present.
+        """
+
+        scopes: dict[tuple[str | None, str | None], _TrackerScope] = {}
 
         subentry_metas = getattr(coordinator, "_subentry_metadata", None)
         if isinstance(subentry_metas, Mapping):
@@ -162,7 +174,8 @@ async def async_setup_entry(
                     or getattr(meta, "config_subentry_id", None)
                     or coordinator.stable_subentry_identifier(key=key)
                 )
-                scopes[identifier] = _TrackerScope(
+                scope_key = (key, identifier)
+                scopes[scope_key] = _TrackerScope(
                     key,
                     getattr(meta, "config_subentry_id", None),
                     identifier,
@@ -190,14 +203,16 @@ async def async_setup_entry(
                     or coordinator.stable_subentry_identifier(key=group_key)
                     or TRACKER_SUBENTRY_KEY
                 )
+                scope_key = (group_key, identifier)
                 scopes.setdefault(
-                    identifier,
+                    scope_key,
                     _TrackerScope(group_key or TRACKER_SUBENTRY_KEY, config_id, identifier),
                 )
 
         if hint_subentry_id:
+            scope_key = (TRACKER_SUBENTRY_KEY, hint_subentry_id)
             scopes.setdefault(
-                hint_subentry_id,
+                scope_key,
                 _TrackerScope(
                     TRACKER_SUBENTRY_KEY,
                     forwarded_config_id or hint_subentry_id,
@@ -221,6 +236,16 @@ async def async_setup_entry(
     scope_states: dict[str, dict[str, Any]] = {}
 
     def _add_scope(scope: _TrackerScope, forwarded_config_id: str | None) -> None:
+        """Initialize entity listeners for a tracker scope and dedupe re-entrance.
+
+        Scopes are keyed by identifier/config_subentry_id/subentry_key to avoid
+        re-registering listeners when dispatcher hints replay or multiple subentry
+        placeholders collapse to the same identifier. Each successful registration
+        attaches a coordinator listener, schedules entity recovery hooks, and
+        ensures `async_add_entities` receives the forwarded config_subentry_id for
+        the scope (when available).
+        """
+
         scope_identifier = scope.identifier or scope.config_subentry_id or scope.subentry_key
         if scope_identifier in scope_states:
             scope_states[scope_identifier]["scan"]()
@@ -590,6 +615,17 @@ async def async_setup_entry(
 
     @callback
     def async_add_subentry(subentry: Any | None = None) -> None:
+        """Process a subentry or placeholder and register tracker scopes.
+
+        Dispatcher callbacks may supply only a `subentry_id` string while Home
+        Assistant is still finalizing the subentry record. Placeholder identifiers
+        enter the `placeholder_*` sets so later calls with full subentry objects can
+        replace them. Deduplication happens per subentry identifier and group key,
+        and each call forwards the dispatcher-provided `config_subentry_id` to
+        `_collect_tracker_scopes` so listeners can inherit the forwarded config ID
+        when Home Assistant supplies one.
+        """
+
         subentry_key = TRACKER_SUBENTRY_KEY
         subentry_identifier = None
         if isinstance(subentry, str):
@@ -980,7 +1016,8 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         """React to coordinator updates.
 
         - Keep the device's human-readable name in sync with the coordinator snapshot.
-        - Maintain 'last good' accuracy data when current fixes are worse than the threshold.
+        - Rely on the coordinator's filtered snapshot for accuracy gating while
+          preserving the last known coordinates when new fixes omit location data.
         """
         if not self.coordinator_has_device():
             self._last_good_accuracy_data = None
@@ -998,49 +1035,18 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             )
             self._attr_name = desired_display
 
-        config_entry = getattr(self.coordinator, "config_entry", None)
-        min_accuracy_raw = _entry_option(
-            config_entry,
-            OPT_MIN_ACCURACY_THRESHOLD,
-            0,
-        )
-        try:
-            min_accuracy_threshold = float(min_accuracy_raw)
-        except (TypeError, ValueError):
-            min_accuracy_threshold = 0.0
-
         device_data = self._current_row()
         if not device_data:
             self.async_write_ha_state()
             return
 
-        accuracy = device_data.get("accuracy")
         lat = device_data.get("latitude")
         lon = device_data.get("longitude")
 
-        # Keep best-known fix when accuracy filtering rejects the current one.
-        is_good = min_accuracy_threshold <= 0 or (
-            accuracy is not None
-            and lat is not None
-            and lon is not None
-            and accuracy <= min_accuracy_threshold
-        )
-
-        if is_good:
+        if lat is not None and lon is not None:
             self._last_good_accuracy_data = device_data.copy()
-            if min_accuracy_threshold > 0 and accuracy is not None:
-                _LOGGER.debug(
-                    "Updated last good accuracy data for %s: accuracy=%sm (threshold=%sm)",
-                    self.entity_id,
-                    accuracy,
-                    min_accuracy_threshold,
-                )
-        elif accuracy is not None:
-            _LOGGER.debug(
-                "Keeping previous good data for %s: current accuracy=%sm > threshold=%sm",
-                self.entity_id,
-                accuracy,
-                min_accuracy_threshold,
-            )
+        elif self._last_good_accuracy_data is None:
+            # Preserve semantic-only updates when no prior location is available.
+            self._last_good_accuracy_data = device_data.copy()
 
         self.async_write_ha_state()

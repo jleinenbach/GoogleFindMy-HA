@@ -70,16 +70,9 @@ registry object as the fixture.
 
 ### Tracker discovery gating expectations
 
-Registry-aware tracker discovery checks belong **after** entities are
-scheduled. Tests that simulate tracker restoration should assert the
-coordinator reuses `find_tracker_entity_entry` (or the equivalent helper)
-in this post-scheduling gate and skips cloud discovery when every
-scheduled tracker already exists in the registry. Avoid pre-scheduling
-registry probes in new helpers to keep discovery behavior and
-notifications consistent with the runtime-patterns guidance. For the
-canonical wording and runtime location of this gate, see the
-[runtime-patterns tracker registry gating reminder](../custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md#tracker-registry-gating)
-and keep platform-level AGENTS aligned with it.
+Refer to the canonical tracker registry guidance in
+[`custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md#tracker-registry-gating`](../custom_components/googlefindmy/agents/runtime_patterns/AGENTS.md#tracker-registry-gating).
+Keep new tests aligned with that runtime contract instead of duplicating wording here.
 
 ### CoordinatorEntity stub overrides
 
