@@ -209,3 +209,41 @@ def test_get_initial_token_async_uses_cache(monkeypatch: pytest.MonkeyPatch) -> 
     assert token == "adm-token"
     assert recorded["adm_user"] == "user@example.com"
     assert recorded["adm_cache"] is cache
+
+
+def test_get_initial_token_async_uses_registered_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache provider should supply the cache when the helper receives None."""
+
+    cache = _DummyCache()
+    recorded: dict[str, Any] = {}
+
+    async def fake_async_get_adm_token_api(user: str, *, cache) -> str:  # type: ignore[no-untyped-def]
+        recorded["adm_user"] = user
+        recorded["adm_cache"] = cache
+        return "adm-token"
+
+    monkeypatch.setattr(
+        nova_module, "async_get_adm_token_api", fake_async_get_adm_token_api
+    )
+
+    def _provider() -> _DummyCache:
+        return cache
+
+    async def _run() -> str:
+        nova_module.register_cache_provider(_provider)
+        try:
+            return await nova_module._get_initial_token_async(
+                "User@Example.com",
+                logging.getLogger("test"),
+                cache=None,
+            )
+        finally:
+            nova_module.unregister_cache_provider()
+
+    token = asyncio.run(_run())
+
+    assert token == "adm-token"
+    assert recorded["adm_user"] == "user@example.com"
+    assert recorded["adm_cache"] is cache
