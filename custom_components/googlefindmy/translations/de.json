@@ -101,7 +101,9 @@
     "hub": {
       "title": "Google Find My Device Hub",
       "entry_type": "Hub feature group",
-      "initiate_flow": "Add hub feature group",
+      "initiate_flow": {
+        "title": "Add hub feature group"
+      },
       "step": {
         "user": {
           "title": "Hub-Featuregruppe hinzufügen",
@@ -118,7 +120,9 @@
     "service": {
       "title": "Google Find Hub Dienst",
       "entry_type": "Service feature group",
-      "initiate_flow": "Add service feature group",
+      "initiate_flow": {
+        "title": "Add service feature group"
+      },
       "step": {
         "user": {
           "title": "Dienst-Funktionsgruppe hinzufügen",
@@ -135,7 +139,9 @@
     "core_tracking": {
       "title": "Google Find My Geräte",
       "entry_type": "Device feature group",
-      "initiate_flow": "Add device feature group",
+      "initiate_flow": {
+        "title": "Add device feature group"
+      },
       "step": {
         "user": {
           "title": "Geräte-Funktionsgruppe hinzufügen",
@@ -291,19 +297,19 @@
         }
       }
     },
-  "refresh_device_urls": {
-    "name": "Geräte-URLs aktualisieren",
-    "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
-    "fields": {}
-  },
-  "rebuild_device_registry": {
-    "name": "Geräteregistrierung neu aufbauen",
-    "description": "Wartung: baut die Geräteregistrierung für Google Find My Hubs neu auf und entfernt Tracker-Geräte, die fälschlicherweise dem übergeordneten Eintrag zugeordnet sind.",
-    "fields": {}
-  },
-  "locate_external": {
-    "name": "Gerät orten (extern)",
-    "description": "Ortung über den externen Helfer; delegiert an die normale Ortung.",
+    "refresh_device_urls": {
+      "name": "Geräte-URLs aktualisieren",
+      "description": "Aktualisiert die Konfigurations-URLs der Geräte, damit sie auf die integrierte Kartenansicht zeigen.",
+      "fields": {}
+    },
+    "rebuild_device_registry": {
+      "name": "Geräteregistrierung neu aufbauen",
+      "description": "Wartung: baut die Geräteregistrierung für Google Find My Hubs neu auf und entfernt Tracker-Geräte, die fälschlicherweise dem übergeordneten Eintrag zugeordnet sind.",
+      "fields": {}
+    },
+    "locate_external": {
+      "name": "Gerät orten (extern)",
+      "description": "Ortung über den externen Helfer; delegiert an die normale Ortung.",
       "fields": {
         "device_id": {
           "name": "Gerät",

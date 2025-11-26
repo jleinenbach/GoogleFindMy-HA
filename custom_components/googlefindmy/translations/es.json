@@ -101,7 +101,9 @@
     "hub": {
       "title": "Google Find My Device Hub",
       "entry_type": "Hub feature group",
-      "initiate_flow": "Add hub feature group",
+      "initiate_flow": {
+        "title": "Add hub feature group"
+      },
       "step": {
         "user": {
           "title": "Agregar grupo de funciones del hub",
@@ -118,7 +120,9 @@
     "service": {
       "title": "Servicio de Google Find Hub",
       "entry_type": "Service feature group",
-      "initiate_flow": "Add service feature group",
+      "initiate_flow": {
+        "title": "Add service feature group"
+      },
       "step": {
         "user": {
           "title": "Agregar grupo de funciones del servicio",
@@ -135,7 +139,9 @@
     "core_tracking": {
       "title": "Dispositivos Google Find My",
       "entry_type": "Device feature group",
-      "initiate_flow": "Add device feature group",
+      "initiate_flow": {
+        "title": "Add device feature group"
+      },
       "step": {
         "user": {
           "title": "Agregar grupo de funciones de dispositivos",
@@ -291,21 +297,21 @@
         }
       }
     },
-  "refresh_device_urls": {
-    "name": "Actualizar URL de los dispositivos",
-    "description": "Actualiza las URL de configuración de los dispositivos de Google Find My para que apunten a la vista de mapa integrada.",
-    "fields": {}
-  },
-  "rebuild_device_registry": {
-    "name": "Reconstruir registro de dispositivos",
-    "description": "Mantenimiento: reconstruye los enlaces del registro de dispositivos para los hubs de Google Find My y elimina los rastreadores vinculados incorrectamente a la entrada principal.",
-    "fields": {}
-  },
-  "locate_external": {
-    "name": "Localizar dispositivo (externo)",
-    "description": "Localiza un dispositivo usando el asistente externo; delega en la localización normal.",
-    "fields": {
-      "device_id": {
+    "refresh_device_urls": {
+      "name": "Actualizar URL de los dispositivos",
+      "description": "Actualiza las URL de configuración de los dispositivos de Google Find My para que apunten a la vista de mapa integrada.",
+      "fields": {}
+    },
+    "rebuild_device_registry": {
+      "name": "Reconstruir registro de dispositivos",
+      "description": "Mantenimiento: reconstruye los enlaces del registro de dispositivos para los hubs de Google Find My y elimina los rastreadores vinculados incorrectamente a la entrada principal.",
+      "fields": {}
+    },
+    "locate_external": {
+      "name": "Localizar dispositivo (externo)",
+      "description": "Localiza un dispositivo usando el asistente externo; delega en la localización normal.",
+      "fields": {
+        "device_id": {
           "name": "Dispositivo",
           "description": "Selecciona un dispositivo de Google Find My (o pasa un ID canónico desde Herramientas para desarrolladores)."
         },

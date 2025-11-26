@@ -101,7 +101,9 @@
     "hub": {
       "title": "Google Find My Device Hub",
       "entry_type": "Hub feature group",
-      "initiate_flow": "Add hub feature group",
+      "initiate_flow": {
+        "title": "Add hub feature group"
+      },
       "step": {
         "user": {
           "title": "Dodaj grupę funkcji huba",
@@ -118,7 +120,9 @@
     "service": {
       "title": "Usługa Google Find Hub",
       "entry_type": "Service feature group",
-      "initiate_flow": "Add service feature group",
+      "initiate_flow": {
+        "title": "Add service feature group"
+      },
       "step": {
         "user": {
           "title": "Dodaj grupę funkcji usługi",
@@ -135,7 +139,9 @@
     "core_tracking": {
       "title": "Urządzenia Google Find My",
       "entry_type": "Device feature group",
-      "initiate_flow": "Add device feature group",
+      "initiate_flow": {
+        "title": "Add device feature group"
+      },
       "step": {
         "user": {
           "title": "Dodaj grupę funkcji urządzeń",
@@ -291,21 +297,21 @@
         }
       }
     },
-  "refresh_device_urls": {
-    "name": "Odśwież adresy URL urządzeń",
-    "description": "Odświeża adresy URL konfiguracji urządzeń Google Find My tak, aby wskazywały na zintegrowany widok mapy.",
-    "fields": {}
-  },
-  "rebuild_device_registry": {
-    "name": "Odbuduj rejestr urządzeń",
-    "description": "Konserwacja: odbudowuje powiązania rejestru urządzeń dla hubów Google Find My i usuwa trackery błędnie powiązane z wpisem nadrzędnym.",
-    "fields": {}
-  },
-  "locate_external": {
-    "name": "Zlokalizuj urządzenie (zewnętrznie)",
-    "description": "Zlokalizuj urządzenie przy użyciu zewnętrznego pomocnika; deleguje do zwykłej lokalizacji.",
-    "fields": {
-      "device_id": {
+    "refresh_device_urls": {
+      "name": "Odśwież adresy URL urządzeń",
+      "description": "Odświeża adresy URL konfiguracji urządzeń Google Find My tak, aby wskazywały na zintegrowany widok mapy.",
+      "fields": {}
+    },
+    "rebuild_device_registry": {
+      "name": "Odbuduj rejestr urządzeń",
+      "description": "Konserwacja: odbudowuje powiązania rejestru urządzeń dla hubów Google Find My i usuwa trackery błędnie powiązane z wpisem nadrzędnym.",
+      "fields": {}
+    },
+    "locate_external": {
+      "name": "Zlokalizuj urządzenie (zewnętrznie)",
+      "description": "Zlokalizuj urządzenie przy użyciu zewnętrznego pomocnika; deleguje do zwykłej lokalizacji.",
+      "fields": {
+        "device_id": {
           "name": "Urządzenie",
           "description": "Wybierz urządzenie Google Find My (lub przekaż kanoniczny identyfikator przez Narzędzia deweloperskie)."
         },

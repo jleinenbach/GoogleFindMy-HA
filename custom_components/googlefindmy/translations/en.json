@@ -101,7 +101,9 @@
     "hub": {
       "title": "Google Find My Device Hub",
       "entry_type": "Hub feature group",
-      "initiate_flow": "Add hub feature group",
+      "initiate_flow": {
+        "title": "Add hub feature group"
+      },
       "step": {
         "user": {
           "title": "Add hub feature group",
@@ -118,7 +120,9 @@
     "service": {
       "title": "Google Find Hub Service",
       "entry_type": "Service feature group",
-      "initiate_flow": "Add service feature group",
+      "initiate_flow": {
+        "title": "Add service feature group"
+      },
       "step": {
         "user": {
           "title": "Add service feature group",
@@ -135,7 +139,9 @@
     "core_tracking": {
       "title": "Google Find My devices",
       "entry_type": "Device feature group",
-      "initiate_flow": "Add device feature group",
+      "initiate_flow": {
+        "title": "Add device feature group"
+      },
       "step": {
         "user": {
           "title": "Add device feature group",
@@ -291,21 +297,21 @@
         }
       }
     },
-  "refresh_device_urls": {
-    "name": "Refresh Device URLs",
-    "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view.",
-    "fields": {}
-  },
-  "rebuild_device_registry": {
-    "name": "Rebuild Device Registry",
-    "description": "Maintenance: rebuilds device registry links for Google Find My hubs and removes tracker devices incorrectly tied to the parent entry.",
-    "fields": {}
-  },
-  "locate_external": {
-    "name": "Locate Device (External)",
-    "description": "Locate a device using the external helper; delegates to the normal locate operation.",
-    "fields": {
-      "device_id": {
+    "refresh_device_urls": {
+      "name": "Refresh Device URLs",
+      "description": "Refresh the configuration URLs for Google Find My devices to point to the integrated map view.",
+      "fields": {}
+    },
+    "rebuild_device_registry": {
+      "name": "Rebuild Device Registry",
+      "description": "Maintenance: rebuilds device registry links for Google Find My hubs and removes tracker devices incorrectly tied to the parent entry.",
+      "fields": {}
+    },
+    "locate_external": {
+      "name": "Locate Device (External)",
+      "description": "Locate a device using the external helper; delegates to the normal locate operation.",
+      "fields": {
+        "device_id": {
           "name": "Device",
           "description": "Select a Google Find My device (or pass a canonical ID via Developer Tools)."
         },
