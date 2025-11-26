@@ -9,6 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from custom_components.googlefindmy.Auth.username_provider import username_string
+from tests.helpers import DummyCache
+
 
 def test_async_retrieve_identity_key_threads_cache(
     monkeypatch: pytest.MonkeyPatch,
@@ -49,7 +52,7 @@ def test_async_retrieve_identity_key_threads_cache(
         encryptedUserSecrets = DummyEncrypted()
         fastPairModelId = None
 
-    cache = object()
+    cache = DummyCache()
     result = asyncio.run(
         decrypt_locations.async_retrieve_identity_key(DummyRegistration(), cache=cache)
     )
@@ -103,7 +106,8 @@ def test_async_retrieve_identity_key_error_uses_cache(
         encryptedUserSecrets = DummyEncrypted()
         fastPairModelId = None
 
-    cache = object()
+    cache = DummyCache()
+    cache.values[username_string] = "user@example.com"
     with pytest.raises(decrypt_locations.StaleOwnerKeyError):
         asyncio.run(
             decrypt_locations.async_retrieve_identity_key(
@@ -113,6 +117,71 @@ def test_async_retrieve_identity_key_error_uses_cache(
 
     assert caches["owner_cache"] is cache
     assert caches["eid_cache"] is cache
+
+
+def test_async_retrieve_identity_key_retries_after_clearing_owner_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry once on stale owner key by clearing the cached owner key entry."""
+
+    from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
+        decrypt_locations,
+    )
+
+    owner_calls: list[object] = []
+    eid_calls: list[object] = []
+
+    async def fake_async_get_owner_key(*, cache, **kwargs):  # type: ignore[no-untyped-def]
+        owner_calls.append(cache)
+        return b"\x01" * 32
+
+    async def fake_async_get_eid_info(*, cache):  # type: ignore[no-untyped-def]
+        eid_calls.append(cache)
+        return SimpleNamespace(
+            encryptedOwnerKeyAndMetadata=SimpleNamespace(ownerKeyVersion=2)
+        )
+
+    async def fake_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return func(*args, **kwargs)
+
+    decrypt_attempts = 0
+
+    def fake_decrypt(owner_key: bytes, encrypted_identity_key: bytes) -> bytes:
+        nonlocal decrypt_attempts
+        decrypt_attempts += 1
+        if decrypt_attempts == 1:
+            raise ValueError("stale")
+        assert owner_key == b"\x01" * 32
+        return b"\xAA" * 32
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_get_owner_key", fake_async_get_owner_key
+    )
+    monkeypatch.setattr(decrypt_locations, "async_get_eid_info", fake_async_get_eid_info)
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(decrypt_locations, "decrypt_eik", fake_decrypt)
+    monkeypatch.setattr(decrypt_locations, "flip_bits", lambda data, _: data)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda _: False)
+
+    class DummyEncrypted:
+        encryptedIdentityKey = b"payload"
+        ownerKeyVersion = 1
+
+    class DummyRegistration:
+        encryptedUserSecrets = DummyEncrypted()
+        fastPairModelId = None
+
+    cache = DummyCache()
+    cache.values[username_string] = "user@example.com"
+
+    result = asyncio.run(
+        decrypt_locations.async_retrieve_identity_key(DummyRegistration(), cache=cache)
+    )
+
+    assert result == b"\xAA" * 32
+    assert cache.values.get("owner_key_user@example.com") is None
+    assert owner_calls == [cache, cache]
+    assert eid_calls == [cache]
 
 
 def test_async_get_eid_info_threads_cache(monkeypatch: pytest.MonkeyPatch) -> None:
