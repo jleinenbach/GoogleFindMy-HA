@@ -1174,11 +1174,12 @@ class GoogleFindMyAPI:
                 "play_sound() called inside an active event loop; use async_play_sound()."
             ),
             context=f"play sound on {device_id}",
-            default=False,
+            default=(False, None),
         )
-        return cast(bool, result)
+        success, _request_uuid = cast(tuple[bool, str | None], result)
+        return success
 
-    def stop_sound(self, device_id: str) -> bool:
+    def stop_sound(self, device_id: str, request_uuid: str | None = None) -> bool:
         """Thin sync wrapper around async_stop_sound for non-HA contexts.
 
         Args:
@@ -1188,7 +1189,7 @@ class GoogleFindMyAPI:
             True if the command was sent successfully, False otherwise.
         """
         result = self._run_sync_helper(
-            lambda: self.async_stop_sound(device_id),
+            lambda: self.async_stop_sound(device_id, request_uuid),
             guard_message=(
                 "stop_sound() called inside an active event loop; use async_stop_sound()."
             ),
@@ -1198,7 +1199,7 @@ class GoogleFindMyAPI:
         return cast(bool, result)
 
     # ---------- Play/Stop Sound (async; HA-first) ----------
-    async def async_play_sound(self, device_id: str) -> bool:
+    async def async_play_sound(self, device_id: str) -> tuple[bool, str | None]:
         """Send a 'Play Sound' command to a device (async path for HA).
 
         Auth mapping note:
@@ -1209,11 +1210,13 @@ class GoogleFindMyAPI:
             device_id: The canonical ID of the device.
 
         Returns:
-            True if the command was submitted successfully, False otherwise.
+            A tuple `(success, request_uuid)` where `success` indicates whether the
+            command was submitted successfully and `request_uuid` captures the
+            backend-generated request identifier when available.
         """
         token = self._get_fcm_token_for_action()
         if not token:
-            return False
+            return (False, None)
         try:
             _LOGGER.info("Submitting Play Sound (async) for %s", device_id)
             # Delegate payload build + transport to the submitter; provide HA session.
@@ -1228,11 +1231,11 @@ class GoogleFindMyAPI:
             )
             if result is None:
                 _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
-                return False
+                return (False, None)
 
-            _response_hex, _request_uuid = result
+            _response_hex, request_uuid = result
             _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
-            return True
+            return (True, request_uuid)
 
         except NovaAuthError as err:
             _LOGGER.error(
@@ -1240,7 +1243,7 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            return False
+            return (False, None)
 
         except NovaHTTPError as err:
             if getattr(err, "status", None) in (401, 403):
@@ -1250,20 +1253,20 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                return False
+                return (False, None)
             _LOGGER.warning(
                 "Server error (%s) while playing sound on %s: %s",
                 err.status,
                 device_id,
                 _short_err(err),
             )
-            return False
+            return (False, None)
 
         except NovaRateLimitError as err:
             _LOGGER.warning(
                 "Play Sound rate-limited for %s: %s", device_id, _short_err(err)
             )
-            return False
+            return (False, None)
 
         except ClientError as err:
             _LOGGER.error(
@@ -1271,15 +1274,17 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            return False
+            return (False, None)
 
         except Exception as err:
             _LOGGER.error(
                 "Failed to play sound (async) on %s: %s", device_id, _short_err(err)
             )
-            return False
+            return (False, None)
 
-    async def async_stop_sound(self, device_id: str) -> bool:
+    async def async_stop_sound(
+        self, device_id: str, request_uuid: str | None = None
+    ) -> bool:
         """Send a 'Stop Sound' command to a device (async path for HA).
 
         Auth mapping note:
@@ -1303,6 +1308,7 @@ class GoogleFindMyAPI:
                 session=self._session,
                 namespace=self._namespace(),
                 cache=cast("TokenCache | None", self._cache),
+                request_uuid=request_uuid,
             )
             ok = result_hex is not None
             if ok:

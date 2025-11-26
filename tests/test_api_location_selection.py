@@ -53,12 +53,14 @@ class _SyncHarness(GoogleFindMyAPI):
         self.calls.append(("loc", (device_id, device_name)))
         return {"id": device_id, "name": device_name}
 
-    async def async_play_sound(self, device_id: str) -> bool:
+    async def async_play_sound(self, device_id: str) -> tuple[bool, str | None]:
         self.calls.append(("play", (device_id,)))
-        return True
+        return True, "uuid-play"
 
-    async def async_stop_sound(self, device_id: str) -> bool:
-        self.calls.append(("stop", (device_id,)))
+    async def async_stop_sound(
+        self, device_id: str, request_uuid: str | None = None
+    ) -> bool:
+        self.calls.append(("stop", (device_id, request_uuid)))
         return True
 
 
@@ -154,7 +156,7 @@ def test_sync_wrappers_execute_without_running_loop() -> None:
         ("basic", ()),
         ("loc", ("dev-1", "Device 1")),
         ("play", ("dev-2",)),
-        ("stop", ("dev-3",)),
+        ("stop", ("dev-3", None)),
     ]
 
 
@@ -171,6 +173,16 @@ def test_sync_wrappers_guard_when_loop_running() -> None:
 
     asyncio.run(_runner())
     assert api.calls == []
+
+
+def test_sync_stop_sound_forwards_request_uuid() -> None:
+    """stop_sound sync wrapper should pass through an explicit request id."""
+
+    api = _SyncHarness()
+
+    assert api.stop_sound("dev-uuid", "req-123") is True
+
+    assert api.calls == [("stop", ("dev-uuid", "req-123"))]
 
 
 def test_sync_wrappers_use_provided_session_loop() -> None:

@@ -191,6 +191,15 @@ Treat this checklist as a living document: if a new helper or guard
 becomes necessary, add it here and verify each item before completing
 any change under `tests/`.
 
+### Helper completeness reminder
+
+When inserting new helper classes alongside existing stubs (for example,
+`_PlatformRecorder` in `tests/helpers/homeassistant.py`), ensure the
+updated class remains fully defined after edits. Partial insertions or
+copy/paste adjustments can silently drop required stub attributes or
+methods; always re-run the relevant tests after modifying helpers to
+confirm their interfaces stay intact.
+
 Contract tests under `tests/test_entity_device_info_contract.py` expect
 `pytest-homeassistant-custom-component`'s bundled `homeassistant`
 stubs to be installed. Without that optional dependency, pytest will
