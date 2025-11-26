@@ -6,6 +6,7 @@ from __future__ import annotations
 # tests/test_device_tracker.py
 import asyncio
 import importlib
+import logging
 from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
 from typing import Any
@@ -246,4 +247,93 @@ def test_initial_snapshot_hydrates_registry_tracker(
     tracker_entity = added[0][0]
     assert tracker_entity.unique_id == "entry-1:tracker-subentry:tracker-1"
     assert coordinator.lookup_calls == ["tracker-1"]
+
+
+def test_device_tracker_avoids_duplicate_accuracy_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Entity updates should rely on coordinator accuracy filtering."""
+
+    device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
+
+    class _CoordinatorStub:
+        def __init__(self) -> None:
+            self.hass = SimpleNamespace()
+            self.config_entry = SimpleNamespace(entry_id="entry-accuracy", options={}, runtime_data=None)
+            self._device_location_data: dict[tuple[str | None, str], dict[str, Any]] = {}
+            self._snapshots: dict[str, list[dict[str, Any]]] = {}
+
+        def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+            return lambda: None
+
+        def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
+            return True
+
+        def get_device_location_data_for_subentry(
+            self, key: str | None, device_id: str
+        ) -> dict[str, Any] | None:
+            return self._device_location_data.get((key, device_id))
+
+        def get_subentry_snapshot(
+            self, key: str | None = None, feature: str | None = None
+        ) -> list[dict[str, Any]]:
+            return list(self._snapshots.get(key or TRACKER_SUBENTRY_KEY, []))
+
+        def stable_subentry_identifier(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> str | None:
+            return key
+
+        def get_subentry_metadata(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> Any:
+            return SimpleNamespace(
+                config_subentry_id=key,
+                visible_device_ids=[],
+                enabled_device_ids=[],
+            )
+
+        def update_location(self, key: str, device: dict[str, Any]) -> None:
+            self._device_location_data[(key, device["id"])] = device
+            self._snapshots[key] = [device]
+
+    coordinator = _CoordinatorStub()
+    entity = device_tracker.GoogleFindMyDeviceTracker(
+        coordinator,
+        {"id": "device-accuracy", "name": "Tracker"},
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier=TRACKER_SUBENTRY_KEY,
+    )
+    entity.hass = SimpleNamespace()
+
+    caplog.set_level(logging.DEBUG)
+    coordinator_logger = logging.getLogger("custom_components.googlefindmy.coordinator")
+    coordinator_logger.debug(
+        "Dropping low-quality fix for Tracker (accuracy=150m > 100m)"
+    )
+
+    good_fix = {
+        "id": "device-accuracy",
+        "name": "Tracker",
+        "accuracy": 25,
+        "latitude": 10.0,
+        "longitude": 20.0,
+    }
+    coordinator.update_location(TRACKER_SUBENTRY_KEY, good_fix)
+
+    entity._handle_coordinator_update()
+
+    assert any(
+        "Dropping low-quality fix" in record.message
+        for record in caplog.records
+        if record.name == "custom_components.googlefindmy.coordinator"
+    )
+    assert all(
+        "threshold" not in record.message and "accuracy=" not in record.message
+        for record in caplog.records
+        if record.name == "custom_components.googlefindmy.device_tracker"
+    )
+    assert entity._last_good_accuracy_data == coordinator.get_device_location_data_for_subentry(
+        TRACKER_SUBENTRY_KEY, "device-accuracy"
+    )
 
