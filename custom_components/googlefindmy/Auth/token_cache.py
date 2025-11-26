@@ -437,8 +437,12 @@ def _unregister_instance(entry_id: str) -> TokenCache | None:
     return _INSTANCES.pop(entry_id, None)
 
 
-def _set_default_entry_id(entry_id: str) -> None:
+def _set_default_entry_id(entry_id: str, *, force: bool = False) -> None:
     """Set the default entry for facade calls (only for single-entry scenarios)."""
+    if force:
+        _STATE["default_entry_id"] = entry_id
+        return
+
     if len(_INSTANCES) > 1 and _STATE["default_entry_id"] != entry_id:
         # Immediately disallow ambiguous facade usage in multi-entry setups.
         _STATE["default_entry_id"] = None
@@ -451,6 +455,22 @@ def _set_default_entry_id(entry_id: str) -> None:
 
 def _get_default_cache() -> TokenCache:
     """Return the default cache instance or raise if ambiguous/missing."""
+    cache_from_provider: TokenCache | None = None
+    try:
+        from ..NovaApi import nova_request  # noqa: PLC0415
+    except Exception:  # pragma: no cover - defensive import guard
+        pass
+    else:
+        provider = getattr(nova_request, "_get_cache_provider", None)
+        if callable(provider):
+            try:
+                cache_from_provider = provider()
+            except Exception:  # pragma: no cover - defensive provider guard
+                cache_from_provider = None
+
+    if cache_from_provider is not None:
+        return cache_from_provider
+
     default_entry_id = _STATE["default_entry_id"]
     if default_entry_id and (cache := _INSTANCES.get(default_entry_id)):
         return cache
