@@ -245,11 +245,19 @@ class GoogleFindMyMapView(HomeAssistantView):
         locations: list[dict[str, Any]] = []
         seen_timestamps: set[float] = set()
         if entity_id:
+            try:
+                from homeassistant.components.recorder import get_instance
+            except ImportError:
+                get_instance = None
             from homeassistant.components.recorder.history import get_significant_states
 
+            recorder = get_instance(self.hass) if get_instance else None
+            async_add_executor_job = getattr(
+                recorder, "async_add_executor_job", self.hass.async_add_executor_job
+            )
             try:
-                # Run heavy DB query in executor
-                history = await self.hass.async_add_executor_job(
+                # Run heavy DB query in recorder executor to avoid regression warnings
+                history = await async_add_executor_job(
                     get_significant_states, self.hass, start_time, end_time, [entity_id]
                 )
 
