@@ -2741,13 +2741,9 @@ class ConfigFlow(
 
         if existing_entries and not is_reconfigure_context:
             _LOGGER.debug(
-                "async_step_user: Aborting new flow, an entry already exists (found %d entries)",
+                "async_step_user: Existing entries detected (found %d); deferring duplicate checks until credentials are available",
                 len(existing_entries),
             )
-            # Preserve the single parent-entry contract for fresh setups; only
-            # reconfigure flows may bypass this guard because they target the
-            # already-linked entry instead of creating a new parent.
-            return self.async_abort(reason="already_configured")
 
         if is_reconfigure_context:
             if matching_entry is not None:
