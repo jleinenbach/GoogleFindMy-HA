@@ -169,6 +169,7 @@ from .const import (
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPTION_KEYS,
+    SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SERVICE_SUBENTRY_TRANSLATION_KEY,
@@ -7217,6 +7218,12 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
     updated_count = 0
     for device in dev_reg.devices.values():
         try:
+            if getattr(device, "entry_type", None) == dr.DeviceEntryType.SERVICE:
+                continue
+
+            if getattr(device, "translation_key", None) == SERVICE_DEVICE_TRANSLATION_KEY:
+                continue
+
             if not any(
                 len(identifier) >= 1 and identifier[0] == DOMAIN
                 for identifier in device.identifiers
