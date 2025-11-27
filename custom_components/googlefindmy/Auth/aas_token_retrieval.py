@@ -172,7 +172,10 @@ async def _get_or_generate_android_id(
         try:
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Failed to persist android_id from FCM credentials: %s", _clip(err))
+            _LOGGER.debug(
+                "Skipping cache write for android_id derived from FCM bundle; persistence failed",
+                exc_info=err,
+            )
         return android_id
 
     if cached_android_id is not None:
@@ -219,9 +222,8 @@ async def _exchange_oauth_for_aas(
     loop = asyncio.get_running_loop()
 
     _LOGGER.debug(
-        "Calling gpsoauth.exchange_token with username=%s, oauth_token_prefix=%s, oauth_token_len=%d, android_id=0x%X",
+        "Calling gpsoauth.exchange_token for %s (token_len=%d, android_id=0x%X)",
         _mask_email_for_logs(username),
-        oauth_token[:10] + "..." if oauth_token else "None",
         len(oauth_token) if oauth_token else 0,
         android_id,
     )
@@ -254,14 +256,16 @@ async def _exchange_oauth_for_aas(
             f"Invalid response from gpsoauth: {_summarize_response(resp)}"
         )
     if "Token" not in resp:
-        error_details = None
         resp_keys: list[str] | str = "N/A"
+        error_details_present = False
         if isinstance(resp, dict):
             resp_keys = list(resp.keys())
-            error_details = resp.get("ErrorDetails") or resp.get("Error")
+            error_details_present = bool(
+                resp.get("ErrorDetails") or resp.get("Error")
+            )
         _LOGGER.warning(
-            "gpsoauth response missing 'Token'. Error details (if any): %s. Response keys: %s",
-            error_details,
+            "gpsoauth response missing 'Token'; error field present=%s; response keys=%s",
+            error_details_present,
             resp_keys,
         )
         raise RuntimeError("Missing 'Token' in gpsoauth response")
@@ -325,7 +329,9 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
         try:
             await cache.set(DATA_AAS_TOKEN, oauth_token)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Failed to persist cached AAS token shortcut: %s", _clip(err))
+            _LOGGER.debug(
+                "Failed to persist cached AAS token shortcut.", exc_info=err
+            )
         return oauth_token
 
     if not oauth_token:
@@ -344,7 +350,7 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
                     username = extracted_username
                 _LOGGER.info(
                     "Using existing ADM token from cache for OAuth exchange (user: %s).",
-                    (username or "unknown").split("@", 1)[0] + "@…",
+                    _mask_email_for_logs(username),
                 )
                 break
 
@@ -358,7 +364,10 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
                         extracted_username = key.replace("adm_token_", "", 1)
                         if extracted_username and "@" in extracted_username:
                             username = extracted_username
-                        _LOGGER.info("Using existing ADM token from global cache for OAuth exchange (user: %s).", username or "unknown")
+                        _LOGGER.info(
+                            "Using existing ADM token from global cache for OAuth exchange (user: %s).",
+                            _mask_email_for_logs(username),
+                        )
                         break
             except Exception:  # noqa: BLE001
                 pass
@@ -435,17 +444,18 @@ async def async_get_aas_token(
                 last_exc = exc
                 if _is_non_retryable_auth(exc) or attempt >= attempts - 1:
                     _LOGGER.error(
-                        "AAS token generation failed%s: %s",
+                        "AAS token generation failed%s (error=%s)",
                         "" if attempt >= attempts - 1 else " (non-retryable)",
-                        _clip(exc),
+                        type(exc).__name__,
+                        exc_info=exc,
                     )
                     break
                 sleep_s = backoff * (2**attempt)
                 _LOGGER.info(
-                    "AAS token generation failed (attempt %d/%d): %s — retrying in %.1fs",
+                    "AAS token generation failed (attempt %d/%d, error=%s); retrying in %.1fs",
                     attempt + 1,
                     attempts,
-                    _clip(exc),
+                    type(exc).__name__,
                     sleep_s,
                 )
                 await asyncio.sleep(sleep_s)

@@ -312,9 +312,9 @@ async def _get_initial_token_async(
                 await resolved_cache.set(cache_key, fallback)
             except Exception as err:  # pragma: no cover - defensive logging
                 logger.debug(
-                    "Failed to mirror ADM token to namespaced key '%s': %s",
-                    cache_key,
-                    err,
+                    "Failed to mirror ADM token to namespaced key",
+                    extra={"cache_key": cache_key},
+                    exc_info=err,
                 )
             return fallback
 
@@ -325,7 +325,9 @@ async def _get_initial_token_async(
             await resolved_cache.set(cache_key, token)
         except Exception as err:  # pragma: no cover - defensive logging
             logger.debug(
-                "Failed to persist ADM token to namespaced key '%s': %s", cache_key, err
+                "Failed to persist ADM token to namespaced key",
+                extra={"cache_key": cache_key},
+                exc_info=err,
             )
 
     return token
@@ -873,7 +875,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             if ns_prefix:
                 await resolved_cache.set(f"{ns_prefix}{DATA_AAS_TOKEN}", token)
         except Exception as err:  # noqa: BLE001 - defensive caching
-            _LOGGER.debug("Failed to seed provided flow token into cache: %s", err)
+            _LOGGER.debug(
+                "Failed to seed provided flow token into cache", exc_info=err
+            )
 
     initial_token = await _get_initial_token_async(
         user, _LOGGER, ns_prefix=(namespace or ""), cache=resolved_cache

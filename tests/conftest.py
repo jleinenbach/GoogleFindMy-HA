@@ -550,10 +550,16 @@ def _stub_homeassistant() -> None:
             self.dependencies: list[str] = []
 
         async def async_get_component(self) -> ModuleType | SimpleNamespace:
-            try:
-                return importlib.import_module(f"custom_components.{self.domain}")
-            except ModuleNotFoundError:
-                return SimpleNamespace(__name__=self.domain)
+            domain = self.domain if isinstance(self.domain, str) else ""
+            if domain == "googlefindmy":
+                try:
+                    return importlib.import_module(
+                        f"custom_components.{domain}"
+                    )
+                except ModuleNotFoundError:
+                    return SimpleNamespace(__name__=domain)
+
+            return SimpleNamespace(__name__=domain or "unknown_integration")
 
     async def _async_get_integration(_hass, _domain):  # pragma: no cover - stub
         return _StubIntegration(_domain)
