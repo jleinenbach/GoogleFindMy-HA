@@ -31,5 +31,5 @@
     "selenium>=4.37.0",
     "undetected_chromedriver>=3.5.5"
   ],
-  "version": "1.6.0"
+  "version": "1.7.0"
 }
