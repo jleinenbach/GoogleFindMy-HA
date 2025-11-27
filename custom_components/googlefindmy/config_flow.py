@@ -5308,7 +5308,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     vol.Optional("new_secrets_json"): selector(
                         {"text": {"multiline": True}}
                     ),
-                    vol.Optional("new_oauth_token"): str,
+                    # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
             )
         else:
@@ -5318,7 +5318,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                         subentry_choices
                     ),
                     vol.Optional("new_secrets_json"): str,
-                    vol.Optional("new_oauth_token"): str,
+                    # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
             )
 
@@ -5327,9 +5327,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             if selected_key not in subentry_choices:
                 errors[_FIELD_SUBENTRY] = "invalid_subentry"
             else:
+                new_token = (user_input.get("new_oauth_token") or "").strip()
+                has_token = bool(new_token)
                 has_secrets = bool((user_input.get("new_secrets_json") or "").strip())
-                has_token = bool((user_input.get("new_oauth_token") or "").strip())
-                if (has_secrets and has_token) or (not has_secrets and not has_token):
+                if not has_secrets and not has_token:
                     errors["base"] = "choose_one"
                 else:
                     try:
@@ -5354,43 +5355,40 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                             return self.async_abort(reason="reconfigure_successful")
 
                         if has_token:
-                            token = (user_input.get("new_oauth_token") or "").strip()
-                            if not (
-                                _token_plausible(token)
-                                and not _disqualifies_for_persistence(token)
-                            ):
-                                errors["base"] = "invalid_token"
+                            try:
+                                chosen = await async_pick_working_token(
+                                    self.hass,
+                                    email,
+                                    [("manual", new_token)],
+                                )
+                            except (DependencyNotReady, ImportError) as exc:
+                                _register_dependency_error(errors, exc)
                             else:
-                                try:
-                                    chosen = await async_pick_working_token(
-                                        self.hass,
-                                        email,
-                                        [("manual", token)],
+                                if not chosen:
+                                    _LOGGER.warning(
+                                        "Token validation failed for %s. No working token found among candidates (%s).",
+                                        _mask_email_for_logs(email),
+                                        _cand_labels([("manual", new_token)]),
                                     )
-                                except (DependencyNotReady, ImportError) as exc:
-                                    _register_dependency_error(errors, exc)
+                                    errors["base"] = "cannot_connect"
                                 else:
-                                    if not chosen:
+                                    if _disqualifies_for_persistence(chosen):
                                         _LOGGER.warning(
-                                            "Token validation failed for %s. No working token found among candidates (%s).",
-                                            _mask_email_for_logs(email),
-                                            _cand_labels([("manual", token)]),
+                                            "Options: token looks like a JWT; persisting anyway due to validation."
                                         )
-                                        errors["base"] = "cannot_connect"
+                                    updated_data = {
+                                        **entry.data,
+                                        DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
+                                        CONF_OAUTH_TOKEN: chosen,
+                                    }
+                                    updated_data.pop(DATA_SECRET_BUNDLE, None)
+                                    if isinstance(chosen, str) and chosen.startswith(
+                                        "aas_et/"
+                                    ):
+                                        updated_data[DATA_AAS_TOKEN] = chosen
                                     else:
-                                        updated_data = {
-                                            **entry.data,
-                                            DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                            CONF_OAUTH_TOKEN: chosen,
-                                        }
-                                        updated_data.pop(DATA_SECRET_BUNDLE, None)
-                                        if isinstance(chosen, str) and chosen.startswith(
-                                            "aas_et/"
-                                        ):
-                                            updated_data[DATA_AAS_TOKEN] = chosen
-                                        else:
-                                            updated_data.pop(DATA_AAS_TOKEN, None)
-                                        return await _finalize_success(updated_data)
+                                        updated_data.pop(DATA_AAS_TOKEN, None)
+                                    return await _finalize_success(updated_data)
 
                         if has_secrets and "new_secrets_json" in user_input:
                             try:
@@ -5461,39 +5459,26 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     except Exception as err2:  # noqa: BLE001
                         if _is_multi_entry_guard_error(err2):
                             entry = self.config_entry
-                            if has_token:
-                                token_value = user_input["new_oauth_token"].strip()
-                                updated_data = {
-                                    **entry.data,
-                                    DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                    CONF_OAUTH_TOKEN: token_value,
-                                }
-                                updated_data.pop(DATA_SECRET_BUNDLE, None)
-                                if token_value.startswith("aas_et/"):
-                                    updated_data[DATA_AAS_TOKEN] = token_value
-                                else:
-                                    updated_data.pop(DATA_AAS_TOKEN, None)
+                            parsed = json.loads(user_input["new_secrets_json"])
+                            cands = _extract_oauth_candidates_from_secrets(parsed)
+                            token_first = cands[0][1] if cands else ""
+                            updated_data = {
+                                **entry.data,
+                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                CONF_OAUTH_TOKEN: token_first,
+                                DATA_SECRET_BUNDLE: parsed,
+                            }
+                            fcm_credentials = _extract_fcm_credentials_from_secrets(
+                                parsed
+                            )
+                            if fcm_credentials is not None:
+                                updated_data["fcm_credentials"] = fcm_credentials
+                            if isinstance(token_first, str) and token_first.startswith(
+                                "aas_et/"
+                            ):
+                                updated_data[DATA_AAS_TOKEN] = token_first
                             else:
-                                parsed = json.loads(user_input["new_secrets_json"])
-                                cands = _extract_oauth_candidates_from_secrets(parsed)
-                                token_first = cands[0][1] if cands else ""
-                                updated_data = {
-                                    **entry.data,
-                                    DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                    CONF_OAUTH_TOKEN: token_first,
-                                    DATA_SECRET_BUNDLE: parsed,
-                                }
-                                fcm_credentials = (
-                                    _extract_fcm_credentials_from_secrets(parsed)
-                                )
-                                if fcm_credentials is not None:
-                                    updated_data["fcm_credentials"] = fcm_credentials
-                                if isinstance(
-                                    token_first, str
-                                ) and token_first.startswith("aas_et/"):
-                                    updated_data[DATA_AAS_TOKEN] = token_first
-                                else:
-                                    updated_data.pop(DATA_AAS_TOKEN, None)
+                                updated_data.pop(DATA_AAS_TOKEN, None)
                             return await _finalize_success(updated_data)
                         errors["base"] = _map_api_exc_to_error_key(err2)
 
