@@ -36,10 +36,20 @@ class _StubConfigEntries:
 
 
 class _StubRegistryEntry:
-    def __init__(self, *, entity_id: str, unique_id: str, config_entry_id: str) -> None:
+    """Entity registry entry stub that optionally links to a device."""
+
+    def __init__(
+        self,
+        *,
+        entity_id: str,
+        unique_id: str,
+        config_entry_id: str,
+        device_id: str | None = None,
+    ) -> None:
         self.entity_id = entity_id
         self.unique_id = unique_id
         self.config_entry_id = config_entry_id
+        self.device_id = device_id
         self.platform = DOMAIN
 
 
@@ -59,6 +69,22 @@ class _StubEntityRegistry:
 
     def async_get(self, entity_id: str) -> _StubRegistryEntry | None:
         return self.entities.get(entity_id)
+
+
+class _StubDeviceEntry:
+    """Device registry entry stub with user-configurable labels."""
+
+    def __init__(self, *, name: str | None = None, name_by_user: str | None = None) -> None:
+        self.name = name
+        self.name_by_user = name_by_user
+
+
+class _StubDeviceRegistry:
+    def __init__(self, devices: dict[str, _StubDeviceEntry]) -> None:
+        self.devices = devices
+
+    def async_get(self, device_id: str) -> _StubDeviceEntry | None:  # pragma: no cover - passthrough
+        return self.devices.get(device_id)
 
 
 class _StubState:
@@ -279,3 +305,95 @@ async def test_get_prefers_matching_entry_over_foreign_match(monkeypatch: pytest
     assert response.status == 200
     assert "leaflet" in response.text.lower()
     assert history_calls == [scoped_registry_entry.entity_id]
+
+
+@pytest.mark.asyncio
+async def test_registry_labels_fill_blank_coordinator_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback to device registry labels when coordinator names are blank or missing."""
+
+    device_id = "device987"
+    coordinator = SimpleNamespace(data=[{"id": device_id, "name": "   "}])
+    entry = _StubEntry("entry-id", runtime_data=coordinator)
+    hass = _StubHass([entry])
+
+    def _resolve() -> type[Any]:
+        return SimpleNamespace
+
+    monkeypatch.setattr(map_view, "_resolve_coordinator_class", _resolve)
+
+    registry_entry = _StubRegistryEntry(
+        entity_id="device_tracker.device987",
+        unique_id=f"{entry.entry_id}:{device_id}",
+        config_entry_id=entry.entry_id,
+        device_id="device-reg-id",
+    )
+    registry = _StubEntityRegistry([registry_entry])
+    monkeypatch.setattr(map_view.er, "async_get", lambda _hass: registry)
+
+    device_registry = _StubDeviceRegistry(
+        {"device-reg-id": _StubDeviceEntry(name_by_user="Registry Label")}
+    )
+    monkeypatch.setattr(map_view.dr, "async_get", lambda _hass: device_registry)
+
+    state = _StubState(latitude=1.0, longitude=2.0)
+    _install_history_stub(monkeypatch, registry_entry.entity_id, state)
+
+    ha_uuid = hass.data["core.uuid"]
+    secret = map_token_secret_seed(ha_uuid, entry.entry_id, False)
+    token = map_token_hex_digest(secret)
+
+    response = await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query={"token": token}),
+        device_id=device_id,
+    )
+
+    assert response.status == 200
+    assert "registry label - location history" in response.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_missing_registry_and_coordinator_use_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return a placeholder name when neither coordinator nor registry provides labels."""
+
+    device_id = "device000"
+    coordinator = SimpleNamespace(data=[])
+    entry = _StubEntry("entry-id", runtime_data=coordinator)
+    hass = _StubHass([entry])
+
+    def _resolve() -> type[Any]:
+        return SimpleNamespace
+
+    monkeypatch.setattr(map_view, "_resolve_coordinator_class", _resolve)
+
+    registry = _StubEntityRegistry([])
+    monkeypatch.setattr(map_view.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(map_view.dr, "async_get", lambda _hass: _StubDeviceRegistry({}))
+
+    ha_uuid = hass.data["core.uuid"]
+    secret = map_token_secret_seed(ha_uuid, entry.entry_id, False)
+    token = map_token_hex_digest(secret)
+
+    response = await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query={"token": token}),
+        device_id=device_id,
+    )
+
+    assert response.status == 200
+    assert "unknown device - location history" in response.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_redirect_uses_relative_location(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect view should preserve query parameters on a relative URL."""
+
+    hass = _StubHass([])
+    view = map_view.GoogleFindMyMapRedirectView(hass)
+
+    request = SimpleNamespace(query={"token": "abc", "start": "2024-01-01T00:00:00Z"})
+
+    with pytest.raises(map_view.web.HTTPFound) as ctx:
+        await view.get(request, device_id="device123")
+
+    assert ctx.value.location == "/api/googlefindmy/map/device123?token=abc&start=2024-01-01T00%3A00%3A00Z"

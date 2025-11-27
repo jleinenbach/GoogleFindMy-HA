@@ -8,7 +8,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from html import escape
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlencode
 
 from aiohttp import web
@@ -29,12 +29,6 @@ from .const import (
 from .ha_typing import HomeAssistantView
 
 _LOGGER = logging.getLogger(__name__)
-
-
-if TYPE_CHECKING:
-    pass
-else:
-    pass
 
 _COORDINATOR_CLASS: type[Any] | None = None
 
@@ -127,7 +121,7 @@ def _resolve_entry_by_token(
 
 
 class GoogleFindMyMapView(HomeAssistantView):
-    """View to serve device location maps."""
+    """View to serve device location maps with token validation and history."""
 
     url = "/api/googlefindmy/map/{device_id}"
     name = "api:googlefindmy:map"
@@ -207,6 +201,7 @@ class GoogleFindMyMapView(HomeAssistantView):
             entity_entry = getattr(registry, "async_get", lambda _eid: None)(entity_id)
 
         if entity_entry:
+            # Registry stubs used in tests may omit device links; guard the lookup.
             device_id_attr = getattr(entity_entry, "device_id", None)
             device_entry = None
             if device_id_attr:
