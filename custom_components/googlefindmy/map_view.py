@@ -164,8 +164,8 @@ class GoogleFindMyMapView(HomeAssistantView):
                 for dev in data:
                     if dev.get("id") == device_id:
                         raw_name = dev.get("name")
-                        if raw_name:
-                            device_name = raw_name
+                        if raw_name and raw_name.strip():
+                            device_name = raw_name.strip()
                         break
 
         # 3. Find the Entity ID (for History Lookup)
@@ -207,13 +207,17 @@ class GoogleFindMyMapView(HomeAssistantView):
             entity_entry = getattr(registry, "async_get", lambda _eid: None)(entity_id)
 
         if entity_entry:
-            device_entry = dr.async_get(self.hass).async_get(entity_entry.device_id)
+            device_id_attr = getattr(entity_entry, "device_id", None)
+            device_entry = None
+            if device_id_attr:
+                device_entry = dr.async_get(self.hass).async_get(device_id_attr)
+
             registry_name = None
             if device_entry:
                 registry_name = device_entry.name_by_user or device_entry.name
 
-            if registry_name and not device_name:
-                device_name = registry_name
+            if registry_name and registry_name.strip() and not device_name:
+                device_name = registry_name.strip()
 
         if not device_name:
             # Name fallback order: coordinator data -> device registry metadata -> placeholder.
