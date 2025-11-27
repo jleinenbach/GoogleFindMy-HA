@@ -535,14 +535,33 @@ async def async_create_discovery_flow(
 _FALLBACK_CONFIG_SUBENTRY_FLOW: type[Any] | None = None
 
 try:  # pragma: no cover - compatibility shim for stripped environments
-    from homeassistant.config_entries import ConfigSubentry, ConfigSubentryFlow
-except Exception:  # noqa: BLE001
+    from homeassistant.config_entries import (
+        ConfigSubentry,
+        ConfigSubentryFlow,
+        SubentryFlowResult,
+    )
+    from homeassistant.helpers.typing import UNDEFINED, UndefinedType
+except ImportError:
     try:  # pragma: no cover - best-effort partial import
         from homeassistant.config_entries import ConfigSubentry as _ConfigSubentry
-    except Exception:  # noqa: BLE001
+    except ImportError:
         ConfigSubentry = None
     else:
         ConfigSubentry = _ConfigSubentry
+
+    try:
+        from homeassistant.helpers.typing import UNDEFINED, UndefinedType
+    except ImportError:
+        class _UndefinedType:
+            """Fallback sentinel for legacy Home Assistant builds."""
+
+            def __repr__(self) -> str:
+                return "UNDEFINED"
+
+        UNDEFINED = _UndefinedType()
+        UndefinedType = type(UNDEFINED)
+
+    SubentryFlowResult = FlowResult
 
     class _FallbackConfigSubentryFlow:
         """Fallback stub for Home Assistant's ConfigSubentryFlow."""
@@ -572,21 +591,40 @@ except Exception:  # noqa: BLE001
 
         def async_update_and_abort(
             self,
+            entry: ConfigEntry,
+            subentry: ConfigSubentry,
             *,
-            data: dict[str, Any],
-            title: str | None = None,
-            unique_id: str | None = None,
-        ) -> FlowResult:
-            # FIXME: The real Home Assistant implementation expects
-            # ``async_update_and_abort(entry, subentry, *, data=..., ...)``.
-            # This stub keeps a simplified signature so legacy test environments
-            # can execute the new flows without importing the upstream helper.
+            unique_id: str | None | UndefinedType = UNDEFINED,
+            title: str | UndefinedType = UNDEFINED,
+            data: Mapping[str, Any] | UndefinedType = UNDEFINED,
+            data_updates: Mapping[str, Any] | UndefinedType = UNDEFINED,
+        ) -> SubentryFlowResult:
+            merged_data: dict[str, Any] = {}
+
+            if data is not UNDEFINED and data is not None:
+                merged_data.update(data)
+
+            if data_updates is not UNDEFINED and data_updates is not None:
+                merged_data.update(data_updates)
+
+            if merged_data:
+                setattr(subentry, "data", merged_data)
+
+            if title is not UNDEFINED:
+                setattr(subentry, "title", title)
+
+            if unique_id is not UNDEFINED:
+                setattr(subentry, "unique_id", unique_id)
+
+            self.config_entry = entry
+            self.subentry = subentry
+
             return {
-                "type": "abort",
-                "reason": "update",
-                "data": data,
-                "title": title,
-                "unique_id": unique_id,
+                "type": data_entry_flow.FlowResultType.ABORT,
+                "reason": "reconfigure_successful",
+                "data": merged_data or None,
+                "title": None if title is UNDEFINED else title,
+                "unique_id": None if unique_id is UNDEFINED else unique_id,
             }
 
     ConfigSubentryFlow = _FallbackConfigSubentryFlow
