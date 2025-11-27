@@ -30,6 +30,7 @@ Retrieval strategy (when not cached):
 from __future__ import annotations
 
 import base64
+import importlib
 import json
 import logging
 import re
@@ -40,9 +41,6 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
-from custom_components.googlefindmy.KeyBackup.shared_key_flow import (
-    request_shared_key_flow,
-)
 from custom_components.googlefindmy.typing_utils import (
     run_in_executor as _run_in_executor,
 )
@@ -185,6 +183,11 @@ async def _interactive_flow_hex() -> str:
     This opens a browser and requires a TTY; **not suitable for Home Assistant**.
     We keep it as a last-resort fallback for developer CLI usage.
     """
+    shared_key_flow = importlib.import_module(
+        "custom_components.googlefindmy.KeyBackup.shared_key_flow"
+    )
+    request_shared_key_flow = shared_key_flow.request_shared_key_flow
+
     # Run potentially interactive/GUI logic in executor
     result = await _run_in_executor(request_shared_key_flow)
 
