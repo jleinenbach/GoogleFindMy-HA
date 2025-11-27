@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import binascii
 import datetime
+from importlib import import_module
 import math
 import os
 import subprocess
 from typing import TYPE_CHECKING, Any, Protocol
 
-from google.protobuf import text_format
 from google.protobuf.message import Message
 
 try:
@@ -22,6 +22,7 @@ except ImportError:
     ZoneInfo = None  # type: ignore
 
 if TYPE_CHECKING:
+    import google.protobuf.text_format as text_format  # type: ignore[import-not-found]
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 from custom_components.googlefindmy.ProtoDecoders import (
@@ -29,6 +30,18 @@ from custom_components.googlefindmy.ProtoDecoders import (
     DeviceUpdate_pb2,
     LocationReportsUpload_pb2,
 )
+
+
+_text_format_module: Any | None = None
+
+
+def _get_text_format() -> Any:
+    """Lazily import ``google.protobuf.text_format`` outside the event loop."""
+
+    global _text_format_module
+    if _text_format_module is None:
+        _text_format_module = import_module("google.protobuf.text_format")
+    return _text_format_module
 
 
 class _DecryptLocationsCallable(Protocol):
@@ -638,27 +651,33 @@ def get_devices_with_location(
 def print_location_report_upload_protobuf(hex_string: str) -> None:
     msg = parse_location_report_upload_protobuf(hex_string)
     try:
-        s = text_format.MessageToString(msg, message_formatter=custom_message_formatter)
+        s = _get_text_format().MessageToString(
+            msg, message_formatter=custom_message_formatter
+        )
     except TypeError:
-        s = text_format.MessageToString(msg)
+        s = _get_text_format().MessageToString(msg)
     print(s)
 
 
 def print_device_update_protobuf(hex_string: str) -> None:
     msg = parse_device_update_protobuf(hex_string)
     try:
-        s = text_format.MessageToString(msg, message_formatter=custom_message_formatter)
+        s = _get_text_format().MessageToString(
+            msg, message_formatter=custom_message_formatter
+        )
     except TypeError:
-        s = text_format.MessageToString(msg)
+        s = _get_text_format().MessageToString(msg)
     print(s)
 
 
 def print_device_list_protobuf(hex_string: str) -> None:
     msg = parse_device_list_protobuf(hex_string)
     try:
-        s = text_format.MessageToString(msg, message_formatter=custom_message_formatter)
+        s = _get_text_format().MessageToString(
+            msg, message_formatter=custom_message_formatter
+        )
     except TypeError:
-        s = text_format.MessageToString(msg)
+        s = _get_text_format().MessageToString(msg)
     print(s)
 
 
