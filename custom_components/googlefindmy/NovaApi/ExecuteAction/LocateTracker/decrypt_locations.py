@@ -10,10 +10,10 @@ import hashlib
 import logging
 import math
 import time
-from importlib import import_module
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, cast
 
+from custom_components.googlefindmy import get_proto_decoder
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
 from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import decrypt
@@ -24,12 +24,8 @@ from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypted_location import (
     WrappedLocation,
 )
-from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
     parse_device_update_protobuf,
-)
-from custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2 import (
-    DeviceRegistration,
 )
 from custom_components.googlefindmy.SpotApi.CreateBleDevice.config import (
     mcu_fast_pair_model_id,
@@ -46,6 +42,18 @@ from google.protobuf.message import DecodeError
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
+    from custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2 import (
+        DeviceRegistration as DeviceRegistrationMessage,
+    )
+    from custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2 import (
+        DeviceUpdate as DeviceUpdateMessage,
+    )
+else:
+    DeviceRegistrationMessage = Any
+    DeviceUpdateMessage = Any
+
+DeviceRegistration = DeviceRegistrationMessage
+DeviceUpdateProto = DeviceUpdateMessage
 
 _LAT_MIN = -90.0
 _LAT_MAX = 90.0
@@ -67,6 +75,18 @@ _MAX_REPORTS: int = 500
 _EIK_LEN: int = 32
 
 
+def _get_common_pb2() -> Any:
+    """Return the Common_pb2 module lazily."""
+
+    return get_proto_decoder("Common_pb2")
+
+
+def _get_device_update_pb2() -> Any:
+    """Return the DeviceUpdate_pb2 module lazily."""
+
+    return get_proto_decoder("DeviceUpdate_pb2")
+
+
 # ---- Exceptions (specific, compatible via RuntimeError) -----------------------
 class DecryptionError(RuntimeError):
     """Raised when decryption fails for reasons other than stale owner key."""
@@ -79,7 +99,8 @@ class StaleOwnerKeyError(DecryptionError):
 def _status_name_safe(code: Any) -> str:
     """Safely get the string representation of an enum, with a robust fallback."""
     try:
-        status_name: str = Common_pb2.Status.Name(int(code))
+        common_pb2 = _get_common_pb2()
+        status_name: str = common_pb2.Status.Name(int(code))
         return status_name
     except Exception:
         try:
@@ -380,20 +401,21 @@ def _infer_report_hint(status_value: Any) -> str | None:
         - None            → unknown/irrelevant; coordinator applies no type-specific cooldown.
     """
     # --- Explicit enum mapping (robust path) -----------------------
+    common_pb2 = _get_common_pb2()
     try:
-        if int(status_value) == getattr(Common_pb2.Status, "CROWDSOURCED"):
+        if int(status_value) == getattr(common_pb2.Status, "CROWDSOURCED"):
             return "in_all_areas"
     except Exception:
         pass
     try:
-        if int(status_value) == getattr(Common_pb2.Status, "AGGREGATED"):
+        if int(status_value) == getattr(common_pb2.Status, "AGGREGATED"):
             return "high_traffic"
     except Exception:
         pass
 
     # --- Conservative fallback based on enum name -------------------
     try:
-        name = Common_pb2.Status.Name(int(status_value)).lower()
+        name = common_pb2.Status.Name(int(status_value)).lower()
     except Exception:
         return None
 
@@ -406,7 +428,7 @@ def _infer_report_hint(status_value: Any) -> str | None:
 
 # ----------------------------- Main decryptor ---------------------------------
 async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
-    device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate, *, cache: TokenCache
+    device_update_protobuf: DeviceUpdateProto, *, cache: TokenCache
 ) -> list[dict[str, Any]]:
     """Decrypt and normalize location reports into HA-friendly dicts (async).
 
@@ -425,6 +447,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
       - Integer-scaled coordinates and validation: §4
       - "High Traffic" vs. "In All Areas" throttling semantics: §4–5
     """
+    common_pb2 = _get_common_pb2()
+    device_update_pb2 = _get_device_update_pb2()
     # Defensive guards on required metadata
     try:
         device_registration: DeviceRegistration = (
@@ -483,7 +507,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 )
                 continue
 
-            if loc.status == Common_pb2.Status.SEMANTIC:
+            if loc.status == common_pb2.Status.SEMANTIC:
                 wrapped.append(
                     WrappedLocation(
                         decrypted_location=b"",
@@ -544,7 +568,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         try:
             report_hint = _infer_report_hint(loc.status)  # may be None (conservative)
 
-            if loc.status == Common_pb2.Status.SEMANTIC:
+            if loc.status == common_pb2.Status.SEMANTIC:
                 payload: dict[str, Any] = {
                     "latitude": None,
                     "longitude": None,
@@ -560,7 +584,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 if report_hint:
                     payload["_report_hint"] = report_hint
             else:
-                proto_loc = DeviceUpdate_pb2.Location()
+                proto_loc = device_update_pb2.Location()
                 try:
                     # Protobuf parsing is relatively cheap → inline
                     proto_loc.ParseFromString(loc.decrypted_location)
@@ -641,7 +665,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
 
 def decrypt_location_response_locations(
-    device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
+    device_update_protobuf: DeviceUpdateProto,
     *,
     cache: TokenCache,
 ) -> list[dict[str, Any]]:

@@ -51,7 +51,8 @@ from collections.abc import (
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
-from types import MappingProxyType, SimpleNamespace
+from importlib import import_module
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -67,8 +68,6 @@ from weakref import WeakKeyDictionary
 
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
-
-from .ProtoDecoders import Common_pb2, DeviceUpdate_pb2, LocationReportsUpload_pb2
 
 try:  # pragma: no cover - ConfigEntryDisabler introduced in HA 2023.12
     from homeassistant.config_entries import ConfigEntryDisabler as _ConfigEntryDisabler
@@ -242,12 +241,58 @@ __all__ = [
     "LocationReportsUpload_pb2",
 ]
 
+ProtoDecoderModuleName = Literal[
+    "Common_pb2", "DeviceUpdate_pb2", "LocationReportsUpload_pb2"
+]
+
+_PROTO_DECODER_PATHS: Mapping[ProtoDecoderModuleName, str] = MappingProxyType(
+    {
+        "Common_pb2": "custom_components.googlefindmy.ProtoDecoders.Common_pb2",
+        "DeviceUpdate_pb2": "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2",
+        "LocationReportsUpload_pb2": (
+            "custom_components.googlefindmy.ProtoDecoders.LocationReportsUpload_pb2"
+        ),
+    }
+)
+_PROTO_DECODER_CACHE: dict[ProtoDecoderModuleName, ModuleType] = {}
+_PROTO_DECODER_CACHE_PROXY: Mapping[ProtoDecoderModuleName, ModuleType] = (
+    MappingProxyType(_PROTO_DECODER_CACHE)
+)
+
+
+def _import_proto_decoder(name: ProtoDecoderModuleName) -> ModuleType:
+    """Import and cache a ProtoDecoder module on demand."""
+
+    module = _PROTO_DECODER_CACHE.get(name)
+    if module is not None:
+        return module
+
+    module = import_module(_PROTO_DECODER_PATHS[name])
+    _PROTO_DECODER_CACHE[name] = module
+    return module
+
+
+def get_proto_decoder(name: ProtoDecoderModuleName) -> ModuleType:
+    """Return the requested ProtoDecoder module, importing it lazily."""
+
+    return _import_proto_decoder(name)
+
+
+def get_proto_decoders() -> Mapping[ProtoDecoderModuleName, ModuleType]:
+    """Return a read-only mapping of all ProtoDecoder modules."""
+
+    for proto_name in _PROTO_DECODER_PATHS:
+        _import_proto_decoder(proto_name)
+    return _PROTO_DECODER_CACHE_PROXY
+
 
 def __getattr__(name: str) -> Any:
     """Expose ProtoDecoder modules at the package root for compatibility."""
 
     if name in __all__:
-        return globals()[name]
+        module = _import_proto_decoder(cast(ProtoDecoderModuleName, name))
+        globals()[name] = module
+        return module
     raise AttributeError(name)
 
 
