@@ -1148,7 +1148,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required("auth_method"): vol.In(
             {
                 _AUTH_METHOD_SECRETS: "GoogleFindMyTools secrets.json",
-                _AUTH_METHOD_INDIVIDUAL: "Manual token + email",
+                # _AUTH_METHOD_INDIVIDUAL: "Manual token + email",  # Disabled: broken manual token path is intentionally hidden.
             }
         )
     }
