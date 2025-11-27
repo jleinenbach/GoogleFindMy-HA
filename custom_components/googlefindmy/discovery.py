@@ -576,7 +576,10 @@ class SecretsJSONWatcher:
             try:
                 unsub()
             except Exception as err:  # noqa: BLE001 - defensive best effort
-                _LOGGER.debug("Error while unsubscribing secrets watcher: %s", err)
+                _LOGGER.debug(
+                    "Error while unsubscribing secrets watcher",
+                    exc_info=err,
+                )
         self._last_signature = None
 
     async def async_force_scan(self) -> None:
@@ -594,9 +597,11 @@ class SecretsJSONWatcher:
             if result is None:
                 if self._last_signature is not None:
                     _LOGGER.debug(
-                        "Secrets discovery reset (%s): %s missing",
-                        reason,
-                        self._path,
+                        "Secrets discovery reset; bundle missing",
+                        extra={
+                            "reason": reason,
+                            "bundle_path": str(self._path),
+                        },
                     )
                 self._last_signature = None
                 return
@@ -643,8 +648,12 @@ class SecretsJSONWatcher:
 
             if not isinstance(results_list, _CloudDiscoveryResults):
                 _LOGGER.debug(
-                    "Secrets discovery results missing runtime container for %s",
-                    _redact_account_for_log(result.email, result.stable_key),
+                    "Secrets discovery results missing runtime container",
+                    extra={
+                        "account": _redact_account_for_log(
+                            result.email, result.stable_key
+                        ),
+                    },
                 )
                 return
 
@@ -652,16 +661,24 @@ class SecretsJSONWatcher:
                 results_list.append(payload)
             except Exception as err:  # noqa: BLE001 - keep watcher alive
                 _LOGGER.warning(
-                    "Secrets discovery flow queueing failed for %s: %s",
-                    _redact_account_for_log(result.email, result.stable_key),
-                    err,
+                    "Secrets discovery flow queueing failed",
+                    extra={
+                        "account": _redact_account_for_log(
+                            result.email, result.stable_key
+                        )
+                    },
+                    exc_info=err,
                 )
                 return
 
             _LOGGER.debug(
-                "Queued secrets discovery for %s (%s)",
-                _redact_account_for_log(result.email, result.stable_key),
-                reason,
+                "Queued secrets discovery",
+                extra={
+                    "account": _redact_account_for_log(
+                        result.email, result.stable_key
+                    ),
+                    "reason": reason,
+                },
             )
 
     async def _async_render_title(self, email: str, *, is_update: bool) -> str | None:
@@ -700,26 +717,35 @@ class SecretsJSONWatcher:
         except FileNotFoundError:
             return None
         except OSError as err:
-            _LOGGER.debug("Unable to read secrets bundle %s: %s", self._path, err)
+            _LOGGER.debug(
+                "Unable to read secrets bundle",
+                extra={"bundle_path": str(self._path)},
+                exc_info=err,
+            )
             return None
 
         try:
             parsed = json.loads(raw_text)
         except json.JSONDecodeError as err:
-            _LOGGER.debug("Invalid secrets.json content at %s: %s", self._path, err)
+            _LOGGER.debug(
+                "Invalid secrets.json content",
+                extra={"bundle_path": str(self._path)},
+                exc_info=err,
+            )
             return None
 
         if not isinstance(parsed, dict):
             _LOGGER.debug(
-                "Ignoring secrets bundle at %s: not a JSON object", self._path
+                "Ignoring secrets bundle: not a JSON object",
+                extra={"bundle_path": str(self._path)},
             )
             return None
 
         email = self._extract_email(parsed)
         if not email:
             _LOGGER.debug(
-                "Ignoring secrets bundle at %s: Google account email missing",
-                self._path,
+                "Ignoring secrets bundle: Google account email missing",
+                extra={"bundle_path": str(self._path)},
             )
             return None
 

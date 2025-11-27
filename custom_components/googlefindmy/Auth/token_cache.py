@@ -399,33 +399,34 @@ def _register_instance(entry_id: str, instance: TokenCache) -> None:
         normalized = cache_entry_id.strip()
         if normalized and normalized != entry_id:
             _LOGGER.warning(
-                "TokenCache entry_id mismatch: registry key '%s' vs instance '%s'. Using registry key.",
-                entry_id,
-                normalized,
+                "TokenCache entry_id mismatch detected; using registry key for cache registration.",
+                extra={
+                    "registry_entry_id_present": bool(entry_id),
+                    "instance_entry_id_present": bool(normalized),
+                },
             )
             try:
                 setattr(instance, "entry_id", entry_id)
             except Exception as err:  # noqa: BLE001 - defensive logging only
                 _LOGGER.debug(
-                    "Failed to correct TokenCache entry_id to '%s': %s", entry_id, err
+                    "Failed to correct TokenCache entry_id to registry key",
+                    exc_info=err,
                 )
         elif not normalized:
             try:
                 setattr(instance, "entry_id", entry_id)
             except Exception as err:  # noqa: BLE001 - defensive logging only
                 _LOGGER.debug(
-                    "Failed to assign entry_id '%s' to TokenCache instance: %s",
-                    entry_id,
-                    err,
+                    "Failed to assign registry entry_id to TokenCache instance",
+                    exc_info=err,
                 )
     else:
         try:
             setattr(instance, "entry_id", entry_id)
         except Exception as err:  # noqa: BLE001 - defensive logging only
             _LOGGER.debug(
-                "Failed to assign entry_id '%s' to TokenCache instance: %s",
-                entry_id,
-                err,
+                "Failed to assign registry entry_id to TokenCache instance",
+                exc_info=err,
             )
     _INSTANCES[entry_id] = instance
 

@@ -64,13 +64,34 @@ _EXPORT_MAP = {
     "get_stub_coordinator_factory": ".stub_coordinator_debug",
 }
 
+_ALLOWED_MODULES: set[str] = {
+    ".config_flow",
+    ".homeassistant",
+    ".homeassistant_stub",
+    ".cache",
+    ".stub_coordinator_debug",
+}
+_MODULE_CACHE: dict[str, Any] = {}
+
+
+def _import_helpers_module(module_name: str) -> Any:
+    """Import an allowed helpers module lazily to avoid circular imports."""
+
+    if module_name not in _ALLOWED_MODULES:
+        raise AttributeError(f"module {__name__!r} has no attribute {module_name!r}")
+
+    if module_name not in _MODULE_CACHE:
+        _MODULE_CACHE[module_name] = import_module(module_name, __name__)
+
+    return _MODULE_CACHE[module_name]
+
 
 def __getattr__(name: str) -> Any:
     """Lazily import config flow helpers to honor Home Assistant stubs."""
 
     module_name = _EXPORT_MAP.get(name)
     if module_name is not None:
-        module = import_module(module_name, __name__)
+        module = _import_helpers_module(module_name)
         value = getattr(module, name)
         globals()[name] = value
         return value

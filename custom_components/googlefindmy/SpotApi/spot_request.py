@@ -130,7 +130,9 @@ async def _pick_auth_token_async(
                 return tok, "spot", user
         except Exception as e:
             _LOGGER.debug(
-                "Failed to get SPOT token for %s: %s; falling back to ADM", user, e
+                "Failed to get SPOT token; falling back to ADM",
+                extra={"has_username": bool(user)},
+                exc_info=e,
             )
 
     # Try ADM for the same user
@@ -340,11 +342,12 @@ async def async_spot_request(
                 src = f"HTTP {status}" if is_http_auth else f"gRPC {grpc_status}"
                 if not refreshed_once:
                     _LOGGER.info(
-                        "SPOT %s auth error (%s); invalidating %s token for %s and retrying once…",
-                        api_scope,
-                        src,
-                        kind,
-                        token_user,
+                        "SPOT auth error; invalidating cached token and retrying once…",
+                        extra={
+                            "api_scope": api_scope,
+                            "auth_source": src,
+                            "token_kind": kind,
+                        },
                     )
                     await _invalidate_token_async(kind, token_user, cache=cache)
                     aas_reset_once = True

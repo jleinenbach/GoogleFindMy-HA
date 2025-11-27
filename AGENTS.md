@@ -247,6 +247,7 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 * **Coverage reminder:** After adjusting registry helper fallbacks, rerun `pytest --cov -q` to confirm coverage stays intact before committing.
 * **Pytest coverage guard:** `pytest -q --cov` will raise the conftest bootstrap error if the Home Assistant stubs are missing. Run `make test-stubs` first so coverage runs complete without runtime import failures.
 * **Import normalization:** Run `python -m ruff check --select I --fix` to auto-sort import blocks (especially in `tests/`) instead of rearranging them manually. Import coroutine annotations (for example, `Coroutine`) from `collections.abc` alongside other container ABCs to avoid duplicate-definition lint errors when `typing` re-exports overlap.
+* **Pytest log capture for citations:** Pipe full coverage runs to a log file (for example, `python -m pytest --cov -q | tee pytest-full.log`) and cite the relevant tail snippet instead of rerunning the suite when only the output is needed.
 
 * **Cache hygiene helper.** Run `make clean` from the repository root to prune `__pycache__` directories and stray `*.pyc` files after tests or whenever caches need to be refreshed. If you need to tidy up manually (for example after executing helper scripts), remove the bytecode caches with `find . -type d -name '__pycache__' -prune -exec rm -rf {} +` before committing.
 

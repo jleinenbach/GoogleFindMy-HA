@@ -13,7 +13,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import gpsoauth
-from custom_components.googlefindmy.Auth.aas_token_retrieval import async_get_aas_token
+from custom_components.googlefindmy.Auth.aas_token_retrieval import (
+    _mask_email_for_logs,
+    async_get_aas_token,
+)
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 
@@ -70,7 +73,8 @@ def _extract_android_id_from_credentials(fcm_creds: Any) -> int | None:
             return None
     if candidate is not None:
         _LOGGER.debug(
-            "Unsupported android_id type in FCM credentials: %s", type(candidate)
+            "Unsupported android_id type in FCM credentials",
+            extra={"android_id_type": type(candidate).__name__},
         )
     return None
 
@@ -87,18 +91,10 @@ def _coerce_android_id(value: object, source: str) -> int | None:
             _LOGGER.debug("android_id value from %s is not numeric", source)
             return None
     if value is not None:
-        _LOGGER.debug("Unsupported android_id type from %s: %s", source, type(value))
+        _LOGGER.debug(
+            "Unsupported android_id type from %s", source, extra={"android_id_type": type(value).__name__}
+        )
     return None
-
-
-def _mask_email(email: str) -> str:
-    """Return a privacy-friendly representation of an email for logs."""
-
-    if "@" not in email:
-        return "<unknown>"
-    local, domain = email.split("@", 1)
-    masked_local = (local[0] + "***") if len(local) > 1 else "*"
-    return f"{masked_local}@{domain}"
 
 
 async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
@@ -109,7 +105,7 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
     try:
         fcm_creds = await cache.get("fcm_credentials")
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to read FCM credentials from cache: %s", err)
+        _LOGGER.debug("Failed to read FCM credentials from cache", exc_info=err)
         fcm_creds = None
 
     android_id = _extract_android_id_from_credentials(fcm_creds)
@@ -117,13 +113,15 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
         try:
             await cache.set(cache_key, android_id)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Failed to persist android_id from FCM credentials: %s", err)
+            _LOGGER.debug(
+                "Failed to persist android_id from FCM credentials", exc_info=err
+            )
         return android_id
 
     try:
         cached_android_id = await cache.get(cache_key)
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to read cached android_id: %s", err)
+        _LOGGER.debug("Failed to read cached android_id", exc_info=err)
         cached_android_id = None
 
     android_id = _coerce_android_id(cached_android_id, "cache")
@@ -133,12 +131,12 @@ async def _resolve_android_id(*, cache: TokenCache, username: str) -> int:
     android_id = random.randint(0x1000000000000000, 0xFFFFFFFFFFFFFFFF)
     _LOGGER.warning(
         "Generated new android_id for %s; cache was missing a stored identifier.",
-        _mask_email(username),
+        _mask_email_for_logs(username),
     )
     try:
         await cache.set(cache_key, android_id)
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to persist generated android_id: %s", err)
+        _LOGGER.debug("Failed to persist generated android_id", exc_info=err)
     return android_id
 
 
@@ -335,7 +333,7 @@ async def async_request_token(  # noqa: PLR0913
         )
     except InvalidAasTokenError:
         _LOGGER.warning(
-            "gpsoauth rejected the cached AAS token while requesting scope '%s'; a fresh AAS token will be required.",
-            scope,
+            "gpsoauth rejected the cached AAS token; a fresh AAS token will be required.",
+            extra={"oauth_scope": scope},
         )
         raise

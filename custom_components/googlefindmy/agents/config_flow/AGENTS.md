@@ -16,6 +16,7 @@ flows, service schemas, or reconfigure hooks are updated.
 ### Integration module imports
 
 * When a config flow needs helpers from the integration package, import the module via `importlib.import_module(__package__ or DOMAIN)` rather than dereferencing `__package__` attributes directly. Home Assistant may start flows with a `None` package hint, and relying on `__init__` attributes can regress when the package layout changes. Centralize this pattern so helper lookups stay robust across runtime and test stubs.
+* Prefer the shared lazy import helpers in `custom_components/googlefindmy/integration_modules.py` (`import_integration_package`, `import_integration_api_module`) so the API and package modules stay lazily loaded while keeping import targets centralized for future changes.
 
 ### Subentry alias handling
 

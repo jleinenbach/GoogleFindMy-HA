@@ -42,7 +42,11 @@ def compile_class_method_from_module(
         AssertionError: If the class or method cannot be found in the module.
     """
 
-    module_path = Path(module_path)
+    module_path = Path(module_path).resolve()
+    repo_root = Path(__file__).resolve().parents[2]
+    if repo_root not in module_path.parents and module_path != repo_root:
+        raise ValueError("module_path must point inside the repository tree")
+
     source = module_path.read_text(encoding="utf-8")
     module_ast = ast.parse(source, filename=str(module_path))
 
@@ -56,10 +60,37 @@ def compile_class_method_from_module(
                     )
                     ast.fix_missing_locations(func_module)
                     namespace: dict[str, Any] = {}
+                    safe_builtins = {
+                        "__build_class__": __build_class__,
+                        "__import__": __import__,
+                        "len": len,
+                        "range": range,
+                        "min": min,
+                        "max": max,
+                        "sum": sum,
+                        "any": any,
+                        "all": all,
+                        "isinstance": isinstance,
+                        "issubclass": issubclass,
+                        "object": object,
+                        "str": str,
+                        "int": int,
+                        "float": float,
+                        "bool": bool,
+                        "dict": dict,
+                        "list": list,
+                        "tuple": tuple,
+                        "set": set,
+                        "frozenset": frozenset,
+                        "enumerate": enumerate,
+                        "zip": zip,
+                        "print": print,
+                    }
+
                     exec(
                         compile(func_module, str(module_path), "exec"),
                         {
-                            "__builtins__": __builtins__,
+                            "__builtins__": safe_builtins,
                             **(dict(global_overrides) if global_overrides else {}),
                         },
                         namespace,
