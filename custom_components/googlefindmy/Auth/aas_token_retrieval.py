@@ -222,10 +222,12 @@ async def _exchange_oauth_for_aas(
     loop = asyncio.get_running_loop()
 
     _LOGGER.debug(
-        "Calling gpsoauth.exchange_token for %s (token_len=%d, android_id=0x%X)",
-        _mask_email_for_logs(username),
-        len(oauth_token) if oauth_token else 0,
-        android_id,
+        "Calling gpsoauth.exchange_token.",
+        extra={
+            "user": _mask_email_for_logs(username),
+            "token_length": len(oauth_token) if oauth_token else 0,
+            "android_id_hex": f"0x{android_id:X}",
+        },
     )
 
     try:
@@ -264,9 +266,12 @@ async def _exchange_oauth_for_aas(
                 resp.get("ErrorDetails") or resp.get("Error")
             )
         _LOGGER.warning(
-            "gpsoauth response missing 'Token'; error field present=%s; response keys=%s",
-            error_details_present,
-            resp_keys,
+            "gpsoauth response missing token; response details recorded in extras.",
+            extra={
+                "error_field_present": error_details_present,
+                "response_keys": resp_keys,
+                "user": _mask_email_for_logs(username),
+            },
         )
         raise RuntimeError("Missing 'Token' in gpsoauth response")
     return resp
@@ -349,8 +354,8 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
                 if extracted_username and "@" in extracted_username:
                     username = extracted_username
                 _LOGGER.info(
-                    "Using existing ADM token from cache for OAuth exchange (user: %s).",
-                    _mask_email_for_logs(username),
+                    "Using existing ADM token from cache for OAuth exchange.",
+                    extra={"user": _mask_email_for_logs(username)},
                 )
                 break
 
@@ -365,8 +370,8 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
                         if extracted_username and "@" in extracted_username:
                             username = extracted_username
                         _LOGGER.info(
-                            "Using existing ADM token from global cache for OAuth exchange (user: %s).",
-                            _mask_email_for_logs(username),
+                            "Using existing ADM token from global cache for OAuth exchange.",
+                            extra={"user": _mask_email_for_logs(username)},
                         )
                         break
             except Exception:  # noqa: BLE001
@@ -442,21 +447,29 @@ async def async_get_aas_token(
                 return await _generate_aas_token(cache=cache)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if _is_non_retryable_auth(exc) or attempt >= attempts - 1:
+                retryable = not _is_non_retryable_auth(exc) and attempt < attempts - 1
+                if not retryable:
                     _LOGGER.error(
-                        "AAS token generation failed%s (error=%s)",
-                        "" if attempt >= attempts - 1 else " (non-retryable)",
-                        type(exc).__name__,
+                        "AAS token generation failed.",
                         exc_info=exc,
+                        extra={
+                            "attempt": attempt + 1,
+                            "attempts": attempts,
+                            "error_type": type(exc).__name__,
+                            "retryable": retryable,
+                        },
                     )
                     break
                 sleep_s = backoff * (2**attempt)
                 _LOGGER.info(
-                    "AAS token generation failed (attempt %d/%d, error=%s); retrying in %.1fs",
-                    attempt + 1,
-                    attempts,
-                    type(exc).__name__,
-                    sleep_s,
+                    "AAS token generation failed; retry scheduled.",
+                    extra={
+                        "attempt": attempt + 1,
+                        "attempts": attempts,
+                        "error_type": type(exc).__name__,
+                        "retry_in_seconds": sleep_s,
+                    },
+                    exc_info=exc,
                 )
                 await asyncio.sleep(sleep_s)
         assert last_exc is not None

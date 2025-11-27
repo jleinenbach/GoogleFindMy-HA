@@ -74,10 +74,18 @@ def test_exchange_oauth_for_aas_logs_inputs(
         "android_id": 0x1234,
     }
 
+    call_logs = [
+        record
+        for record in caplog.records
+        if record.message == "Calling gpsoauth.exchange_token."
+    ]
+    assert call_logs, "Expected the gpsoauth exchange call to be logged"
+    call_log = call_logs[0]
+    assert getattr(call_log, "user") == "u***@example.com"
+    assert getattr(call_log, "token_length") == 18
+    assert getattr(call_log, "android_id_hex") == "0x1234"
+
     messages = "\n".join(record.message for record in caplog.records)
-    assert "Calling gpsoauth.exchange_token" in messages
-    assert "for u***@example.com" in messages
-    assert "token_len=18" in messages
     assert "gpsoauth exchange response received" in messages
 
 
@@ -101,10 +109,16 @@ def test_exchange_oauth_for_aas_missing_token_logs_warning(
         )
 
     warnings = [
-        record.message for record in caplog.records if record.levelno >= logging.WARNING
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "gpsoauth response missing token" in record.message
     ]
-    assert any("gpsoauth response missing 'Token'" in message for message in warnings)
-    assert any("error field present=True" in message for message in warnings)
+    assert warnings, "Expected warning about missing Token key"
+    warning = warnings[0]
+    assert getattr(warning, "error_field_present") is True
+    assert getattr(warning, "response_keys") == ["Error"]
+    assert getattr(warning, "user") == "u***@example.com"
 
 
 def test_async_get_aas_token_short_circuits_for_cached_master(

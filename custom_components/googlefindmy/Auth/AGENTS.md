@@ -57,3 +57,20 @@ _LOGGER.debug(
     exc_info=err,
 )
 ```
+
+**Quick template for reviewers/authors:**
+
+```python
+_LOGGER.info(
+    "<short summary without secrets>",
+    extra={
+        "user": _mask_email_for_logs(username),
+        "context_key": context_value,
+    },
+    exc_info=err,  # include only when a traceback is helpful
+)
+```
+
+Keep sensitive strings (tokens, response bodies, raw exception text) out of the
+message itself and prefer short context keys in `extra` so log processing stays
+consistent and Semgrep does not flag credential leaks.
