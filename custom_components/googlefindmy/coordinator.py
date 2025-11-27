@@ -105,8 +105,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
 # This avoids silent type/name drift and keeps source labels stable.
-from custom_components.googlefindmy.ProtoDecoders import Common_pb2
-
+from . import get_proto_decoder
 from .api import GoogleFindMyAPI
 from .const import (
     CACHE_KEY_CONTRIBUTOR_MODE,
@@ -326,6 +325,12 @@ def format_epoch_utc(value: Any) -> str | None:
 _MISSING = object()
 
 
+def _get_common_pb2() -> Any:
+    """Import Common_pb2 lazily to defer protobuf initialization."""
+
+    return get_proto_decoder("Common_pb2")
+
+
 def _row_source_label(row: dict[str, Any]) -> tuple[int, str]:
     """
     Determine (rank, label) for the source of a report.
@@ -342,17 +347,18 @@ def _row_source_label(row: dict[str, Any]) -> tuple[int, str]:
     raw_status = row.get("status")
     if isinstance(raw_status, str):
         status_name = raw_status.strip().lower()
-    elif isinstance(raw_status, (int, float)) and Common_pb2:
+    elif isinstance(raw_status, (int, float)):
         try:
-            status_name = Common_pb2.Status.Name(int(raw_status)).lower()
+            status_name = _get_common_pb2().Status.Name(int(raw_status)).lower()
         except Exception:
             status_name = str(int(raw_status))
     else:
         status_name = ""
 
     hint = str(row.get("_report_hint") or "").strip().lower()
-    cs = getattr(Common_pb2, "CROWDSOURCED", _MISSING)
-    ag = getattr(Common_pb2, "AGGREGATED", _MISSING)
+    common_pb2 = _get_common_pb2()
+    cs = getattr(common_pb2, "CROWDSOURCED", _MISSING)
+    ag = getattr(common_pb2, "AGGREGATED", _MISSING)
 
     if is_own:
         return 3, "owner"
