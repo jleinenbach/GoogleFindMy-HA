@@ -692,7 +692,11 @@ class FcmRegister:
             fcm_refresh_token = self.credentials["fcm"]["installation"]["refresh_token"]
             fid = self.credentials["fcm"]["installation"]["fid"]
         except KeyError as e:
-            _logger.error("Cannot refresh FCM token: missing credentials key: %s", e)
+            missing_key = getattr(e, "args", ("<unknown>",))[0]
+            _logger.error(
+                "Cannot refresh FCM token: missing credentials key; skipping refresh",
+                extra={"missing_credentials_key": missing_key},
+            )
             return None
 
         headers = {
@@ -724,10 +728,10 @@ class FcmRegister:
             else:
                 text = await resp.text()
                 _logger.error(
-                    "Error during fcm_refresh_install_token at %s (status=%s): %s",
+                    "Error during fcm_refresh_install_token at %s (status=%s); response redacted",
                     url,
                     resp.status,
-                    text[:300],
+                    extra={"response_length": len(text)},
                 )
                 return None
 
@@ -857,7 +861,8 @@ class FcmRegister:
                     return self.credentials
             except Exception as e:
                 _logger.warning(
-                    "Existing credentials check-in failed: %s; re-registering", e
+                    "Existing credentials check-in failed; re-registering",
+                    exc_info=e,
                 )
 
         self.credentials = await self.register()
@@ -866,7 +871,7 @@ class FcmRegister:
             try:
                 self.credentials_updated_callback(credentials)
             except Exception as e:  # avoid caller breaking the flow
-                _logger.debug("credentials_updated_callback raised: %s", e)
+                _logger.debug("credentials_updated_callback raised", exc_info=e)
 
         if credentials is None:
             raise RuntimeError("Registration did not yield credentials")

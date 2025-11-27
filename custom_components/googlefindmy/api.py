@@ -635,7 +635,8 @@ class GoogleFindMyAPI:
             receiver = _FCM_ReceiverGetter()
         except Exception as err:
             _LOGGER.error(
-                "Cannot obtain FCM token: provider callable failed: %s", _short_err(err)
+                "Cannot obtain FCM token: provider callable failed",
+                exc_info=err,
             )
             return None
         if receiver is None:
@@ -663,13 +664,13 @@ class GoogleFindMyAPI:
                 token = receiver.get_fcm_token()
             except Exception as err:
                 _LOGGER.error(
-                    "Cannot obtain FCM token from shared receiver (legacy fallback failed): %s",
-                    _short_err(err),
+                    "Cannot obtain FCM token from shared receiver (legacy fallback failed)",
+                    exc_info=err,
                 )
                 return None
         except Exception as err:
             _LOGGER.error(
-                "Cannot obtain FCM token from shared receiver: %s", _short_err(err)
+                "Cannot obtain FCM token from shared receiver", exc_info=err
             )
             return None
         if not token or not isinstance(token, str) or len(token) < 10:
@@ -690,7 +691,8 @@ class GoogleFindMyAPI:
             receiver = _FCM_ReceiverGetter()
         except Exception as err:
             _LOGGER.debug(
-                "FCM readiness probe: provider callable failed: %s", _short_err(err)
+                "FCM readiness probe: provider callable failed",
+                exc_info=err,
             )
             return None
         if receiver is None:
@@ -718,13 +720,14 @@ class GoogleFindMyAPI:
                 token = receiver.get_fcm_token()
             except Exception as err:
                 _LOGGER.debug(
-                    "FCM readiness probe: legacy get_fcm_token call failed: %s",
-                    _short_err(err),
+                    "FCM readiness probe: legacy get_fcm_token call failed",
+                    exc_info=err,
                 )
                 return None
         except Exception as err:
             _LOGGER.debug(
-                "FCM readiness probe: get_fcm_token failed: %s", _short_err(err)
+                "FCM readiness probe: get_fcm_token failed",
+                exc_info=err,
             )
             return None
         if not token or not isinstance(token, str) or len(token) < 10:

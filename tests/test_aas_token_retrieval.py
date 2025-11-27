@@ -76,8 +76,8 @@ def test_exchange_oauth_for_aas_logs_inputs(
 
     messages = "\n".join(record.message for record in caplog.records)
     assert "Calling gpsoauth.exchange_token" in messages
-    assert "username=u***@example.com" in messages
-    assert "oauth_token_len=18" in messages
+    assert "for u***@example.com" in messages
+    assert "token_len=18" in messages
     assert "gpsoauth exchange response received" in messages
 
 
@@ -104,7 +104,7 @@ def test_exchange_oauth_for_aas_missing_token_logs_warning(
         record.message for record in caplog.records if record.levelno >= logging.WARNING
     ]
     assert any("gpsoauth response missing 'Token'" in message for message in warnings)
-    assert any("BadAuthentication" in message for message in warnings)
+    assert any("error field present=True" in message for message in warnings)
 
 
 def test_async_get_aas_token_short_circuits_for_cached_master(

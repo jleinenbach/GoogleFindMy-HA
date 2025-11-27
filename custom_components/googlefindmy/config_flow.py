@@ -48,7 +48,6 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import lru_cache
-from importlib import import_module
 from types import MappingProxyType, ModuleType
 from typing import (
     TYPE_CHECKING,
@@ -123,6 +122,10 @@ from .const import (
     service_device_identifier,
 )
 from .email import normalize_email, normalize_email_or_default, unique_account_id
+from .integration_modules import (
+    import_integration_api_module,
+    import_integration_package,
+)
 
 _ResolveEntryEmailCallable = Callable[[ConfigEntry], tuple[str | None, str | None]]
 _CoalesceCallable = Callable[
@@ -663,7 +666,7 @@ def _import_api() -> type[GoogleFindMyAPI]:
     """Import the API lazily so config flows load without optional deps."""
 
     try:
-        module = import_module(f"{__package__}.api")
+        module = import_integration_api_module()
     except ImportError as err:  # pragma: no cover - exercised via tests
         raise DependencyNotReady(
             "Google Find My Device dependencies are not installed."
@@ -1335,9 +1338,11 @@ async def async_pick_working_token(
             )
             await _try_probe_devices(api, email=email, token=token)
             _LOGGER.debug(
-                "Token probe OK (source=%s, email=%s).",
-                source,
-                _mask_email_for_logs(email),
+                "Token probe succeeded.",
+                extra={
+                    "token_source": source,
+                    "email": _mask_email_for_logs(email),
+                },
             )
             return token
         except DependencyNotReady:
@@ -1346,19 +1351,24 @@ async def async_pick_working_token(
             if _is_multi_entry_guard_error(err):
                 _LOGGER.debug(
                     (
-                        "Token probe guarded but accepted (source=%s, email=%s). "
-                        "Deferring to entry-scoped caches for multi-account setup."
+                        "Token probe guarded but accepted; deferring to entry-scoped "
+                        "caches for multi-account setup."
                     ),
-                    source,
-                    _mask_email_for_logs(email),
+                    extra={
+                        "token_source": source,
+                        "email": _mask_email_for_logs(email),
+                    },
                 )
                 return token
             key = _map_api_exc_to_error_key(err)
             _LOGGER.debug(
-                "Token probe failed (source=%s, mapped=%s, email=%s).",
-                source,
-                key,
-                _mask_email_for_logs(email),
+                "Token probe failed; mapped error key.",
+                extra={
+                    "token_source": source,
+                    "error_key": key,
+                    "email": _mask_email_for_logs(email),
+                },
+                exc_info=err,
             )
             continue
     return None
@@ -1370,6 +1380,20 @@ def _cand_labels(candidates: list[tuple[str, str]]) -> str:
     if not sources:
         return "none"
     return ", ".join(sorted(sources))
+
+
+def _log_token_validation_failure(
+    *, email: str, candidates: list[tuple[str, str]]
+) -> None:
+    """Log a sanitized token validation failure with candidate metadata."""
+
+    _LOGGER.warning(
+        "Token validation failed; no working tokens among candidates.",
+        extra={
+            "email": _mask_email_for_logs(email),
+            "candidate_sources": _cand_labels(candidates),
+        },
+    )
 
 
 # ---------------------------
@@ -1475,7 +1499,7 @@ def _resolve_entry_email_for_lookup(entry: ConfigEntry) -> tuple[str | None, str
     global _RESOLVE_ENTRY_EMAIL
     if _RESOLVE_ENTRY_EMAIL is None:
         try:
-            integration = import_module(__package__ or DOMAIN)
+            integration = import_integration_package()
 
             candidate = getattr(integration, "_resolve_entry_email")
         except Exception:  # pragma: no cover - fallback for stubs
@@ -1536,7 +1560,7 @@ async def _async_coalesce_account_entries(
 
     global _COALESCE_ENTRIES
     if _COALESCE_ENTRIES is None:
-        integration = import_module(__package__ or DOMAIN)
+        integration = import_integration_package()
 
         candidate = getattr(integration, "async_coalesce_account_entries", None)
 
@@ -2843,11 +2867,7 @@ class ConfigFlow(
                     return self.async_abort(reason="dependency_not_ready")
                 else:
                     if not chosen:
-                        _LOGGER.warning(
-                            "Token validation failed for %s. No working token found among candidates (%s).",
-                            _mask_email_for_logs(email),
-                            _cand_labels(cands),
-                        )
+                        _log_token_validation_failure(email=email, candidates=cands)
                         errors["base"] = "cannot_connect"
                     else:
                         # Persist validated token; prefer non-JWT candidate when possible
@@ -2913,11 +2933,7 @@ class ConfigFlow(
                     return self.async_abort(reason="dependency_not_ready")
                 else:
                     if not chosen:
-                        _LOGGER.warning(
-                            "Token validation failed for %s. No working token found among candidates (%s).",
-                            _mask_email_for_logs(email),
-                            _cand_labels(cands),
-                        )
+                        _log_token_validation_failure(email=email, candidates=cands)
                         errors["base"] = "cannot_connect"
                     else:
                         auth_method = _AUTH_METHOD_INDIVIDUAL
@@ -3495,10 +3511,9 @@ class ConfigFlow(
                             _register_dependency_error(errors, exc)
                         else:
                             if not chosen:
-                                _LOGGER.warning(
-                                    "Token validation failed for %s. No working token found among candidates (%s).",
-                                    _mask_email_for_logs(fixed_email),
-                                    _cand_labels([("manual", token)]),
+                                _log_token_validation_failure(
+                                    email=fixed_email,
+                                    candidates=[("manual", token)],
                                 )
                                 errors["base"] = "cannot_connect"
                             else:
@@ -3556,10 +3571,8 @@ class ConfigFlow(
                                     _register_dependency_error(errors, exc)
                                 else:
                                     if not chosen:
-                                        _LOGGER.warning(
-                                            "Token validation failed for %s. No working token found among candidates (%s).",
-                                            _mask_email_for_logs(fixed_email),
-                                            _cand_labels(cands),
+                                        _log_token_validation_failure(
+                                            email=fixed_email, candidates=cands
                                         )
                                         errors["base"] = "cannot_connect"
                                     else:
@@ -3689,10 +3702,17 @@ class ConfigFlow(
                     await result
                 return
             except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Clearing cached AAS token via %s failed: %s", attr, err)
+                _LOGGER.debug(
+                    "Clearing cached AAS token failed.",
+                    extra={
+                        "setter": attr,
+                        "entry_id": getattr(entry, "entry_id", None),
+                    },
+                    exc_info=err,
+                )
         _LOGGER.debug(
-            "No compatible cache setter found to clear the cached AAS token for entry %s",
-            entry.entry_id,
+            "No compatible cache setter found to clear the cached AAS token.",
+            extra={"entry_id": getattr(entry, "entry_id", None)},
         )
 
     def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
@@ -3861,7 +3881,7 @@ class ConfigFlow(
 
         subentries = getattr(entry, "subentries", None)
         if isinstance(subentries, Mapping):
-            integration = import_module(__package__ or DOMAIN)
+            integration = import_integration_package()
 
             manager_cls: type[_SubentryManagerProto] | None = getattr(
                 integration, "ConfigEntrySubEntryManager", None
@@ -5379,10 +5399,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                 _register_dependency_error(errors, exc)
                             else:
                                 if not chosen:
-                                    _LOGGER.warning(
-                                        "Token validation failed for %s. No working token found among candidates (%s).",
-                                        _mask_email_for_logs(email),
-                                        _cand_labels([("manual", new_token)]),
+                                    _log_token_validation_failure(
+                                        email=email,
+                                        candidates=[("manual", new_token)],
                                     )
                                     errors["base"] = "cannot_connect"
                                 else:
@@ -5427,10 +5446,8 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                         _register_dependency_error(errors, exc)
                                     else:
                                         if not chosen:
-                                            _LOGGER.warning(
-                                                "Token validation failed for %s. No working token found among candidates (%s).",
-                                                _mask_email_for_logs(email),
-                                                _cand_labels(cands),
+                                            _log_token_validation_failure(
+                                                email=email, candidates=cands
                                             )
                                             errors["base"] = "cannot_connect"
                                         else:

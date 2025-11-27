@@ -36,3 +36,24 @@ When adding new cache-backed helpers under this directory, reuse these patterns 
 ## Cookie handling
 
 When reading cookies from external authentication flows (for example, Selenium-managed sessions), always validate both the presence and the expected type of each field before use. In particular, confirm that the `"value"` entry resolves to a `str` and raise a descriptive exception if validation fails so helpers consuming the data can rely on strict return contracts.
+
+## Logging guardrails
+
+* Prefer `exc_info=<err>` over interpolating exception text into log messages so token- or credential-related details remain out of the log stream while still preserving traceback context for debugging.
+* When referencing account identifiers in logs, always mask them via `_mask_email_for_logs` (available from `aas_token_retrieval`) instead of embedding raw usernames or email addresses.
+
+### Preferred logger pattern
+
+Use structured extras plus `exc_info` to keep tokens and raw error text out of messages:
+
+```python
+_LOGGER.debug(
+    "Token probe failed; mapped error key.",
+    extra={
+        "token_source": source,
+        "error_key": key,
+        "email": _mask_email_for_logs(email),
+    },
+    exc_info=err,
+)
+```
