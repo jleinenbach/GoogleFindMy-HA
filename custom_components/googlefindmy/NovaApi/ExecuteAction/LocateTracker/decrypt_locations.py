@@ -14,6 +14,7 @@ from importlib import import_module
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, cast
 
+from custom_components.googlefindmy import get_proto_decoder
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
 from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import decrypt
@@ -39,8 +40,6 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
     async_get_owner_key,
 )
 from google.protobuf.message import DecodeError
-
-from .... import get_proto_decoder
 
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
