@@ -48,3 +48,7 @@ rotation can proceed without interrupting other accounts.
 Heavyweight runtime dependencies (for example, browser drivers such as `undetected_chromedriver`) must be imported lazily inside
 the helpers that use them. Avoid module-level imports that execute expensive discovery logic during Home Assistant startup—wrap
 the import in a small getter and call it only from the executor-backed runtime path.
+
+When adding a lazy import helper, **keep the corresponding `import_module` (or other loader) imported in the module** so static
+analysis tools like `ruff` retain full visibility into the call site. Dropping the import and relying solely on dynamic
+resolution causes undefined-name lint failures the next time the file is checked.
