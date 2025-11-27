@@ -87,6 +87,35 @@ def test_async_step_hub_requires_home_assistant_context() -> None:
     assert hub_result["reason"] == "unknown"
 
 
+@pytest.mark.asyncio
+async def test_user_step_allows_additional_accounts() -> None:
+    """User step should stay available when entries already exist."""
+
+    class _Entry:
+        def __init__(self) -> None:
+            self.entry_id = "existing-entry"
+            self.data = {CONF_GOOGLE_EMAIL: "existing@example.com"}
+
+    entry = _Entry()
+
+    hass = SimpleNamespace()
+    hass.config_entries = SimpleNamespace(
+        async_entries=lambda domain: [entry] if domain == DOMAIN else []
+    )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    set_config_flow_unique_id(flow, None)
+
+    result = await flow.async_step_user()
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert result["type"] == "form"
+    assert result.get("step_id") == "user"
+
+
 def _stable_subentry_id(entry_id: str, key: str) -> str:
     """Return deterministic config_subentry_id values for tests."""
 
