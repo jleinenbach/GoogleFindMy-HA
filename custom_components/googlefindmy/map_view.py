@@ -8,12 +8,13 @@ import logging
 import time
 from datetime import datetime, timedelta
 from html import escape
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlencode
 
 from aiohttp import web
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
@@ -28,12 +29,6 @@ from .const import (
 from .ha_typing import HomeAssistantView
 
 _LOGGER = logging.getLogger(__name__)
-
-
-if TYPE_CHECKING:
-    pass
-else:
-    pass
 
 _COORDINATOR_CLASS: type[Any] | None = None
 
@@ -126,7 +121,7 @@ def _resolve_entry_by_token(
 
 
 class GoogleFindMyMapView(HomeAssistantView):
-    """View to serve device location maps."""
+    """View to serve device location maps with token validation and history."""
 
     url = "/api/googlefindmy/map/{device_id}"
     name = "api:googlefindmy:map"
@@ -153,7 +148,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         # We lazily resolve the coordinator to get the friendly name
         coordinator_cls = _resolve_coordinator_class()
         runtime = getattr(entry, "runtime_data", None)
-        device_name = "Unknown Device"
+        device_name: str | None = None
 
         # Try to find device in the entry's coordinator data
         if runtime:
@@ -162,12 +157,15 @@ class GoogleFindMyMapView(HomeAssistantView):
                 data = getattr(coordinator, "data", []) or []
                 for dev in data:
                     if dev.get("id") == device_id:
-                        device_name = dev.get("name") or "Unknown Device"
+                        raw_name = dev.get("name")
+                        if raw_name and raw_name.strip():
+                            device_name = raw_name.strip()
                         break
 
         # 3. Find the Entity ID (for History Lookup)
         registry = er.async_get(self.hass)
         entity_id: str | None = None
+        entity_entry: er.RegistryEntry | None = None
         # Try standard unique_id formats
         possible_unique_ids = [
             f"{entry.entry_id}:{device_id}",
@@ -185,6 +183,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                 continue
 
             entity_id = ent
+            entity_entry = registry_entry
             break
 
         # Fallback search by matching unique_id suffix if exact match fails
@@ -195,7 +194,29 @@ class GoogleFindMyMapView(HomeAssistantView):
                     if entity.platform == DOMAIN and entity.config_entry_id == entry.entry_id:
                         if entity.unique_id.endswith(f":{device_id}") or entity.unique_id.endswith(f"_{device_id}"):
                             entity_id = entity.entity_id
+                            entity_entry = entity
                             break
+
+        if not entity_entry and entity_id:
+            entity_entry = getattr(registry, "async_get", lambda _eid: None)(entity_id)
+
+        if entity_entry:
+            # Registry stubs used in tests may omit device links; guard the lookup.
+            device_id_attr = getattr(entity_entry, "device_id", None)
+            device_entry = None
+            if device_id_attr:
+                device_entry = dr.async_get(self.hass).async_get(device_id_attr)
+
+            registry_name = None
+            if device_entry:
+                registry_name = device_entry.name_by_user or device_entry.name
+
+            if registry_name and registry_name.strip() and not device_name:
+                device_name = registry_name.strip()
+
+        if not device_name:
+            # Name fallback order: coordinator data -> device registry metadata -> placeholder.
+            device_name = "Unknown Device"
 
         # 4. Parse Filters (Time & Accuracy)
         end_time = dt_util.utcnow()
