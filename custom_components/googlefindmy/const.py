@@ -18,7 +18,7 @@ DOMAIN: str = "googlefindmy"
 # Latest config entry schema version handled by this integration.
 CONFIG_ENTRY_VERSION: int = 2
 # Keep the integration version aligned across the project (match manifest.json)
-INTEGRATION_VERSION: str = "1.6.0"
+INTEGRATION_VERSION: str = "1.7.0"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
