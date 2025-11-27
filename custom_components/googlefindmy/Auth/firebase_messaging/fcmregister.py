@@ -728,10 +728,12 @@ class FcmRegister:
             else:
                 text = await resp.text()
                 _logger.error(
-                    "Error during fcm_refresh_install_token at %s (status=%s); response redacted",
-                    url,
-                    resp.status,
-                    extra={"response_length": len(text)},
+                    "Error during fcm_refresh_install_token; response redacted.",
+                    extra={
+                        "request_url": url,
+                        "status": resp.status,
+                        "response_length": len(text),
+                    },
                 )
                 return None
 

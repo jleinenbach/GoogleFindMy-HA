@@ -265,9 +265,11 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
         aas_token_direct = await cache.get(DATA_AAS_TOKEN)
         if not isinstance(aas_token_direct, str) or not aas_token_direct:
             _LOGGER.warning(
-                "Cached AAS token missing during ADM refresh (method=%s); falling back to OAuth provider.",
-                auth_method or "<unknown>",
-                extra={"account": _mask_email(username)},
+                "Cached AAS token missing during ADM refresh; falling back to OAuth provider.",
+                extra={
+                    "account": _mask_email(username),
+                    "auth_method": auth_method or "<unknown>",
+                },
             )
             aas_token_direct = None
             aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
@@ -500,12 +502,17 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 # Non-retryable? Log once and stop immediately.
-                if _is_non_retryable_auth(exc) or attempt >= attempts - 1:
+                retryable = not _is_non_retryable_auth(exc) and attempt < attempts - 1
+                if not retryable:
                     _LOGGER.error(
-                        "ADM token generation failed%s",
-                        "" if attempt >= attempts - 1 else " (non-retryable)",
+                        "ADM token generation failed.",
                         exc_info=exc,
-                        extra={"account": _mask_email(user)},
+                        extra={
+                            "account": _mask_email(user),
+                            "attempt": attempt + 1,
+                            "attempts": attempts,
+                            "retryable": retryable,
+                        },
                     )
                     break
 
@@ -517,12 +524,14 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
 
                 sleep_s = backoff * (2**attempt)
                 _LOGGER.info(
-                    "ADM token generation failed (attempt %d/%d) — retrying in %.1fs",
-                    attempt + 1,
-                    attempts,
-                    sleep_s,
+                    "ADM token generation failed; retry scheduled.",
                     exc_info=exc,
-                    extra={"account": _mask_email(user)},
+                    extra={
+                        "account": _mask_email(user),
+                        "attempt": attempt + 1,
+                        "attempts": attempts,
+                        "retry_in_seconds": sleep_s,
+                    },
                 )
                 await asyncio.sleep(sleep_s)
 
