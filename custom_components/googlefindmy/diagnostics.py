@@ -292,20 +292,39 @@ def _fcm_receiver_state(hass: HomeAssistant) -> dict[str, Any] | None:
     if not rcvr:
         return None
 
+    snapshots: dict[str, dict[str, Any]] = {}
+    try:
+        snapshots = rcvr.get_health_snapshots()
+    except Exception:  # pragma: no cover - defensive guard
+        snapshots = {}
+
+    entries = []
+    connected_entries: list[str] = []
+    for entry_id, snap in snapshots.items():
+        if snap.get("healthy"):
+            connected_entries.append(entry_id)
+
+        entries.append(
+            {
+                "entry_id": entry_id,
+                "healthy": bool(snap.get("healthy")),
+                "supervisor_running": bool(snap.get("supervisor_running")),
+                "client_ready": bool(snap.get("client_ready")),
+                "run_state": snap.get("run_state"),
+                "do_listen": bool(snap.get("do_listen")),
+                "last_activity_monotonic": snap.get("last_activity_monotonic"),
+                "seconds_since_last_activity": snap.get(
+                    "seconds_since_last_activity"
+                ),
+                "activity_stale": bool(snap.get("activity_stale")),
+            }
+        )
+
     def _get(attr: str, default: Any = None) -> Any:
         try:
             return getattr(rcvr, attr, default)
         except Exception:
             return default
-
-    # run_state may be an enum; prefer .name, fallback to str(value)
-    run_state = None
-    try:
-        pc = getattr(rcvr, "pc", None)
-        rs = getattr(pc, "run_state", None)
-        run_state = getattr(rs, "name", None) or (str(rs) if rs is not None else None)
-    except Exception:
-        run_state = None
 
     last_start = _get("last_start_monotonic", 0.0)
     seconds_since_last_start = None
@@ -316,11 +335,12 @@ def _fcm_receiver_state(hass: HomeAssistant) -> dict[str, Any] | None:
         seconds_since_last_start = None
 
     return {
-        "is_listening": bool(_get("_listening", False)),
-        "run_state": run_state,
+        "connected_entries": sorted(connected_entries),
+        "entries": entries,
         "ref_count": int(bucket.get("fcm_refcount", 0) or 0),
         "start_count": int(_get("start_count", 0) or 0),
         "seconds_since_last_start": seconds_since_last_start,
+        "activity_stale_after_seconds": _get("_activity_stale_after_s"),
     }
 
 

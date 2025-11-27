@@ -117,15 +117,44 @@ def _get_fcm_info(receiver: Any) -> dict[str, Any]:
         ready_value = bool(ready_attr) if ready_attr is not None else None
     info["is_ready"] = ready_value
 
+    snapshots: dict[str, dict[str, Any]] = {}
+    try:
+        snapshots = receiver.get_health_snapshots()
+    except Exception:  # pragma: no cover - defensive guard
+        snapshots = {}
+
+    info["healthy_entries"] = sorted(
+        entry_id for entry_id, snap in snapshots.items() if snap.get("healthy")
+    )
+
     for attr in ("start_count", "last_start_monotonic", "last_stop_monotonic"):
         value = getattr(receiver, attr, None)
         if isinstance(value, (int, float)):
             info[attr] = float(value)
 
+    if snapshots:
+        info["entry_count"] = len(snapshots)
+        info["entries"] = [
+            {
+                "entry_id": entry_id,
+                "healthy": bool(snap.get("healthy")),
+                "run_state": snap.get("run_state"),
+                "seconds_since_last_activity": snap.get(
+                    "seconds_since_last_activity"
+                ),
+                "activity_stale": bool(snap.get("activity_stale")),
+            }
+            for entry_id, snap in snapshots.items()
+        ]
+
     clients = getattr(receiver, "pcs", None)
     if isinstance(clients, dict):
         info["client_count"] = len(clients)
         info["client_ids"] = sorted(str(key) for key in clients.keys())
+
+    activity_timeout = getattr(receiver, "_activity_stale_after_s", None)
+    if isinstance(activity_timeout, (int, float)):
+        info["activity_stale_after_seconds"] = float(activity_timeout)
 
     return info
 

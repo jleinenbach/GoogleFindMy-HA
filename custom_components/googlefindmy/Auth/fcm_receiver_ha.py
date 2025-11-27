@@ -252,6 +252,10 @@ class FcmReceiverHA:
         # Guard against concurrent start/stop/register races
         self._lock = asyncio.Lock()
 
+        # Per-entry runtime health
+        self._entry_last_activity_monotonic: dict[str, float] = {}
+        self._activity_stale_after_s: float = float(FCM_IDLE_RESET_AFTER_S)
+
     @staticmethod
     def _ensure_cache_entry_id(cache: Any, entry_id: str) -> None:
         """Attach the entry_id to a cache instance when possible."""
@@ -300,20 +304,89 @@ class FcmReceiverHA:
         """Optionally attach Home Assistant for owner-index fallback routing."""
         self._hass = hass
 
+    def _monotonic_from_wall_time(
+        self, wall_time: float, monotonic_now: float
+    ) -> float | None:
+        """Convert a wall clock timestamp to the monotonic clock domain."""
+
+        if wall_time <= 0:
+            return None
+
+        try:
+            wall_now = time.time()
+            offset = monotonic_now - wall_now
+            return wall_time + offset
+        except Exception:  # pragma: no cover - defensive conversion
+            return None
+
+    def _update_last_activity_for_entry(
+        self, entry_id: str, pc: Any, monotonic_now: float
+    ) -> float | None:
+        """Refresh and return the last activity timestamp for an entry."""
+
+        last_message_time = getattr(pc, "last_message_time", None)
+        last_activity = None
+        if isinstance(last_message_time, (int, float)):
+            last_activity = self._monotonic_from_wall_time(
+                float(last_message_time), monotonic_now
+            )
+
+        if last_activity is None:
+            last_activity = self._entry_last_activity_monotonic.get(entry_id)
+
+        if last_activity is not None:
+            self._entry_last_activity_monotonic[entry_id] = last_activity
+
+        return last_activity
+
+    def get_health_snapshots(self) -> dict[str, dict[str, Any]]:
+        """Return per-entry health snapshots for diagnostics/state reporting."""
+
+        now = time.monotonic()
+        stale_after = max(self._activity_stale_after_s, 0.0)
+
+        snapshots: dict[str, dict[str, Any]] = {}
+        for entry_id, pc in self.pcs.items():
+            supervisor = self.supervisors.get(entry_id)
+            supervisor_running = supervisor is not None and not supervisor.done()
+            run_state = getattr(pc, "run_state", None)
+            do_listen = bool(getattr(pc, "do_listen", False))
+
+            last_activity = self._entry_last_activity_monotonic.get(entry_id)
+            activity_age = None
+            if last_activity is not None:
+                activity_age = max(now - last_activity, 0.0)
+
+            if FcmPushClientRunState is not None:
+                client_ready = run_state == FcmPushClientRunState.STARTED and do_listen
+            else:
+                client_ready = do_listen
+
+            fresh_activity = (
+                last_activity is not None
+                and (stale_after == 0.0 or (activity_age is not None and activity_age <= stale_after))
+            )
+
+            snapshots[entry_id] = {
+                "supervisor_running": supervisor_running,
+                "client_ready": client_ready,
+                "run_state": getattr(run_state, "name", run_state),
+                "do_listen": do_listen,
+                "last_activity_monotonic": last_activity,
+                "seconds_since_last_activity": activity_age,
+                "activity_stale": not fresh_activity,
+                "healthy": supervisor_running and client_ready and fresh_activity,
+            }
+
+        return snapshots
+
     # -------------------- Basic readiness (aggregate) --------------------
 
     @property
     def is_ready(self) -> bool:
         """True if at least one client is started and listening."""
-        for pc in self.pcs.values():
-            state = getattr(pc, "run_state", None)
-            do_listen = getattr(pc, "do_listen", False)
-            if FcmPushClientRunState is not None:
-                if state == FcmPushClientRunState.STARTED and do_listen:
-                    return True
-            elif do_listen:
-                return True
-        return False
+        snapshots = self.get_health_snapshots()
+        return any(snap.get("healthy") for snap in snapshots.values())
 
     ready = is_ready  # alias used by callers
 
@@ -462,6 +535,9 @@ class FcmReceiverHA:
                             "[entry=%s] FCM client started; entering monitor loop",
                             entry_id,
                         )
+                        self._update_last_activity_for_entry(
+                            entry_id, pc, time.monotonic()
+                        )
                     except Exception as err:
                         _LOGGER.info(
                             "[entry=%s] FCM client failed to start: %s", entry_id, err
@@ -473,6 +549,11 @@ class FcmReceiverHA:
                         await asyncio.sleep(max(FCM_MONITOR_INTERVAL_S, 0.5))
                         state = getattr(pc, "run_state", None)
                         do_listen = getattr(pc, "do_listen", False)
+                        monotonic_now = time.monotonic()
+                        last_activity = self._update_last_activity_for_entry(
+                            entry_id, pc, monotonic_now
+                        )
+                        stale_after = max(self._activity_stale_after_s, 0.0)
                         if state is None:
                             _LOGGER.info(
                                 "[entry=%s] FCM client state unknown; scheduling restart",
@@ -490,6 +571,21 @@ class FcmReceiverHA:
                             _LOGGER.info(
                                 "[entry=%s] FCM client stopped; scheduling restart",
                                 entry_id,
+                            )
+                            break
+
+                        if last_activity is None:
+                            _LOGGER.info(
+                                "[entry=%s] FCM client has no activity timestamp; scheduling restart",
+                                entry_id,
+                            )
+                            break
+
+                        if stale_after > 0.0 and monotonic_now - last_activity > stale_after:
+                            _LOGGER.info(
+                                "[entry=%s] FCM client activity stale (age=%.1fs); scheduling restart",
+                                entry_id,
+                                monotonic_now - last_activity,
                             )
                             break
 
@@ -1312,6 +1408,7 @@ class FcmReceiverHA:
 
     def _purge_entry_tokens(self, entry_id: str) -> None:
         """Remove all routing references for a given entry."""
+        self._entry_last_activity_monotonic.pop(entry_id, None)
         tokens = self._entry_to_tokens.pop(entry_id, set())
         self._pending_routing_tokens.pop(entry_id, None)
         if not tokens:
