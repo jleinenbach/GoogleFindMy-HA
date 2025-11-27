@@ -33,6 +33,7 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 
 * **Preserve parent-platform forwarding state across retries.** When a setup, reconfigure, or auth retry path short-circuits the normal flow, retain the `_gfm_parent_platforms_forwarded` flag on `entry.runtime_data` so unload handlers can skip subentry teardowns when parent platforms were never forwarded. This prevents `ValueError: Config entry was never loaded!` noise after partial setups.
 * **Reconfigure context markers.** Home Assistant populates `flow.context["entry_id"]` when a reconfigure flow starts (for example via `config_entries.async_start_reconfigure`). Treat that value as authoritative when routing the user step so the flow stays bound to the existing entry instead of tripping duplicate-account guards. Inline comments should call out this guard relaxation to preserve the single-parent-entry rule for new setups while keeping reconfigure detours safe.
+* **Manual token UI path disabled.** The `_AUTH_METHOD_INDIVIDUAL` choice in `STEP_USER_DATA_SCHEMA` remains commented out because the manual token + email path is broken. Keep the commented line (with its inline note) intact until the workflow is fixed and ready to re-enable. The reauth form’s manual token field is similarly commented out with a matching note so the broken path stays hidden there as well.
 
 ## Service validation fallbacks
 
