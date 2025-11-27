@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 from aiohttp import web
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -153,7 +153,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         # We lazily resolve the coordinator to get the friendly name
         coordinator_cls = _resolve_coordinator_class()
         runtime = getattr(entry, "runtime_data", None)
-        device_name = "Unknown Device"
+        device_name: str | None = None
 
         # Try to find device in the entry's coordinator data
         if runtime:
@@ -162,12 +162,15 @@ class GoogleFindMyMapView(HomeAssistantView):
                 data = getattr(coordinator, "data", []) or []
                 for dev in data:
                     if dev.get("id") == device_id:
-                        device_name = dev.get("name") or "Unknown Device"
+                        raw_name = dev.get("name")
+                        if raw_name:
+                            device_name = raw_name
                         break
 
         # 3. Find the Entity ID (for History Lookup)
         registry = er.async_get(self.hass)
         entity_id: str | None = None
+        entity_entry: er.RegistryEntry | None = None
         # Try standard unique_id formats
         possible_unique_ids = [
             f"{entry.entry_id}:{device_id}",
@@ -185,6 +188,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                 continue
 
             entity_id = ent
+            entity_entry = registry_entry
             break
 
         # Fallback search by matching unique_id suffix if exact match fails
@@ -195,7 +199,24 @@ class GoogleFindMyMapView(HomeAssistantView):
                     if entity.platform == DOMAIN and entity.config_entry_id == entry.entry_id:
                         if entity.unique_id.endswith(f":{device_id}") or entity.unique_id.endswith(f"_{device_id}"):
                             entity_id = entity.entity_id
+                            entity_entry = entity
                             break
+
+        if not entity_entry and entity_id:
+            entity_entry = getattr(registry, "async_get", lambda _eid: None)(entity_id)
+
+        if entity_entry:
+            device_entry = dr.async_get(self.hass).async_get(entity_entry.device_id)
+            registry_name = None
+            if device_entry:
+                registry_name = device_entry.name_by_user or device_entry.name
+
+            if registry_name and not device_name:
+                device_name = registry_name
+
+        if not device_name:
+            # Name fallback order: coordinator data -> device registry metadata -> placeholder.
+            device_name = "Unknown Device"
 
         # 4. Parse Filters (Time & Accuracy)
         end_time = dt_util.utcnow()
