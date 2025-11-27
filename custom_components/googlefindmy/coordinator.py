@@ -65,7 +65,7 @@ from collections import deque
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from types import MappingProxyType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
@@ -78,12 +78,6 @@ else:  # pragma: no cover - typing fallback for runtime imports
     GoogleHomeFilterProtocol = Any
 
 from homeassistant.components.device_tracker import DOMAIN as DEVICE_TRACKER_DOMAIN
-from homeassistant.components.recorder import (
-    get_instance as get_recorder,
-)
-from homeassistant.components.recorder import (
-    history as recorder_history,
-)
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigEntryAuthFailed,
@@ -477,6 +471,49 @@ def _as_ha_attributes(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if alt is not None:
         out["altitude_m"] = alt
     return {k: v for k, v in out.items() if v is not None}
+
+
+class _RecorderHistoryProxy:
+    """Lazy loader for Recorder history helpers."""
+
+    _module: ModuleType | None = None
+
+    def _load(self) -> ModuleType:
+        if self._module is None:
+            from homeassistant.components.recorder import history as history_module
+
+            self._module = history_module
+        return self._module
+
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover - proxy passthrough
+        return getattr(self._load(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:  # pragma: no cover - proxy passthrough
+        if name == "_module":
+            super().__setattr__(name, value)
+            return
+        setattr(self._load(), name, value)
+
+    def __delattr__(self, name: str) -> None:  # pragma: no cover - proxy passthrough
+        if name == "_module":
+            super().__delattr__(name)
+            return
+        try:
+            delattr(self._load(), name)
+        except AttributeError:
+            # Mirror monkeypatch's raising=False semantics by ignoring missing attrs.
+            return
+
+
+recorder_history = _RecorderHistoryProxy()
+
+
+def get_recorder(hass: HomeAssistant) -> Any:
+    """Lazily import and return the Recorder instance for a hass object."""
+
+    from homeassistant.components.recorder import get_instance as get_recorder_instance
+
+    return get_recorder_instance(hass)
 
 
 # -------------------------------------------------------------------------
