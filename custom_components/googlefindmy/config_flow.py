@@ -1148,7 +1148,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required("auth_method"): vol.In(
             {
                 _AUTH_METHOD_SECRETS: "GoogleFindMyTools secrets.json",
-                _AUTH_METHOD_INDIVIDUAL: "Manual token + email",
+                # _AUTH_METHOD_INDIVIDUAL: "Manual token + email",  # Disabled: broken manual token path is intentionally hidden.
             }
         )
     }
@@ -1456,13 +1456,13 @@ def _interpret_reauth_choice(
             return None, None, "invalid_token"
         return "secrets", parsed, None
 
-    # Manual token path (email is fixed from the entry)
-    if not (
-        _token_plausible(token_raw) and not _disqualifies_for_persistence(token_raw)
-    ):
-        return None, None, "invalid_token"
+    # Manual token path disabled: broken manual reauth entry remains hidden until fixed.
+    # if not (
+    #     _token_plausible(token_raw) and not _disqualifies_for_persistence(token_raw)
+    # ):
+    #     return None, None, "invalid_token"
 
-    return "manual", token_raw, None
+    return None, None, "choose_one"
 def _resolve_entry_email_for_lookup(entry: ConfigEntry) -> tuple[str | None, str | None]:
     """Return the raw and normalized email associated with ``entry``."""
 
@@ -3457,14 +3457,14 @@ class ConfigFlow(
                     vol.Optional(_REAUTH_FIELD_SECRETS): selector(
                         {"text": {"multiline": True}}
                     ),
-                    vol.Optional(_REAUTH_FIELD_TOKEN): str,
+                    # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
         else:
             schema = vol.Schema(
                 {
                     vol.Optional(_REAUTH_FIELD_SECRETS): str,
-                    vol.Optional(_REAUTH_FIELD_TOKEN): str,
+                    # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
 
@@ -5308,7 +5308,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     vol.Optional("new_secrets_json"): selector(
                         {"text": {"multiline": True}}
                     ),
-                    vol.Optional("new_oauth_token"): str,
+                    # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
             )
         else:
@@ -5318,7 +5318,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                         subentry_choices
                     ),
                     vol.Optional("new_secrets_json"): str,
-                    vol.Optional("new_oauth_token"): str,
+                    # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
             )
 
@@ -5328,8 +5328,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                 errors[_FIELD_SUBENTRY] = "invalid_subentry"
             else:
                 has_secrets = bool((user_input.get("new_secrets_json") or "").strip())
-                has_token = bool((user_input.get("new_oauth_token") or "").strip())
-                if (has_secrets and has_token) or (not has_secrets and not has_token):
+                if not has_secrets:
                     errors["base"] = "choose_one"
                 else:
                     try:
@@ -5353,19 +5352,24 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                             )
                             return self.async_abort(reason="reconfigure_successful")
 
-                        if has_token:
-                            token = (user_input.get("new_oauth_token") or "").strip()
-                            if not (
-                                _token_plausible(token)
-                                and not _disqualifies_for_persistence(token)
-                            ):
+                    if has_secrets and "new_secrets_json" in user_input:
+                        try:
+                            parsed = json.loads(user_input["new_secrets_json"])
+                            if not isinstance(parsed, dict):
+                                raise TypeError()
+                        except Exception:
+                            errors["new_secrets_json"] = "invalid_json"
+                        else:
+                            cands = _extract_oauth_candidates_from_secrets(parsed)
+                            if not cands:
                                 errors["base"] = "invalid_token"
                             else:
                                 try:
                                     chosen = await async_pick_working_token(
                                         self.hass,
                                         email,
-                                        [("manual", token)],
+                                        cands,
+                                        secrets_bundle=parsed,
                                     )
                                 except (DependencyNotReady, ImportError) as exc:
                                     _register_dependency_error(errors, exc)
@@ -5374,75 +5378,31 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                         _LOGGER.warning(
                                             "Token validation failed for %s. No working token found among candidates (%s).",
                                             _mask_email_for_logs(email),
-                                            _cand_labels([("manual", token)]),
+                                            _cand_labels(cands),
                                         )
                                         errors["base"] = "cannot_connect"
                                     else:
+                                        to_persist = chosen
+                                        if _disqualifies_for_persistence(to_persist):
+                                            alt = next(
+                                                (
+                                                    v
+                                                    for (_src, v) in cands
+                                                    if not _disqualifies_for_persistence(
+                                                        v
+                                                    )
+                                                ),
+                                                None,
+                                            )
+                                            if alt:
+                                                to_persist = alt
                                         updated_data = {
                                             **entry.data,
-                                            DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
-                                            CONF_OAUTH_TOKEN: chosen,
+                                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                            CONF_OAUTH_TOKEN: to_persist,
+                                            DATA_SECRET_BUNDLE: parsed,
                                         }
-                                        updated_data.pop(DATA_SECRET_BUNDLE, None)
-                                        if isinstance(chosen, str) and chosen.startswith(
-                                            "aas_et/"
-                                        ):
-                                            updated_data[DATA_AAS_TOKEN] = chosen
-                                        else:
-                                            updated_data.pop(DATA_AAS_TOKEN, None)
-                                        return await _finalize_success(updated_data)
-
-                        if has_secrets and "new_secrets_json" in user_input:
-                            try:
-                                parsed = json.loads(user_input["new_secrets_json"])
-                                if not isinstance(parsed, dict):
-                                    raise TypeError()
-                            except Exception:
-                                errors["new_secrets_json"] = "invalid_json"
-                            else:
-                                cands = _extract_oauth_candidates_from_secrets(parsed)
-                                if not cands:
-                                    errors["base"] = "invalid_token"
-                                else:
-                                    try:
-                                        chosen = await async_pick_working_token(
-                                            self.hass,
-                                            email,
-                                            cands,
-                                            secrets_bundle=parsed,
-                                        )
-                                    except (DependencyNotReady, ImportError) as exc:
-                                        _register_dependency_error(errors, exc)
-                                    else:
-                                        if not chosen:
-                                            _LOGGER.warning(
-                                                "Token validation failed for %s. No working token found among candidates (%s).",
-                                                _mask_email_for_logs(email),
-                                                _cand_labels(cands),
-                                            )
-                                            errors["base"] = "cannot_connect"
-                                        else:
-                                            to_persist = chosen
-                                            if _disqualifies_for_persistence(to_persist):
-                                                alt = next(
-                                                    (
-                                                        v
-                                                        for (_src, v) in cands
-                                                        if not _disqualifies_for_persistence(
-                                                            v
-                                                        )
-                                                    ),
-                                                    None,
-                                                )
-                                                if alt:
-                                                    to_persist = alt
-                                            updated_data = {
-                                                **entry.data,
-                                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                                CONF_OAUTH_TOKEN: to_persist,
-                                                DATA_SECRET_BUNDLE: parsed,
-                                            }
-                                            fcm_credentials = (
+                                        fcm_credentials = (
                                                 _extract_fcm_credentials_from_secrets(
                                                     parsed
                                                 )
