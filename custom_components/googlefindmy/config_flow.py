@@ -1456,13 +1456,13 @@ def _interpret_reauth_choice(
             return None, None, "invalid_token"
         return "secrets", parsed, None
 
-    # Manual token path (email is fixed from the entry)
-    if not (
-        _token_plausible(token_raw) and not _disqualifies_for_persistence(token_raw)
-    ):
-        return None, None, "invalid_token"
+    # Manual token path disabled: broken manual reauth entry remains hidden until fixed.
+    # if not (
+    #     _token_plausible(token_raw) and not _disqualifies_for_persistence(token_raw)
+    # ):
+    #     return None, None, "invalid_token"
 
-    return "manual", token_raw, None
+    return None, None, "choose_one"
 def _resolve_entry_email_for_lookup(entry: ConfigEntry) -> tuple[str | None, str | None]:
     """Return the raw and normalized email associated with ``entry``."""
 
@@ -3457,14 +3457,14 @@ class ConfigFlow(
                     vol.Optional(_REAUTH_FIELD_SECRETS): selector(
                         {"text": {"multiline": True}}
                     ),
-                    vol.Optional(_REAUTH_FIELD_TOKEN): str,
+                    # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
         else:
             schema = vol.Schema(
                 {
                     vol.Optional(_REAUTH_FIELD_SECRETS): str,
-                    vol.Optional(_REAUTH_FIELD_TOKEN): str,
+                    # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
 
