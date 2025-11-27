@@ -128,11 +128,13 @@ from .const import (
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
+    SERVICE_SUBENTRY_TRANSLATION_KEY,
     SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
+    TRACKER_SUBENTRY_TRANSLATION_KEY,
     UPDATE_INTERVAL,
     # Helpers
     coerce_ignored_mapping,
@@ -999,10 +1001,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             },
             subentry_type=SUBENTRY_TYPE_TRACKER,
             unique_id=f"{entry_id}-{TRACKER_SUBENTRY_KEY}",
+            translation_key=TRACKER_SUBENTRY_TRANSLATION_KEY,
         )
         service_definition = ConfigEntrySubentryDefinition(
             key=SERVICE_SUBENTRY_KEY,
-            title=entry_title,
+            title="Google Find Hub Service",
             data={
                 "features": service_features,
                 "fcm_push_enabled": fcm_push_enabled,
@@ -1011,6 +1014,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             },
             subentry_type=SUBENTRY_TYPE_SERVICE,
             unique_id=f"{entry_id}-{SERVICE_SUBENTRY_KEY}",
+            translation_key=SERVICE_SUBENTRY_TRANSLATION_KEY,
         )
 
         return [tracker_definition, service_definition]

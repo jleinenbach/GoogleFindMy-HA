@@ -1079,6 +1079,12 @@ def _build_subentry_payload(
     return payload
 
 
+_DEFAULT_SUBENTRY_TITLES: dict[str, str] = {
+    TRACKER_SUBENTRY_KEY: "Google Find My devices",
+    SERVICE_SUBENTRY_KEY: "Google Find Hub Service",
+}
+
+
 def _disqualifies_for_persistence(value: str) -> str | None:
     """Return a reason string if token must NOT be persisted.
 
@@ -4737,15 +4743,23 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             return
 
         data = dict(getattr(subentry, "data", {}) or {})
-        new_title = getattr(entry, "title", None)
-        if not new_title:
+        new_entry_title = getattr(entry, "title", None)
+        if not new_entry_title:
             return
+        group_key = data.get("group_key") or subentry_option.key
+        current_title = getattr(subentry, "title", None)
+        default_title = _DEFAULT_SUBENTRY_TITLES.get(group_key)
+        target_title = (
+            current_title if default_title is not None else None
+        ) or default_title
+        if target_title is None:
+            target_title = new_entry_title
         if (
-            data.get("entry_title") == new_title
-            and getattr(subentry, "title", None) == new_title
+            data.get("entry_title") == new_entry_title
+            and getattr(subentry, "title", None) == target_title
         ):
             return
-        data["entry_title"] = new_title
+        data["entry_title"] = new_entry_title
         update_helper = cast(
             Callable[..., Awaitable[None] | None], ConfigFlow._async_update_subentry
         )
@@ -4754,7 +4768,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             entry,
             subentry,
             data=data,
-            title=new_title,
+            title=target_title,
             unique_id=getattr(subentry, "unique_id", None),
         )
         if inspect.isawaitable(result):
