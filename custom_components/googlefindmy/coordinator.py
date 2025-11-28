@@ -1741,6 +1741,51 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         google_home_filter = getattr(runtime_data, "google_home_filter", None)
         return cast("GoogleHomeFilterProtocol | None", google_home_filter)
 
+    def _should_preserve_precise_home_coordinates(
+        self,
+        prev_location: Mapping[str, Any] | None,
+        replacement_attrs: Mapping[str, Any],
+    ) -> bool:
+        """Return True when cached coordinates are precise and still inside Home.
+
+        The Google Home filter proposes substituting a semantic detection with the
+        Home zone's coordinates and radius. Preserve the previously cached
+        coordinates only when they are **both** more precise than the proposed
+        radius **and** still fall within that radius, so we do not pin a device to
+        an outdated off-site fix after a semantic Home report arrives.
+        """
+
+        if not prev_location:
+            return False
+
+        try:
+            prev_lat = float(prev_location["latitude"])
+            prev_lon = float(prev_location["longitude"])
+            prev_acc = float(prev_location["accuracy"])
+            proposed_lat = float(replacement_attrs["latitude"])
+            proposed_lon = float(replacement_attrs["longitude"])
+            proposed_radius = float(replacement_attrs["radius"])
+        except (KeyError, TypeError, ValueError):
+            return False
+
+        if not (
+            math.isfinite(prev_lat)
+            and math.isfinite(prev_lon)
+            and math.isfinite(prev_acc)
+            and math.isfinite(proposed_lat)
+            and math.isfinite(proposed_lon)
+            and math.isfinite(proposed_radius)
+        ):
+            return False
+
+        if proposed_radius <= 0 or prev_acc >= proposed_radius:
+            return False
+
+        return (
+            self._haversine_distance(prev_lat, prev_lon, proposed_lat, proposed_lon)
+            <= proposed_radius
+        )
+
     async def async_shutdown(self) -> None:
         """Clean up listeners and timers on entry unload to avoid leaks."""
         self._cancel_pending_subentry_repair()
@@ -4680,30 +4725,49 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                     )
                                     continue
                                 if replacement_attrs:
-                                    _LOGGER.info(
-                                        "Google Home filter: %s detected at '%s', substituting with Home coordinates",
-                                        dev_name,
-                                        semantic_name,
+                                    prev_location = self._device_location_data.get(
+                                        dev_id
                                     )
+                                    keep_previous_precise = (
+                                        self._should_preserve_precise_home_coordinates(
+                                            prev_location, replacement_attrs
+                                        )
+                                    )
+
                                     location = dict(location)
-                                    # Update coordinates and derive accuracy from radius (if present).
-                                    if (
-                                        "latitude" in replacement_attrs
-                                        and "longitude" in replacement_attrs
-                                    ):
-                                        location["latitude"] = replacement_attrs.get(
-                                            "latitude"
+                                    if keep_previous_precise and prev_location is not None:
+                                        _LOGGER.debug(
+                                            "Google Home filter: %s detected at '%s', preserving previous precise coordinates",
+                                            dev_name,
+                                            semantic_name,
                                         )
-                                        location["longitude"] = replacement_attrs.get(
-                                            "longitude"
+                                        location["latitude"] = prev_location["latitude"]
+                                        location["longitude"] = prev_location["longitude"]
+                                        location["accuracy"] = prev_location["accuracy"]
+                                    else:
+                                        _LOGGER.info(
+                                            "Google Home filter: %s detected at '%s', substituting with Home coordinates",
+                                            dev_name,
+                                            semantic_name,
                                         )
-                                    if (
-                                        "radius" in replacement_attrs
-                                        and replacement_attrs.get("radius") is not None
-                                    ):
-                                        location["accuracy"] = replacement_attrs.get(
-                                            "radius"
-                                        )
+                                        if (
+                                            "latitude" in replacement_attrs
+                                            and "longitude" in replacement_attrs
+                                        ):
+                                            location["latitude"] = replacement_attrs.get(
+                                                "latitude"
+                                            )
+                                            location["longitude"] = replacement_attrs.get(
+                                                "longitude"
+                                            )
+                                        if (
+                                            "radius" in replacement_attrs
+                                            and replacement_attrs.get("radius")
+                                            is not None
+                                        ):
+                                            location["accuracy"] = replacement_attrs.get(
+                                                "radius"
+                                            )
                                     # Clear semantic name so HA Core's zone engine determines the final state.
                                     location["semantic_name"] = None
                         # ------------------------------------------------------------------
@@ -5915,22 +5979,41 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         self.push_updated([device_id])
                         return {}
                     if replacement_attrs:
+                        prev_location = self._device_location_data.get(device_id)
+                        keep_previous_precise = (
+                            self._should_preserve_precise_home_coordinates(
+                                prev_location, replacement_attrs
+                            )
+                        )
+
                         location_data = dict(location_data)
-                        if (
-                            "latitude" in replacement_attrs
-                            and "longitude" in replacement_attrs
-                        ):
-                            location_data["latitude"] = replacement_attrs.get(
-                                "latitude"
+                        if keep_previous_precise and prev_location is not None:
+                            _LOGGER.debug(
+                                "Google Home filter: %s detected at '%s' (manual locate), preserving previous precise coordinates",
+                                name,
+                                semantic_name,
                             )
-                            location_data["longitude"] = replacement_attrs.get(
-                                "longitude"
-                            )
-                        if (
-                            "radius" in replacement_attrs
-                            and replacement_attrs.get("radius") is not None
-                        ):
-                            location_data["accuracy"] = replacement_attrs.get("radius")
+                            location_data["latitude"] = prev_location["latitude"]
+                            location_data["longitude"] = prev_location["longitude"]
+                            location_data["accuracy"] = prev_location["accuracy"]
+                        else:
+                            if (
+                                "latitude" in replacement_attrs
+                                and "longitude" in replacement_attrs
+                            ):
+                                location_data["latitude"] = replacement_attrs.get(
+                                    "latitude"
+                                )
+                                location_data["longitude"] = replacement_attrs.get(
+                                    "longitude"
+                                )
+                            if (
+                                "radius" in replacement_attrs
+                                and replacement_attrs.get("radius") is not None
+                            ):
+                                location_data["accuracy"] = replacement_attrs.get(
+                                    "radius"
+                                )
                         # Clear semantic name so HA Core's zone engine determines the final state.
                         location_data["semantic_name"] = None
             # ----------------------------------------------------------------------
