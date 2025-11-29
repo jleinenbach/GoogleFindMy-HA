@@ -65,6 +65,7 @@ from collections import deque
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from statistics import mean, stdev
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -194,6 +195,9 @@ _FCM_FALLBACK_POLL_AFTER_S = 5 * 60
 
 # Altitude adjustments smaller than 1 m are considered noise for significance checks.
 _ALTITUDE_SIGNIFICANT_DELTA_M = 1.0
+
+# Predictive polling buffer to avoid requesting data before it is available server-side.
+_PREDICTION_BUFFER_S = 45
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -711,6 +715,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._device_caps: dict[
             str, dict[str, Any]
         ] = {}  # device_id -> caps (e.g., {"can_ring": True})
+        self._device_update_history: dict[str, deque[float]] = {}
         self._present_device_ids: set[str] = (
             set()
         )  # diagnostics-only set from latest non-empty list
@@ -4442,6 +4447,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._presence_ttl_s = max(2 * effective_interval, 120)
             now_mono = time.monotonic()
 
+            predicted_target = self._get_predicted_poll_time()
+            predictive_due = False
+            predictive_block = False
+            if predicted_target is not None:
+                wall_now = time.time()
+                time_until = predicted_target - wall_now
+
+                if 0 < time_until <= effective_interval:
+                    delay = time_until + _PREDICTION_BUFFER_S
+                    _LOGGER.debug(
+                        "Predictive polling: update expected in %.1fs; scheduling retry in %.1fs (buffer=%ss)",
+                        time_until,
+                        delay,
+                        _PREDICTION_BUFFER_S,
+                    )
+                    self._schedule_short_retry(delay)
+                    predictive_block = True
+                elif time_until <= 0:
+                    _LOGGER.debug(
+                        "Predictive polling: update overdue by %.1fs; polling now if limits allow.",
+                        abs(time_until),
+                    )
+                    predictive_due = True
+
             # Cold-start guard: if the very first seen list is empty, treat it as transient
             if not filtered_devices and self._last_nonempty_wall == 0.0:
                 raise UpdateFailed(
@@ -4520,7 +4549,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
             )
 
-            due = (now_mono - self._last_poll_mono) >= effective_interval or is_cold_start
+            hard_limit_passed = (now_mono - self._last_poll_mono) >= self.min_poll_interval
+
+            due = (
+                (
+                    (now_mono - self._last_poll_mono) >= effective_interval
+                    and not predictive_block
+                )
+                or (predictive_due and hard_limit_passed)
+            ) or is_cold_start
             if due and not self._is_polling and devices_to_poll:
                 force_poll = False
                 fcm_ready = self._is_fcm_ready_soft()
@@ -4819,6 +4856,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
                         # Sanitize invariants + enrich fields (label, utc-string)
                         location = _sanitize_decoder_row(location)
+
+                        raw_last_seen = _normalize_epoch_seconds(
+                            location.get("last_seen")
+                        )
+                        self._track_device_interval(dev_id, raw_last_seen)
 
                         # Increment crowdsourced updates statistic (post-sanitization)
                         if location.get("source_label") == "crowdsourced":
@@ -5219,6 +5261,48 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         slot = self._device_location_data.setdefault(device_id, {})
         slot.setdefault("last_seen", float(ts_epoch))
 
+    def _track_device_interval(self, device_id: str, last_seen: float | None) -> None:
+        """Track last_seen history to predict future poll targets."""
+
+        if last_seen is None:
+            return
+
+        history_store = getattr(self, "_device_update_history", None)
+        if history_store is None:
+            history_store = {}
+            self._device_update_history = history_store
+
+        history = history_store.setdefault(device_id, deque(maxlen=4))
+
+        if not history or last_seen > history[-1]:
+            history.append(last_seen)
+
+    def _get_predicted_poll_time(self) -> float | None:
+        """Predict the earliest next update time based on device histories."""
+
+        history_store = getattr(self, "_device_update_history", None)
+        if not history_store:
+            return None
+
+        predictions: list[float] = []
+
+        for history in history_store.values():
+            if len(history) < 2:
+                continue
+
+            intervals = [history[idx + 1] - history[idx] for idx in range(len(history) - 1)]
+            avg_interval = mean(intervals)
+
+            if len(intervals) >= 2 and stdev(intervals) > 300:
+                continue
+
+            predictions.append(history[-1] + avg_interval)
+
+        if not predictions:
+            return None
+
+        return min(predictions)
+
     def update_device_cache(
         self, device_id: str, location_data: dict[str, Any]
     ) -> None:
@@ -5260,6 +5344,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         # Sanitize invariants + enrich fields before gating
         slot = _sanitize_decoder_row(slot)
+
+        raw_last_seen = _normalize_epoch_seconds(slot.get("last_seen"))
+        self._track_device_interval(device_id, raw_last_seen)
 
         # Increment crowdsourced stats for push/manual commits as well
         if slot.get("source_label") == "crowdsourced":
