@@ -50,6 +50,10 @@ When a test module depends on optional plugins such as
 intact. The skip guard avoids littering files with inline import
 fallbacks and ensures `ruff` continues to enforce top-level grouping.
 
+When stubbing coordinators with asynchronous fixtures, reuse the shared
+pytest event loop instead of creating ad-hoc loops so teardown waits do
+not conflict with pending tasks.
+
 Whenever the local environment installs the real `homeassistant`
 package (for example via `pip install -r requirements-dev.txt`), also
 install `pytest-homeassistant-custom-component` and run `pytest -q`.

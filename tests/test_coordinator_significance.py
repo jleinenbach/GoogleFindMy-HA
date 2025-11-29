@@ -15,6 +15,7 @@ def _make_coordinator(existing: dict[str, Any]) -> GoogleFindMyCoordinator:
     coordinator._device_location_data = {"device-1": dict(existing)}
     coordinator._movement_threshold = 50.0
     coordinator._device_names = {}
+    coordinator._device_update_history = {}
     coordinator.increment_stat = lambda *_args, **_kwargs: None
     coordinator._apply_report_type_cooldown = lambda *_args, **_kwargs: None
     coordinator._is_on_hass_loop = lambda: True
