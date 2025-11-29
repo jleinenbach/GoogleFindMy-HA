@@ -967,6 +967,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         await policy.async_on_401()
                         if not refreshed_once:
                             refreshed_once = True
+                            # Allow time for the refreshed token to propagate across Google backends
+                            # before retrying the request.
+                            await asyncio.sleep(3.0)
                             continue  # Free retry
 
                         raise NovaAuthError(status, "Unauthorized after token refresh")

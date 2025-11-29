@@ -630,7 +630,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             )
             return []
         except NovaAuthError as e:
-            _LOGGER.error(
+            _LOGGER.warning(
                 "Authentication error while requesting location for %s: %s", name, e
             )
             return []
