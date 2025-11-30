@@ -30,6 +30,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
+from custom_components.googlefindmy.entity import GoogleFindMyDeviceEntity
 
 pytest_plugins = ("pytest_homeassistant_custom_component",)
 
@@ -107,6 +108,93 @@ class _StubMapRedirectView:
 
     async def async_setup(self) -> None:
         return None
+
+
+def _build_device_entity(
+    hass: HomeAssistant,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> GoogleFindMyDeviceEntity:
+    """Return a device entity with deterministic token generation."""
+
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace())
+    entity = GoogleFindMyDeviceEntity(
+        coordinator,
+        {"id": "device-1", "name": "Device"},
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier="tracker-subentry",
+    )
+    entity.hass = hass
+    monkeypatch.setattr(entity, "_get_map_token", lambda: "secure-token")
+    return entity
+
+
+def test_device_configuration_url_relative_default(
+    hass: HomeAssistant,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relative URLs should be the default configuration link."""
+
+    entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+
+    configuration_url = entity.device_configuration_url()
+
+    assert configuration_url.startswith("/")
+    assert "http://" not in configuration_url
+    assert "https://" not in configuration_url
+    assert "/redirect_map/" not in configuration_url
+
+
+def test_device_configuration_url_absolute_success(
+    hass: HomeAssistant,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absolute URLs should include the resolved base URL when available."""
+
+    entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+    monkeypatch.setattr(
+        entity, "_resolve_absolute_base_url", lambda: "https://external.domain"
+    )
+
+    configuration_url = entity.device_configuration_url(absolute=True)
+
+    assert (
+        configuration_url
+        == "https://external.domain/api/googlefindmy/map/device-1?token=secure-token"
+    )
+
+
+def test_device_configuration_url_absolute_failure(
+    hass: HomeAssistant,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absolute URL resolution should return None when the base URL is unavailable."""
+
+    entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+    monkeypatch.setattr(entity, "_resolve_absolute_base_url", lambda: None)
+
+    assert entity.device_configuration_url(absolute=True) is None
+
+
+def test_device_info_configuration_url_relative(
+    hass: HomeAssistant,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DeviceInfo should expose a relative configuration URL by default."""
+
+    entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+
+    configuration_url = entity.device_info.configuration_url
+
+    assert isinstance(configuration_url, str)
+    assert configuration_url.startswith("/")
+    assert configuration_url.endswith("token=secure-token")
+    assert "/api/googlefindmy/map/" in configuration_url
 
 
 @pytest.mark.asyncio
